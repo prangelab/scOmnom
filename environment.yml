@@ -1,0 +1,29 @@
+name: scOmnom_env
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.10
+  - scanpy
+  - anndata
+  - numpy
+  - pandas
+  - scipy
+  - matplotlib
+  - seaborn
+  - joblib
+  - kneed
+  - typer
+  - scrublet
+  - h5py
+  - scikit-learn
+  - igraph
+  - python-igraph
+  - leidenalg
+  - pytest
+  - pydantic
+  - pip
+  - pip:
+      # any additional packages not available via conda
+      - umap-learn
