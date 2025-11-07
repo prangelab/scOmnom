@@ -24,6 +24,7 @@ dependencies:
   - pytest
   - pydantic
   - pip
+  - psutil
   - pip:
       # any additional packages not available via conda
       - umap-learn

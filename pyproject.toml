@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scomnom"
+version = "0.1.0"
+description = "Modular scRNA-seq preprocessing and analysis pipeline built on the scVerse ecosystem."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "Koen Prange", email = "info@prangelab.org" }
+]
+
+dependencies = [
+  "scanpy",
+  "anndata",
+  "numpy",
+  "pandas",
+  "scipy",
+  "matplotlib",
+  "seaborn",
+  "typer",
+  "pydantic",
+  "scrublet",
+  "leidenalg",
+  "python-igraph",
+  "joblib",
+  "kneed",
+  "h5py",
+  "psutil",
+  "umap-learn"
+]
+
+[project.scripts]
+scomnom = "scomnom.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]

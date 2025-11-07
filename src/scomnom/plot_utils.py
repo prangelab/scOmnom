@@ -13,9 +13,7 @@ def setup_scanpy_figs(figdir: Path) -> None:
     figdir.mkdir(parents=True, exist_ok=True)
 
 
-def qc_violin_and_scatter(adata, groupby: str):
-    sc.pl.violin(adata, ["n_genes_by_counts", "total_counts", "pct_counts_mt"],
-                 groupby=groupby, jitter=0.4, multi_panel=True, save="_QC_violin_mt_counts.png")
+def qc_scatter(adata, groupby: str):
     sc.pl.scatter(adata, "total_counts", "n_genes_by_counts", color="pct_counts_mt",
                   save="_QC_scatter_mt.png")
 
@@ -28,7 +26,7 @@ def hvgs_and_pca_plots(adata, max_pcs_plot: int):
 def umap_by(adata, keys):
     if isinstance(keys, str):
         keys = [keys]
-    sc.pl.umap(adata, color=keys, save=f"_QC_umap_{'_'.join(keys)}.png")
+    sc.pl.umap(adata, color=keys, use_raw=False, save=f"_QC_umap_{'_'.join(keys)}.png")
 
 
 def barplot_before_after(df_counts: pd.DataFrame, figpath: Path, min_cells_per_sample: int):
