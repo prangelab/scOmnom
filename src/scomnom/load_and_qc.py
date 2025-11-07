@@ -17,6 +17,14 @@ from . import plot_utils
 
 LOGGER = logging.getLogger(__name__)
 
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    message="Variable names are not unique",
+    category=UserWarning,
+    module="anndata"
+)
+
 # ---- logging helper ----
 def setup_logging(logfile: Optional[Path]):
     handlers = [logging.StreamHandler()]

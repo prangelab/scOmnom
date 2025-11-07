@@ -1,0 +1,17 @@
+scanpy
+anndata
+numpy
+pandas
+scipy
+matplotlib
+seaborn
+typer
+pydantic
+scrublet
+leidenalg
+python-igraph
+joblib
+kneed
+h5py
+psutil
+umap-learn

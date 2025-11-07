@@ -10,6 +10,8 @@ def setup_scanpy_figs(figdir: Path) -> None:
     sc.set_figure_params(dpi=300, facecolor="white")
     sc.settings.figdir = str(figdir)
     sc.settings.autoshow = False
+    sc.settings.autosave = False
+    sc.settings.file_format_figs = "png"
     figdir.mkdir(parents=True, exist_ok=True)
 
 

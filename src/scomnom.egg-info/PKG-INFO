@@ -1,0 +1,25 @@
+Metadata-Version: 2.4
+Name: scomnom
+Version: 0.1.0
+Summary: Modular scRNA-seq preprocessing and analysis pipeline built on the scVerse ecosystem.
+Author-email: Koen Prange <info@prangelab.org>
+License: MIT
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: scanpy
+Requires-Dist: anndata
+Requires-Dist: numpy
+Requires-Dist: pandas
+Requires-Dist: scipy
+Requires-Dist: matplotlib
+Requires-Dist: seaborn
+Requires-Dist: typer
+Requires-Dist: pydantic
+Requires-Dist: scrublet
+Requires-Dist: leidenalg
+Requires-Dist: python-igraph
+Requires-Dist: joblib
+Requires-Dist: kneed
+Requires-Dist: h5py
+Requires-Dist: psutil
+Requires-Dist: umap-learn

@@ -1,0 +1,16 @@
+pyproject.toml
+src/scomnom/__init__.py
+src/scomnom/cli.py
+src/scomnom/cluster_and_annotate.py
+src/scomnom/config.py
+src/scomnom/integrate.py
+src/scomnom/io_utils.py
+src/scomnom/load_and_qc.py
+src/scomnom/plot_utils.py
+src/scomnom.egg-info/PKG-INFO
+src/scomnom.egg-info/SOURCES.txt
+src/scomnom.egg-info/dependency_links.txt
+src/scomnom.egg-info/entry_points.txt
+src/scomnom.egg-info/requires.txt
+src/scomnom.egg-info/top_level.txt
+tests/test_load_and_qc.py
