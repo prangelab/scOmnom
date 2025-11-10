@@ -167,12 +167,16 @@ def filter_and_doublets(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
 
     # preserve uns across reassignments
     pre_counts = adata.uns["pre_filter_counts"]
+    pre_cb_counts = adata.uns["before_cellbender_counts"]
+    post_cb_counts = adata.uns["after_cellbender_counts"]
 
     # doublet detection may return a new AnnData
     adata = run_scrublet_parallel(adata, batch_key=cfg.batch_key, n_jobs=cfg.n_jobs)
 
     # reattach if lost
     adata.uns["pre_filter_counts"] = pre_counts
+    adata.uns["before_cellbender_counts"] = pre_cb_counts
+    adata.uns["after_cellbender_counts"] = post_cb_counts
 
     return adata
 
@@ -279,11 +283,10 @@ def run_qc_plots_counts(adata: ad.AnnData, cfg: LoadAndQCConfig) -> None:
     import numpy as np
     import os
 
-    # updated folder structure
     figdir_qc = cfg.figdir / "QC_plots"
-    figdir_ps = figdir_qc / "per_sample"
+    figdir_cb = figdir_qc / "cellbender"
     os.makedirs(figdir_qc, exist_ok=True)
-    os.makedirs(figdir_ps, exist_ok=True)
+    os.makedirs(figdir_cb, exist_ok=True)
 
     # ---------- before vs after filtering ----------
     raw_pre = adata.uns.get("pre_filter_counts", None)
@@ -314,7 +317,9 @@ def run_qc_plots_counts(adata: ad.AnnData, cfg: LoadAndQCConfig) -> None:
     )
     df_counts.to_csv(figdir_qc / "QC_cells_per_sample_filter.tsv", sep="\t", index=False)
 
-    # Per-sample plots (now in subfolder)
+    # Per-sample plots (filter)
+    per_sample_dir = figdir_qc / "per_sample"
+    os.makedirs(per_sample_dir, exist_ok=True)
     for _, row in df_counts.iterrows():
         s = row["sample"]
         df_s = df_counts[df_counts["sample"] == s].copy()
@@ -326,10 +331,10 @@ def run_qc_plots_counts(adata: ad.AnnData, cfg: LoadAndQCConfig) -> None:
             }
         ).reset_index(drop=True)
         plot_utils.barplot_before_after(
-            df_s, figdir_ps / f"{s}_QC_cells_before_after.png", cfg.min_cells_per_sample
+            df_s, per_sample_dir / f"{s}_QC_cells_before_after_filter.png", cfg.min_cells_per_sample
         )
 
-    # Aggregate overview (each sample = one bar)
+    # Aggregate filter overview
     plot_utils.barplot_before_after(
         df_counts.rename(
             columns={
@@ -338,45 +343,55 @@ def run_qc_plots_counts(adata: ad.AnnData, cfg: LoadAndQCConfig) -> None:
                 "pct_retained_filter": "retained_pct",
             }
         ).reset_index(drop=True),
-        figdir_qc / "QC_cells_before_after_AGGREGATE.png",
+        figdir_qc / "QC_cells_before_after_filter_AGGREGATE.png",
         cfg.min_cells_per_sample,
     )
 
+    # ---------- CellBender comparison ----------
+    if "before_cellbender_counts" in adata.uns and "after_cellbender_counts" in adata.uns:
+        before_cb = pd.Series(adata.uns["before_cellbender_counts"]).sort_index()
+        after_cb = pd.Series(adata.uns["after_cellbender_counts"]).sort_index()
+        all_samples_cb = sorted(set(before_cb.index) | set(after_cb.index))
+        before_cb = before_cb.reindex(all_samples_cb, fill_value=0)
+        after_cb = after_cb.reindex(all_samples_cb, fill_value=0)
 
-    # ---------- full pipeline ----------
-    if "before_cellbender_counts" in adata.uns:
-        samples = sorted(adata.uns["before_cellbender_counts"].keys())
-        raw_10x = [adata.uns["before_cellbender_counts"][s] for s in samples]
-        after_cb = [adata.uns.get("after_cellbender_counts", {}).get(s, 0) for s in samples]
-        final_filtered = [adata.obs.query(f"{cfg.batch_key} == @s").shape[0] for s in samples]
-
-        df_full = pd.DataFrame({
-            "sample": samples,
-            "raw_10x": raw_10x,
-            "after_cellbender": after_cb,
-            "final_filtered": final_filtered,
+        df_cb = pd.DataFrame({
+            "sample": all_samples_cb,
+            "before_cellbender": before_cb.values,
+            "after_cellbender": after_cb.values,
         })
-        df_full["pct_retained_cb"] = np.where(
-            df_full["raw_10x"] > 0, 100 * df_full["after_cellbender"] / df_full["raw_10x"], 0
+        df_cb["pct_retained_cellbender"] = np.where(
+            df_cb["before_cellbender"] > 0,
+            100 * df_cb["after_cellbender"] / df_cb["before_cellbender"],
+            0,
         )
-        df_full["pct_retained_final"] = np.where(
-            df_full["raw_10x"] > 0, 100 * df_full["final_filtered"] / df_full["raw_10x"], 0
-        )
-        df_full.to_csv(figdir_qc / "QC_cells_per_sample_full_pipeline.tsv", sep="\t", index=False)
+        df_cb.to_csv(figdir_cb / "QC_cells_per_sample_cellbender.tsv", sep="\t", index=False)
 
-        # Per-sample plots
-        for _, row in df_full.iterrows():
+        for _, row in df_cb.iterrows():
             s = row["sample"]
-            plot_utils.barplot_full_pipeline(
-                df_full[df_full["sample"] == s],
-                figdir_qc / f"{s}_QC_cells_full_pipeline.png",
+            df_s = df_cb[df_cb["sample"] == s].copy()
+            df_s = df_s.rename(
+                columns={
+                    "before_cellbender": "before",
+                    "after_cellbender": "after",
+                    "pct_retained_cellbender": "retained_pct",
+                }
+            ).reset_index(drop=True)
+            plot_utils.barplot_before_after(
+                df_s, figdir_cb / f"{s}_QC_cells_before_after_cellbender.png", cfg.min_cells_per_sample
             )
 
-        # Aggregate overview
-        plot_utils.barplot_full_pipeline(
-            df_full, figdir_qc / "QC_cells_full_pipeline_AGGREGATE.png"
+        plot_utils.barplot_before_after(
+            df_cb.rename(
+                columns={
+                    "before_cellbender": "before",
+                    "after_cellbender": "after",
+                    "pct_retained_cellbender": "retained_pct",
+                }
+            ).reset_index(drop=True),
+            figdir_cb / "QC_cells_before_after_cellbender_AGGREGATE.png",
+            cfg.min_cells_per_sample,
         )
-
 
 
 # ---- orchestrator ----
