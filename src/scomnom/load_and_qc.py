@@ -34,29 +34,44 @@ def setup_logging(logfile: Optional[Path]):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", handlers=handlers)
 
 # ---- step functions ----
-def load_raw_data(cfg: LoadAndQCConfig) -> Dict[str, ad.AnnData]:
+def load_raw_data(cfg: LoadAndQCConfig) -> tuple[Dict[str, ad.AnnData], Dict[str, float]]:
     raw_dirs = io_utils.find_raw_dirs(cfg.sample_dir, cfg.raw_pattern)
     out: Dict[str, ad.AnnData] = {}
+    read_counts: Dict[str, float] = {}
+
     for raw in raw_dirs:
         sample = raw.name.split(".raw_feature_bc_matrix")[0]
         adata = io_utils.read_raw_10x(raw)
         out[sample] = adata
-        LOGGER.info("Loaded raw %s: %d cells, %d genes", sample, adata.n_obs, adata.n_vars)
-    return out
+        total_reads = float(adata.X.sum())
+        read_counts[sample] = total_reads
+        LOGGER.info(
+            "Loaded raw %s: %d cells, %d genes, %.2e total reads",
+            sample, adata.n_obs, adata.n_vars, total_reads,
+        )
+    return out, read_counts
 
 
-def load_cellbender_data(cfg: LoadAndQCConfig) -> Dict[str, ad.AnnData]:
+def load_cellbender_data(cfg: LoadAndQCConfig) -> tuple[Dict[str, ad.AnnData], Dict[str, float]]:
     if cfg.cellbender_dir is None:
-        return {}
+        return {}, {}
     cb_dirs = io_utils.find_cellbender_dirs(cfg.cellbender_dir, cfg.cellbender_pattern)
     out: Dict[str, ad.AnnData] = {}
+    read_counts: Dict[str, float] = {}
+
     for cb in cb_dirs:
         sample = cb.name.split(".cellbender_filtered.output")[0]
         adata = io_utils.read_cellbender_h5(cb, sample, cfg.cellbender_h5_suffix)
         if adata is not None:
             out[sample] = adata
-            LOGGER.info("Loaded CellBender %s: %d cells, %d genes", sample, adata.n_obs, adata.n_vars)
-    return out
+            total_reads = float(adata.X.sum())
+            read_counts[sample] = total_reads
+            LOGGER.info(
+                "Loaded CellBender %s: %d cells, %d genes, %.2e total reads",
+                sample, adata.n_obs, adata.n_vars, total_reads,
+            )
+    return out, read_counts
+
 
 
 def merge_samples(raw_map: Dict[str, ad.AnnData], cb_map: Dict[str, ad.AnnData], batch_key: str) -> ad.AnnData:
@@ -352,8 +367,8 @@ def run_load_and_qc(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) -> ad.
     setup_logging(logfile)
     LOGGER.info("Starting load_and_qc")
     # load
-    raw_map = load_raw_data(cfg)
-    cb_map = load_cellbender_data(cfg) if cfg.cellbender_dir else {}
+    raw_map, raw_read_counts = load_raw_data(cfg)
+    cb_map, cb_read_counts = load_cellbender_data(cfg) if cfg.cellbender_dir else ({}, {})
     # merge
     adata = merge_samples(raw_map, cb_map, batch_key=cfg.batch_key)
     # metadata
@@ -372,12 +387,13 @@ def run_load_and_qc(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) -> ad.
     # Cluster + cleanup
     adata = cluster_and_cleanup_qc(adata, cfg)
     # Make qc plots
-    run_qc_plots_dimred(adata, cfg)
     qc_dir = Path(cfg.output_dir) / "figures" / "QC_plots"
     qc_dir.mkdir(parents=True, exist_ok=True)
-    sc.pl.umap(adata, color=[cfg.batch_key, "leiden"], save=qc_dir/"_QC_umap_per_sample_and_leiden.png") if cfg.make_figures else None
-    # counts plots
+    plot_utils.plot_cellbender_comparison(raw_read_counts, cb_read_counts, cfg.figdir)
+    run_qc_plots_dimred(adata, cfg)
     run_qc_plots_counts(adata, cfg)
+    sc.pl.umap(adata, color=[cfg.batch_key, "leiden"], save=qc_dir/"_QC_umap_per_sample_and_leiden.png") if cfg.make_figures else None
+    plot_utils.plot_final_cell_counts(adata, cfg)
     # write
     io_utils.save_adata(adata, cfg.output_dir / cfg.output_name)
     LOGGER.info("Finished load_and_qc")

@@ -57,28 +57,121 @@ def barplot_before_after(df_counts: pd.DataFrame, figpath: Path, min_cells_per_s
     plt.close()
 
 
-def barplot_full_pipeline(df_counts: pd.DataFrame, figpath: Path):
-    x = np.arange(len(df_counts))
-    width = 0.25
-    fig, ax = plt.subplots(figsize=(max(6, len(df_counts) * 0.6), 4))
-    colors = ['lightgray', 'orange', 'steelblue']
-    bars_raw = ax.bar(x - width, df_counts['raw_10x'], width, label='Raw 10x', color=colors[0], alpha=0.7)
-    bars_cb = ax.bar(x, df_counts['after_cellbender'], width, label='After CellBender', color=colors[1], alpha=0.7)
-    bars_final = ax.bar(x + width, df_counts['final_filtered'], width, label='Final Filtered',
-                        color=['red' if c < 50 else colors[2] for c in df_counts['final_filtered']], alpha=0.7)
+def plot_cellbender_comparison(raw_counts: dict, cb_counts: dict, figdir: Path) -> None:
+    """
+    Generate per-sample and aggregate plots comparing total read counts
+    before vs after CellBender. Each barplot shows absolute read counts and
+    percent retained above the filtered bar.
+
+    Parameters
+    ----------
+    raw_counts : dict
+        {sample: total_reads_before_cellbender}
+    cb_counts : dict
+        {sample: total_reads_after_cellbender}
+    figdir : Path
+        Base figure directory; will create QC_plots/cellbender/
+    """
+    import pandas as pd
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import os
+
+    figdir_cb = Path(figdir) / "QC_plots" / "cellbender"
+    os.makedirs(figdir_cb, exist_ok=True)
+
+    # build dataframe
+    samples = sorted(set(raw_counts) | set(cb_counts))
+    df = pd.DataFrame({
+        "sample": samples,
+        "raw_reads": [raw_counts.get(s, 0) for s in samples],
+        "cb_reads": [cb_counts.get(s, 0) for s in samples],
+    })
+    df["pct_retained"] = np.where(
+        df["raw_reads"] > 0,
+        100 * df["cb_reads"] / df["raw_reads"],
+        0,
+    )
+    df.to_csv(figdir_cb / "QC_reads_per_sample_cellbender.tsv", sep="\t", index=False)
+
+    # helper for single barplot
+    def _plot_single(row, outpath):
+        fig, ax = plt.subplots(figsize=(8, 6))
+        x = np.arange(1)
+        width = 0.35
+        bars_raw = ax.bar(x - width / 2, [row["raw_reads"]], width, color="lightgray", label="raw")
+        bars_cb = ax.bar(x + width / 2, [row["cb_reads"]], width, color="steelblue", label="cellbender")
+        pct = row["pct_retained"]
+        if row["cb_reads"] > 0:
+            ax.text(x + width / 2, row["cb_reads"], f"{pct:.1f}%", ha="center", va="bottom")
+        ax.set_title(row["sample"])
+        ax.set_ylabel("Total reads")
+        ax.set_xticks([])
+        ax.legend()
+        plt.tight_layout()
+        fig.savefig(outpath, dpi=300)
+        plt.close(fig)
+
+    # per-sample plots
+    for _, row in df.iterrows():
+        _plot_single(row, figdir_cb / f"{row['sample']}_QC_reads_before_after_cellbender.png")
+
+    # aggregate overview
+    fig, ax = plt.subplots(figsize=(max(6, len(df) * 0.8), 6))
+    x = np.arange(len(df))
+    width = 0.35
+    ax.bar(x - width / 2, df["raw_reads"], width, color="lightgray", label="raw")
+    ax.bar(x + width / 2, df["cb_reads"], width, color="steelblue", label="cellbender")
+    for i, pct in enumerate(df["pct_retained"]):
+        if df.loc[i, "cb_reads"] > 0:
+            ax.text(i + width / 2, df.loc[i, "cb_reads"], f"{pct:.1f}%", ha="center", va="bottom")
     ax.set_xticks(x)
-    ax.set_xticklabels(df_counts['sample'], rotation=45, ha='right')
-    ax.set_ylabel('Number of cells')
-    ax.set_title('Cell counts per sample across pipeline')
+    ax.set_xticklabels(df["sample"], rotation=45, ha="right")
+    ax.set_ylabel("Total reads")
     ax.legend()
+    ax.set_title("CellBender: total reads per sample")
     plt.tight_layout()
-    for i in range(len(df_counts)):
-        h_cb = bars_cb[i].get_height(); pct_cb = df_counts.loc[i, 'pct_retained_cb']
-    if h_cb > 0:
-        ax.text(bars_cb[i].get_x() + bars_cb[i].get_width()/2, h_cb, f"{pct_cb:.1f}%", ha='center', fontsize=8)
-    h_f = bars_final[i].get_height(); pct_f = df_counts.loc[i, 'pct_retained_final']
-    if h_f > 0:
-        ax.text(bars_final[i].get_x() + bars_final[i].get_width()/2, h_f, f"{pct_f:.1f}%", ha='center', fontsize=8)
-    figpath.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(figpath, dpi=300)
-    plt.close()
+    fig.savefig(figdir_cb / "QC_reads_before_after_cellbender_AGGREGATE.png", dpi=200)
+    plt.close(fig)
+
+
+def plot_final_cell_counts(adata, cfg) -> None:
+    """
+    Plot number of cells per sample after all filtering.
+    Sorted descending, with total cell count displayed.
+    """
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    import numpy as np
+    from pathlib import Path
+    import os
+
+    figdir_qc = Path(cfg.figdir) / "QC_plots"
+    os.makedirs(figdir_qc, exist_ok=True)
+
+    counts = adata.obs[cfg.batch_key].value_counts().sort_values(ascending=False)
+    df = pd.DataFrame({"sample": counts.index, "n_cells": counts.values})
+    total_cells = int(df["n_cells"].sum())
+
+    fig, ax = plt.subplots(figsize=(max(6, len(df) * 0.6), 5))
+    bars = ax.bar(df["sample"], df["n_cells"], color="steelblue", alpha=0.8)
+    ax.set_xticks(np.arange(len(df)))
+    ax.set_xticklabels(df["sample"], rotation=45, ha="right")
+    ax.set_ylabel("Number of cells")
+    ax.set_title("Final number of cells per sample (post-filtering)")
+    ax.grid(axis="y", linestyle="--", alpha=0.3)
+
+    # Annotate total
+    ax.text(
+        0.98, 0.95,
+        f"Total: {total_cells:,} cells",
+        ha="right", va="top",
+        transform=ax.transAxes,
+        fontsize=10, fontweight="bold",
+        bbox=dict(facecolor="white", edgecolor="gray", alpha=0.7)
+    )
+
+    plt.tight_layout()
+    outpath = figdir_qc / "QC_cells_final_per_sample.png"
+    fig.savefig(outpath, dpi=300)
+    plt.close(fig)
