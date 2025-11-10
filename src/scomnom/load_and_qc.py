@@ -284,9 +284,7 @@ def run_qc_plots_counts(adata: ad.AnnData, cfg: LoadAndQCConfig) -> None:
     import os
 
     figdir_qc = cfg.figdir / "QC_plots"
-    figdir_cb = figdir_qc / "cellbender"
     os.makedirs(figdir_qc, exist_ok=True)
-    os.makedirs(figdir_cb, exist_ok=True)
 
     # ---------- before vs after filtering ----------
     raw_pre = adata.uns.get("pre_filter_counts", None)
@@ -347,51 +345,6 @@ def run_qc_plots_counts(adata: ad.AnnData, cfg: LoadAndQCConfig) -> None:
         cfg.min_cells_per_sample,
     )
 
-    # ---------- CellBender comparison ----------
-    if "before_cellbender_counts" in adata.uns and "after_cellbender_counts" in adata.uns:
-        before_cb = pd.Series(adata.uns["before_cellbender_counts"]).sort_index()
-        after_cb = pd.Series(adata.uns["after_cellbender_counts"]).sort_index()
-        all_samples_cb = sorted(set(before_cb.index) | set(after_cb.index))
-        before_cb = before_cb.reindex(all_samples_cb, fill_value=0)
-        after_cb = after_cb.reindex(all_samples_cb, fill_value=0)
-
-        df_cb = pd.DataFrame({
-            "sample": all_samples_cb,
-            "before_cellbender": before_cb.values,
-            "after_cellbender": after_cb.values,
-        })
-        df_cb["pct_retained_cellbender"] = np.where(
-            df_cb["before_cellbender"] > 0,
-            100 * df_cb["after_cellbender"] / df_cb["before_cellbender"],
-            0,
-        )
-        df_cb.to_csv(figdir_cb / "QC_cells_per_sample_cellbender.tsv", sep="\t", index=False)
-
-        for _, row in df_cb.iterrows():
-            s = row["sample"]
-            df_s = df_cb[df_cb["sample"] == s].copy()
-            df_s = df_s.rename(
-                columns={
-                    "before_cellbender": "before",
-                    "after_cellbender": "after",
-                    "pct_retained_cellbender": "retained_pct",
-                }
-            ).reset_index(drop=True)
-            plot_utils.barplot_before_after(
-                df_s, figdir_cb / f"{s}_QC_cells_before_after_cellbender.png", cfg.min_cells_per_sample
-            )
-
-        plot_utils.barplot_before_after(
-            df_cb.rename(
-                columns={
-                    "before_cellbender": "before",
-                    "after_cellbender": "after",
-                    "pct_retained_cellbender": "retained_pct",
-                }
-            ).reset_index(drop=True),
-            figdir_cb / "QC_cells_before_after_cellbender_AGGREGATE.png",
-            cfg.min_cells_per_sample,
-        )
 
 
 # ---- orchestrator ----
