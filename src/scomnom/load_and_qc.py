@@ -1,9 +1,6 @@
 from __future__ import annotations
 import os
 import logging
-import numpy as np
-import pandas as pd
-import scipy.sparse
 import anndata as ad
 import scanpy as sc
 from joblib import Parallel, delayed
@@ -24,6 +21,12 @@ warnings.filterwarnings(
     category=UserWarning,
     module="anndata"
 )
+warnings.filterwarnings(
+    "ignore",
+    message=".*not compatible with tight_layout.*",
+    category=UserWarning,
+    module="scanpy.plotting._utils"
+)
 
 # ---- logging helper ----
 def setup_logging(logfile: Optional[Path]):
@@ -34,97 +37,6 @@ def setup_logging(logfile: Optional[Path]):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", handlers=handlers)
 
 # ---- step functions ----
-def load_raw_data(cfg: LoadAndQCConfig) -> tuple[Dict[str, ad.AnnData], Dict[str, float]]:
-    raw_dirs = io_utils.find_raw_dirs(cfg.sample_dir, cfg.raw_pattern)
-    out: Dict[str, ad.AnnData] = {}
-    read_counts: Dict[str, float] = {}
-
-    for raw in raw_dirs:
-        sample = raw.name.split(".raw_feature_bc_matrix")[0]
-        adata = io_utils.read_raw_10x(raw)
-        out[sample] = adata
-        total_reads = float(adata.X.sum())
-        read_counts[sample] = total_reads
-        LOGGER.info(
-            "Loaded raw %s: %d cells, %d genes, %.2e total reads",
-            sample, adata.n_obs, adata.n_vars, total_reads,
-        )
-    return out, read_counts
-
-
-def load_cellbender_data(cfg: LoadAndQCConfig) -> tuple[Dict[str, ad.AnnData], Dict[str, float]]:
-    if cfg.cellbender_dir is None:
-        return {}, {}
-    cb_dirs = io_utils.find_cellbender_dirs(cfg.cellbender_dir, cfg.cellbender_pattern)
-    out: Dict[str, ad.AnnData] = {}
-    read_counts: Dict[str, float] = {}
-
-    for cb in cb_dirs:
-        sample = cb.name.split(".cellbender_filtered.output")[0]
-        adata = io_utils.read_cellbender_h5(cb, sample, cfg.cellbender_h5_suffix)
-        if adata is not None:
-            out[sample] = adata
-            total_reads = float(adata.X.sum())
-            read_counts[sample] = total_reads
-            LOGGER.info(
-                "Loaded CellBender %s: %d cells, %d genes, %.2e total reads",
-                sample, adata.n_obs, adata.n_vars, total_reads,
-            )
-    return out, read_counts
-
-
-
-def merge_samples(raw_map: Dict[str, ad.AnnData], cb_map: Dict[str, ad.AnnData], batch_key: str) -> ad.AnnData:
-    adatas: List[ad.AnnData] = []
-
-    for sample, raw in raw_map.items():
-        if sample in cb_map:
-            cb = cb_map[sample].copy()
-            common_obs = cb.obs_names.intersection(raw.obs_names)
-            common_var = cb.var_names.intersection(raw.var_names)
-            if len(common_obs) == 0 or len(common_var) == 0:
-                LOGGER.warning("No common cells or genes for %s. Skipping.", sample)
-                continue
-            cb = cb[common_obs, common_var].copy()
-            raw = raw[common_obs, common_var].copy()
-            cb.layers["counts_raw"] = raw.X.copy()
-            adata = cb
-        else:
-            # raw-only mode
-            raw = raw.copy()
-            if not scipy.sparse.issparse(raw.X):
-                raw.X = scipy.sparse.csr_matrix(raw.X)
-            raw.layers["counts_raw"] = raw.X.copy()
-            adata = raw
-
-        adata.obs[batch_key] = sample
-        adata.obs_names = [f"{sample}_{bc}" for bc in adata.obs_names]
-        adatas.append(adata)
-
-    if len(adatas) == 0:
-        raise RuntimeError("No samples loaded after matching.")
-
-    LOGGER.info("Concatenating %d AnnData objects...", len(adatas))
-    adata_all = sc.concat(adatas, axis=0, join="outer", merge="first")
-    adata_all.obs_names_make_unique()
-
-    # Store counts summary in merged object
-    adata_all.uns["before_cellbender_counts"] = {k: v.n_obs for k, v in raw_map.items()}
-    adata_all.uns["after_cellbender_counts"] = {k: v.n_obs for k, v in cb_map.items()}
-
-    if "counts_raw" in adata_all.layers:
-        raw_counts = adata_all.layers["counts_raw"]
-        if not scipy.sparse.issparse(raw_counts):
-            raw_counts = scipy.sparse.csr_matrix(raw_counts)
-        adata_all.raw = ad.AnnData(X=raw_counts, var=adata_all.var.copy(), obs=adata_all.obs.copy())
-        LOGGER.info("adata.raw set with counts_raw layer.")
-    else:
-        LOGGER.warning("'counts_raw' layer not found; adata.raw not set.")
-
-    return adata_all
-
-
-
 def add_metadata(adata: ad.AnnData, metadata_tsv: Optional[Path], sample_id_col: str) -> ad.AnnData:
     if metadata_tsv is None:
         return adata
@@ -132,7 +44,7 @@ def add_metadata(adata: ad.AnnData, metadata_tsv: Optional[Path], sample_id_col:
     if not metadata_tsv.exists():
         LOGGER.error("Metadata TSV not found: %s", metadata_tsv)
         return adata
-    df = pd.read_csv(metadata_tsv, sep=' ', index_col=0)
+    df = pd.read_csv(metadata_tsv, sep='\t')
     df.index = df.index.astype(str)
     if sample_id_col not in adata.obs.columns:
         LOGGER.error("Column '%s' not in adata.obs", sample_id_col)
@@ -173,25 +85,19 @@ def run_scrublet_parallel(adata: ad.AnnData, batch_key: str, n_jobs: int, **kwar
 
 
 def filter_and_doublets(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
-    # record counts before filtering
-    adata.uns["pre_filter_counts"] = adata.obs[cfg.batch_key].value_counts().sort_index().to_dict()
+    # preserve prefilter counts if already set
+    pre_counts = adata.uns.get("pre_filter_counts", None)
 
     # apply filters in place
     sc.pp.filter_cells(adata, min_genes=cfg.min_genes)
     sc.pp.filter_genes(adata, min_cells=cfg.min_cells)
 
-    # preserve uns across reassignments
-    pre_counts = adata.uns["pre_filter_counts"]
-    pre_cb_counts = adata.uns["before_cellbender_counts"]
-    post_cb_counts = adata.uns["after_cellbender_counts"]
-
     # doublet detection may return a new AnnData
     adata = run_scrublet_parallel(adata, batch_key=cfg.batch_key, n_jobs=cfg.n_jobs)
 
     # reattach if lost
-    adata.uns["pre_filter_counts"] = pre_counts
-    adata.uns["before_cellbender_counts"] = pre_cb_counts
-    adata.uns["after_cellbender_counts"] = post_cb_counts
+    if pre_counts is not None:
+        adata.uns["pre_filter_counts"] = pre_counts
 
     return adata
 
@@ -230,154 +136,24 @@ def cluster_and_cleanup_qc(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnDat
         adata = adata[~adata.obs[cfg.batch_key].isin(small)].copy()
     return adata
 
-# ---- plotting wrappers ----
-def run_qc_plots_pre(adata: ad.AnnData, cfg: LoadAndQCConfig) -> None:
-    if not cfg.make_figures:
-        return
-    plot_utils.setup_scanpy_figs(cfg.figdir)
-    # Redirect to QC plot folder
-    qc_dir = Path(cfg.output_dir) / "figures" / "QC_plots"
-    qc_dir.mkdir(parents=True, exist_ok=True)
-    sc.settings.figdir = qc_dir
-    plot_utils.qc_scatter(adata, groupby=cfg.batch_key)
-
-
-def run_qc_plots_dimred(adata: ad.AnnData, cfg: LoadAndQCConfig):
-    """Generate all QC plots (pre/post-filter, PCA, UMAP) inside QC_plots."""
-    import os
-    figdir_qc = cfg.figdir / "QC_plots"
-    os.makedirs(figdir_qc, exist_ok=True)
-
-    # Set Scanpy’s figure directory temporarily to QC_plots
-    from scanpy import settings as sc_settings
-    old_figdir = sc_settings.figdir
-    sc_settings.figdir = figdir_qc
-
-    try:
-        # Pre-filter QC
-        if "counts_raw" in adata.layers:
-            sc.pl.violin(
-                adata,
-                ["n_genes_by_counts_raw", "total_counts_raw", "pct_counts_mt_raw"],
-                jitter=0.4,
-                groupby=cfg.batch_key,
-                save="_QC_violin_mt_counts_prefilter.png",
-                show=False
-            )
-
-        # Post-filter QC
-        sc.pl.violin(
-            adata,
-            ["n_genes_by_counts", "total_counts", "pct_counts_mt"],
-            jitter=0.4,
-            groupby=cfg.batch_key,
-            save="_QC_violin_mt_counts_postfilter.png",
-            show=False
-        )
-
-        # PCA, variance, and UMAP
-        sc.pl.pca_variance_ratio(
-            adata,
-            log=True,
-            n_pcs=cfg.max_pcs_plot,
-            save="_QC_pca_variance_ratio.png",
-            show=False
-        )
-        sc.pl.umap(adata, color=[cfg.batch_key], save="_QC_umap_sample.png", show=False)
-        sc.pl.umap(adata, color=[cfg.batch_key, "leiden"], save="_QC_umap_per_sample_and_leiden.png", show=False)
-        sc.pl.scatter(adata, x="total_counts", y="pct_counts_mt", save="_QC_scatter_mt.png", show=False)
-    finally:
-        sc_settings.figdir = old_figdir
-
-
-
-def run_qc_plots_counts(adata: ad.AnnData, cfg: LoadAndQCConfig) -> None:
-    if not cfg.make_figures:
-        return
-    import pandas as pd
-    import numpy as np
-    import os
-
-    figdir_qc = cfg.figdir / "QC_plots"
-    os.makedirs(figdir_qc, exist_ok=True)
-
-    # ---------- before vs after filtering ----------
-    raw_pre = adata.uns.get("pre_filter_counts", None)
-    if isinstance(raw_pre, dict):
-        before_counts = pd.Series(raw_pre).sort_index()
-    else:
-        before_counts = raw_pre
-
-    after_counts = adata.obs[cfg.batch_key].value_counts().sort_index()
-    all_samples = sorted(set(before_counts.index) | set(after_counts.index)) if before_counts is not None else after_counts.index
-
-    before_counts = (
-        before_counts.reindex(all_samples, fill_value=0)
-        if before_counts is not None
-        else pd.Series([0] * len(all_samples), index=all_samples)
-    )
-    after_counts = after_counts.reindex(all_samples, fill_value=0)
-
-    df_counts = pd.DataFrame({
-        "sample": all_samples,
-        "before_filter": before_counts.values,
-        "after_filter": after_counts.values,
-    })
-    df_counts["pct_retained_filter"] = np.where(
-        df_counts["before_filter"] > 0,
-        100 * df_counts["after_filter"] / df_counts["before_filter"],
-        0,
-    )
-    df_counts.to_csv(figdir_qc / "QC_cells_per_sample_filter.tsv", sep="\t", index=False)
-
-    # Per-sample plots (filter)
-    per_sample_dir = figdir_qc / "per_sample"
-    os.makedirs(per_sample_dir, exist_ok=True)
-    for _, row in df_counts.iterrows():
-        s = row["sample"]
-        df_s = df_counts[df_counts["sample"] == s].copy()
-        df_s = df_s.rename(
-            columns={
-                "before_filter": "before",
-                "after_filter": "after",
-                "pct_retained_filter": "retained_pct",
-            }
-        ).reset_index(drop=True)
-        plot_utils.barplot_before_after(
-            df_s, per_sample_dir / f"{s}_QC_cells_before_after_filter.png", cfg.min_cells_per_sample
-        )
-
-    # Aggregate filter overview
-    plot_utils.barplot_before_after(
-        df_counts.rename(
-            columns={
-                "before_filter": "before",
-                "after_filter": "after",
-                "pct_retained_filter": "retained_pct",
-            }
-        ).reset_index(drop=True),
-        figdir_qc / "QC_cells_before_after_filter_AGGREGATE.png",
-        cfg.min_cells_per_sample,
-    )
-
-
 
 # ---- orchestrator ----
 def run_load_and_qc(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) -> ad.AnnData:
     setup_logging(logfile)
     LOGGER.info("Starting load_and_qc")
     # load
-    raw_map, raw_read_counts = load_raw_data(cfg)
-    cb_map, cb_read_counts = load_cellbender_data(cfg) if cfg.cellbender_dir else ({}, {})
+    raw_map, raw_read_counts = io_utils.load_raw_data(cfg)
+    cb_map, cb_read_counts = io_utils.load_cellbender_data(cfg) if cfg.cellbender_dir else ({}, {})
     # merge
-    adata = merge_samples(raw_map, cb_map, batch_key=cfg.batch_key)
+    adata = io_utils.merge_samples(raw_map, cb_map, batch_key=cfg.batch_key)
+    # early prefilter to reduce footprint
+    adata = io_utils.prefilter_low_content_cells(adata,min_genes=cfg.min_genes_prefilter,min_umis=cfg.min_umis_prefilter)
     # metadata
     adata = add_metadata(adata, cfg.metadata_tsv, sample_id_col=cfg.batch_key)
-    # qc metrics and pre-filter plots
+    # qc metrics
     adata = compute_qc_metrics(adata, cfg)
-    run_qc_plots_pre(adata, cfg)
-    # capture counts per sample before filtering
-    adata.uns["pre_filter_counts"] = adata.obs[cfg.batch_key].value_counts().sort_index()
+    # Show stats before filtering
+    plot_utils.run_qc_plots_pre_filter(adata, cfg)
     # filtering + doublets tagging
     adata = filter_and_doublets(adata, cfg)
     # normalize + HVG
@@ -390,9 +166,7 @@ def run_load_and_qc(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) -> ad.
     qc_dir = Path(cfg.output_dir) / "figures" / "QC_plots"
     qc_dir.mkdir(parents=True, exist_ok=True)
     plot_utils.plot_cellbender_comparison(raw_read_counts, cb_read_counts, cfg.figdir)
-    run_qc_plots_dimred(adata, cfg)
-    run_qc_plots_counts(adata, cfg)
-    sc.pl.umap(adata, color=[cfg.batch_key, "leiden"], save=qc_dir/"_QC_umap_per_sample_and_leiden.png") if cfg.make_figures else None
+    plot_utils.run_qc_plots_postfilter(adata, cfg)
     plot_utils.plot_final_cell_counts(adata, cfg)
     # write
     io_utils.save_adata(adata, cfg.output_dir / cfg.output_name)
