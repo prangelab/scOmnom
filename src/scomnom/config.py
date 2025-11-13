@@ -2,6 +2,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field, validator
 from pathlib import Path
 from typing import Optional, Dict, List
+from matplotlib.figure import Figure
 
 class LoadAndQCConfig(BaseModel):
     # I/O
@@ -39,6 +40,10 @@ class LoadAndQCConfig(BaseModel):
     # Plots
     make_figures: bool = True
     figdir_name: str = "figures"
+    figure_formats: List[str] = Field(
+        default_factory=lambda: ["png", "pdf"],
+        description="Figure formats to save (e.g. ['png','pdf'])."
+    )
 
     # File patterns
     raw_pattern: str = "*.raw_feature_bc_matrix"
@@ -53,3 +58,13 @@ class LoadAndQCConfig(BaseModel):
     @validator("output_name")
     def ensure_h5ad(cls, v: str) -> str:
         return v if v.endswith(".h5ad") else f"{v}.h5ad"
+
+    @validator("figure_formats", each_item=True)
+    def validate_formats(cls, fmt: str):
+        supported = Figure().canvas.get_supported_filetypes()
+        if fmt.lower() not in supported:
+            raise ValueError(
+                f"Unsupported figure format '{fmt}'. "
+                f"Supported formats include: {', '.join(sorted(supported))}"
+            )
+        return fmt.lower()

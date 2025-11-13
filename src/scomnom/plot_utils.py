@@ -5,7 +5,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import scanpy as sc
 import matplotlib as mpl
-
+import logging
+LOGGER = logging.getLogger(__name__)
 
 # Global params
 mpl.rcParams["xtick.alignment"] = "right"
@@ -14,28 +15,60 @@ mpl.rcParams["figure.autolayout"] = True
 mpl.rcParams["figure.constrained_layout.use"] = True
 mpl.rcParams["figure.subplot.right"] = 0.9  # gives space for legends
 
-def setup_scanpy_figs(figdir: Path) -> None:
-    import matplotlib as mpl
+FIGURE_FORMATS = ["png", "pdf"]
+ROOT_FIGDIR = None
+
+def set_figure_formats(formats):
+    global FIGURE_FORMATS
+    FIGURE_FORMATS = list(formats)
+
+
+def setup_scanpy_figs(figdir: Path, formats=None) -> None:
+    global ROOT_FIGDIR
+    ROOT_FIGDIR = figdir.resolve()
+
     import scanpy as sc
-    mpl.rcParams.update({
-        "figure.constrained_layout.use": True,
-        "figure.autolayout": True,
-        "figure.subplot.right": 0.88,   # leave margin for legends
-        "legend.loc": "best",
-        "legend.frameon": False,
-    })
-    sc.set_figure_params(dpi=300, facecolor="white", figsize=(6, 5))
+
+    if formats is not None:
+        set_figure_formats(formats)
+
     sc.settings.figdir = str(figdir)
     sc.settings.autoshow = False
     sc.settings.autosave = False
-    sc.settings.file_format_figs = "png"
+
+    # Set a neutral figure style
+    sc.settings.set_figure_params(
+        dpi=300,
+        dpi_save=300,
+        facecolor="white",
+        frameon=False,
+        vector_friendly=False,
+        fontsize=10,
+        figsize=(6, 5),
+        format=FIGURE_FORMATS[0],
+    )
+
     figdir.mkdir(parents=True, exist_ok=True)
 
 
-def save_multi(fig_name: str, figdir, formats=("png", "pdf")):
-    for ext in formats:
-        plt.savefig(figdir / f"{fig_name}.{ext}", dpi=300)
+def save_multi(stem: str, figdir: Path):
+    import matplotlib.pyplot as plt
+    global ROOT_FIGDIR
+
+    figdir = figdir.resolve()
+    root = ROOT_FIGDIR
+
+    # compute rel path ALWAYS relative to the true figure root
+    rel = figdir.relative_to(root)
+
+    for ext in FIGURE_FORMATS:
+        outdir = root / ext / rel
+        outdir.mkdir(parents=True, exist_ok=True)
+        LOGGER.info(f"Saving figure: {outfile}")
+        plt.savefig(outdir / f"{stem}.{ext}", dpi=300)
+
     plt.close()
+
 
 
 # ---- plotting wrappers ----
@@ -87,7 +120,6 @@ def barplot_before_after(df_counts: pd.DataFrame, figpath: Path, min_cells_per_s
         pct = df_counts.loc[i, 'retained_pct']
         if height > 0:
             ax.text(bar.get_x() + bar.get_width()/2, height, f"{pct:.1f}%", ha='center', va='bottom', fontsize=8, rotation=60)
-    figpath.parent.mkdir(parents=True, exist_ok=True)
     save_multi(figpath.stem, figpath.parent)
 
 
@@ -95,10 +127,8 @@ def plot_cellbender_comparison(raw_counts: dict, cb_counts: dict, figdir: Path) 
     import pandas as pd
     import numpy as np
     import matplotlib.pyplot as plt
-    import os
 
-    figdir_cb = Path(figdir) / "QC_plots" / "cellbender"
-    os.makedirs(figdir_cb, exist_ok=True)
+    figdir_cb = (figdir / "QC_plots" / "cellbender").resolve()
 
     samples = sorted(set(raw_counts) | set(cb_counts))
     df = pd.DataFrame({
@@ -111,7 +141,6 @@ def plot_cellbender_comparison(raw_counts: dict, cb_counts: dict, figdir: Path) 
         100 * df["cb_reads"] / df["raw_reads"],
         0,
     )
-    df.to_csv(figdir_cb / "QC_reads_per_sample_cellbender.tsv", sep="\t", index=False)
 
     def _plot_single(row, outpath_stem):
         fig, ax = plt.subplots(figsize=(8, 6))
@@ -133,6 +162,11 @@ def plot_cellbender_comparison(raw_counts: dict, cb_counts: dict, figdir: Path) 
         stem = f"{row['sample']}_QC_reads_before_after_cellbender"
         _plot_single(row, stem)
 
+     # Store per-format, same placement as figures:
+    for ext in FIGURE_FORMATS:
+        outdir = ROOT_FIGDIR / ext / figdir_cb.relative_to(ROOT_FIGDIR)
+        df.to_csv(outdir / "QC_reads_per_sample_cellbender.tsv", sep="\t", index=False)
+
     fig, ax = plt.subplots(figsize=(max(6, len(df) * 0.8), 6))
     x = np.arange(len(df))
     width = 0.35
@@ -150,7 +184,6 @@ def plot_cellbender_comparison(raw_counts: dict, cb_counts: dict, figdir: Path) 
     save_multi("QC_reads_before_after_cellbender_AGGREGATE", figdir_cb)
 
 
-
 def plot_final_cell_counts(adata, cfg) -> None:
     import matplotlib.pyplot as plt
     import pandas as pd
@@ -159,7 +192,6 @@ def plot_final_cell_counts(adata, cfg) -> None:
     import os
 
     figdir_qc = Path(cfg.figdir) / "QC_plots"
-    os.makedirs(figdir_qc, exist_ok=True)
 
     counts = adata.obs[cfg.batch_key].value_counts().sort_values(ascending=False)
     df = pd.DataFrame({"sample": counts.index, "n_cells": counts.values})
@@ -188,7 +220,6 @@ def plot_final_cell_counts(adata, cfg) -> None:
 
 def plot_mt_histogram(adata, cfg, suffix):
     figdir_qc = cfg.figdir / "QC_plots"
-    figdir_qc.mkdir(parents=True, exist_ok=True)
 
     plt.figure(figsize=(5, 4))
     plt.hist(adata.obs["pct_counts_mt"], bins=50, color="steelblue", alpha=0.8)
@@ -204,8 +235,6 @@ def run_qc_plots_pre_filter(adata: ad.AnnData, cfg: LoadAndQCConfig) -> None:
         return
 
     figdir_qc = cfg.figdir / "QC_plots"
-    figdir_qc.mkdir(parents=True, exist_ok=True)
-    sc.settings.figdir = figdir_qc
 
     if "doublet_score" in adata.obs:
         sc.pl.violin(
@@ -220,12 +249,10 @@ def run_qc_plots_pre_filter(adata: ad.AnnData, cfg: LoadAndQCConfig) -> None:
 
 
 def run_qc_plots_postfilter(adata: ad.AnnData, cfg: LoadAndQCConfig):
-    import os
-    figdir_qc = cfg.figdir / "QC_plots"
-    os.makedirs(figdir_qc, exist_ok=True)
-
     from scanpy import settings as sc_settings
     old_figdir = sc_settings.figdir
+    figdir_qc = cfg.figdir / "QC_plots"
+
     sc_settings.figdir = figdir_qc
 
     try:
