@@ -141,9 +141,22 @@ def cluster_and_cleanup_qc(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnDat
 def run_load_and_qc(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) -> ad.AnnData:
     setup_logging(logfile)
     LOGGER.info("Starting load_and_qc")
-    # load
-    raw_map, raw_read_counts = io_utils.load_raw_data(cfg)
+    # Check input
+    if cfg.raw_sample_dir and cfg.filtered_sample_dir:
+        raise RuntimeError("Specify only one of raw_sample_dir or filtered_sample_dir")
+    # choose source
+    if cfg.filtered_sample_dir:
+        LOGGER.info("Loading Cell Ranger filtered matrices...")
+        raw_map, raw_read_counts = io_utils.load_filtered_data(cfg)
+    elif cfg.raw_sample_dir:
+        LOGGER.info("Loading raw matrices and applying cell-calling filter...")
+        raw_map, raw_read_counts = io_utils.load_raw_data(cfg)
+    else:
+        raise RuntimeError("Must provide at least one of raw_sample_dir or filtered_sample_dir")
+
+    # load CellBender if available
     cb_map, cb_read_counts = io_utils.load_cellbender_data(cfg) if cfg.cellbender_dir else ({}, {})
+
     # merge
     adata = io_utils.merge_samples(raw_map, cb_map, batch_key=cfg.batch_key)
     # early prefilter to reduce footprint

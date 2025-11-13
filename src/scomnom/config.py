@@ -5,8 +5,9 @@ from typing import Optional, Dict, List
 
 class LoadAndQCConfig(BaseModel):
     # I/O
-    sample_dir: Path = Field(..., description="Directory with 10x raw folders: <sample>.raw_feature_bc_matrix")
-    cellbender_dir: Optional[Path] = Field(None, description="Directory with CellBender outputs: <sample>.cellbender_filtered.output/")
+    raw_sample_dir: Optional[Path] = Field(None, description="Directory with 10x raw_feature_bc_matrix folders")
+    filtered_sample_dir: Optional[Path] = Field(None,description="Directory with 10x filtered_feature_bc_matrix folders")
+    cellbender_dir: Optional[Path] = Field(None, description="Directory with CellBender outputs")
     metadata_tsv: Optional[Path] = Field(None, description="TSV with per-sample metadata indexed by sample ID")
     output_dir: Path = Field(..., description="Directory for outputs (h5ad + figures)")
     output_name: str = Field("adata.preprocessed.h5ad", description="Output h5ad filename")
@@ -41,6 +42,7 @@ class LoadAndQCConfig(BaseModel):
 
     # File patterns
     raw_pattern: str = "*.raw_feature_bc_matrix"
+    filtered_pattern: str = "*.filtered_feature_bc_matrix"
     cellbender_pattern: str = "*.cellbender_filtered.output"
     cellbender_h5_suffix: str = ".cellbender_out.h5"
 
