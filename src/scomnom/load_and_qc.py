@@ -1,5 +1,4 @@
 from __future__ import annotations
-import os
 import logging
 import anndata as ad
 import scanpy as sc
@@ -24,9 +23,9 @@ warnings.filterwarnings(
 warnings.filterwarnings(
     "ignore",
     message=".*not compatible with tight_layout.*",
-    category=UserWarning,
-    module="scanpy.plotting._utils"
+    category=UserWarning
 )
+
 
 # ---- logging helper ----
 def setup_logging(logfile: Optional[Path]):
@@ -141,6 +140,8 @@ def cluster_and_cleanup_qc(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnDat
 def run_load_and_qc(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) -> ad.AnnData:
     setup_logging(logfile)
     LOGGER.info("Starting load_and_qc")
+    plot_utils.setup_scanpy_figs(cfg.figdir, cfg.figure_formats)
+
     # Check input
     if cfg.raw_sample_dir and cfg.filtered_sample_dir:
         raise RuntimeError("Specify only one of raw_sample_dir or filtered_sample_dir")
@@ -176,8 +177,6 @@ def run_load_and_qc(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) -> ad.
     # Cluster + cleanup
     adata = cluster_and_cleanup_qc(adata, cfg)
     # Make qc plots
-    qc_dir = Path(cfg.output_dir) / "figures" / "QC_plots"
-    qc_dir.mkdir(parents=True, exist_ok=True)
     plot_utils.plot_cellbender_comparison(raw_read_counts, cb_read_counts, cfg.figdir)
     plot_utils.run_qc_plots_postfilter(adata, cfg)
     plot_utils.plot_final_cell_counts(adata, cfg)

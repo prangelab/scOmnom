@@ -22,6 +22,10 @@ def load_and_qc(
     min_cells_per_sample: int = typer.Option(20),
     max_pct_mt: float = typer.Option(5.0),
     make_figures: bool = typer.Option(True),
+    figure_format: list[str] = typer.Option(
+        ["png", "pdf"],
+        help="Figure formats to save. Repeat option for multiple formats, e.g. --figure-format png --figure-format pdf",
+    ),
     batch_key: str = typer.Option("sample"),
     raw_pattern: str = typer.Option("*.raw_feature_bc_matrix"),
     filtered_pattern: str = typer.Option("*.filtered_feature_bc_matrix"),
@@ -49,6 +53,7 @@ def load_and_qc(
         min_cells_per_sample=min_cells_per_sample,
         max_pct_mt=max_pct_mt,
         make_figures=make_figures,
+        figure_formats=figure_format,
         batch_key=batch_key,
         raw_pattern=raw_pattern,
         filtered_pattern=filtered_pattern,
