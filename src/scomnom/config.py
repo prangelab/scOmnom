@@ -68,3 +68,50 @@ class LoadAndQCConfig(BaseModel):
                 f"Supported formats include: {', '.join(sorted(supported))}"
             )
         return fmt.lower()
+
+class IntegrationConfig(BaseModel):
+    # I/O
+    input_path: Path = Field(..., description="Preprocessed h5ad from load_and_qc")
+    output_path: Optional[Path] = Field(
+        None,
+        description="Output integrated h5ad. Defaults to <input_stem>.integrated.h5ad",
+    )
+
+    # Integration method control
+    methods: Optional[List[str]] = Field(
+        None,
+        description=(
+            "Integration methods to run. "
+            "Supported: Scanorama, LIGER, Harmony, scVI, scANVI. "
+            "Default: all except scANVI."
+        ),
+    )
+    include_scanvi: bool = Field(
+        False,
+        description="Include scANVI in benchmarking (off by default; slow on CPU)",
+    )
+
+    # Keys
+    batch_key: Optional[str] = Field(
+        None, description="Batch/sample key in adata.obs (default: auto-detect)"
+    )
+    label_key: str = Field(
+        "leiden",
+        description="Label/cluster key in adata.obs used for scib-metrics & scANVI",
+    )
+
+    # Compute
+    use_gpu: bool = Field(False, description="Use GPU for scVI/scANVI")
+    benchmark_n_jobs: int = Field(1, ge=1, description="Parallel workers for scib-metrics")
+
+    # Logging
+    logfile: Optional[Path] = Field(
+        None,
+        description="Optional log file path; defaults to <input_dir>/integration.log",
+    )
+
+    @validator("methods")
+    def normalize_methods(cls, v):
+        if v is None:
+            return None
+        return [m.strip() for m in v]

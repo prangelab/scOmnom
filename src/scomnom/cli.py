@@ -65,9 +65,68 @@ def load_and_qc(
 
     run_load_and_qc(cfg, logfile=output_dir / "pipeline.log")
 
+from .config import IntegrationConfig
+from .integrate import run_integration
+
 @app.command()
-def integrate():
-    run_integration()
+def integrate(
+    input_path: Path = typer.Option(
+        ...,
+        help="Input h5ad produced by load_and_qc (typically adata.preprocessed.h5ad)"
+    ),
+    output_path: Optional[Path] = typer.Option(
+        None,
+        help="Output integrated h5ad. Defaults to <input_stem>.integrated.h5ad"
+    ),
+    methods: Optional[List[str]] = typer.Option(
+        None,
+        help=(
+            "Integration methods to run. Repeat option for multiple.\n"
+            "Supported: Scanorama, LIGER, Harmony, scVI, scANVI.\n"
+            "Default: all except scANVI."
+        ),
+    ),
+    batch_key: Optional[str] = typer.Option(
+        None,
+        help="Batch column in .obs (default: auto-detect)"
+    ),
+    label_key: str = typer.Option(
+        "leiden",
+        help="Label/cluster column for scib-metrics (default: leiden)"
+    ),
+    use_gpu: bool = typer.Option(
+        False,
+        help="Run scVI/scANVI on GPU"
+    ),
+    include_scanvi: bool = typer.Option(
+        False,
+        help="Include scANVI in benchmarking (slow without GPU)"
+    ),
+    benchmark_n_jobs: int = typer.Option(
+        1,
+        help="Parallel workers for scib-metrics"
+    ),
+):
+    """
+    Run integration + scib-metrics benchmarking and write an integrated h5ad.
+    """
+
+    logfile = input_path.parent / "integration.log"
+
+    cfg = IntegrationConfig(
+        input_path=input_path,
+        output_path=output_path,
+        methods=methods,
+        batch_key=batch_key,
+        label_key=label_key,
+        use_gpu=use_gpu,
+        include_scanvi=include_scanvi,
+        benchmark_n_jobs=benchmark_n_jobs,
+        logfile=logfile,
+    )
+
+    run_integration(cfg)
+
 
 @app.command()
 def cluster_and_annotate():
