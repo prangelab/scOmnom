@@ -32,23 +32,38 @@ def setup_scanpy_figs(figdir: Path) -> None:
     figdir.mkdir(parents=True, exist_ok=True)
 
 
+def save_multi(fig_name: str, figdir, formats=("png", "pdf")):
+    for ext in formats:
+        plt.savefig(figdir / f"{fig_name}.{ext}", dpi=300)
+    plt.close()
+
+
+# ---- plotting wrappers ----
 def qc_scatter(adata, groupby: str):
-    sc.pl.scatter(adata, "total_counts", "n_genes_by_counts", color="pct_counts_mt",
-                  save="_QC_scatter_mt.png")
-    sc.pl.scatter(adata, "total_counts", "n_genes_by_counts", color="pct_counts_mt",
-                  save="_QC_scatter_mt.pdf")
+    sc.pl.scatter(
+        adata,
+        x="total_counts",
+        y="n_genes_by_counts",
+        color="pct_counts_mt",
+        show=False
+    )
+    save_multi("QC_scatter_mt", Path(sc.settings.figdir))
 
 
 def hvgs_and_pca_plots(adata, max_pcs_plot: int):
-    sc.pl.highly_variable_genes(adata, save="_QC_highly_variable_genes.png")
-    sc.pl.pca_variance_ratio(adata, n_pcs=max_pcs_plot, log=True, save="_QC_pca_variance_ratio.png")
-    sc.pl.pca_variance_ratio(adata, n_pcs=max_pcs_plot, log=True, save="_QC_pca_variance_ratio.pdf")
+    sc.pl.highly_variable_genes(adata, show=False)
+    save_multi("QC_highly_variable_genes", Path(sc.settings.figdir))
+
+    sc.pl.pca_variance_ratio(adata, n_pcs=max_pcs_plot, log=True, show=False)
+    save_multi("QC_pca_variance_ratio", Path(sc.settings.figdir))
+
 
 def umap_by(adata, keys):
     if isinstance(keys, str):
         keys = [keys]
-    sc.pl.umap(adata, color=keys, use_raw=False, save=f"_QC_umap_{'_'.join(keys)}.png")
-    sc.pl.umap(adata, color=keys, use_raw=False, save=f"_QC_umap_{'_'.join(keys)}.pdf")
+    name = f"QC_umap_{'_'.join(keys)}"
+    sc.pl.umap(adata, color=keys, use_raw=False, show=False)
+    save_multi(name, Path(sc.settings.figdir))
 
 
 def barplot_before_after(df_counts: pd.DataFrame, figpath: Path, min_cells_per_sample: int):
@@ -73,26 +88,10 @@ def barplot_before_after(df_counts: pd.DataFrame, figpath: Path, min_cells_per_s
         if height > 0:
             ax.text(bar.get_x() + bar.get_width()/2, height, f"{pct:.1f}%", ha='center', va='bottom', fontsize=8, rotation=60)
     figpath.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(figpath, dpi=300)
-    plt.savefig(figpath.with_suffix(".pdf"))
-    plt.close()
+    save_multi(figpath.stem, figpath.parent)
 
 
 def plot_cellbender_comparison(raw_counts: dict, cb_counts: dict, figdir: Path) -> None:
-    """
-    Generate per-sample and aggregate plots comparing total read counts
-    before vs after CellBender. Each barplot shows absolute read counts and
-    percent retained above the filtered bar.
-
-    Parameters
-    ----------
-    raw_counts : dict
-        {sample: total_reads_before_cellbender}
-    cb_counts : dict
-        {sample: total_reads_after_cellbender}
-    figdir : Path
-        Base figure directory; will create QC_plots/cellbender/
-    """
     import pandas as pd
     import numpy as np
     import matplotlib.pyplot as plt
@@ -101,7 +100,6 @@ def plot_cellbender_comparison(raw_counts: dict, cb_counts: dict, figdir: Path) 
     figdir_cb = Path(figdir) / "QC_plots" / "cellbender"
     os.makedirs(figdir_cb, exist_ok=True)
 
-    # build dataframe
     samples = sorted(set(raw_counts) | set(cb_counts))
     df = pd.DataFrame({
         "sample": samples,
@@ -115,13 +113,12 @@ def plot_cellbender_comparison(raw_counts: dict, cb_counts: dict, figdir: Path) 
     )
     df.to_csv(figdir_cb / "QC_reads_per_sample_cellbender.tsv", sep="\t", index=False)
 
-    # helper for single barplot
-    def _plot_single(row, outpath):
+    def _plot_single(row, outpath_stem):
         fig, ax = plt.subplots(figsize=(8, 6))
         x = np.arange(1)
         width = 0.35
-        bars_raw = ax.bar(x - width / 2, [row["raw_reads"]], width, color="lightgray", label="raw")
-        bars_cb = ax.bar(x + width / 2, [row["cb_reads"]], width, color="steelblue", label="cellbender")
+        ax.bar(x - width / 2, [row["raw_reads"]], width, color="lightgray", label="raw")
+        ax.bar(x + width / 2, [row["cb_reads"]], width, color="steelblue", label="cellbender")
         pct = row["pct_retained"]
         if row["cb_reads"] > 0:
             ax.text(x + width / 2, row["cb_reads"], f"{pct:.1f}%", ha="center", va="bottom", rotation=60)
@@ -130,15 +127,12 @@ def plot_cellbender_comparison(raw_counts: dict, cb_counts: dict, figdir: Path) 
         ax.set_xticks([])
         ax.legend()
         plt.tight_layout()
-        fig.savefig(outpath, dpi=300)
-        fig.savefig(outpath.with_suffix(".pdf"))
-        plt.close(fig)
+        save_multi(outpath_stem, figdir_cb)
 
-    # per-sample plots
     for _, row in df.iterrows():
-        _plot_single(row, figdir_cb / f"{row['sample']}_QC_reads_before_after_cellbender.png")
+        stem = f"{row['sample']}_QC_reads_before_after_cellbender"
+        _plot_single(row, stem)
 
-    # aggregate overview
     fig, ax = plt.subplots(figsize=(max(6, len(df) * 0.8), 6))
     x = np.arange(len(df))
     width = 0.35
@@ -153,16 +147,11 @@ def plot_cellbender_comparison(raw_counts: dict, cb_counts: dict, figdir: Path) 
     ax.legend()
     ax.set_title("CellBender: total reads per sample")
     plt.tight_layout()
-    fig.savefig(figdir_cb / "QC_reads_before_after_cellbender_AGGREGATE.png", dpi=300)
-    fig.savefig(figdir_cb / "QC_reads_before_after_cellbender_AGGREGATE.pdf")
-    plt.close(fig)
+    save_multi("QC_reads_before_after_cellbender_AGGREGATE", figdir_cb)
+
 
 
 def plot_final_cell_counts(adata, cfg) -> None:
-    """
-    Plot number of cells per sample after all filtering.
-    Sorted descending, with total cell count displayed.
-    """
     import matplotlib.pyplot as plt
     import pandas as pd
     import numpy as np
@@ -177,14 +166,13 @@ def plot_final_cell_counts(adata, cfg) -> None:
     total_cells = int(df["n_cells"].sum())
 
     fig, ax = plt.subplots(figsize=(max(6, len(df) * 0.6), 5))
-    bars = ax.bar(df["sample"], df["n_cells"], color="steelblue", alpha=0.8)
+    ax.bar(df["sample"], df["n_cells"], color="steelblue", alpha=0.8)
     ax.set_xticks(np.arange(len(df)))
     ax.set_xticklabels(df["sample"], rotation=45, ha="right")
     ax.set_ylabel("Number of cells")
     ax.set_title("Final number of cells per sample (post-filtering)")
     ax.grid(axis="y", linestyle="--", alpha=0.3)
 
-    # Annotate total
     ax.text(
         0.98, 0.95,
         f"Total: {total_cells:,} cells",
@@ -195,116 +183,102 @@ def plot_final_cell_counts(adata, cfg) -> None:
     )
 
     plt.tight_layout()
-    outpath = figdir_qc / "QC_cells_final_per_sample.png"
-    fig.savefig(outpath, dpi=300)
-    fig.savefig(outpath.with_suffix(".pdf"))
-    plt.close(fig)
+    save_multi("QC_cells_final_per_sample", figdir_qc)
 
 
-# ---- plotting wrappers ----
 def plot_mt_histogram(adata, cfg, suffix):
     figdir_qc = cfg.figdir / "QC_plots"
     figdir_qc.mkdir(parents=True, exist_ok=True)
+
     plt.figure(figsize=(5, 4))
     plt.hist(adata.obs["pct_counts_mt"], bins=50, color="steelblue", alpha=0.8)
     plt.xlabel("Percent mitochondrial counts")
     plt.ylabel("Number of cells")
     plt.title("Distribution of mitochondrial content")
     plt.tight_layout()
-    plt.savefig(figdir_qc / f"{suffix}_QC_hist_pct_mt.png", dpi=300)
-    plt.savefig(figdir_qc / f"{suffix}_QC_hist_pct_mt.pdf")
-    plt.close()
+    save_multi(f"{suffix}_QC_hist_pct_mt", figdir_qc)
+
 
 def run_qc_plots_pre_filter(adata: ad.AnnData, cfg: LoadAndQCConfig) -> None:
-    """Plots QC distributions before doublet and MT filtering."""
     if not cfg.make_figures:
         return
+
     figdir_qc = cfg.figdir / "QC_plots"
     figdir_qc.mkdir(parents=True, exist_ok=True)
     sc.settings.figdir = figdir_qc
 
     if "doublet_score" in adata.obs:
-        sc.pl.violin(adata, ["doublet_score"], groupby=cfg.batch_key,
-                     save="_QC_doublet_score_violin_prefilter.png", show=False)
-        sc.pl.violin(adata, ["doublet_score"], groupby=cfg.batch_key,
-                     save="_QC_doublet_score_violin_prefilter.pdf", show=False)
+        sc.pl.violin(
+            adata,
+            ["doublet_score"],
+            groupby=cfg.batch_key,
+            show=False
+        )
+        save_multi("QC_doublet_score_violin_prefilter", figdir_qc)
 
     plot_mt_histogram(adata, cfg, "prefilter")
 
 
 def run_qc_plots_postfilter(adata: ad.AnnData, cfg: LoadAndQCConfig):
-    """Generate all QC plots (pre/post-filter, PCA, UMAP) inside QC_plots."""
     import os
     figdir_qc = cfg.figdir / "QC_plots"
     os.makedirs(figdir_qc, exist_ok=True)
 
-    # Set Scanpy’s figure directory temporarily to QC_plots
     from scanpy import settings as sc_settings
     old_figdir = sc_settings.figdir
     sc_settings.figdir = figdir_qc
 
     try:
-        # Post-filter QC
         sc.pl.violin(
             adata,
             ["n_genes_by_counts", "total_counts", "pct_counts_mt"],
             jitter=0.4,
             groupby=cfg.batch_key,
-            save="_QC_violin_mt_counts_postfilter.png",
             show=False
         )
-        sc.pl.violin(
-            adata,
-            ["n_genes_by_counts", "total_counts", "pct_counts_mt"],
-            jitter=0.4,
-            groupby=cfg.batch_key,
-            save="_QC_violin_mt_counts_postfilter.pdf",
-            show=False
-        )
+        save_multi("QC_violin_mt_counts_postfilter", figdir_qc)
+
         plot_mt_histogram(adata, cfg, "postfilter")
+
         sc.pl.scatter(
             adata,
             x="total_counts",
             y="n_genes_by_counts",
             color="pct_counts_mt",
-            save="_QC_complexity_prefilter.png",
             show=False
         )
+        save_multi("QC_complexity_prefilter", figdir_qc)
+
+        sc.pl.pca_variance_ratio(
+            adata,
+            log=True,
+            n_pcs=cfg.max_pcs_plot,
+            show=False
+        )
+        save_multi("QC_pca_variance_ratio", figdir_qc)
+
+        sc.pl.umap(adata, color=[cfg.batch_key], show=False)
+        save_multi("QC_umap_sample", figdir_qc)
+
+        sc.pl.umap(adata, color=["leiden"], show=False)
+        save_multi("QC_umap_leiden", figdir_qc)
+
+        sc.pl.umap(
+            adata,
+            color=[cfg.batch_key, "leiden"],
+            legend_loc="on data",
+            show=False
+        )
+        save_multi("QC_umap_per_sample_and_leiden", figdir_qc)
+
         sc.pl.scatter(
             adata,
             x="total_counts",
-            y="n_genes_by_counts",
-            color="pct_counts_mt",
-            save="_QC_complexity_prefilter.pdf",
+            y="pct_counts_mt",
             show=False
         )
+        save_multi("QC_scatter_mt", figdir_qc)
 
-        # PCA, variance, and UMAP
-        sc.pl.pca_variance_ratio(
-            adata,
-            log=True,
-            n_pcs=cfg.max_pcs_plot,
-            save="_QC_pca_variance_ratio.png",
-            show=False
-        )
-        sc.pl.pca_variance_ratio(
-            adata,
-            log=True,
-            n_pcs=cfg.max_pcs_plot,
-            save="_QC_pca_variance_ratio.pdf",
-            show=False
-        )
-
-        sc.pl.umap(adata, color=[cfg.batch_key], save="_QC_umap_sample.png", show=False)
-        sc.pl.umap(adata, color=["leiden"], save="_QC_umap_leiden.png", show=False)
-        sc.pl.umap(adata, color=[cfg.batch_key, "leiden"], save="_QC_umap_per_sample_and_leiden.png", legend_loc="on data", show=False)
-        sc.pl.scatter(adata, x="total_counts", y="pct_counts_mt", save="_QC_scatter_mt.png", show=False)
-
-        sc.pl.umap(adata, color=[cfg.batch_key], save="_QC_umap_sample.pdf", show=False)
-        sc.pl.umap(adata, color=["leiden"], save="_QC_umap_leiden.pdf", show=False)
-        sc.pl.umap(adata, color=[cfg.batch_key, "leiden"], save="_QC_umap_per_sample_and_leiden.pdf",
-                   legend_loc="on data", show=False)
-        sc.pl.scatter(adata, x="total_counts", y="pct_counts_mt", save="_QC_scatter_mt.pdf", show=False)
     finally:
         sc_settings.figdir = old_figdir
 
