@@ -28,32 +28,27 @@ def run_cell_qc(cfg: CellQCConfig) -> None:
     figdir.mkdir(parents=True, exist_ok=True)
 
     # Containers
-    raw_filtered_reads = None       # after knee+GMM
-    raw_unfiltered_reads = None     # before any filtering (true raw)
-    cr_filtered_reads = None
-    cb_reads = None
-    cell_counts_per_dataset = {}
+    raw_map = cr_map = cb_map = None
+    raw_unfiltered_reads = raw_filtered_reads = None
+    cr_filtered_reads = cb_reads = None
 
-    # RAW
+    # RAW (raw-unfiltered + raw-filtered reads)
     if cfg.raw_sample_dir is not None:
-        LOGGER.info("Loading RAW dataset...")
+        LOGGER.info("Loading RAW matrices (raw + knee+GMM filtered)...")
         raw_map, raw_filtered_reads, raw_unfiltered_reads = io_utils.load_raw_data(
             cfg,
-            record_pre_filter_counts=True,
+            record_pre_filter_counts=True,  # ensures raw_unfiltered_reads is populated
         )
-        cell_counts_per_dataset["raw-filtered"] = _compute_cell_counts(raw_map)
 
-    # CellRanger-filtered
+    # CellRanger filtered
     if cfg.filtered_sample_dir is not None:
-        LOGGER.info("Loading CellRanger-filtered dataset...")
+        LOGGER.info("Loading CellRanger filtered matrices...")
         cr_map, cr_filtered_reads = io_utils.load_filtered_data(cfg)
-        cell_counts_per_dataset["cellranger-filtered"] = _compute_cell_counts(cr_map)
 
     # CellBender
     if cfg.cellbender_dir is not None:
-        LOGGER.info("Loading CellBender dataset...")
+        LOGGER.info("Loading CellBender matrices...")
         cb_map, cb_reads = io_utils.load_cellbender_data(cfg)
-        cell_counts_per_dataset["cellbender"] = _compute_cell_counts(cb_map)
 
     # READ-COUNT COMPARISONS
     if raw_unfiltered_reads is not None:
@@ -98,45 +93,5 @@ def run_cell_qc(cfg: CellQCConfig) -> None:
                 figdir=figdir,
                 stem="reads_cellranger_filtered_vs_cellbender",
             )
-
-    # CELL-COUNT PLOTS
-    if cell_counts_per_dataset:
-        plot_utils.plot_cell_counts_multi(
-            cell_counts_per_dataset=cell_counts_per_dataset,
-            figdir=figdir,
-            stem="cell_counts_per_sample",
-        )
-
-    # MEDIAN + PERCENTILE (90th) READ COMPARISONS
-    datasets_for_stats = {}
-
-    # Build dict of sample → reads for each dataset
-    if raw_filtered_reads is not None and raw_unfiltered_reads is not None:
-        datasets_for_stats["raw-filtered"] = raw_filtered_reads
-
-    if cr_filtered_reads is not None:
-        datasets_for_stats["cellranger-filtered"] = cr_filtered_reads
-
-    if cb_reads is not None:
-        datasets_for_stats["cellbender"] = cb_reads
-
-    # Need at least 2 datasets + raw-unfiltered as reference
-    if raw_unfiltered_reads is not None and len(datasets_for_stats) >= 1:
-        # Median read comparison
-        plot_utils.plot_read_medians(
-            ref_counts=raw_unfiltered_reads,
-            datasets=datasets_for_stats,
-            figdir=figdir,
-            stem="reads_median_comparison",
-        )
-
-        # 90th percentile comparison
-        plot_utils.plot_read_percentiles(
-            ref_counts=raw_unfiltered_reads,
-            datasets=datasets_for_stats,
-            figdir=figdir,
-            stem="reads_p90_comparison",
-            pct=90.0,
-        )
 
     LOGGER.info("Finished cell_qc")

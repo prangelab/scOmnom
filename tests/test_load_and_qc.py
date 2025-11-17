@@ -2,7 +2,7 @@ import pytest
 import anndata as ad
 import numpy as np
 import pandas as pd
-from scomnom.load_and_qc import run_load_and_qc
+from scomnom.load_and_filter import run_load_and_filter
 from scomnom.config import LoadAndQCConfig
 
 def make_fake_anndata(n_cells=50, n_genes=100):

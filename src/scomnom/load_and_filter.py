@@ -124,9 +124,9 @@ def cluster_and_cleanup_qc(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnDat
 
 
 # ---- orchestrator ----
-def run_load_and_qc(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) -> ad.AnnData:
+def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) -> ad.AnnData:
     setup_logging(logfile)
-    LOGGER.info("Starting load_and_qc")
+    LOGGER.info("Starting load_and_filter")
     plot_utils.setup_scanpy_figs(cfg.figdir, cfg.figure_formats)
 
     # infer batch key
@@ -181,6 +181,6 @@ def run_load_and_qc(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) -> ad.
     plot_utils.plot_elbow_knee(adata, cfg, suffix="postfilter")
 
     io_utils.save_adata(adata, cfg.output_dir / cfg.output_name)
-    LOGGER.info("Finished load_and_qc")
+    LOGGER.info("Finished load_and_filter")
     return adata
 

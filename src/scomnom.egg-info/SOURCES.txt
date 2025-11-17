@@ -6,7 +6,7 @@ src/scomnom/cluster_and_annotate.py
 src/scomnom/config.py
 src/scomnom/integrate.py
 src/scomnom/io_utils.py
-src/scomnom/load_and_qc.py
+src/scomnom/load_and_filter.py
 src/scomnom/plot_utils.py
 src/scomnom.egg-info/PKG-INFO
 src/scomnom.egg-info/SOURCES.txt

@@ -81,7 +81,7 @@ class LoadAndQCConfig(BaseModel):
 
 class IntegrationConfig(BaseModel):
     # I/O
-    input_path: Path = Field(..., description="Preprocessed h5ad from load_and_qc")
+    input_path: Path = Field(..., description="Preprocessed h5ad from load_and_filter")
     output_path: Optional[Path] = Field(
         None,
         description="Output integrated h5ad. Defaults to <input_stem>.integrated.h5ad",

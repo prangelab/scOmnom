@@ -8,7 +8,7 @@ import numpy as np
 import scanpy as sc
 
 from .config import IntegrationConfig
-from .load_and_qc import setup_logging
+from .load_and_filter import setup_logging
 from . import io_utils
 
 LOGGER = logging.getLogger(__name__)
