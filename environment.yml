@@ -38,7 +38,6 @@ dependencies:
   - pip:
       - umap-learn
       - scanorama
-      - pyliger
       - harmonypy
       - scvi-tools
       - scib-metrics

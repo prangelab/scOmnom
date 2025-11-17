@@ -1,22 +1,124 @@
 from __future__ import annotations
+from typing import Optional, List
 import typer
 from pathlib import Path
 from .load_and_qc import run_load_and_qc
 from .integrate import run_integration
 from .cluster_and_annotate import run_clustering
 from .config import LoadAndQCConfig
+from .cell_qc import run_cell_qc
+
 
 app = typer.Typer(help="scOmnom CLI")
 
-@app.command()
+# Globally supress some warnings
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    message="Variable names are not unique",
+    category=UserWarning,
+    module="anndata"
+)
+warnings.filterwarnings(
+    "ignore",
+    message=".*not compatible with tight_layout.*",
+    category=UserWarning
+)
+warnings.filterwarnings(
+    "ignore",
+    message="pkg_resources is deprecated as an API",
+    category=UserWarning
+)
+
+# ----------------------------------------------------------
+# Standalone: scomnom cell-qc
+# ----------------------------------------------------------
+@app.command("cell-qc")
+def cell_qc(
+    # Input directories (0–3 provided)
+    raw: Optional[Path] = typer.Option(
+        None, "--raw", "-r",
+        help="Directory containing raw 10x matrices (*.raw_feature_bc_matrix)"
+    ),
+    filtered: Optional[Path] = typer.Option(
+        None, "--filtered", "-f",
+        help="Directory containing filtered 10x matrices (*.filtered_feature_bc_matrix)"
+    ),
+    cellbender: Optional[Path] = typer.Option(
+        None, "--cellbender", "-c",
+        help="Directory containing CellBender outputs (*.cellbender_filtered.output)"
+    ),
+
+    # Output
+    output_dir: Path = typer.Option(
+        ..., "--out", "-o",
+        help="Output directory containing figures/"
+    ),
+
+    # optional: control figure formats
+    figure_formats: List[str] = typer.Option(
+        ["png", "pdf"],
+        "--format",
+        help="Figure formats to export (png, pdf, svg)"
+    ),
+
+    # metadata (optional)
+    metadata_tsv: Optional[Path] = typer.Option(
+        None,
+        "--metadata",
+        help="Optional metadata TSV (not required for cell-qc)"
+    ),
+):
+    """
+    Standalone QC module that compares multiple inputs:
+    raw / filtered / cellbender (1–3 directories allowed).
+
+    All pairwise comparisons are generated.
+    """
+
+    from .config import CellQCConfig
+    from .cell_qc import run_cell_qc
+
+    # --- sanity checks ---
+    if (raw is None) and (filtered is None) and (cellbender is None):
+        raise typer.BadParameter(
+            "Provide at least one input: --raw, --filtered, or --cellbender"
+        )
+
+    # create output dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- build config ---
+    cfg = CellQCConfig(
+        output_dir=output_dir,
+        figdir_name="figures",
+        figure_formats=figure_formats,
+        raw_sample_dir=raw,
+        filtered_sample_dir=filtered,
+        cellbender_dir=cellbender,
+        metadata_tsv=metadata_tsv,
+        batch_key=None,   # will be inferred later (or unused)
+        make_figures=True,
+    )
+
+    # --- run the module ---
+    run_cell_qc(cfg)
+
 @app.command()
 def load_and_qc(
     raw_sample_dir: Path = typer.Option(None, help="Path with <sample>.raw_feature_bc_matrix folders"),
     filtered_sample_dir: Path = typer.Option(None, help="Path with <sample>.filtered_feature_bc_matrix folders (Cell Ranger output)"),
     cellbender_dir: Path = typer.Option(None, help="Path with <sample>.cellbender_filtered.output folders"),
     output_dir: Path = typer.Option(None, help="Output directory"),
-    metadata_tsv: Path = typer.Option(None, help="Sample-level metadata TSV"),
-    n_jobs: int = typer.Option(4),
+        metadata_tsv: Path = typer.Option(
+            ...,
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            help="Sample-level metadata TSV (required)",
+        ),
+        n_jobs: int = typer.Option(4),
     min_cells: int = typer.Option(3),
     min_genes: int = typer.Option(200),
     min_cells_per_sample: int = typer.Option(20),
@@ -26,7 +128,7 @@ def load_and_qc(
         ["png", "pdf"],
         help="Figure formats to save. Repeat option for multiple formats, e.g. --figure-format png --figure-format pdf",
     ),
-    batch_key: str = typer.Option("sample"),
+    batch_key: str = typer.Option(None),
     raw_pattern: str = typer.Option("*.raw_feature_bc_matrix"),
     filtered_pattern: str = typer.Option("*.filtered_feature_bc_matrix"),
     cellbender_pattern: str = typer.Option("*.cellbender_filtered.output"),
@@ -82,7 +184,7 @@ def integrate(
         None,
         help=(
             "Integration methods to run. Repeat option for multiple.\n"
-            "Supported: Scanorama, LIGER, Harmony, scVI, scANVI.\n"
+            "Supported: Scanorama, Harmony, scVI, scANVI.\n"
             "Default: all except scANVI."
         ),
     ),
@@ -94,16 +196,8 @@ def integrate(
         "leiden",
         help="Label/cluster column for scib-metrics (default: leiden)"
     ),
-    use_gpu: bool = typer.Option(
-        False,
-        help="Run scVI/scANVI on GPU"
-    ),
-    include_scanvi: bool = typer.Option(
-        False,
-        help="Include scANVI in benchmarking (slow without GPU)"
-    ),
     benchmark_n_jobs: int = typer.Option(
-        1,
+        4,
         help="Parallel workers for scib-metrics"
     ),
 ):
@@ -119,8 +213,6 @@ def integrate(
         methods=methods,
         batch_key=batch_key,
         label_key=label_key,
-        use_gpu=use_gpu,
-        include_scanvi=include_scanvi,
         benchmark_n_jobs=benchmark_n_jobs,
         logfile=logfile,
     )

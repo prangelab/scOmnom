@@ -35,7 +35,7 @@ class LoadAndQCConfig(BaseModel):
     n_top_genes: int = 2000
     max_pcs_plot: int = 50
     # Batch key
-    batch_key: str = "sample_id"
+    batch_key: Optional[str] = None
 
     # Plots
     make_figures: bool = True
@@ -69,6 +69,16 @@ class LoadAndQCConfig(BaseModel):
             )
         return fmt.lower()
 
+    @validator("*", pre=True)
+    def check_exactly_one_source(cls, v, values):
+        raw = values.get("raw_sample_dir")
+        filt = values.get("filtered_sample_dir")
+        cb = values.get("cellbender_dir")
+        if sum(x is not None for x in [raw, filt, cb]) != 1:
+            raise ValueError("Exactly one of raw_sample_dir, filtered_sample_dir, cellbender_dir must be set.")
+        return v
+
+
 class IntegrationConfig(BaseModel):
     # I/O
     input_path: Path = Field(..., description="Preprocessed h5ad from load_and_qc")
@@ -82,13 +92,9 @@ class IntegrationConfig(BaseModel):
         None,
         description=(
             "Integration methods to run. "
-            "Supported: Scanorama, LIGER, Harmony, scVI, scANVI. "
+            "Supported: Scanorama, Harmony, scVI, scANVI. "
             "Default: all except scANVI."
         ),
-    )
-    include_scanvi: bool = Field(
-        False,
-        description="Include scANVI in benchmarking (off by default; slow on CPU)",
     )
 
     # Keys
@@ -101,7 +107,6 @@ class IntegrationConfig(BaseModel):
     )
 
     # Compute
-    use_gpu: bool = Field(False, description="Use GPU for scVI/scANVI")
     benchmark_n_jobs: int = Field(1, ge=1, description="Parallel workers for scib-metrics")
 
     # Logging
@@ -115,3 +120,38 @@ class IntegrationConfig(BaseModel):
         if v is None:
             return None
         return [m.strip() for m in v]
+
+
+class CellQCConfig(BaseModel):
+    # Paths
+    output_dir: Path
+
+    # Figure handling
+    figdir_name: str = "figures"
+    figure_formats: List[str] = ["png", "pdf"]
+
+    # 10x directory patterns (same defaults as LoadAndQCConfig for compatibility)
+    raw_pattern: str = "*.raw_feature_bc_matrix"
+    filtered_pattern: str = "*.filtered_feature_bc_matrix"
+    cellbender_pattern: str = "*.cellbender_filtered.output"
+    cellbender_h5_suffix: str = ".cellbender_out.h5"
+
+    # These are assigned dynamically by cell-qc
+    raw_sample_dir: Optional[Path] = None
+    filtered_sample_dir: Optional[Path] = None
+    cellbender_dir: Optional[Path] = None
+
+    # Metadata not used in cell-qc, but included for compatibility with io_utils
+    metadata_tsv: Optional[Path] = None
+    batch_key: Optional[str] = None
+
+    make_figures: bool = True
+
+    @validator("figure_formats", each_item=True)
+    def validate_formats(cls, fmt):
+        supported = Figure().canvas.get_supported_filetypes()
+        fmt = fmt.lower()
+        if fmt not in supported:
+            raise ValueError(f"Unsupported figure format '{fmt}'. Supported: {', '.join(sorted(supported))}")
+        return fmt
+

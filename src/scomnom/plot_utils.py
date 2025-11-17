@@ -125,65 +125,254 @@ def barplot_before_after(df_counts: pd.DataFrame, figpath: Path, min_cells_per_s
     save_multi(figpath.stem, figpath.parent)
 
 
-def plot_cellbender_comparison(raw_counts: dict, cb_counts: dict, figdir: Path) -> None:
-    import pandas as pd
+def plot_percent_retention(
+    baseline_reads: dict,
+    method_reads: dict,
+    method_label: str,
+    figdir: Path,
+    stem: Optional[str] = None,
+):
+    """
+    baseline_reads: dict sample -> reads (raw-unfiltered)
+    method_reads:   dict sample -> reads (filtered, CB, etc.)
+    method_label:   e.g. "cellranger_filtered", "cellbender"
+    figdir:         Path to .../cell_qc
+    """
     import numpy as np
+    import pandas as pd
     import matplotlib.pyplot as plt
 
-    figdir_cb = (figdir / "QC_plots" / "cellbender").resolve()
+    samples = sorted(set(baseline_reads) | set(method_reads))
 
-    samples = sorted(set(raw_counts) | set(cb_counts))
     df = pd.DataFrame({
         "sample": samples,
-        "raw_reads": [raw_counts.get(s, 0) for s in samples],
-        "cb_reads": [cb_counts.get(s, 0) for s in samples],
+        "baseline": [baseline_reads.get(s, 0) for s in samples],
+        "method":   [method_reads.get(s, 0) for s in samples],
     })
+
     df["pct_retained"] = np.where(
-        df["raw_reads"] > 0,
-        100 * df["cb_reads"] / df["raw_reads"],
+        df["baseline"] > 0,
+        100 * df["method"] / df["baseline"],
         0,
     )
 
-    def _plot_single(row, outpath_stem):
-        fig, ax = plt.subplots(figsize=(8, 6))
-        x = np.arange(1)
-        width = 0.35
-        ax.bar(x - width / 2, [row["raw_reads"]], width, color="lightgray", label="raw")
-        ax.bar(x + width / 2, [row["cb_reads"]], width, color="steelblue", label="cellbender")
-        pct = row["pct_retained"]
-        if row["cb_reads"] > 0:
-            ax.text(x + width / 2, row["cb_reads"], f"{pct:.1f}%", ha="center", va="bottom", rotation=60)
-        ax.set_title(row["sample"])
-        ax.set_ylabel("Total reads")
-        ax.set_xticks([])
-        ax.legend()
-        plt.tight_layout()
-        save_multi(outpath_stem, figdir_cb)
+    if stem is None:
+        stem = f"pct_reads_retained_{method_label}"
 
-    for _, row in df.iterrows():
-        stem = f"{row['sample']}_QC_reads_before_after_cellbender"
-        _plot_single(row, stem)
-
-     # Store per-format, same placement as figures:
-    for ext in FIGURE_FORMATS:
-        outdir = ROOT_FIGDIR / ext / figdir_cb.relative_to(ROOT_FIGDIR)
-        df.to_csv(outdir / "QC_reads_per_sample_cellbender.tsv", sep="\t", index=False)
-
-    fig, ax = plt.subplots(figsize=(max(6, len(df) * 0.8), 6))
+    # ---- plot ----
     x = np.arange(len(df))
-    width = 0.35
-    ax.bar(x - width / 2, df["raw_reads"], width, color="lightgray", label="raw")
-    ax.bar(x + width / 2, df["cb_reads"], width, color="steelblue", label="cellbender")
-    for i, pct in enumerate(df["pct_retained"]):
-        if df.loc[i, "cb_reads"] > 0:
-            ax.text(i + width / 2, df.loc[i, "cb_reads"], f"{pct:.1f}%", ha="center", va="bottom", rotation=60)
+    fig, ax = plt.subplots(figsize=(max(6, len(df) * 0.7), 5))
+
+    bars = ax.bar(x, df["pct_retained"], color="steelblue", alpha=0.8)
     ax.set_xticks(x)
     ax.set_xticklabels(df["sample"], rotation=45, ha="right")
-    ax.set_ylabel("Total reads")
-    ax.legend()
-    ax.set_title("CellBender: total reads per sample")
+    ax.set_ylabel("% reads retained vs raw")
+    ax.set_title(f"{method_label}: % reads retained")
+
+    for i, bar in enumerate(bars):
+        h = bar.get_height()
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            h,
+            f"{h:.1f}%",
+            ha="center", va="bottom", fontsize=8, rotation=60
+        )
+
     plt.tight_layout()
-    save_multi("QC_reads_before_after_cellbender_AGGREGATE", figdir_cb)
+    save_multi(stem, figdir)
+
+    # Save table
+    df.to_csv(figdir / f"{stem}.tsv", sep="\t", index=False)
+
+
+def plot_median_complexity(
+    method_map: dict,
+    method_label: str,
+    figdir: Path,
+    stem_prefix: Optional[str] = None,
+):
+    """
+    method_map:   dict sample -> AnnData
+    method_label: e.g. "raw_filtered", "cellranger_filtered", "cellbender"
+    figdir:       Path to .../cell_qc
+    """
+
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+
+    samples = sorted(method_map.keys())
+
+    med_genes = []
+    med_umis = []
+
+    for s in samples:
+        adata = method_map[s]
+        med_genes.append(float(np.median(adata.obs["n_genes_by_counts"])))
+        med_umis.append(float(np.median(adata.obs["total_counts"])))
+
+    df = pd.DataFrame({
+        "sample": samples,
+        "median_genes": med_genes,
+        "median_umis": med_umis,
+    })
+
+    if stem_prefix is None:
+        stem_prefix = f"complexity_{method_label}"
+
+    # ---- genes plot ----
+    fig, ax = plt.subplots(figsize=(max(6, len(df) * 0.7), 5))
+    x = np.arange(len(df))
+
+    ax.bar(x, df["median_genes"], color="darkgreen", alpha=0.8)
+    ax.set_xticks(x)
+    ax.set_xticklabels(df["sample"], rotation=45, ha="right")
+    ax.set_ylabel("Median genes per cell")
+    ax.set_title(f"{method_label}: median genes per cell")
+    plt.tight_layout()
+    save_multi(f"{stem_prefix}_median_genes", figdir)
+
+    # ---- UMIs plot ----
+    fig, ax = plt.subplots(figsize=(max(6, len(df) * 0.7), 5))
+    ax.bar(x, df["median_umis"], color="darkorange", alpha=0.8)
+    ax.set_xticks(x)
+    ax.set_xticklabels(df["sample"], rotation=45, ha="right")
+    ax.set_ylabel("Median UMIs per cell")
+    ax.set_title(f"{method_label}: median UMIs per cell")
+    plt.tight_layout()
+    save_multi(f"{stem_prefix}_median_umis", figdir)
+
+    # table
+    df.to_csv(figdir / f"{stem_prefix}_summary.tsv", sep="\t", index=False)
+
+
+def plot_elbow_knee(
+    adata: ad.AnnData,
+    figpath_stem: str,
+    figdir: Path,
+    title: str = "Barcode Rank UMI Knee Plot"
+):
+    """
+    Generate a Cell Ranger–style elbow/knee plot.
+
+    - Sort barcodes by total UMIs (descending)
+    - Plot rank vs UMIs
+    - Compute and annotate knee point
+    - log–log axes (matches Cell Ranger)
+    """
+
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from kneed import KneeLocator
+
+    # Compute raw counts from X or counts_raw
+    if "counts_raw" in adata.layers:
+        total = np.asarray(adata.layers["counts_raw"].sum(axis=1)).ravel()
+    else:
+        total = np.asarray(adata.X.sum(axis=1)).ravel()
+
+    # Sort
+    sorted_idx = np.argsort(total)[::-1]
+    sorted_counts = total[sorted_idx]
+    ranks = np.arange(1, len(sorted_counts) + 1)
+
+    # Knee detection
+    kl = KneeLocator(
+        ranks,
+        sorted_counts,
+        curve="convex",
+        direction="decreasing"
+    )
+    knee_rank = kl.elbow if kl.elbow is not None else None
+
+    plt.figure(figsize=(6, 5))
+    plt.plot(ranks, sorted_counts, lw=1)
+
+    if knee_rank is not None:
+        knee_value = sorted_counts[knee_rank - 1]
+        plt.axvline(knee_rank, color="red", linestyle="--", label=f"Knee ~{knee_rank}")
+        plt.axhline(knee_value, color="red", linestyle="--")
+
+    plt.xscale("log")
+    plt.yscale("log")
+    plt.xlabel("Barcode rank")
+    plt.ylabel("Total UMI counts")
+    plt.title(title)
+    plt.tight_layout()
+
+    save_multi(figpath_stem, figdir)
+
+
+def plot_read_comparison(
+    ref_counts: dict,
+    other_counts: dict,
+    ref_label: str,
+    other_label: str,
+    figdir: Path,
+    stem: str,
+):
+    """
+    Plot read counts per sample between two datasets.
+    Samples are matched by name; missing samples are shown as zero.
+
+    ref_counts: dict[sample -> reads]
+    other_counts: dict[sample -> reads]
+    figdir: directory where figures are stored
+    stem: file stem for exporting
+    """
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    # Align sample names
+    samples = sorted(set(ref_counts) | set(other_counts))
+    df = pd.DataFrame({
+        "sample": samples,
+        ref_label: [ref_counts.get(s, 0) for s in samples],
+        other_label: [other_counts.get(s, 0) for s in samples],
+    })
+    df["pct_retained"] = np.where(
+        df[ref_label] > 0,
+        100 * df[other_label] / df[ref_label],
+        0
+    )
+
+    # ---- Plot ----
+    plt.figure(figsize=(max(6, len(samples) * 0.8), 6))
+    x = np.arange(len(samples))
+    width = 0.35
+
+    plt.bar(x - width / 2, df[ref_label], width,
+            color="lightgray", label=ref_label)
+    plt.bar(x + width / 2, df[other_label], width,
+            color="steelblue", label=other_label)
+
+    for i, pct in enumerate(df["pct_retained"]):
+        if df.loc[i, other_label] > 0:
+            plt.text(
+                i + width / 2,
+                df.loc[i, other_label],
+                f"{pct:.1f}%",
+                ha="center",
+                va="bottom",
+                rotation=60,
+                fontsize=8,
+            )
+
+    plt.xticks(x, df["sample"], rotation=45, ha="right")
+    plt.ylabel("Total reads")
+    plt.title(f"Total reads per sample: {ref_label} vs {other_label}")
+    plt.legend()
+    plt.tight_layout()
+
+    # Save using your multi-format saver
+    save_multi(stem, figdir)
+
+    # Also save the underlying table
+    for ext in FIGURE_FORMATS:
+        outdir = ROOT_FIGDIR / ext / figdir.relative_to(ROOT_FIGDIR)
+        outdir.mkdir(parents=True, exist_ok=True)
+        df.to_csv(outdir / f"{stem}.tsv", sep="\t", index=False)
 
 
 def plot_final_cell_counts(adata, cfg) -> None:

@@ -3,15 +3,25 @@ import scipy.sparse
 import glob
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 import anndata as ad
 import scanpy as sc
-from kneed import KneeLocator
-import numpy as np
-import matplotlib.pyplot as plt
 from .config import LoadAndQCConfig
 
 LOGGER = logging.getLogger(__name__)
+
+
+def detect_sample_dirs(base: Path, patterns: list[str]) -> List[Path]:
+    """
+    Detect sample folders based on user-specified patterns in config.
+    patterns is a list of glob patterns: e.g.
+        ["*.raw_feature_bc_matrix", "*.filtered_feature_bc_matrix", "*.cellbender_filtered.output"]
+    """
+    out = []
+    for pat in patterns:
+        out.extend(Path(p) for p in glob.glob(str(base / pat)))
+    return sorted(out)
+
 
 def filter_raw_barcodes(adata: ad.AnnData, plot: bool = False, plot_path: Optional[Path] = None) -> ad.AnnData:
     """
@@ -87,6 +97,65 @@ def filter_raw_barcodes(adata: ad.AnnData, plot: bool = False, plot_path: Option
     )
     return adata_filtered
 
+import logging
+LOGGER = logging.getLogger(__name__)
+
+def infer_batch_key_from_metadata_tsv(metadata_tsv: Path, user_batch_key: Optional[str]) -> str:
+    """Infer or validate batch_key using only the metadata TSV header."""
+    import pandas as pd
+    import logging
+
+    LOGGER = logging.getLogger(__name__)
+
+    meta = pd.read_csv(metadata_tsv, sep="\t")
+    cols = set(meta.columns)
+
+    # User provided a batch key → validate
+    if user_batch_key is not None:
+        if user_batch_key not in cols:
+            raise KeyError(
+                f"batch_key '{user_batch_key}' not found in metadata columns: {sorted(cols)}"
+            )
+        return user_batch_key
+
+    # Try standard candidates
+    for cand in ("sample", "sample_id", "batch"):
+        if cand in cols:
+            LOGGER.warning(
+                "No batch_key provided. Inferred batch_key='%s' from metadata.tsv. "
+                "Please verify this is correct.", cand
+            )
+            return cand
+
+    raise KeyError(
+        f"Could not infer batch_key. metadata.tsv does not contain any of: "
+        f"'sample', 'sample_id', 'batch'. Metadata columns: {sorted(cols)}"
+    )
+
+def infer_batch_key(adata, explicit_batch_key=None):
+    # User explicitly provided key
+    if explicit_batch_key is not None:
+        if explicit_batch_key not in adata.obs:
+            raise KeyError(
+                f"batch_key '{explicit_batch_key}' not found in adata.obs. "
+                f"Available columns: {list(adata.obs.columns)}"
+            )
+        return explicit_batch_key
+
+    # Automatic inference
+    for cand in ("sample_id", "sample", "batch"):
+        if cand in adata.obs:
+            LOGGER.warning(
+                "Inferring batch_key='%s'. If this is incorrect, specify --batch-key explicitly.",
+                cand,
+            )
+            return cand
+
+    raise KeyError(
+        "Could not infer batch_key automatically. None of ['sample_id', 'sample', 'batch'] "
+        "found in adata.obs. Specify --batch-key explicitly."
+    )
+
 
 def find_raw_dirs(sample_dir: Path, pattern: str) -> List[Path]:
     return [Path(p) for p in glob.glob(str(sample_dir / pattern))]
@@ -112,15 +181,31 @@ def read_cellbender_h5(cb_folder: Path, sample: str, h5_suffix: str) -> Optional
     return adata
 
 
-def load_raw_data(cfg: LoadAndQCConfig) -> tuple[Dict[str, ad.AnnData], Dict[str, float]]:
+def load_raw_data(
+    cfg: LoadAndQCConfig | CellQCConfig,
+    record_pre_filter_counts: bool = False,
+) -> tuple[
+    Dict[str, ad.AnnData],
+    Dict[str, float],   # filtered reads
+    Optional[Dict[str, float]]  # unfiltered reads before knee+GMM
+]:
     raw_dirs = find_raw_dirs(cfg.raw_sample_dir, cfg.raw_pattern)
     out: Dict[str, ad.AnnData] = {}
-    read_counts: Dict[str, float] = {}
+    read_counts_filtered: Dict[str, float] = {}
+    read_counts_unfiltered: Dict[str, float] = {} if record_pre_filter_counts else None
 
     for raw in raw_dirs:
         sample = raw.name.split(".raw_feature_bc_matrix")[0]
+
+        # Read matrix first
         adata = read_raw_10x(raw)
-        if cfg.cellbender_dir is None:
+        total_reads_unfiltered = float(adata.X.sum())
+
+        if record_pre_filter_counts:
+            read_counts_unfiltered[sample] = total_reads_unfiltered
+
+        # Now apply the knee+GMM filter
+        if cfg.cellbender_dir is None:  # same condition as before
             qc_plot_dir = Path(cfg.output_dir) / "figures" / "QC_plots"
             plot_path = qc_plot_dir / f"{sample}_barcode_knee"
             adata = filter_raw_barcodes(
@@ -129,14 +214,19 @@ def load_raw_data(cfg: LoadAndQCConfig) -> tuple[Dict[str, ad.AnnData], Dict[str
                 plot_path=plot_path,
             )
 
+        # Final filtered reads
+        total_reads_filtered = float(adata.X.sum())
+        read_counts_filtered[sample] = total_reads_filtered
+
         out[sample] = adata
-        total_reads = float(adata.X.sum())
-        read_counts[sample] = total_reads
         LOGGER.info(
-            "Loaded raw %s: %d cells, %d genes, %.2e total reads",
-            sample, adata.n_obs, adata.n_vars, total_reads,
+            "Loaded raw %s: %d cells, %d genes, %.2e → %.2e reads "
+            "(before → after filtering)",
+            sample, adata.n_obs, adata.n_vars,
+            total_reads_unfiltered, total_reads_filtered
         )
-    return out, read_counts
+
+    return out, read_counts_filtered, read_counts_unfiltered
 
 
 def load_filtered_data(cfg: LoadAndQCConfig) -> tuple[Dict[str, ad.AnnData], Dict[str, float]]:
@@ -183,75 +273,31 @@ def load_cellbender_data(cfg: LoadAndQCConfig) -> tuple[Dict[str, ad.AnnData], D
     return out, read_counts
 
 
-def prefilter_low_content_cells(
-    adata: ad.AnnData,
-    min_genes: int,
-    min_umis: int,
-) -> ad.AnnData:
-    """Remove barcodes with extremely low total UMIs or detected genes."""
-    import scanpy as sc
-    LOGGER.info("Running light prefilter: min_genes=%d, min_umis=%d", min_genes, min_umis)
-    n0 = adata.n_obs
-    sc.pp.calculate_qc_metrics(adata, inplace=True, log1p=False)
-    mask = (adata.obs["n_genes_by_counts"] >= min_genes) & (
-        adata.obs["total_counts"] >= min_umis
-    )
-    adata = adata[mask].copy()
-    LOGGER.info("Prefiltered %d → %d cells (%.1f%% retained)", n0, adata.n_obs, 100 * adata.n_obs / n0)
-    return adata
+def merge_samples(sample_map: Dict[str, ad.AnnData], batch_key: str) -> ad.AnnData:
+    adatas = []
 
+    for sample, ad in sample_map.items():
+        ad = ad.copy()
 
-def merge_samples(raw_map: Dict[str, ad.AnnData], cb_map: Dict[str, ad.AnnData], batch_key: str) -> ad.AnnData:
-    adatas: list[ad.AnnData] = []
-
-    # When CellBender is used, restrict to intersection of sample sets
-    if cb_map:
-        shared_samples = sorted(set(raw_map) & set(cb_map))
-        raw_map = {k: raw_map[k] for k in shared_samples}
-    else:
-        shared_samples = list(raw_map)
-
-    for sample, raw in raw_map.items():
-        if sample in cb_map:
-            cb = cb_map[sample].copy()
-            common_obs = cb.obs_names.intersection(raw.obs_names)
-            common_var = cb.var_names.intersection(raw.var_names)
-            if len(common_obs) == 0 or len(common_var) == 0:
-                LOGGER.warning("No common cells or genes for %s. Skipping.", sample)
-                continue
-            cb = cb[common_obs, common_var].copy()
-            raw = raw[common_obs, common_var].copy()
-            cb.layers["counts_raw"] = raw.X.copy()
-            adata = cb
+        import scipy.sparse as sp
+        if not sp.issparse(ad.X):
+            ad.X = sp.csr_matrix(ad.X)
         else:
-            raw = raw.copy()
-            if not scipy.sparse.issparse(raw.X):
-                raw.X = scipy.sparse.csr_matrix(raw.X)
-            raw.layers["counts_raw"] = raw.X.copy()
-            adata = raw
+            ad.X = ad.X.tocsr()
 
-        adata.obs[batch_key] = sample
-        adata.obs_names = [f"{sample}_{bc}" for bc in adata.obs_names]
-        adatas.append(adata)
+        ad.layers["counts_raw"] = ad.X.copy()
+
+        ad.obs[batch_key] = sample
+        ad.obs_names = [f"{sample}_{bc}" for bc in ad.obs_names]
+
+        adatas.append(ad)
 
     if not adatas:
-        raise RuntimeError("No samples loaded after matching.")
+        raise RuntimeError("No samples loaded.")
 
-    LOGGER.info("Concatenating %d AnnData objects...", len(adatas))
     adata_all = sc.concat(adatas, axis=0, join="outer", merge="first")
     adata_all.obs_names_make_unique()
-
-    if "counts_raw" in adata_all.layers:
-        raw_counts = adata_all.layers["counts_raw"]
-        if not scipy.sparse.issparse(raw_counts):
-            raw_counts = scipy.sparse.csr_matrix(raw_counts)
-        adata_all.raw = ad.AnnData(X=raw_counts, var=adata_all.var.copy(), obs=adata_all.obs.copy())
-        LOGGER.info("adata.raw set with counts_raw layer.")
-    else:
-        LOGGER.warning("'counts_raw' layer not found; adata.raw not set.")
-
     return adata_all
-
 
 
 def save_adata(adata: ad.AnnData, out_path: Path) -> None:

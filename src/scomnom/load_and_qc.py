@@ -13,19 +13,6 @@ from . import plot_utils
 
 LOGGER = logging.getLogger(__name__)
 
-import warnings
-warnings.filterwarnings(
-    "ignore",
-    message="Variable names are not unique",
-    category=UserWarning,
-    module="anndata"
-)
-warnings.filterwarnings(
-    "ignore",
-    message=".*not compatible with tight_layout.*",
-    category=UserWarning
-)
-
 
 # ---- logging helper ----
 def setup_logging(logfile: Optional[Path]):
@@ -34,6 +21,7 @@ def setup_logging(logfile: Optional[Path]):
         logfile.parent.mkdir(parents=True, exist_ok=True)
         handlers.append(logging.FileHandler(str(logfile), mode="w"))
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", handlers=handlers)
+
 
 # ---- step functions ----
 def add_metadata(adata: ad.AnnData, metadata_tsv: Optional[Path], sample_id_col: str) -> ad.AnnData:
@@ -50,7 +38,7 @@ def add_metadata(adata: ad.AnnData, metadata_tsv: Optional[Path], sample_id_col:
         return adata
     obs_col = adata.obs[sample_id_col].astype(str)
     temp = pd.DataFrame({sample_id_col: obs_col}, index=adata.obs_names)
-    merged = temp.join(df, on=sample_id_col, how='left')
+    merged = temp.merge(df, on=sample_id_col, how="left")
     for col in df.columns:
         adata.obs[col] = merged[col]
         if (adata.obs[col].nunique() / max(1, len(adata.obs[col]))) < 0.1 and not pd.api.types.is_numeric_dtype(adata.obs[col]):
@@ -101,7 +89,6 @@ def filter_and_doublets(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
     return adata
 
 
-
 def normalize_and_hvg(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
     adata.layers['counts'] = adata.X.copy()
     sc.pp.normalize_total(adata)
@@ -142,45 +129,58 @@ def run_load_and_qc(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) -> ad.
     LOGGER.info("Starting load_and_qc")
     plot_utils.setup_scanpy_figs(cfg.figdir, cfg.figure_formats)
 
-    # Check input
-    if cfg.raw_sample_dir and cfg.filtered_sample_dir:
-        raise RuntimeError("Specify only one of raw_sample_dir or filtered_sample_dir")
-    # choose source
-    if cfg.filtered_sample_dir:
-        LOGGER.info("Loading Cell Ranger filtered matrices...")
-        raw_map, raw_read_counts = io_utils.load_filtered_data(cfg)
-    elif cfg.raw_sample_dir:
-        LOGGER.info("Loading raw matrices and applying cell-calling filter...")
-        raw_map, raw_read_counts = io_utils.load_raw_data(cfg)
-    else:
-        raise RuntimeError("Must provide at least one of raw_sample_dir or filtered_sample_dir")
+    # infer batch key
+    batch_key = io_utils.infer_batch_key_from_metadata_tsv(cfg.metadata_tsv, cfg.batch_key)
+    cfg.batch_key = batch_key
 
-    # load CellBender if available
-    cb_map, cb_read_counts = io_utils.load_cellbender_data(cfg) if cfg.cellbender_dir else ({}, {})
+    # get input
+    n_sources = sum([
+        cfg.raw_sample_dir is not None,
+        cfg.filtered_sample_dir is not None,
+        cfg.cellbender_dir is not None,
+    ])
+    if n_sources != 1:
+        raise RuntimeError(
+            "Exactly one input source must be provided: "
+            "--raw-sample-dir OR --filtered-sample-dir OR --cellbender-dir"
+        )
+
+    # Load depending on which is set
+    if cfg.raw_sample_dir:
+        LOGGER.info("Loading raw 10x matrices with CellRanger-like cell calling...")
+        sample_map, read_counts = io_utils.load_raw_data(cfg)
+
+    elif cfg.filtered_sample_dir:
+        LOGGER.info("Loading CellRanger filtered matrices...")
+        sample_map, read_counts = io_utils.load_filtered_data(cfg)
+
+    else:  # cfg.cellbender_dir
+        LOGGER.info("Loading CellBender matrices...")
+        sample_map, read_counts = io_utils.load_cellbender_data(cfg)
 
     # merge
-    adata = io_utils.merge_samples(raw_map, cb_map, batch_key=cfg.batch_key)
-    # early prefilter to reduce footprint
-    adata = io_utils.prefilter_low_content_cells(adata,min_genes=cfg.min_genes_prefilter,min_umis=cfg.min_umis_prefilter)
+    adata = io_utils.merge_samples(sample_map, batch_key=cfg.batch_key)
+
     # metadata
     adata = add_metadata(adata, cfg.metadata_tsv, sample_id_col=cfg.batch_key)
-    # qc metrics
+    adata.uns["batch_key"] = batch_key
+
+    # QC metrics + plots
     adata = compute_qc_metrics(adata, cfg)
-    # Show stats before filtering
     plot_utils.run_qc_plots_pre_filter(adata, cfg)
-    # filtering + doublets tagging
+    plot_utils.plot_elbow_knee(adata, cfg, suffix="prefilter")
+
+    # filtering + normalization + reduction + clustering
     adata = filter_and_doublets(adata, cfg)
-    # normalize + HVG
     adata = normalize_and_hvg(adata, cfg)
-    # PCA/UMAP # cluster + cleanup
     adata = pca_neighbors_umap(adata, cfg)
-    # Cluster + cleanup
     adata = cluster_and_cleanup_qc(adata, cfg)
-    # Make qc plots
-    plot_utils.plot_cellbender_comparison(raw_read_counts, cb_read_counts, cfg.figdir)
+
     plot_utils.run_qc_plots_postfilter(adata, cfg)
     plot_utils.plot_final_cell_counts(adata, cfg)
-    # write
+    plot_utils.plot_elbow_knee(adata, cfg, suffix="postfilter")
+
     io_utils.save_adata(adata, cfg.output_dir / cfg.output_name)
     LOGGER.info("Finished load_and_qc")
     return adata
+
