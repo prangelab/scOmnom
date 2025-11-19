@@ -25,7 +25,6 @@ def run_cell_qc(cfg: CellQCConfig) -> None:
         cfg.figure_formats
     )
     figdir = (cfg.output_dir / cfg.figdir_name / "cell_qc").resolve()
-    figdir.mkdir(parents=True, exist_ok=True)
 
     # Containers
     raw_map = cr_map = cb_map = None
@@ -37,7 +36,8 @@ def run_cell_qc(cfg: CellQCConfig) -> None:
         LOGGER.info("Loading RAW matrices (raw + knee+GMM filtered)...")
         raw_map, raw_filtered_reads, raw_unfiltered_reads = io_utils.load_raw_data(
             cfg,
-            record_pre_filter_counts=True,  # ensures raw_unfiltered_reads is populated
+            record_pre_filter_counts=True,
+            plot_dir=Path("cell_qc"),
         )
 
     # CellRanger filtered

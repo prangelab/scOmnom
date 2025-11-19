@@ -69,14 +69,19 @@ class LoadAndQCConfig(BaseModel):
             )
         return fmt.lower()
 
-    @validator("*", pre=True)
-    def check_exactly_one_source(cls, v, values):
-        raw = values.get("raw_sample_dir")
-        filt = values.get("filtered_sample_dir")
-        cb = values.get("cellbender_dir")
-        if sum(x is not None for x in [raw, filt, cb]) != 1:
-            raise ValueError("Exactly one of raw_sample_dir, filtered_sample_dir, cellbender_dir must be set.")
-        return v
+    from pydantic import model_validator
+    @model_validator(mode="after")
+    def check_exactly_one_source(self):
+        sources = [
+            self.raw_sample_dir,
+            self.filtered_sample_dir,
+            self.cellbender_dir,
+        ]
+        if sum(x is not None for x in sources) != 1:
+            raise ValueError(
+                "Exactly one of raw_sample_dir, filtered_sample_dir, cellbender_dir must be set."
+            )
+        return self
 
 
 class IntegrationConfig(BaseModel):

@@ -192,23 +192,39 @@ def plot_read_comparison(
     fig, ax = plt.subplots(figsize=(max(6, len(samples) * 0.7), 5))
     _clean_axes(ax)
 
+    # bars
     ax.bar(
         x - width / 2,
         df[ref_label],
         width,
         label=ref_label,
         alpha=0.85,
-        color="#999999"
+        color="#999999",
     )
 
-    ax.bar(
+    other_bar = ax.bar(
         x + width / 2,
         df[other_label],
         width,
         label=other_label,
         alpha=0.85,
-        color="steelblue"
+        color="steelblue",
     )
+
+    # annotate % of ref_counts relative to other_counts on other_counts bars
+    for i, rect in enumerate(other_bar):
+        ref = df.loc[i, ref_label]
+        other = df.loc[i, other_label]
+        if other > 0:
+            pct = 100 * other / ref
+            ax.text(
+                rect.get_x() + rect.get_width() / 2,
+                rect.get_height(),
+                f"{pct:.1f}%",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+            )
 
     ax.set_xticks(x)
     ax.set_xticklabels(samples, rotation=45, ha="right")
@@ -219,42 +235,57 @@ def plot_read_comparison(
     fig.tight_layout()
     save_multi(stem, figdir)
 
-    df.to_csv(figdir / f"{stem}.tsv", sep="\t", index=False)
-
 
 # -------------------------------------------------------------------------
 # Final cell-counts plot
 # -------------------------------------------------------------------------
-def plot_final_cell_counts(adata, cfg):
-    import numpy as np
+def plot_final_cell_counts(adata: ad.AnnData, cfg: LoadAndQCConfig) -> None:
+    """Plot final per-sample cell counts with a mean line and summary box."""
+    import matplotlib.pyplot as plt
 
-    figdir_qc = Path(cfg.figdir) / "QC_plots"
+    batch_key = cfg.batch_key
+    if batch_key not in adata.obs:
+        LOGGER.warning("batch_key '%s' not found in adata.obs; skipping plot.", batch_key)
+        return
 
-    counts = adata.obs[cfg.batch_key].value_counts().sort_values(ascending=False)
-    df = pd.DataFrame({"sample": counts.index, "n_cells": counts.values})
-    total_cells = int(df["n_cells"].sum())
+    counts = adata.obs[batch_key].value_counts().sort_index()
+    mean_cells = counts.mean()
+    total_cells = counts.sum()
 
-    fig, ax = plt.subplots(figsize=(max(6, len(df) * 0.6), 5))
+    fig, ax = plt.subplots(figsize=(8, 4))
+    counts.plot(kind="bar", ax=ax, color="steelblue", edgecolor="black")
+
+    # Theme-consistent mean line — darker steelblue
+    ax.axhline(mean_cells, linestyle="--", color="#1f4e79", linewidth=1.0)
+
+    # Clean axes (removes grid, applies spine styling)
     _clean_axes(ax)
 
-    ax.bar(df["sample"], df["n_cells"], color="steelblue", alpha=0.85)
+    ax.set_ylabel("Cell count")
+    ax.set_title("Final cell counts per sample")
 
-    ax.set_xticks(np.arange(len(df)))
-    ax.set_xticklabels(df["sample"], rotation=45, ha="right")
-    ax.set_ylabel("Number of cells")
-    ax.set_title("Final number of cells per sample")
-
+    # Summary stats box
+    summary_text = (
+        f"Total cells: {total_cells:,}\n"
+        f"Mean per sample: {mean_cells:,.0f}"
+    )
     ax.text(
-        0.98, 0.95,
-        f"Total: {total_cells:,} cells",
-        ha="right", va="top",
+        0.02, 0.98,
+        summary_text,
         transform=ax.transAxes,
-        fontsize=10,
-        bbox=dict(facecolor="white", edgecolor="#666666", alpha=0.6)
+        fontsize=9,
+        va="top",
+        bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray")
     )
 
+    plt.xticks(rotation=45, ha="right")
     fig.tight_layout()
-    save_multi("QC_cells_final_per_sample", figdir_qc)
+
+    # Correct save call
+    figdir_qc = cfg.figdir / "QC_plots"
+    save_multi(stem="final_cell_counts", figdir=figdir_qc)
+
+    plt.close(fig)
 
 
 # -------------------------------------------------------------------------
@@ -309,7 +340,6 @@ def run_qc_plots_postfilter(adata, cfg):
     sc_settings.figdir = figdir_qc
 
     try:
-        # violins
         sc.pl.violin(
             adata,
             ["n_genes_by_counts", "total_counts", "pct_counts_mt"],
@@ -317,7 +347,21 @@ def run_qc_plots_postfilter(adata, cfg):
             groupby=cfg.batch_key,
             show=False
         )
+
+        fig = plt.gcf()
+        axs = fig.get_axes()
+
+        # Compact margins but keep readable
+        fig.subplots_adjust(left=0.08, right=0.98, bottom=0.22, top=0.90, wspace=0.25)
+
+        # Force all violin subplots to equal width
+        first_width = axs[0].get_position().width
+        for ax in axs:
+            pos = ax.get_position()
+            ax.set_position([pos.x0, pos.y0, first_width, pos.height])
+
         save_multi("QC_violin_mt_counts_postfilter", figdir_qc)
+        plt.close(fig)
 
         plot_mt_histogram(adata, cfg, "postfilter")
 

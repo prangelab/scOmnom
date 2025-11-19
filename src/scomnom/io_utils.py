@@ -23,24 +23,32 @@ def detect_sample_dirs(base: Path, patterns: list[str]) -> List[Path]:
     return sorted(out)
 
 
-def filter_raw_barcodes(adata: ad.AnnData, plot: bool = False, plot_path: Optional[Path] = None) -> ad.AnnData:
+def filter_raw_barcodes(
+    adata: ad.AnnData,
+    plot: bool = False,
+    plot_path: Optional[Path] = None,
+) -> ad.AnnData:
     """
     Approximate Cell Ranger 'cell calling' on a raw_feature_bc_matrix.
     Uses a hybrid of Gaussian mixture modeling and knee detection to
     determine a permissive UMI cutoff separating background from cells.
     Keeps all barcodes above the selected cutoff in total UMI counts.
+
+    If plot=True and plot_path is provided, the figure is passed through
+    save_multi() and ends up in <figdir>/<fmt>/subdirs consistently.
     """
     import numpy as np
     import matplotlib.pyplot as plt
     from kneed import KneeLocator
     from sklearn.mixture import GaussianMixture
+    from .plot_utils import save_multi
 
     total_counts = np.array(adata.X.sum(axis=1)).flatten()
     sorted_idx = np.argsort(total_counts)[::-1]
     sorted_counts = total_counts[sorted_idx]
     ranks = np.arange(1, len(sorted_counts) + 1)
 
-    # --- 1. Fit two-component GMM in log10(UMIs) space ---
+    # --- 1. Fit GMM (log space) ---
     log_counts = np.log10(sorted_counts + 1).reshape(-1, 1)
     gm = GaussianMixture(n_components=2, random_state=0)
     gm.fit(log_counts)
@@ -54,48 +62,55 @@ def filter_raw_barcodes(adata: ad.AnnData, plot: bool = False, plot_path: Option
     sd_bg = np.sqrt(gm.covariances_[bg_comp]).item()
     sd_cell = np.sqrt(gm.covariances_[cell_comp]).item()
 
-    # --- 2. Analytical intersection of the two Gaussians ---
+    # --- 2. Intersection of Gaussians ---
     a = 1/(2*sd_bg**2) - 1/(2*sd_cell**2)
     b = mu_cell/(sd_cell**2) - mu_bg/(sd_bg**2)
     c = (mu_bg**2)/(2*sd_bg**2) - (mu_cell**2)/(2*sd_cell**2) - np.log((sd_cell*w_bg)/(sd_bg*w_cell))
-    disc = b**2 - 4*a*c
+    disc = b*b - 4*a*c
+
     if disc < 0:
-        log_thresh = mu_cell  # fallback if intersection fails
+        log_thresh = mu_cell
     else:
         log_thresh = (-b + np.sqrt(disc)) / (2*a)
+
     umi_thresh = 10 ** log_thresh
 
-    # --- 3. Knee (inflection) detection as fallback/upper bound ---
+    # --- 3. Knee detection ---
     kl = KneeLocator(ranks, sorted_counts, curve="convex", direction="decreasing")
     knee_rank = kl.elbow or len(sorted_counts)
     knee_value = sorted_counts[knee_rank - 1]
 
-    # --- 4. Choose the *more permissive* cutoff ---
-    cutoff_value = min(knee_value, umi_thresh)
+    # --- 4. Choose cutoff (geometric mean of knee + GMM thresholds) ---
+    cutoff_value = np.sqrt(umi_thresh * knee_value)
+
     keep_mask = total_counts >= cutoff_value
     adata_filtered = adata[keep_mask].copy()
 
-    # --- 5. Optional plot ---
-    if plot and plot_path:
+    # --- 5. Plot using save_multi ---
+    if plot and plot_path is not None:
+        stem = plot_path.stem
+        figdir = plot_path.parent
+
         plt.figure(figsize=(5, 4))
         plt.plot(ranks, sorted_counts, lw=1, label="All barcodes")
-        plt.axhline(cutoff_value, color="red", linestyle="--", label="Cutoff")
-        plt.axvline(knee_rank, color="orange", linestyle=":", label="Knee")
+        plt.axhline(cutoff_value, color="red", linestyle="--", label=f"Cutoff = {cutoff_value:.0f}")
+        plt.axvline(knee_rank, color="orange", linestyle=":", label=f"Knee rank = {knee_rank}")
         plt.xlabel("Barcode rank")
         plt.ylabel("Total UMI counts")
-        plt.title("Barcode rank vs UMI counts (Cell Ranger-like cutoff)")
+        plt.title("Barcode rank vs total UMIs")
         plt.legend()
         plt.tight_layout()
-        plot_path.parent.mkdir(parents=True, exist_ok=True)
-        plt.savefig(plot_path.with_suffix(".png"), dpi=300)
-        plt.savefig(plot_path.with_suffix(".pdf"))
-        plt.close()
+
+        save_multi(stem, figdir)
 
     LOGGER.info(
         "Cell-calling (Cell Ranger-like): retained %d / %d barcodes (%.1f%%)",
-        adata_filtered.n_obs, adata.n_obs, 100 * adata_filtered.n_obs / adata.n_obs
+        adata_filtered.n_obs, adata.n_obs,
+        100 * adata_filtered.n_obs / len(total_counts)
     )
+
     return adata_filtered
+
 
 import logging
 LOGGER = logging.getLogger(__name__)
@@ -184,49 +199,63 @@ def read_cellbender_h5(cb_folder: Path, sample: str, h5_suffix: str) -> Optional
 def load_raw_data(
     cfg: LoadAndQCConfig | CellQCConfig,
     record_pre_filter_counts: bool = False,
+    plot_dir: Optional[Path] = None,
 ) -> tuple[
     Dict[str, ad.AnnData],
-    Dict[str, float],   # filtered reads
-    Optional[Dict[str, float]]  # unfiltered reads before knee+GMM
+    Dict[str, float],
+    Optional[Dict[str, float]],
 ]:
     raw_dirs = find_raw_dirs(cfg.raw_sample_dir, cfg.raw_pattern)
-    out: Dict[str, ad.AnnData] = {}
+
+    raw_map: Dict[str, ad.AnnData] = {}
     read_counts_filtered: Dict[str, float] = {}
-    read_counts_unfiltered: Dict[str, float] = {} if record_pre_filter_counts else None
+    read_counts_unfiltered: Optional[Dict[str, float]] = {} if record_pre_filter_counts else None
 
     for raw in raw_dirs:
         sample = raw.name.split(".raw_feature_bc_matrix")[0]
+        LOGGER.info(f"Loading RAW sample: {sample}")
 
-        # Read matrix first
+        # 1) Read unfiltered matrix
         adata = read_raw_10x(raw)
         total_reads_unfiltered = float(adata.X.sum())
-
         if record_pre_filter_counts:
             read_counts_unfiltered[sample] = total_reads_unfiltered
 
-        # Now apply the knee+GMM filter
-        if cfg.cellbender_dir is None:  # same condition as before
-            qc_plot_dir = Path(cfg.output_dir) / "figures" / "QC_plots"
-            plot_path = qc_plot_dir / f"{sample}_barcode_knee"
-            adata = filter_raw_barcodes(
-                adata,
-                plot=cfg.make_figures,
-                plot_path=plot_path,
+        # 2) Determine plot_path
+        plot_dir = Path(cfg.output_dir) / cfg.figdir_name
+        if getattr(cfg, "make_figures", False) and plot_dir is not None:
+            # always include subdir under the format namespace
+            plot_path = plot_dir / "cell_qc" / f"{sample}_barcode_knee"
+        elif getattr(cfg, "make_figures", False):
+            # Fallback for load-and-qc:
+            fallback_dir = (
+                Path(cfg.output_dir) / cfg.figdir_name / "QC_plots"
             )
+            plot_path = fallback_dir / f"{sample}_barcode_knee"
+        else:
+            plot_path = None
 
-        # Final filtered reads
-        total_reads_filtered = float(adata.X.sum())
-        read_counts_filtered[sample] = total_reads_filtered
-
-        out[sample] = adata
-        LOGGER.info(
-            "Loaded raw %s: %d cells, %d genes, %.2e → %.2e reads "
-            "(before → after filtering)",
-            sample, adata.n_obs, adata.n_vars,
-            total_reads_unfiltered, total_reads_filtered
+        # 3) Apply knee+GMM
+        adata_f = filter_raw_barcodes(
+            adata,
+            plot=cfg.make_figures,
+            plot_path=plot_path,
         )
 
-    return out, read_counts_filtered, read_counts_unfiltered
+        # 4) Store counts
+        read_counts_filtered[sample] = float(adata_f.X.sum())
+        raw_map[sample] = adata_f
+
+        LOGGER.info(
+            "Raw sample %s: %.3e → %.3e reads (before → after filtering); %d cells retained",
+            sample,
+            total_reads_unfiltered,
+            read_counts_filtered[sample],
+            adata_f.n_obs,
+        )
+
+    return raw_map, read_counts_filtered, read_counts_unfiltered
+
 
 
 def load_filtered_data(cfg: LoadAndQCConfig) -> tuple[Dict[str, ad.AnnData], Dict[str, float]]:

@@ -121,7 +121,13 @@ def load_and_filter(
     raw_sample_dir: Path = typer.Option(None, help="Path with <sample>.raw_feature_bc_matrix folders"),
     filtered_sample_dir: Path = typer.Option(None, help="Path with <sample>.filtered_feature_bc_matrix folders (Cell Ranger output)"),
     cellbender_dir: Path = typer.Option(None, help="Path with <sample>.cellbender_filtered.output folders"),
-    output_dir: Path = typer.Option(None, help="Output directory"),
+        output_dir: Path = typer.Option(
+            ...,
+            "--out",
+            "-o",
+            help="Output directory (required). Will contain h5ad + figures/",
+        ),
+
         metadata_tsv: Path = typer.Option(
             ...,
             exists=True,

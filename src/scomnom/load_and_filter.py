@@ -25,24 +25,52 @@ def setup_logging(logfile: Optional[Path]):
 
 # ---- step functions ----
 def add_metadata(adata: ad.AnnData, metadata_tsv: Optional[Path], sample_id_col: str) -> ad.AnnData:
-    if metadata_tsv is None:
-        return adata
     import pandas as pd
+
+    if metadata_tsv is None:
+        raise RuntimeError("metadata_tsv is required but was None")
+
     if not metadata_tsv.exists():
-        LOGGER.error("Metadata TSV not found: %s", metadata_tsv)
-        return adata
-    df = pd.read_csv(metadata_tsv, sep='\t')
-    df.index = df.index.astype(str)
-    if sample_id_col not in adata.obs.columns:
-        LOGGER.error("Column '%s' not in adata.obs", sample_id_col)
-        return adata
+        raise FileNotFoundError(f"Metadata TSV not found: {metadata_tsv}")
+
+    df = pd.read_csv(metadata_tsv, sep="\t")
+    if sample_id_col not in df.columns:
+        raise KeyError(
+            f"Metadata TSV does not contain required column '{sample_id_col}'. "
+            f"Found columns: {list(df.columns)}"
+        )
+
+    df[sample_id_col] = df[sample_id_col].astype(str)
+
+    obs_sample_ids = pd.Index(adata.obs[sample_id_col].astype(str))
+    meta_sample_ids = pd.Index(df[sample_id_col])
+
+    missing = obs_sample_ids.unique().difference(meta_sample_ids)
+
+    if len(missing) > 0:
+        raise ValueError(
+            "Some sample IDs in adata.obs are missing in metadata_tsv:\n"
+            f"  {list(missing)}"
+        )
+
     obs_col = adata.obs[sample_id_col].astype(str)
     temp = pd.DataFrame({sample_id_col: obs_col}, index=adata.obs_names)
     merged = temp.merge(df, on=sample_id_col, how="left")
     for col in df.columns:
-        adata.obs[col] = merged[col]
-        if (adata.obs[col].nunique() / max(1, len(adata.obs[col]))) < 0.1 and not pd.api.types.is_numeric_dtype(adata.obs[col]):
-            adata.obs[col] = adata.obs[col].astype('category')
+        if col == sample_id_col:
+            # Protect the batch key from being overwritten
+            continue
+
+        # Assign per-cell metadata
+        adata.obs[col] = merged[col].values
+
+        # Optional: cast small-cardinality strings to category
+        if (
+                adata.obs[col].nunique() < 0.1 * len(adata.obs)
+                and adata.obs[col].dtype == object
+        ):
+            adata.obs[col] = adata.obs[col].astype("category")
+
     return adata
 
 
@@ -75,9 +103,12 @@ def filter_and_doublets(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
     # preserve prefilter counts if already set
     pre_counts = adata.uns.get("pre_filter_counts", None)
 
-    # apply filters in place
     sc.pp.filter_cells(adata, min_genes=cfg.min_genes)
     sc.pp.filter_genes(adata, min_cells=cfg.min_cells)
+
+    # After all filters, check per sample
+    for sample, n in adata.obs[cfg.batch_key].value_counts().items():
+        LOGGER.info(f"Remaining cells in {sample}: {n}")
 
     # doublet detection may return a new AnnData
     adata = run_scrublet_parallel(adata, batch_key=cfg.batch_key, n_jobs=cfg.n_jobs)
@@ -148,7 +179,8 @@ def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) ->
     # Load depending on which is set
     if cfg.raw_sample_dir:
         LOGGER.info("Loading raw 10x matrices with CellRanger-like cell calling...")
-        sample_map, read_counts = io_utils.load_raw_data(cfg)
+        qc_plot_dir = cfg.output_dir / "figures" / "QC_plots"
+        sample_map, read_counts, _ = io_utils.load_raw_data(cfg, plot_dir=qc_plot_dir,)
 
     elif cfg.filtered_sample_dir:
         LOGGER.info("Loading CellRanger filtered matrices...")
@@ -158,28 +190,85 @@ def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) ->
         LOGGER.info("Loading CellBender matrices...")
         sample_map, read_counts = io_utils.load_cellbender_data(cfg)
 
+    # --- validate metadata has 1 row per sample ---
+    LOGGER.info("Validating samples and metadata...")
+    import pandas as pd
+
+    if cfg.metadata_tsv is None:
+        raise RuntimeError("metadata_tsv is required but was None")
+
+    df_meta = pd.read_csv(cfg.metadata_tsv, sep="\t")
+    if cfg.batch_key not in df_meta.columns:
+        raise KeyError(
+            f"Metadata TSV must contain the batch key column '{cfg.batch_key}'. "
+            f"Found columns: {list(df_meta.columns)}"
+        )
+
+    meta_samples = pd.Index(df_meta[cfg.batch_key].astype(str))
+    loaded_samples = pd.Index(sample_map.keys()).astype(str)
+
+    missing_rows = loaded_samples.difference(meta_samples)
+    extra_rows = meta_samples.difference(loaded_samples)
+
+    if len(missing_rows) > 0:
+        raise ValueError(
+            "The following samples were found in the input directories but "
+            "are missing from metadata_tsv:\n"
+            f"  {list(missing_rows)}"
+        )
+
+    if len(extra_rows) > 0:
+        raise ValueError(
+            "The following samples exist in metadata_tsv but were not found "
+            "in the input data folders:\n"
+            f"  {list(extra_rows)}"
+        )
+
+    if len(meta_samples) != len(loaded_samples):
+        raise ValueError(
+            f"metadata_tsv has {len(meta_samples)} rows for batch_key='{cfg.batch_key}', "
+            f"but {len(loaded_samples)} samples were loaded."
+        )
+
     # merge
+    LOGGER.info("Merging samples...")
     adata = io_utils.merge_samples(sample_map, batch_key=cfg.batch_key)
 
     # metadata
+    LOGGER.info("Adding metadata...")
     adata = add_metadata(adata, cfg.metadata_tsv, sample_id_col=cfg.batch_key)
     adata.uns["batch_key"] = batch_key
 
     # QC metrics + plots
+    LOGGER.info("Running QC...")
     adata = compute_qc_metrics(adata, cfg)
     plot_utils.run_qc_plots_pre_filter(adata, cfg)
-    plot_utils.plot_elbow_knee(adata, cfg, suffix="prefilter")
+    plot_utils.plot_elbow_knee(
+        adata,
+        figpath_stem="QC_elbow_knee_prefilter",
+        figdir=cfg.figdir / "QC_plots"
+    )
 
     # filtering + normalization + reduction + clustering
+    LOGGER.info("Filtering...")
     adata = filter_and_doublets(adata, cfg)
+    LOGGER.info("Normalising...")
     adata = normalize_and_hvg(adata, cfg)
+    LOGGER.info("Reducing dimensions...")
     adata = pca_neighbors_umap(adata, cfg)
+    LOGGER.info("Clustering and cleaning up...")
     adata = cluster_and_cleanup_qc(adata, cfg)
 
+    LOGGER.info("PLotting...")
     plot_utils.run_qc_plots_postfilter(adata, cfg)
     plot_utils.plot_final_cell_counts(adata, cfg)
-    plot_utils.plot_elbow_knee(adata, cfg, suffix="postfilter")
+    plot_utils.plot_elbow_knee(
+        adata,
+        figpath_stem="QC_elbow_knee_postfilter",
+        figdir=cfg.figdir / "QC_plots"
+    )
 
+    LOGGER.info("Saving...")
     io_utils.save_adata(adata, cfg.output_dir / cfg.output_name)
     LOGGER.info("Finished load_and_filter")
     return adata
