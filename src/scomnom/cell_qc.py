@@ -51,8 +51,12 @@ def run_cell_qc(cfg: CellQCConfig) -> None:
         cb_map, cb_reads = io_utils.load_cellbender_data(cfg)
 
     # READ-COUNT COMPARISONS
+    # ----------------------
+
     if raw_unfiltered_reads is not None:
-        # Raw-unfiltered vs raw-filtered (knee+GMM)
+        # ====================================================
+        # Case 1 — RAW is present → full set of comparisons
+        # ====================================================
         if raw_filtered_reads is not None:
             plot_utils.plot_read_comparison(
                 ref_counts=raw_unfiltered_reads,
@@ -63,7 +67,6 @@ def run_cell_qc(cfg: CellQCConfig) -> None:
                 stem="reads_raw_unfiltered_vs_raw_filtered",
             )
 
-        # Raw-unfiltered vs CellRanger-filtered
         if cr_filtered_reads is not None:
             plot_utils.plot_read_comparison(
                 ref_counts=raw_unfiltered_reads,
@@ -74,7 +77,6 @@ def run_cell_qc(cfg: CellQCConfig) -> None:
                 stem="reads_raw_unfiltered_vs_cellranger_filtered",
             )
 
-        # Raw-unfiltered vs CellBender
         if cb_reads is not None:
             plot_utils.plot_read_comparison(
                 ref_counts=raw_unfiltered_reads,
@@ -84,6 +86,7 @@ def run_cell_qc(cfg: CellQCConfig) -> None:
                 figdir=figdir,
                 stem="reads_raw_unfiltered_vs_cellbender",
             )
+
         if cr_filtered_reads is not None and cb_reads is not None:
             plot_utils.plot_read_comparison(
                 ref_counts=cr_filtered_reads,
@@ -93,5 +96,73 @@ def run_cell_qc(cfg: CellQCConfig) -> None:
                 figdir=figdir,
                 stem="reads_cellranger_filtered_vs_cellbender",
             )
+
+    else:
+        # ================================================
+        # Case 2 — No RAW present
+        # ================================================
+        if cr_filtered_reads is not None and cb_reads is not None:
+            # CellRanger vs CellBender only
+            plot_utils.plot_read_comparison(
+                ref_counts=cr_filtered_reads,
+                other_counts=cb_reads,
+                ref_label="cellranger-filtered",
+                other_label="cellbender",
+                figdir=figdir,
+                stem="reads_cellranger_filtered_vs_cellbender",
+            )
+
+        else:
+            # ==================================================
+            # Case 3 — Only one data source available
+            # → fallback: unfiltered_cell_counts
+            # ==================================================
+            LOGGER.info("Only one data source available; plotting unfiltered cell counts.")
+
+            # Pick whichever map exists
+            sample_map_nonnull = raw_map or cr_map or cb_map
+            if sample_map_nonnull is not None:
+                import matplotlib.pyplot as plt
+                adata_combined = ad.concat(
+                    list(sample_map_nonnull.values()),
+                    label="sample_id",
+                    keys=list(sample_map_nonnull.keys()),
+                    index_unique="_",
+                    join="outer",
+                )
+
+                # Reuse final cell count plot but rename output
+                counts = adata_combined.obs["sample_id"].value_counts().sort_index()
+                mean_cells = counts.mean()
+                total_cells = counts.sum()
+
+                fig, ax = plt.subplots(figsize=(8, 4))
+                counts.plot(kind="bar", ax=ax, color="steelblue", edgecolor="black")
+
+                ax.axhline(mean_cells, linestyle="--", color="#1f4e79", linewidth=1.0)
+                ax.grid(False)
+
+                ax.set_ylabel("Cell count")
+                ax.set_title("Unfiltered cell counts per sample")
+
+                summary_text = f"Total cells: {total_cells:,}\nMean per sample: {mean_cells:,.0f}"
+                ax.text(
+                    0.02, 0.98,
+                    summary_text,
+                    transform=ax.transAxes,
+                    fontsize=9,
+                    va="top",
+                    bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray")
+                )
+
+                plt.xticks(rotation=45, ha="right")
+                fig.tight_layout()
+
+                plot_utils.save_multi(
+                    stem="unfiltered_cell_counts",
+                    figdir=figdir,
+                )
+
+                plt.close(fig)
 
     LOGGER.info("Finished cell_qc")

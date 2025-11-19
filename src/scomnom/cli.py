@@ -7,7 +7,7 @@ from .integrate import run_integration
 from .cluster_and_annotate import run_clustering
 from .config import LoadAndQCConfig
 from .cell_qc import run_cell_qc
-
+from .logging_utils import init_logging
 
 app = typer.Typer(help="scOmnom CLI")
 
@@ -61,13 +61,6 @@ def cell_qc(
         "--format",
         help="Figure formats to export (png, pdf, svg)"
     ),
-
-    # metadata (optional)
-    metadata_tsv: Optional[Path] = typer.Option(
-        None,
-        "--metadata",
-        help="Optional metadata TSV (not required for cell-qc)"
-    ),
 ):
     """
     Standalone QC module for comparing multiple input count matrices.
@@ -88,6 +81,9 @@ def cell_qc(
     from .config import CellQCConfig
     from .cell_qc import run_cell_qc
 
+    logfile = output_dir / "cell_qc.log"
+    init_logging(logfile)
+
     # --- sanity checks ---
     if (raw is None) and (filtered is None) and (cellbender is None):
         raise typer.BadParameter(
@@ -105,8 +101,6 @@ def cell_qc(
         raw_sample_dir=raw,
         filtered_sample_dir=filtered,
         cellbender_dir=cellbender,
-        metadata_tsv=metadata_tsv,
-        batch_key=None,   # will be inferred later (or unused)
         make_figures=True,
     )
 
@@ -180,6 +174,10 @@ def load_and_filter(
             "Invalid input: CellBender outputs cannot be combined with Cell Ranger filtered matrices. "
             "Use --raw-sample-dir instead."
         )
+
+    logfile = output_dir / "load-and-filter.log"
+    init_logging(logfile)
+
     cfg = LoadAndQCConfig(
         raw_sample_dir=raw_sample_dir,
         filtered_sample_dir=filtered_sample_dir,
@@ -202,7 +200,7 @@ def load_and_filter(
         min_umis_prefilter=min_umis_prefilter,
     )
 
-    run_load_and_filter(cfg, logfile=output_dir / "pipeline.log")
+    run_load_and_filter(cfg, logfile)
 
 from .config import IntegrationConfig
 from .integrate import run_integration
@@ -253,7 +251,8 @@ def integrate(
             scOmnom load-and-filter
         """
 
-    logfile = input_path.parent / "integration.log"
+    logfile = output_dir / "integrate.log"
+    init_logging(logfile)
 
     cfg = IntegrationConfig(
         input_path=input_path,
@@ -286,6 +285,10 @@ def cluster_and_annotate():
        Use after:
            scOmnom load-and-filter
        """
+
+    logfile = output_dir / "cluster-and-annotate.log"
+    init_logging(logfile)
+
     run_clustering()
 
 if __name__ == "__main__":
