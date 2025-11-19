@@ -1,39 +1,51 @@
 name: scOmnom_env
 channels:
-  - pytorch
-  - nvidia
   - conda-forge
   - bioconda
+  - pytorch
   - defaults
 
 dependencies:
+  # Python
   - python=3.10
 
-  # Core scientific stack
-  - scanpy
-  - anndata
-  - numpy
-  - pandas
+  # Numeric stack
+  - numpy<2
   - scipy
+  - pandas
   - matplotlib
   - seaborn
   - joblib
-  - kneed
-  - typer
-  - scrublet
   - h5py
   - scikit-learn
+  - psutil
+
+  # Scanpy ecosystem
+  - scanpy
+  - anndata
   - igraph
   - python-igraph
   - leidenalg
-  - pytest
+  - scrublet
+  - kneed
+  - typer
   - pydantic
-  - psutil
 
-  # GPU-enabled PyTorch (official)
+  # PyTorch (CPU only for portability; GPU will be used automatically on compute nodes)
   - pytorch
-  - pytorch-cuda=11.8
 
+  # Optional acceleration (commented out)
+  # macOS Metal (uncomment on Apple Silicon):
+  # - pytorch::pytorch
+  # - conda-forge::mps
+
+  # Linux GPU CUDA wheels (ONLY install on GPU nodes):
+  # - pytorch-cuda=11.8
+
+  # Testing
+  - pytest
+
+  # Pip packages
   - pip
   - pip:
       - umap-learn

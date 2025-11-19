@@ -115,22 +115,22 @@ def load_and_filter(
     raw_sample_dir: Path = typer.Option(None, help="Path with <sample>.raw_feature_bc_matrix folders"),
     filtered_sample_dir: Path = typer.Option(None, help="Path with <sample>.filtered_feature_bc_matrix folders (Cell Ranger output)"),
     cellbender_dir: Path = typer.Option(None, help="Path with <sample>.cellbender_filtered.output folders"),
-        output_dir: Path = typer.Option(
-            ...,
-            "--out",
-            "-o",
-            help="Output directory (required). Will contain h5ad + figures/",
-        ),
+    output_dir: Path = typer.Option(
+        ...,
+        "--out",
+        "-o",
+        help="Output directory (required). Will contain h5ad + figures/",
+    ),
 
-        metadata_tsv: Path = typer.Option(
-            ...,
-            exists=True,
-            file_okay=True,
-            dir_okay=False,
-            readable=True,
-            help="Sample-level metadata TSV (required)",
-        ),
-        n_jobs: int = typer.Option(4),
+    metadata_tsv: Path = typer.Option(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="Sample-level metadata TSV (required)",
+    ),
+    n_jobs: int = typer.Option(4),
     min_cells: int = typer.Option(3),
     min_genes: int = typer.Option(200),
     min_cells_per_sample: int = typer.Option(20),
@@ -251,7 +251,7 @@ def integrate(
             scOmnom load-and-filter
         """
 
-    logfile = output_dir / "integrate.log"
+    logfile = input_path.parent / "integrate.log"
     init_logging(logfile)
 
     cfg = IntegrationConfig(
