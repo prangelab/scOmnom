@@ -9,6 +9,7 @@ from .config import LoadAndQCConfig
 from .cell_qc import run_cell_qc
 from .logging_utils import init_logging
 
+ALLOWED_METHODS = {"scVI", "Scanorama", "Harmony"}
 app = typer.Typer(help="scOmnom CLI")
 
 # Globally supress some warnings
@@ -35,6 +36,39 @@ warnings.filterwarnings(
     category=UserWarning,
     module="lightning.pytorch"
 )
+
+
+def _normalize_methods(methods):
+    """
+    Normalize and validate integration method inputs.
+
+    Supports:
+    --methods A --methods B
+    --methods A,B,C
+    or mixed.
+
+    Returns a list of validated method names or None.
+    """
+    if methods is None:
+        return None
+
+    # Expand comma-separated entries
+    expanded = []
+    for m in methods:
+        expanded.extend([x.strip() for x in m.split(",") if x.strip()])
+
+    # Validate
+    invalid = [m for m in expanded if m not in ALLOWED_METHODS]
+    if invalid:
+        allowed = ", ".join(sorted(ALLOWED_METHODS))
+        bad = ", ".join(invalid)
+        raise ValueError(
+            f"Invalid method(s): {bad}. Allowed methods: {allowed}"
+        )
+
+    return expanded
+
+
 
 # ----------------------------------------------------------
 # Standalone: scomnom cell-qc
@@ -226,11 +260,16 @@ def integrate(
     ),
     methods: Optional[List[str]] = typer.Option(
         None,
+        "--methods",
+        "-m",
         help=(
             "Integration methods to run. Repeat option for multiple.\n"
             "Supported: Scanorama, Harmony, scVI, scANVI.\n"
             "Default: all except scANVI."
         ),
+        case_sensitive=False,
+        show_default=False,
+        autocompletion=lambda: ALLOWED_METHODS,
     ),
     batch_key: Optional[str] = typer.Option(
         None,
@@ -256,6 +295,7 @@ def integrate(
         Use after:
             scOmnom load-and-filter
         """
+    methods = _normalize_methods(methods)
 
     logfile = input_path.parent / "integrate.log"
     init_logging(logfile)
