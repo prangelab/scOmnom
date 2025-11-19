@@ -29,6 +29,12 @@ warnings.filterwarnings(
     message="pkg_resources is deprecated as an API",
     category=UserWarning
 )
+warnings.filterwarnings(
+    "ignore",
+    message=r".*does not have many workers which may be a bottleneck.*",
+    category=UserWarning,
+    module="lightning.pytorch"
+)
 
 # ----------------------------------------------------------
 # Standalone: scomnom cell-qc

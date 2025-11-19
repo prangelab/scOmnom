@@ -6,6 +6,7 @@ from typing import List, Optional, Sequence
 import anndata as ad
 import numpy as np
 import scanpy as sc
+import pandas as pd
 
 from .config import IntegrationConfig
 from .load_and_filter import setup_logging
@@ -140,7 +141,6 @@ def _select_best_embedding(
     figdir: Path,
 ) -> str:
     from scib_metrics.benchmark import Benchmarker, BioConservation, BatchCorrection
-
     _ensure_label_key(adata, label_key)
 
     bm = Benchmarker(
@@ -159,12 +159,42 @@ def _select_best_embedding(
     raw = bm.get_results(min_max_scale=False)
     scaled = bm.get_results(min_max_scale=True)
 
+    # ------------------------------------------------------------------
+    # DEBUG: Inspect scIB output structure before filtering
+    # ------------------------------------------------------------------
+    try:
+        debug_path = figdir / "scib_debug_raw.tsv"
+        debug_scaled_path = figdir / "scib_debug_scaled.tsv"
+        raw.to_csv(debug_path, sep="\t")
+        scaled.to_csv(debug_scaled_path, sep="\t")
+
+        LOGGER.info("scIB raw results shape: %s", raw.shape)
+        LOGGER.info("scIB scaled results shape: %s", scaled.shape)
+        LOGGER.info("scIB raw index: %s", list(raw.index))
+        LOGGER.info("scIB scaled index: %s", list(scaled.index))
+        LOGGER.info("scIB raw columns: %s", list(raw.columns))
+        LOGGER.info("scIB scaled columns: %s", list(scaled.columns))
+
+        # Per-row NaN summary
+        for emb in scaled.index:
+            row = scaled.loc[emb]
+            n_nan = row.isna().sum()
+            n_inf = (~np.isfinite(row.to_numpy())).sum()
+            LOGGER.info(
+                "scIB debug: embedding '%s' → %d NaN, %d non-finite",
+                emb, n_nan, n_inf
+            )
+    except Exception as e:
+        LOGGER.warning("scIB debug block failed: %s", e)
+
     raw.to_csv(figdir / "integration_metrics_raw.tsv", sep="\t")
     scaled.to_csv(figdir / "integration_metrics_scaled.tsv", sep="\t")
 
-    # Filter out embeddings where all metrics are NaN or non-finite
-    # (this happens when isolated_labels / PCR / graph_connectivity fail)
-    numeric = scaled.select_dtypes(include="number")
+    # Drop the 'Metric Type' row BEFORE numeric conversion
+    scaled_no_meta = scaled.drop(index=["Metric Type"], errors="ignore")
+
+    # Convert to numeric
+    numeric = scaled_no_meta.apply(pd.to_numeric, errors="coerce")
 
     valid_embeddings = []
     for emb in numeric.index:
@@ -242,17 +272,21 @@ def run_integration(cfg: IntegrationConfig) -> ad.AnnData:
     if best != "Unintegrated":
         try:
             from . import plot_utils
-            from scanpy import settings as sc_settings
 
-            figdir_integration = in_path.parent / "figures" / "integration"
-            figdir_integration.mkdir(parents=True, exist_ok=True)
+            # This generates and returns a matplotlib Figure and makes it active
+            fig = sc.pl.umap(
+                full,
+                color=[cfg.batch_key, cfg.label_key],
+                show=False,
+                return_fig=True,
+            )
 
-            old_figdir = sc_settings.figdir
-            sc_settings.figdir = str(figdir_integration)
-            try:
-                plot_utils.umap_by(full, [batch_key, cfg.label_key])
-            finally:
-                sc_settings.figdir = old_figdir
+            # Determine the output base
+            base = cfg.output_path if cfg.output_path is not None else in_path
+            figdir = base.parent / "figures" / "integration"
+
+            # save_multi expects: stem (str), figdir (Path)
+            save_multi(f"{best}_umap", figdir)
         except Exception as e:
             LOGGER.warning("UMAP plotting failed: %s", e)
     else:

@@ -242,6 +242,7 @@ def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) ->
     # QC metrics + plots
     LOGGER.info("Running QC...")
     adata = compute_qc_metrics(adata, cfg)
+    LOGGER.info(" Plotting pre-filter QC...")
     plot_utils.run_qc_plots_pre_filter(adata, cfg)
     plot_utils.plot_elbow_knee(
         adata,
@@ -259,7 +260,7 @@ def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) ->
     LOGGER.info("Clustering and cleaning up...")
     adata = cluster_and_cleanup_qc(adata, cfg)
 
-    LOGGER.info("PLotting...")
+    LOGGER.info("Plotting post-filter QC...")
     plot_utils.run_qc_plots_postfilter(adata, cfg)
     plot_utils.plot_final_cell_counts(adata, cfg)
     plot_utils.plot_elbow_knee(
