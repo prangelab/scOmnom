@@ -22,10 +22,6 @@ class LoadAndQCConfig(BaseModel):
     min_cells_per_sample: int = Field(20, ge=0)
     max_pct_mt: float = Field(5.0, ge=0.0, description="Mitochondrial % threshold after CB + filters")
 
-    # Light prefilter before QC
-    min_genes_prefilter: int = Field(50, ge=0, description="Remove barcodes with fewer detected genes before QC")
-    min_umis_prefilter: int = Field(20, ge=0, description="Remove barcodes with fewer UMIs before QC")
-
     # Gene flags
     mt_prefix: str = Field("MT-", description="Prefix for mitochondrial genes")
     ribo_prefixes: List[str] = Field(default_factory=lambda: ["RPS", "RPL"])

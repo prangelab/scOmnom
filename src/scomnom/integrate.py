@@ -10,7 +10,7 @@ import pandas as pd
 
 from .config import IntegrationConfig
 from .load_and_filter import setup_logging
-from . import io_utils
+from . import io_utils,plot_utils
 
 LOGGER = logging.getLogger(__name__)
 
@@ -61,6 +61,28 @@ def _run_harmony_embedding(adata: ad.AnnData, batch_key: str) -> np.ndarray:
     ho = hm.run_harmony(adata.obsm["X_pca"], adata.obs, batch_key)
     return ho.Z_corr.T
 
+def _run_bbknn_embedding(adata: AnnData, batch_key: str) -> np.ndarray:
+    """
+    Run BBKNN in an isolated copy so original neighbors graph is untouched.
+    Returns a UMAP embedding (n_cells × 2) as a NumPy array.
+    """
+
+    import bbknn
+    import scanpy as sc
+
+    # Work on a copy to avoid modifying real neighbors
+    tmp = adata.copy()
+
+    # Build BBKNN neighbors
+    bbknn.bbknn(tmp, batch_key=batch_key)
+
+    # Compute UMAP based on the BBKNN neighbor graph
+    sc.tl.umap(tmp)
+
+    # Extract embedding
+    emb = tmp.obsm["X_umap"].copy()
+
+    return emb
 
 # scVI and scANVI ------------------------------------------------------------
 
@@ -101,31 +123,49 @@ def _run_all_embeddings(
     if "X_pca" not in adata.obsm:
         sc.tl.pca(adata)
 
+    # Always include unintegrated PCA
     adata.obsm["Unintegrated"] = adata.obsm["X_pca"]
     created = ["Unintegrated"]
 
     method_set = {m.lower() for m in methods}
     scvi_model = None
 
+    # ------------------------
+    # SCVI/SCANVI shared model
+    # ------------------------
     if {"scvi", "scanvi"} & method_set:
         scvi_model, emb = _fit_scvi(adata, batch_key=batch_key)
         adata.obsm["scVI"] = emb
         created.append("scVI")
 
+    # ------------------------
+    # Other methods
+    # ------------------------
     for m in methods:
         key = m.lower()
         try:
             if key == "scanorama":
                 adata.obsm["Scanorama"] = _run_scanorama_embedding(adata, batch_key)
                 created.append("Scanorama")
+
             elif key == "harmony":
                 adata.obsm["Harmony"] = _run_harmony_embedding(adata, batch_key)
                 created.append("Harmony")
+
+            elif key == "bbknn":
+                LOGGER.info("Running BBKNN")
+                emb = _run_bbknn_embedding(adata, batch_key=batch_key)
+                adata.obsm["BBKNN"] = emb
+                created.append("BBKNN")
+
             elif key == "scvi":
+                # Already done above
                 continue
+
             elif key == "scanvi":
                 adata.obsm[SCANVI_NAME] = _run_scanvi_from_scvi(scvi_model, adata, label_key)
                 created.append(SCANVI_NAME)
+
         except Exception as e:
             LOGGER.warning("Method '%s' failed: %s", m, e)
 
@@ -159,34 +199,6 @@ def _select_best_embedding(
     raw = bm.get_results(min_max_scale=False)
     scaled = bm.get_results(min_max_scale=True)
 
-    # ------------------------------------------------------------------
-    # DEBUG: Inspect scIB output structure before filtering
-    # ------------------------------------------------------------------
-    try:
-        debug_path = figdir / "scib_debug_raw.tsv"
-        debug_scaled_path = figdir / "scib_debug_scaled.tsv"
-        raw.to_csv(debug_path, sep="\t")
-        scaled.to_csv(debug_scaled_path, sep="\t")
-
-        LOGGER.info("scIB raw results shape: %s", raw.shape)
-        LOGGER.info("scIB scaled results shape: %s", scaled.shape)
-        LOGGER.info("scIB raw index: %s", list(raw.index))
-        LOGGER.info("scIB scaled index: %s", list(scaled.index))
-        LOGGER.info("scIB raw columns: %s", list(raw.columns))
-        LOGGER.info("scIB scaled columns: %s", list(scaled.columns))
-
-        # Per-row NaN summary
-        for emb in scaled.index:
-            row = scaled.loc[emb]
-            n_nan = row.isna().sum()
-            n_inf = (~np.isfinite(row.to_numpy())).sum()
-            LOGGER.info(
-                "scIB debug: embedding '%s' → %d NaN, %d non-finite",
-                emb, n_nan, n_inf
-            )
-    except Exception as e:
-        LOGGER.warning("scIB debug block failed: %s", e)
-
     raw.to_csv(figdir / "integration_metrics_raw.tsv", sep="\t")
     scaled.to_csv(figdir / "integration_metrics_scaled.tsv", sep="\t")
 
@@ -202,8 +214,7 @@ def _select_best_embedding(
     # Drop columns that are entirely NaN (scIB sometimes leaves these)
     numeric = numeric.dropna(axis=1, how="all")
 
-    LOGGER.info(f"numeric dtypes: {numeric.dtypes}")
-    LOGGER.info(f"numeric head:\n{numeric.head()}")
+    LOGGER.info(f"scIB results table:\n{numeric.head()}")
 
     valid_embeddings = []
     for emb in numeric.index:
@@ -224,26 +235,36 @@ def _select_best_embedding(
     if isinstance(best, tuple):
         best = best[0]
 
+    LOGGER.info(f"Selected best embedding: '{best}'")
     return str(best)
 
 
 
 def run_integration(cfg: IntegrationConfig) -> ad.AnnData:
     setup_logging(cfg.logfile)
-    in_path = cfg.input_path
-    out_path = cfg.output_path or in_path.with_name(f"{in_path.stem}.integrated.h5ad")
 
-    # If user gave a directory, auto-generate a filename.
+    in_path: Path = cfg.input_path
+    out_path: Path = cfg.output_path or in_path.with_name(f"{in_path.stem}.integrated.h5ad")
+
+    # Figure directory root
+    figroot = out_path.parent / "figures"
+    figroot.mkdir(parents=True, exist_ok=True)
+    plot_utils.setup_scanpy_figs(figroot)
+
+    # Base directory for integration-specific plots:
+    figdir = figroot / "integration"
+    figdir.mkdir(parents=True, exist_ok=True)
+
+    # Handle output file path (directory vs file)
     if out_path.exists() and out_path.is_dir():
         out_path = out_path / f"{in_path.stem}.integrated.h5ad"
     elif not out_path.suffix:
-        # No suffix means it's intended as a directory
         out_path.mkdir(parents=True, exist_ok=True)
         out_path = out_path / f"{in_path.stem}.integrated.h5ad"
     else:
-        # User provided a filename; ensure parent exists
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Load data, infer batch key, compute HVGs
     full = sc.read_h5ad(str(in_path))
     batch_key = io_utils.infer_batch_key(full, cfg.batch_key)
     cfg.batch_key = batch_key
@@ -254,18 +275,24 @@ def run_integration(cfg: IntegrationConfig) -> ad.AnnData:
 
     methods = cfg.methods or list(DEFAULT_METHODS)
 
+    # Run all embeddings
     emb_keys = _run_all_embeddings(hvg, methods, batch_key, cfg.label_key)
 
-    figdir = in_path.parent / "figures" / "integration"
-    best = _select_best_embedding(hvg, emb_keys, batch_key, cfg.label_key, cfg.benchmark_n_jobs, figdir)
+    # Benchmark and choose best embedding
+    best = _select_best_embedding(
+        hvg, emb_keys, batch_key, cfg.label_key, cfg.benchmark_n_jobs, figdir
+    )
 
+    # Copy embeddings to full-data object
     for k in emb_keys:
         full.obsm[k] = hvg.obsm[k]
 
+    # Compute integrated neighbors + UMAP
     full.obsm["X_integrated"] = full.obsm[best]
     sc.pp.neighbors(full, use_rep="X_integrated")
     sc.tl.umap(full)
 
+    # Store metadata
     full.uns.setdefault("integration", {})
     full.uns["integration"].update({
         "methods": emb_keys,
@@ -277,29 +304,68 @@ def run_integration(cfg: IntegrationConfig) -> ad.AnnData:
         "benchmark_metrics_scaled_path": str(figdir / "integration_metrics_scaled.tsv"),
     })
 
-    # Plot integrated UMAP — only if an integrated embedding was actually selected
-    if best != "Unintegrated":
-        try:
-            from . import plot_utils
+    # Plot per-method UMAPs
+    import matplotlib.pyplot as plt
 
-            # This generates and returns a matplotlib Figure and makes it active
+    for method in emb_keys:
+        try:
+            LOGGER.info(f"Plotting UMAPs for method: {method}")
+
+            # ---- Single-panel integrated UMAP ----
+            tmp = full.copy()
+            sc.pp.neighbors(tmp, use_rep=method)
+            sc.tl.umap(tmp)
+
             fig = sc.pl.umap(
-                full,
-                color=[cfg.batch_key, cfg.label_key],
+                tmp,
+                color=cfg.batch_key,
                 show=False,
                 return_fig=True,
             )
+            plot_utils.save_multi(f"{method}_umap", figdir)
+            plt.close(fig)
 
-            # Determine the output base
-            base = cfg.output_path if cfg.output_path is not None else in_path
-            figdir = base.parent / "figures" / "integration"
+            # ---- Two-panel: integrated (left) vs unintegrated (right) ----
+            tmp2 = full.copy()
 
-            # save_multi expects: stem (str), figdir (Path)
-            save_multi(f"{best}_umap", figdir)
+            sc.pp.neighbors(tmp2, use_rep=method)
+            sc.tl.umap(tmp2)
+            umap_integrated = tmp2.obsm["X_umap"].copy()
+
+            sc.pp.neighbors(tmp2, use_rep="Unintegrated")
+            sc.tl.umap(tmp2)
+            umap_unintegrated = tmp2.obsm["X_umap"].copy()
+
+            # Build two-panel figure
+            fig, axs = plt.subplots(1, 2, figsize=(10, 4))
+
+            tmp2.obsm["X_umap"] = umap_integrated
+            sc.pl.umap(
+                tmp2,
+                color=cfg.batch_key,
+                ax=axs[0],
+                show=False,
+                title=f"{method}",
+            )
+
+            tmp2.obsm["X_umap"] = umap_unintegrated
+            sc.pl.umap(
+                tmp2,
+                color=cfg.batch_key,
+                ax=axs[1],
+                show=False,
+                title="Unintegrated",
+            )
+
+            plot_utils.save_multi(f"{method}_vs_Unintegrated_umap", figdir)
+            plt.close(fig)
+
         except Exception as e:
-            LOGGER.warning("UMAP plotting failed: %s", e)
-    else:
-        LOGGER.info("Skipping UMAP plotting because best='Unintegrated'.")
+            LOGGER.warning("UMAP plotting for %s failed: %s", method, e)
 
+    # ------------------------------------------------------------------
+    # Save integrated data
+    # ------------------------------------------------------------------
     io_utils.save_adata(full, out_path)
     return full
+

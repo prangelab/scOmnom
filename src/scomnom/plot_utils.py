@@ -66,9 +66,26 @@ def setup_scanpy_figs(figdir: Path, formats=None) -> None:
     figdir.mkdir(parents=True, exist_ok=True)
 
 
-def save_multi(stem: str, figdir: Path):
+def save_multi(stem: str, figdir: Path, fig=None):
+    """
+    Save the current matplotlib figure (or a provided figure) to multiple formats
+    under ROOT_FIGDIR / ext / relative_path.
+
+    Parameters
+    ----------
+    stem : str
+        Base filename without extension.
+    figdir : Path
+        Directory where figures should be placed (subdirectories created automatically).
+    fig : matplotlib.figure.Figure, optional
+        If provided, activate and save this figure instead of the current active one.
+    """
     import matplotlib.pyplot as plt
     global ROOT_FIGDIR
+
+    # If a figure is provided, activate it
+    if fig is not None:
+        plt.figure(fig.number)
 
     figdir = figdir.resolve()
     rel = figdir.relative_to(ROOT_FIGDIR)
@@ -81,6 +98,7 @@ def save_multi(stem: str, figdir: Path):
         plt.savefig(outfile, dpi=300)
 
     plt.close()
+
 
 
 # -------------------------------------------------------------------------

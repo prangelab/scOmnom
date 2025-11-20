@@ -1,6 +1,7 @@
 pyproject.toml
 src/scomnom/__init__.py
 src/scomnom/cell_qc.py
+src/scomnom/cli (conflicted copy 2025-11-20 095632).py
 src/scomnom/cli.py
 src/scomnom/cluster_and_annotate.py
 src/scomnom/config.py

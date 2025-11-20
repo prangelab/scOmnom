@@ -9,7 +9,7 @@ from .config import LoadAndQCConfig
 from .cell_qc import run_cell_qc
 from .logging_utils import init_logging
 
-ALLOWED_METHODS = {"scVI", "Scanorama", "Harmony"}
+ALLOWED_METHODS = {"scVI", "scANVI", "Scanorama", "Harmony", "BBKNN"}
 app = typer.Typer(help="scOmnom CLI")
 
 # Globally supress some warnings
@@ -185,8 +185,6 @@ def load_and_filter(
     filtered_pattern: str = typer.Option("*.filtered_feature_bc_matrix"),
     cellbender_pattern: str = typer.Option("*.cellbender_filtered.output"),
     cellbender_h5_suffix: str = typer.Option(".cellbender_out.h5"),
-    min_genes_prefilter: int = typer.Option(50),
-    min_umis_prefilter: int = typer.Option(20),
 ):
     """
         Run the complete scOmnom preprocessing pipeline.
@@ -236,8 +234,6 @@ def load_and_filter(
         filtered_pattern=filtered_pattern,
         cellbender_pattern=cellbender_pattern,
         cellbender_h5_suffix=cellbender_h5_suffix,
-        min_genes_prefilter=min_genes_prefilter,
-        min_umis_prefilter=min_umis_prefilter,
     )
 
     run_load_and_filter(cfg, logfile)
