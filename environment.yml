@@ -8,6 +8,7 @@ channels:
 dependencies:
   # Python
   - python=3.10
+  - setuptools=69.5.1
 
   # Numeric stack
   - numpy<2
@@ -48,8 +49,13 @@ dependencies:
   # Pip packages
   - pip
   - pip:
+      - pip>=23
+      - setuptools>=69
+      - wheel>=0.42
+
       - umap-learn
       - scanorama
       - harmonypy
       - scvi-tools
       - scib-metrics
+      - types-pytz
