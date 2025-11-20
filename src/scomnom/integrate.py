@@ -190,11 +190,20 @@ def _select_best_embedding(
     raw.to_csv(figdir / "integration_metrics_raw.tsv", sep="\t")
     scaled.to_csv(figdir / "integration_metrics_scaled.tsv", sep="\t")
 
-    # Drop the 'Metric Type' row BEFORE numeric conversion
-    scaled_no_meta = scaled.drop(index=["Metric Type"], errors="ignore")
+    # Convert everything to string first to avoid mixed dtypes
+    scaled_str = scaled.astype(str)
 
-    # Convert to numeric
-    numeric = scaled_no_meta.apply(pd.to_numeric, errors="coerce")
+    # Coerce everything to numeric (strings → numeric or NaN)
+    numeric = scaled_str.apply(pd.to_numeric, errors="coerce")
+
+    # Drop the Metric Type row
+    numeric = numeric.drop(index=["Metric Type"], errors="ignore")
+
+    # Drop columns that are entirely NaN (scIB sometimes leaves these)
+    numeric = numeric.dropna(axis=1, how="all")
+
+    LOGGER.info(f"numeric dtypes: {numeric.dtypes}")
+    LOGGER.info(f"numeric head:\n{numeric.head()}")
 
     valid_embeddings = []
     for emb in numeric.index:
