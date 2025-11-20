@@ -14,7 +14,7 @@ from . import io_utils,plot_utils
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_METHODS: tuple[str, ...] = ("Scanorama", "Harmony", "scVI")
+DEFAULT_METHODS: tuple[str, ...] = ("Scanorama", "Harmony", "scVI", "BBKNN")
 SCANVI_NAME = "scANVI"
 
 
@@ -66,6 +66,7 @@ def _run_bbknn_embedding(adata: AnnData, batch_key: str) -> np.ndarray:
     Run BBKNN in an isolated copy so original neighbors graph is untouched.
     Returns a UMAP embedding (n_cells × 2) as a NumPy array.
     """
+    LOGGER.info("Running BBKNN")
 
     import bbknn
     import scanpy as sc
@@ -199,8 +200,8 @@ def _select_best_embedding(
     raw = bm.get_results(min_max_scale=False)
     scaled = bm.get_results(min_max_scale=True)
 
-    raw.to_csv(figdir / "integration_metrics_raw.tsv", sep="\t")
-    scaled.to_csv(figdir / "integration_metrics_scaled.tsv", sep="\t")
+    raw.to_csv(figdir.parent.parent / "integration_metrics_raw.tsv", sep="\t")
+    scaled.to_csv(figdir.parent.parent / "integration_metrics_scaled.tsv", sep="\t")
 
     # Convert everything to string first to avoid mixed dtypes
     scaled_str = scaled.astype(str)
@@ -326,6 +327,9 @@ def run_integration(cfg: IntegrationConfig) -> ad.AnnData:
             plt.close(fig)
 
             # ---- Two-panel: integrated (left) vs unintegrated (right) ----
+            # Skip the unintegrated embedding
+            if method == "Unintegrated":
+                continue
             tmp2 = full.copy()
 
             sc.pp.neighbors(tmp2, use_rep=method)

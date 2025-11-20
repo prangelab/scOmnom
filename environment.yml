@@ -30,7 +30,7 @@ dependencies:
   - kneed
   - typer
   - pydantic
-
+  - bbknn
   # PyTorch (CPU only for portability; GPU will be used automatically on compute nodes)
   - pytorch
 

@@ -260,7 +260,7 @@ def integrate(
         "-m",
         help=(
             "Integration methods to run. Repeat option for multiple.\n"
-            "Supported: Scanorama, Harmony, scVI, scANVI.\n"
+            "Supported: Scanorama, Harmony, scVI, scANVI, BBKNN.\n"
             "Default: all except scANVI."
         ),
         case_sensitive=False,
