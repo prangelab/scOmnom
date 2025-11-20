@@ -1,5 +1,7 @@
 from __future__ import annotations
 import logging
+import sys
+from os import mkdir
 from pathlib import Path
 from typing import List, Optional, Sequence
 
@@ -194,11 +196,15 @@ def _select_best_embedding(
         n_jobs=n_jobs,
     )
 
-    figdir.mkdir(parents=True, exist_ok=True)
     bm.benchmark()
+
+    #mkdir(figdir.parent / "svg")
+    #bm.plot_results_table(show=False, save_dir=figdir.parent / "svg")
 
     raw = bm.get_results(min_max_scale=False)
     scaled = bm.get_results(min_max_scale=True)
+
+    plot_utils.plot_scib_results_table(scaled, figdir)
 
     raw.to_csv(figdir.parent.parent / "integration_metrics_raw.tsv", sep="\t")
     scaled.to_csv(figdir.parent.parent / "integration_metrics_scaled.tsv", sep="\t")
@@ -249,21 +255,16 @@ def run_integration(cfg: IntegrationConfig) -> ad.AnnData:
 
     # Figure directory root
     figroot = out_path.parent / "figures"
-    figroot.mkdir(parents=True, exist_ok=True)
     plot_utils.setup_scanpy_figs(figroot)
 
     # Base directory for integration-specific plots:
     figdir = figroot / "integration"
-    figdir.mkdir(parents=True, exist_ok=True)
 
     # Handle output file path (directory vs file)
     if out_path.exists() and out_path.is_dir():
         out_path = out_path / f"{in_path.stem}.integrated.h5ad"
     elif not out_path.suffix:
-        out_path.mkdir(parents=True, exist_ok=True)
         out_path = out_path / f"{in_path.stem}.integrated.h5ad"
-    else:
-        out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Load data, infer batch key, compute HVGs
     full = sc.read_h5ad(str(in_path))

@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import math
 import scanpy as sc
 import matplotlib as mpl
 import logging
@@ -102,7 +103,7 @@ def save_multi(stem: str, figdir: Path, fig=None):
 
 
 # -------------------------------------------------------------------------
-# Internal helper aesthetic
+# Internal helpers
 # -------------------------------------------------------------------------
 def _clean_axes(ax):
     ax.grid(False)
@@ -492,3 +493,231 @@ def barplot_before_after(df_counts: pd.DataFrame, figpath: Path, min_cells_per_s
 
     fig.tight_layout()
     save_multi(figpath.stem, figpath.parent)
+
+
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+import pandas as pd
+from pathlib import Path
+import numpy as np
+
+
+def plot_scib_results_table(scaled: pd.DataFrame, figdir: Path) -> None:
+    """Generate a scIB-style results table with circles for metrics and bars for aggregate scores.
+
+    This final version includes:
+    - Circles for individual metrics, bars for aggregate scores.
+    - Dotted row separation lines at row boundaries.
+    - Thick vertical dividers between metric groups and aggregate scores (except the right-most boundary).
+    - Horizontal column labels at the top in a hierarchical grouping.
+    - Complete removal of all internal grid lines and axes spines.
+    """
+    df = scaled.copy()
+    df = df.loc[~df.index.str.contains("Metric", case=False, na=False)]
+
+    # --- Data and Column Grouping (Robust against KeyErrors) ---
+    all_cols = df.columns.tolist()
+
+    # 1. Define Core Groupings
+    agg_metrics = ["Batch correction", "Bio conservation", "Total"]
+    batch_metrics_expected = ["iLISI", "KBET", "Graph connectivity", "PCR comparison"]
+    middle_metrics_expected = ["cLISI", "Silhouette batch"]
+
+    # 2. Filter Lists to Include Only Existing Columns
+    agg_metrics = [c for c in agg_metrics if c in all_cols]
+    batch_metrics = [c for c in batch_metrics_expected if c in all_cols]
+    middle_metrics = [c for c in middle_metrics_expected if c in all_cols]
+
+    # 3. Identify Bio Conservation Metrics (everything else that's not agg, batch, or middle)
+    exclude_list = agg_metrics + batch_metrics + middle_metrics
+    bio_metrics = [c for c in all_cols if c not in exclude_list]
+
+    # 4. Construct Final Ordered List of Normal Metrics
+    normal_metrics = bio_metrics + middle_metrics + batch_metrics
+
+    df = df[normal_metrics + agg_metrics]
+    vals = df.values.astype(float)
+    n_rows, n_cols = vals.shape
+
+    # --- Colormaps ---
+    cmap_metrics = mpl.colors.LinearSegmentedColormap.from_list(
+        "PuGr",
+        ["#5E3584", "white", "#99CC33", "#4A8F3F"], N=256
+    )
+    cmap_agg = mpl.cm.get_cmap("YlGnBu")
+    norm = mpl.colors.Normalize(vmin=0, vmax=1)
+
+    # --- Figure Setup ---
+    cell_w, cell_h = 1.2, 0.6
+    agg_gap = 0.5
+
+    fig_w = cell_w * (n_cols + 0.5) + agg_gap + 1.0
+    fig_h = cell_h * (n_rows + 1.5)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+    # --- Draw Markers (Circles and Bars) and Text ---
+    bar_h = cell_h * 0.7
+
+    for i in range(n_rows):
+        for j in range(n_cols):
+            metric = df.columns[j]
+            x_coord = j + agg_gap if metric in agg_metrics else j
+            y_coord = n_rows - i - 0.5
+            val = vals[i, j]
+
+            current_cmap = cmap_agg if metric in agg_metrics else cmap_metrics
+
+            if metric in agg_metrics:
+                # Draw BARS for aggregate scores
+                bar_color = current_cmap(norm(val))
+
+                ax.barh(
+                    y=y_coord,
+                    width=val,
+                    left=x_coord,
+                    height=bar_h,
+                    color=bar_color,
+                    edgecolor="none",
+                )
+
+                # Draw white outline/box to suppress grid lines and provide visual cell separation
+                ax.hlines(y=y_coord + bar_h / 2, xmin=x_coord, xmax=x_coord + 1, color='white', linewidth=1)
+                ax.hlines(y=y_coord - bar_h / 2, xmin=x_coord, xmax=x_coord + 1, color='white', linewidth=1)
+                ax.vlines(x=x_coord, ymin=y_coord - bar_h / 2, ymax=y_coord + bar_h / 2, color='white', linewidth=1)
+                ax.vlines(x=x_coord + 1, ymin=y_coord - bar_h / 2, ymax=y_coord + bar_h / 2, color='white', linewidth=1)
+
+                text_color = "white" if val > 0.4 else "black"
+
+                ax.text(
+                    x_coord + 0.05,
+                    y_coord,
+                    f"{val:.2f}",
+                    ha="left",
+                    va="center",
+                    fontsize=9,
+                    color=text_color,
+                )
+
+            else:
+                # Draw CIRCLES for individual metrics
+                ax.scatter(
+                    x_coord + 0.5,
+                    y_coord,
+                    s=900 * cell_h,
+                    c=[current_cmap(norm(val))],
+                    edgecolor="0.8",
+                    linewidth=0.8,
+                )
+
+                text_color = "black" if (val > 0.2 and val < 0.8) else "white"
+
+                ax.text(
+                    x_coord + 0.5,
+                    y_coord,
+                    f"{val:.2f}",
+                    ha="center",
+                    va="center",
+                    fontsize=9,
+                    color=text_color,
+                )
+
+    # --- Grid Lines (Final Positioning and Dividers) ---
+
+    # 0. Disable all default grid lines
+    ax.grid(False)
+
+    # 1. Horizontal dotted lines at the ROW BOUNDARIES
+    for i in range(n_rows + 1):
+        ax.axhline(i, color="0.85", linewidth=0.8, linestyle="dotted")
+
+    # 2. Vertical Divider between Bio Conservation and Batch Correction
+    bio_batch_divider_x = len(bio_metrics) + len(middle_metrics)
+    ax.axvline(bio_batch_divider_x, color="0.3", linewidth=1.5, linestyle="-")
+
+    # 3. Vertical Dividers for Aggregate Scores
+    agg_start = len(normal_metrics) + agg_gap
+    ax.axvline(agg_start, color="0.3", linewidth=1.5)
+    # The line below, which was the final right-most line, is removed.
+    # ax.axvline(agg_start + len(agg_metrics), color="0.3", linewidth=1.5)
+
+    # --- Axis and Labels Setup ---
+    ax.set_xlim(0, n_cols + agg_gap)
+    ax.set_ylim(0, n_rows)
+    ax.set_xticks([])
+    ax.set_frame_on(False)
+
+    # Hiding Y-Axis Ticks
+    ax.tick_params(axis='y', length=0)
+
+    # --- Column Headers (Hierarchical - Two Layers - TOP and HORIZONTAL) ---
+
+    # 1. Top Layer Headers (Groups)
+    if bio_metrics or middle_metrics:
+        bio_start = 0
+        bio_width = len(bio_metrics) + len(middle_metrics)
+        ax.text(
+            bio_start + (bio_width / 2.0),
+            -0.5,
+            "Bio conservation",
+            ha="center",
+            va="center",
+            fontsize=10,
+            fontweight="bold"
+        )
+
+    if batch_metrics:
+        batch_start = len(bio_metrics) + len(middle_metrics)
+        batch_width = len(batch_metrics)
+        ax.text(
+            batch_start + (batch_width / 2.0),
+            -0.5,
+            "Batch correction",
+            ha="center",
+            va="center",
+            fontsize=10,
+            fontweight="bold"
+        )
+
+    if agg_metrics:
+        agg_center = agg_start + (len(agg_metrics) / 2.0)
+        ax.text(
+            agg_center,
+            -0.5,
+            "Aggregate score",
+            ha="center",
+            va="center",
+            fontsize=10,
+            fontweight="bold"
+        )
+
+    # 2. Bottom Layer Headers (Individual Metrics)
+    for idx, label in enumerate(normal_metrics):
+        ax.text(
+            idx + 0.5,
+            0.0,
+            label,
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            rotation=0,
+        )
+
+    for idx, label in enumerate(agg_metrics):
+        ax.text(
+            agg_start + idx + 0.5,
+            0.0,
+            label,
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            rotation=0,
+        )
+
+    # --- Y-axis (Method) Labels ---
+    ax.invert_yaxis()
+    ax.set_yticks(np.arange(n_rows) + 0.5)
+    ax.set_yticklabels(df.index.tolist(), fontsize=10)
+
+    plt.tight_layout()
+    save_multi("scIB_results_table", figdir)
+    plt.close(fig)
