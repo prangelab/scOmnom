@@ -3,6 +3,7 @@ channels:
   - conda-forge
   - bioconda
   - pytorch
+  - nvidia
   - defaults
 
 dependencies:
@@ -32,16 +33,13 @@ dependencies:
   - typer
   - pydantic
   - bbknn
-  # PyTorch (CPU only for portability; GPU will be used automatically on compute nodes)
-  - pytorch
-
-  # Optional acceleration (commented out)
-  # macOS Metal (uncomment on Apple Silicon):
-  # - pytorch::pytorch
-  # - conda-forge::mps
-
-  # Linux GPU CUDA wheels (ONLY install on GPU nodes):
-  # - pytorch-cuda=11.8
+  - pytorch::pytorch=2.0.1
+  - pytorch::torchvision=0.15.2
+  - pytorch::torchaudio=2.0.2
+  # # GPU ACCELERATION:
+  # # ON A MAC: AUTO ENABLED (METAL)
+  # # ON LINUX (NVIDIA GPU A100) - UNCOMMENT THIS LINE (ALSO ON HPC)
+  # # - pytorch::pytorch-cuda=12.1
 
   # Testing
   - pytest
