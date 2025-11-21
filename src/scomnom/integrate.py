@@ -16,6 +16,8 @@ from . import io_utils,plot_utils
 import torch
 torch.set_float32_matmul_precision('high')
 
+torch.set_float32_matmul_precision('high')
+
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_METHODS: tuple[str, ...] = ("Scanorama", "Harmony", "scVI", "BBKNN")
