@@ -33,9 +33,9 @@ dependencies:
   - typer
   - pydantic
   - bbknn
-  - pytorch::pytorch=2.0.1
-  - pytorch::torchvision=0.15.2
-  - pytorch::torchaudio=2.0.2
+  - pytorch::pytorch=2.1.0
+  - pytorch::torchvision=0.16.0
+  - pytorch::torchaudio=2.1.0
   # # GPU ACCELERATION:
   # # ON A MAC: AUTO ENABLED (METAL)
   # # ON LINUX (NVIDIA GPU A100) - UNCOMMENT THIS LINE (ALSO ON HPC)
