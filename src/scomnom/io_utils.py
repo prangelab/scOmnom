@@ -1,14 +1,21 @@
 from __future__ import annotations
-import scipy.sparse
 import glob
 import logging
-from pathlib import Path
 from typing import Dict, List, Optional
 import anndata as ad
 import scanpy as sc
 from .config import LoadAndQCConfig
+from pathlib import Path
+import shutil
 
 LOGGER = logging.getLogger(__name__)
+
+# Official CellTypist model registry
+CELLTYPIST_REGISTRY_URL = "https://celltypist.cog.sanger.ac.uk/models/models.json"
+
+# Local cache directory for downloaded models
+CELLTYPIST_CACHE = Path.home() / ".cache" / "scomnom" / "celltypist_models"
+CELLTYPIST_CACHE.mkdir(parents=True, exist_ok=True)
 
 
 def detect_sample_dirs(base: Path, patterns: list[str]) -> List[Path]:
@@ -333,3 +340,214 @@ def save_adata(adata: ad.AnnData, out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     adata.write(str(out_path), compression="gzip")
     LOGGER.info("Wrote %s", out_path)
+
+
+# =====================================================================
+# CellTypist model handling
+# =====================================================================
+import hashlib
+import requests
+
+
+def _celltypist_cache_dir() -> Path:
+    """Return the cache directory for CellTypist models."""
+    d = Path.home() / ".cache" / "scomnom" / "celltypist_models"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+def get_available_celltypist_models() -> List[Dict[str, str]]:
+    """
+    Retrieve CellTypist model list (v1.7.x compatible).
+    Returns list of dicts: {"name": model_name, "description": None}
+    """
+    try:
+        import celltypist
+        import celltypist.models as m
+        import pandas as pd
+
+        # This works in CellTypist 1.7.x
+        models_info = m.models_description()
+
+        # Convert output to DataFrame (this is what worked earlier)
+        df = pd.DataFrame(models_info).T  # Rows: ["model", "description"]
+
+        if "model" not in df.index:
+            LOGGER.error("Could not parse CellTypist model list (no 'model' row).")
+            return []
+
+        model_names = df.loc["model"].dropna().tolist()
+
+        return [{"name": str(name), "description": None} for name in model_names]
+
+    except Exception as e:
+        LOGGER.warning(f"Failed to retrieve CellTypist model list: {e}")
+        return []
+
+
+def _download_celltypist_model(url: str, out_path: Path, timeout: int = 60) -> None:
+    """
+    Download a CellTypist model from the given URL to out_path.
+    """
+    LOGGER.info("Downloading CellTypist model from %s", url)
+
+    try:
+        with requests.get(url, stream=True, timeout=timeout) as r:
+            r.raise_for_status()
+            with open(out_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+    except requests.RequestException as e:
+        raise RuntimeError(f"Failed to download CellTypist model from {url}: {e}")
+
+
+def get_celltypist_model(model_name_or_path: str) -> Path:
+    """
+    Resolve a CellTypist model path for CellTypist v1.7.1.
+
+    Cases:
+      1) Local file path -> return
+      2) Ensure model exists in registry
+      3) If cached -> return cached
+      4) If not cached -> bulk-download all CellTypist models
+                         then copy the requested one into scomnom’s cache
+    """
+    from pathlib import Path
+    import celltypist.models as ct_models
+    import shutil
+
+    # -------------------------------
+    # 1) User-specified local file
+    # -------------------------------
+    local_path = Path(model_name_or_path)
+    if local_path.exists():
+        LOGGER.info("Using local CellTypist model: %s", local_path)
+        return local_path.resolve()
+
+    # -------------------------------
+    # 2) Query registry
+    # -------------------------------
+    models = get_available_celltypist_models()  # [{"name","description","cached"},...]
+    if not models:
+        raise RuntimeError(
+            f"Model '{model_name_or_path}' is not a local file and the "
+            f"remote model list cannot be retrieved (offline?)."
+        )
+
+    available = [m["name"] for m in models]
+    if model_name_or_path not in available:
+        raise RuntimeError(
+            f"Model '{model_name_or_path}' not found in CellTypist registry.\n"
+            f"Available models: {', '.join(available)}"
+        )
+
+    # -------------------------------
+    # Determine cache directory
+    # -------------------------------
+    try:
+        cache_dir = Path(ct_models.MODELS_DIR)
+    except Exception:
+        cache_dir = Path.home() / ".cache" / "scomnom" / "celltypist_models"
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cached_model = cache_dir / model_name_or_path
+
+    # -------------------------------
+    # 3) Cached copy available?
+    # -------------------------------
+    if cached_model.exists():
+        LOGGER.info("Using cached CellTypist model: %s", cached_model)
+        return cached_model.resolve()
+
+    # -------------------------------
+    # 4) Not cached → bulk-download all models
+    # -------------------------------
+    from .io_utils import download_all_celltypist_models
+
+    LOGGER.info(
+        "Model '%s' not cached. Downloading all CellTypist models "
+        "because CellTypist v1.x does not support single-model download.",
+        model_name_or_path,
+    )
+
+    download_all_celltypist_models()
+
+    # Source location from CellTypist's internal cache
+    src = Path.home() / ".celltypist" / "data" / "models" / model_name_or_path
+
+    if not src.exists():
+        raise RuntimeError(
+            f"Bulk download completed but required model not found:\n{src}\n"
+            "This indicates CellTypist failed to download this specific file."
+        )
+
+    shutil.copy2(src, cached_model)
+    LOGGER.info("Copied model to scomnom cache: %s", cached_model)
+
+    return cached_model.resolve()
+
+
+def download_all_celltypist_models() -> None:
+    """
+    Download ALL official CellTypist models into the scomnom cache.
+
+    Notes:
+    - CellTypist v1.x does NOT support downloading a single model.
+    - `download_models()` always downloads the full model registry.
+    - This function calls CellTypist's downloader, then copies all
+      downloaded models into scomnom's cache directory.
+    """
+    import celltypist
+    import celltypist.models as ct_models
+
+    LOGGER.info("Using CellTypist version %s", celltypist.__version__)
+    LOGGER.info("Invoking CellTypist bulk model downloader")
+
+    # 1) Let CellTypist download its *entire* registry
+    try:
+        ct_models.download_models()   # v1.x always downloads all 59 models
+    except Exception as e:
+        raise RuntimeError(f"CellTypist failed while downloading models: {e}")
+
+    # 2) Identify CellTypist’s own storage directory
+    ct_home = Path.home() / ".celltypist" / "data" / "models"
+    if not ct_home.exists():
+        raise RuntimeError(
+            f"CellTypist reports models downloaded, but directory does not exist: {ct_home}"
+        )
+
+    # 3) Ensure scomnom cache exists
+    cache_dir = _celltypist_cache_dir()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # 4) Copy *.pkl models into scomnom cache
+    copied = 0
+    skipped = 0
+    for pkl in ct_home.glob("*.pkl"):
+        dest = cache_dir / pkl.name
+        if dest.exists():
+            LOGGER.info("Cached model already exists, skipping: %s", dest)
+            skipped += 1
+            continue
+
+        LOGGER.info("Copying model to scomnom cache: %s", pkl.name)
+        shutil.copy2(pkl, dest)
+        copied += 1
+
+    LOGGER.info(
+        "Model sync complete: %d copied, %d skipped. Cache at: %s",
+        copied,
+        skipped,
+        cache_dir,
+    )
+
+
+# =====================================================================
+# Export cluster annotations (unchanged)
+# =====================================================================
+def export_cluster_annotations(adata: ad.AnnData, columns: List[str], out_path: Path) -> None:
+    df = adata.obs[columns].copy()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_path, index=True)
+    LOGGER.info("Exported cluster annotations → %s", out_path)
+

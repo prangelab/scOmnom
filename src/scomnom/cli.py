@@ -2,18 +2,25 @@ from __future__ import annotations
 from typing import Optional, List
 import typer
 from pathlib import Path
+import warnings
+
+from .cell_qc import run_cell_qc
 from .load_and_filter import run_load_and_filter
 from .integrate import run_integration
 from .cluster_and_annotate import run_clustering
+
+from .config import CellQCConfig
 from .config import LoadAndQCConfig
-from .cell_qc import run_cell_qc
+from .config import IntegrationConfig
+from .config import ClusterAnnotateConfig
+
 from .logging_utils import init_logging
+
 
 ALLOWED_METHODS = {"scVI", "scANVI", "Scanorama", "Harmony", "BBKNN"}
 app = typer.Typer(help="scOmnom CLI")
 
-# Globally supress some warnings
-import warnings
+# Globally supress some warning
 warnings.filterwarnings(
     "ignore",
     message="Variable names are not unique",
@@ -69,10 +76,6 @@ def _normalize_methods(methods):
     return expanded
 
 
-
-# ----------------------------------------------------------
-# Standalone: scomnom cell-qc
-# ----------------------------------------------------------
 @app.command("cell-qc", help="Generate QC comparisons between raw, Cell Ranger–filtered, and CellBender matrices.")
 def cell_qc(
     # Input directories (0–3 provided)
@@ -118,8 +121,6 @@ def cell_qc(
     Useful for evaluating barcode calling and dataset quality **before** running full preprocessing.
     """
 
-    from .config import CellQCConfig
-    from .cell_qc import run_cell_qc
 
     logfile = output_dir / "cell_qc.log"
     init_logging(logfile)
@@ -146,6 +147,7 @@ def cell_qc(
 
     # --- run the module ---
     run_cell_qc(cfg)
+
 
 @app.command(
     "load-and-filter",
@@ -238,8 +240,6 @@ def load_and_filter(
 
     run_load_and_filter(cfg, logfile)
 
-from .config import IntegrationConfig
-from .integrate import run_integration
 
 @app.command(
     "integrate",
@@ -311,27 +311,170 @@ def integrate(
 
 @app.command(
     "cluster-and-annotate",
-    help="Generate clusters and annotations on an integrated dataset."
+    help="Perform clustering (resolution sweep + stability) and optional CellTypist annotation."
 )
-def cluster_and_annotate():
+def cluster_and_annotate(
+    # --- I/O ---
+    input_path: Optional[Path] = typer.Option(
+        None,
+        "--input",
+        "-i",
+        help="Integrated h5ad file produced by `scOmnom integrate`."
+    ),
+    output_path: Optional[Path] = typer.Option(
+        None,
+        "--out",
+        "-o",
+        help="Output h5ad. Defaults to <input>.clustered.annotated.h5ad"
+    ),
+
+    # --- Embeddings / keys ---
+    embedding_key: str = typer.Option(
+        "X_integrated",
+        help="Embedding key in .obsm to use for neighbors and silhouette scoring."
+    ),
+    batch_key: Optional[str] = typer.Option(
+        None,
+        help="Batch/sample column in adata.obs (default: auto-detect)."
+    ),
+    label_key: str = typer.Option(
+        "leiden",
+        help="Final cluster key stored in adata.obs."
+    ),
+
+    # --- Resolution sweep ---
+    res_min: float = typer.Option(0.2),
+    res_max: float = typer.Option(2.0),
+    n_resolutions: int = typer.Option(10),
+    penalty_alpha: float = typer.Option(0.02),
+
+    # --- Stability ---
+    stability_repeats: int = typer.Option(5),
+    subsample_frac: float = typer.Option(0.8),
+    random_state: int = typer.Option(42),
+
+    # --- CellTypist annotation ---
+    celltypist_model: Optional[str] = typer.Option(
+        "Immune_All_Low.pkl",
+        help="Path or name of CellTypist model. If None, skip annotation."
+    ),
+    celltypist_majority_voting: bool = typer.Option(True),
+    annotation_csv: Optional[Path] = typer.Option(None),
+
+    # --- Model management ---
+    list_models: bool = typer.Option(
+        False,
+        "--list-models",
+        help="List available CellTypist models and exit.",
+    ),
+    download_models: bool = typer.Option(
+        False,
+        "--download-models",
+        help=(
+                "Download ALL official CellTypist models into the scomnom cache.\n\n"
+                "⚠ NOTE: CellTypist v1.x does NOT support downloading a single model.\n"
+                "This option will trigger downloading ~59 models (approx 2–3 GB).\n"
+                "Already-downloaded models are skipped.\n"
+        ),
+    ),
+
+    # --- Figures ---
+    make_figures: bool = typer.Option(True),
+    figure_format: List[str] = typer.Option(["png", "pdf"]),
+    figdir_name: str = typer.Option("figures"),
+):
     """
-       Run clustering and annotation on an already preprocessed h5ad.
+    Run clustering + annotation, or list/download CellTypist models.
+    """
+    # ---------------------------------------------------------
+    # 1. Handle --list-models or --download-model EARLY
+    # ---------------------------------------------------------
+    if list_models:
+        from .io_utils import get_available_celltypist_models
+        from pathlib import Path
+        import os
 
-       This step:
-       - Loads the preprocessed AnnData
-       - Performs Leiden clustering (and optionally other clusterings)
-       - Generates UMAP/cluster plots
-       - Optionally performs marker-based annotation (if configured)
-       - Writes an updated annotated h5ad
+        typer.echo("\nAvailable CellTypist models:\n")
+        typer.echo("👉 Detailed model information can be found at `https://www.celltypist.org/models`\n")
 
-       Use after:
-           scOmnom load-and-filter
-       """
+        models = get_available_celltypist_models()
+        if not models:
+            typer.echo("Unable to fetch model list (offline?).")
+            raise typer.Exit()
 
-    logfile = output_dir / "cluster-and-annotate.log"
-    init_logging(logfile)
+        # Hardcoded official CellTypist cache dir
+        cache_dir = Path(os.path.expanduser("~/.celltypist/data/models"))
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        typer.echo(f"Cache directory: {cache_dir}\n")
 
-    run_clustering()
+        for m in models:
+            name = m["name"]
+            cached = (cache_dir / name).exists()
+            status = "✔ cached" if cached else "✘ not cached"
+            typer.echo(f"  - {name:<35} [{status}]")
+
+        raise typer.Exit()
+
+    if download_models:
+        from .io_utils import download_all_celltypist_models
+        typer.echo("Downloading ALL CellTypist models (required by CellTypist v1.x)...\n")
+        try:
+            download_all_celltypist_models()
+        except Exception as e:
+            typer.echo(f"Failed to download models: {e}")
+            raise typer.Exit(1)
+
+        typer.echo("\nDone.")
+        raise typer.Exit()
+
+    # ---------------------------------------------------------
+    # 2. Normal mode: input_path IS required
+    # ---------------------------------------------------------
+    if input_path is None:
+        raise typer.BadParameter(
+            "Missing required option --input / -i unless using --list-models or --download-model."
+        )
+
+    # ---------------------------------------------------------
+    # 3. Run full clustering + annotation
+    # ---------------------------------------------------------
+    log_path = (
+        output_path.parent / "cluster-and-annotate.log"
+        if output_path is not None
+        else input_path.parent / "cluster-and-annotate.log"
+    )
+    init_logging(log_path)
+
+    cfg = ClusterAnnotateConfig(
+        input_path=input_path,
+        output_path=output_path,
+
+        embedding_key=embedding_key,
+        batch_key=batch_key,
+        label_key=label_key,
+
+        res_min=res_min,
+        res_max=res_max,
+        n_resolutions=n_resolutions,
+        penalty_alpha=penalty_alpha,
+
+        stability_repeats=stability_repeats,
+        subsample_frac=subsample_frac,
+        random_state=random_state,
+
+        celltypist_model=celltypist_model,
+        celltypist_majority_voting=celltypist_majority_voting,
+        annotation_csv=annotation_csv,
+
+        make_figures=make_figures,
+        figure_formats=figure_format,
+        figdir_name=figdir_name,
+
+        logfile=log_path,
+    )
+
+    run_clustering(cfg)
+
 
 if __name__ == "__main__":
     app()

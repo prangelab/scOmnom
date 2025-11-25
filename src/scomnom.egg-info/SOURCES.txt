@@ -16,4 +16,5 @@ src/scomnom.egg-info/dependency_links.txt
 src/scomnom.egg-info/entry_points.txt
 src/scomnom.egg-info/requires.txt
 src/scomnom.egg-info/top_level.txt
+tests/test_celltypist_scraper.py
 tests/test_load_and_qc.py

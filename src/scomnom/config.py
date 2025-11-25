@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Optional, Dict, List
 from matplotlib.figure import Figure
 
+
 class LoadAndQCConfig(BaseModel):
     # I/O
     raw_sample_dir: Optional[Path] = Field(None, description="Directory with 10x raw_feature_bc_matrix folders")
@@ -156,3 +157,89 @@ class CellQCConfig(BaseModel):
             raise ValueError(f"Unsupported figure format '{fmt}'. Supported: {', '.join(sorted(supported))}")
         return fmt
 
+
+class ClusterAnnotateConfig(BaseModel):
+    # I/O
+    input_path: Path = Field(..., description="Integrated h5ad from the integration step")
+    output_path: Optional[Path] = Field(
+        None,
+        description="Output clustered/annotated h5ad. Defaults to <input>.clustered.annotated.h5ad",
+    )
+
+    # Embedding / batch / labels
+    embedding_key: str = Field(
+        "X_integrated",
+        description="Key in .obsm to use for neighbors / silhouette (default: X_integrated from integration)",
+    )
+    batch_key: Optional[str] = Field(
+        None,
+        description="Batch/sample key in adata.obs (default: auto-detect)",
+    )
+    label_key: str = Field(
+        "leiden",
+        description="Final cluster label key in adata.obs",
+    )
+
+    # Figure handling
+    figdir_name: str = "figures"
+    make_figures: bool = True
+    figure_formats: List[str] = Field(
+        default_factory=lambda: ["png", "pdf"],
+        description="Figure formats to save",
+    )
+
+    # Resolution sweep
+    res_min: float = Field(0.2, ge=0.0)
+    res_max: float = Field(2.0, ge=0.0)
+    n_resolutions: int = Field(10, ge=2)
+    penalty_alpha: float = Field(
+        0.02,
+        ge=0.0,
+        description="Penalty term for number of clusters in penalized silhouette",
+    )
+
+    # Stability analysis
+    stability_repeats: int = Field(5, ge=1)
+    subsample_frac: float = Field(
+        0.8,
+        gt=0.0,
+        le=1.0,
+        description="Fraction of cells to use per subsample for stability ARI",
+    )
+    random_state: int = 42
+
+    # CellTypist annotation
+    celltypist_model: Optional[str] = Field(
+        "Immune_All_Low.pkl",
+        description="CellTypist model to use. Either a local .pkl file or a model name from the "
+        "CellTypist registry (e.g. 'Immune_All_Low.pkl', 'Cells_Intestinal_Tract.pkl'). "
+        "Set to None to skip annotation.",
+    )
+    celltypist_majority_voting: bool = True
+    celltypist_label_key: str = "celltypist_label"
+    final_label_key: str = "final_label"
+    annotation_csv: Optional[Path] = Field(
+        None,
+        description="Optional CSV path to export cluster + annotation table",
+    )
+    available_models: Optional[List[str]] = None
+    celltypist_cluster_label_key: str = "celltypist_cluster_label"
+
+    # Logging
+    logfile: Optional[Path] = None
+
+    @property
+    def figdir(self) -> Path:
+        base = self.output_path.parent if self.output_path is not None else self.input_path.parent
+        return base / self.figdir_name
+
+    @validator("figure_formats", each_item=True)
+    def validate_formats(cls, fmt: str):
+        supported = Figure().canvas.get_supported_filetypes()
+        fmt = fmt.lower()
+        if fmt not in supported:
+            raise ValueError(
+                f"Unsupported figure format '{fmt}'. "
+                f"Supported formats include: {', '.join(sorted(supported))}"
+            )
+        return fmt

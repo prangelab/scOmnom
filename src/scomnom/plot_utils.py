@@ -721,3 +721,111 @@ def plot_scib_results_table(scaled: pd.DataFrame, figdir: Path) -> None:
     plt.tight_layout()
     save_multi("scIB_results_table", figdir)
     plt.close(fig)
+
+
+def plot_clustering_resolution_sweep(
+    resolutions: np.ndarray,
+    silhouette_scores: List[float],
+    n_clusters: List[int],
+    penalized_scores: List[float],
+    figdir: Path,
+) -> None:
+    """Plot silhouette, #clusters, and penalized score across resolutions."""
+    import matplotlib.pyplot as plt
+
+    fig, axs = plt.subplots(1, 3, figsize=(14, 4))
+
+    # Silhouette
+    ax = axs[0]
+    _clean_axes(ax)
+    ax.plot(resolutions, silhouette_scores, marker="o")
+    ax.set_title("Silhouette score")
+    ax.set_xlabel("Resolution")
+    ax.set_ylabel("Score")
+
+    # Number of clusters
+    ax = axs[1]
+    _clean_axes(ax)
+    ax.plot(resolutions, n_clusters, marker="o")
+    ax.set_title("Number of clusters")
+    ax.set_xlabel("Resolution")
+    ax.set_ylabel("Clusters")
+
+    # Penalized silhouette
+    ax = axs[2]
+    _clean_axes(ax)
+    ax.plot(resolutions, penalized_scores, marker="o")
+    ax.set_title("Penalized score\n(silhouette - α·N)")
+    ax.set_xlabel("Resolution")
+    ax.set_ylabel("Score")
+
+    fig.tight_layout()
+    save_multi("clustering_resolution_sweep", figdir)
+
+
+def plot_clustering_ari_heatmap(
+    ari_matrix: pd.DataFrame,
+    figdir: Path,
+) -> None:
+    """Heatmap of ARI between clusterings at different resolutions."""
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    _clean_axes(ax)
+    sns.heatmap(
+        ari_matrix.astype(float),
+        annot=True,
+        fmt=".2f",
+        cmap="viridis",
+        ax=ax,
+    )
+    ax.set_title("ARI between resolutions")
+    plt.tight_layout()
+    save_multi("clustering_ari_between_resolutions", figdir)
+
+
+def plot_clustering_stability_ari(
+    stability_aris: List[float],
+    figdir: Path,
+) -> None:
+    """Line plot of ARI vs repetition for subsampling stability."""
+    import matplotlib.pyplot as plt
+
+    if not stability_aris:
+        return
+
+    repeats = np.arange(1, len(stability_aris) + 1)
+    mean_ari = float(np.mean(stability_aris))
+
+    fig, ax = plt.subplots(figsize=(5, 4))
+    _clean_axes(ax)
+    ax.plot(repeats, stability_aris, marker="o", label="ARI")
+    ax.axhline(mean_ari, color="red", linestyle="--", label=f"Mean ARI = {mean_ari:.3f}")
+    ax.set_title("Subsampling stability (ARI)")
+    ax.set_xlabel("Repeat")
+    ax.set_ylabel("ARI with full data")
+    ax.legend(frameon=False)
+
+    fig.tight_layout()
+    save_multi("clustering_stability_ari", figdir)
+
+
+def plot_cluster_umaps(
+    adata,
+    label_key: str,
+    batch_key: str,
+    figdir: Path,
+) -> None:
+    """UMAPs colored by cluster and batch for the clustering stage."""
+    # Leiden / cluster
+    sc.pl.umap(adata, color=[label_key], show=False)
+    save_multi(f"cluster_umap_{label_key}", figdir)
+
+    # Batch / sample
+    if batch_key in adata.obs:
+        sc.pl.umap(adata, color=[batch_key], show=False)
+        save_multi(f"cluster_umap_{batch_key}", figdir)
+
+        sc.pl.umap(adata, color=[batch_key, label_key], legend_loc="on data", show=False)
+        save_multi(f"cluster_umap_{batch_key}_and_{label_key}", figdir)

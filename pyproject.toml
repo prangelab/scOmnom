@@ -30,7 +30,9 @@ dependencies = [
   "kneed",
   "h5py",
   "psutil",
-  "umap-learn"
+  "umap-learn",
+  "celltypist",
+  "requests",
 ]
 
 [project.scripts]

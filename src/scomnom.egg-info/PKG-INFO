@@ -23,3 +23,5 @@ Requires-Dist: kneed
 Requires-Dist: h5py
 Requires-Dist: psutil
 Requires-Dist: umap-learn
+Requires-Dist: celltypist
+Requires-Dist: requests

@@ -57,3 +57,5 @@ dependencies:
       - scvi-tools
       - scib-metrics
       - types-pytz
+      - celltypist
+      - requests

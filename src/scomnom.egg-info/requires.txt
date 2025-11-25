@@ -15,3 +15,5 @@ kneed
 h5py
 psutil
 umap-learn
+celltypist
+requests
