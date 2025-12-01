@@ -137,21 +137,9 @@ def main():
     outdir = Path("synthetic_demo_results")
     outdir.mkdir(exist_ok=True)
 
-    # Write temp h5ad BEFORE creating cfg
-    temp = outdir / "temp_input.h5ad"
-    adata.write(temp)
-
-    # Inject batch key (single batch)
-    adata.obs["batch"] = "batch1"
-
-    print("Running full clustering pipeline...")
-
     cfg = ClusterAnnotateConfig(
-        input_path=temp,                 # <-- REQUIRED by Pydantic
         output_path=outdir / "synthetic.clustered.annotated.h5ad",
-
         embedding_key="X_umap",
-        batch_key="batch",
         label_key="leiden",
 
         bio_guided_clustering=True,
@@ -178,15 +166,12 @@ def main():
         figure_formats=["png"],
         figdir_name="figs_synth_demo",
 
-        celltypist_model=None,          # Disable CellTypist
     )
 
-    # Now everything is valid — run pipeline
     run_clustering(cfg)
 
     print("\nSynthetic demo complete.")
     print(f"→ Results written to {outdir}")
-
 
 
 if __name__ == "__main__":
