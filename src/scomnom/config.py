@@ -208,22 +208,34 @@ class ClusterAnnotateConfig(BaseModel):
     )
     random_state: int = 42
 
-    # CellTypist annotation
+    tiny_cluster_size: int = 20
+    min_cluster_size: int = 20
+    min_plateau_len: int = 3
+    max_cluster_jump_frac: float = 0.4
+    stability_threshold: float = 0.85
+
+    w_stab: float = 0.50
+    w_sil: float = 0.35
+    w_tiny: float = 0.15
+
+    # Celltypist annotation
     celltypist_model: Optional[str] = Field(
         "Immune_All_Low.pkl",
-        description="CellTypist model to use. Either a local .pkl file or a model name from the "
-        "CellTypist registry (e.g. 'Immune_All_Low.pkl', 'Cells_Intestinal_Tract.pkl'). "
-        "Set to None to skip annotation.",
+        description="Path or name of CellTypist model (.pkl file). If None, skip annotation.",
     )
     celltypist_majority_voting: bool = True
     celltypist_label_key: str = "celltypist_label"
-    final_label_key: str = "final_label"
-    annotation_csv: Optional[Path] = Field(
-        None,
-        description="Optional CSV path to export cluster + annotation table",
+    final_label_key: str = Field(
+        "leiden",
+        description="Final annotation label. "
+                    "If CellTypist is run, this will be overwritten to celltypist_cluster_label."
     )
-    available_models: Optional[List[str]] = None
+
+    # cluster-collapsed CellTypist label
     celltypist_cluster_label_key: str = "celltypist_cluster_label"
+
+    annotation_csv: Optional[Path] = None
+    available_models: Optional[List[Dict[str, str]]] = None
 
     # Logging
     logfile: Optional[Path] = None

@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Sequence, Optional
 
 import anndata as ad
 import numpy as np
 import pandas as pd
 import scanpy as sc
-from sklearn.metrics import silhouette_score, adjusted_rand_score
+from sklearn.metrics import adjusted_rand_score, silhouette_samples, silhouette_score
 
 from .config import ClusterAnnotateConfig
 from .load_and_filter import setup_logging
@@ -50,84 +51,592 @@ def _compute_resolutions(cfg: ClusterAnnotateConfig) -> np.ndarray:
     return np.linspace(cfg.res_min, cfg.res_max, cfg.n_resolutions, endpoint=True)
 
 
+def _res_key(r: float | str) -> str:
+    """Canonical resolution key string (3 decimals, for external-facing keys)."""
+    return f"{float(r):.3f}"
+
+
+def _centroid_silhouette(X: np.ndarray, labels: np.ndarray) -> float:
+    """
+    Compute a centroid-based separation score in the given embedding X.
+
+    Parameters
+    ----------
+    X : ndarray, shape (n_cells, n_dims)
+    labels : ndarray, shape (n_cells,)
+
+    Returns
+    -------
+    float
+        Mean centroid-based separation across clusters. NaN if <2 clusters.
+    """
+    unique = np.unique(labels)
+    if unique.size < 2:
+        return float("nan")
+
+    centroids = []
+    for cid in unique:
+        mask = labels == cid
+        if not np.any(mask):
+            continue
+        centroids.append(X[mask].mean(axis=0))
+    centroids = np.vstack(centroids)
+    k = centroids.shape[0]
+    if k < 2:
+        return float("nan")
+
+    # pairwise distances between centroids
+    diff = centroids[:, None, :] - centroids[None, :, :]
+    D = np.linalg.norm(diff, axis=2)  # shape (k, k)
+
+    s_vals = []
+    for i in range(k):
+        d_i = D[i].copy()
+        d_i[i] = np.inf
+        a_i = float(np.min(d_i))  # nearest other centroid
+        b_i = float(np.mean(d_i[np.isfinite(d_i)])) if np.isfinite(d_i).any() else 0.0
+        denom = max(a_i, b_i)
+        if denom <= 0.0:
+            s_i = 0.0
+        else:
+            s_i = (b_i - a_i) / denom
+        s_vals.append(s_i)
+
+    return float(np.mean(s_vals)) if s_vals else float("nan")
+
+
+# -------------------------------------------------------------------------
+# Resolution-selection data structures and helpers
+# -------------------------------------------------------------------------
+@dataclass
+class ResolutionMetrics:
+    resolutions: List[float]
+    silhouette: Dict[float, float]
+    cluster_counts: Dict[float, int]
+    cluster_sizes: Dict[float, np.ndarray]
+    labels_per_resolution: Dict[float, np.ndarray]
+    ari_adjacent: Optional[Dict[Tuple[float, float], float]] = None
+
+
+@dataclass
+class ResolutionSelectionConfig:
+    stability_threshold: float = 0.85
+    min_plateau_len: int = 3
+    max_cluster_jump_frac: float = 0.4
+    min_cluster_size: int = 20
+    tiny_cluster_size: int = 20
+    w_stab: float = 0.50
+    w_sil: float = 0.35
+    w_tiny: float = 0.15
+
+
+@dataclass
+class Plateau:
+    resolutions: List[float]
+    mean_stability: float
+
+
+@dataclass
+class ResolutionSelectionResult:
+    best_resolution: float
+    scores: Dict[float, float]
+    stability: Dict[float, float]
+    tiny_cluster_penalty: Dict[float, float]
+    plateaus: List[Plateau]
+
+
+def _compute_ari_adjacent(
+    resolutions: Sequence[float],
+    labels_per_resolution: Dict[float, np.ndarray],
+) -> Dict[Tuple[float, float], float]:
+    """Compute ARI between adjacent resolutions."""
+    ari_adjacent: Dict[Tuple[float, float], float] = {}
+    sorted_res = sorted(resolutions)
+    for r1, r2 in zip(sorted_res[:-1], sorted_res[1:]):
+        labels1 = labels_per_resolution[r1]
+        labels2 = labels_per_resolution[r2]
+        ari = adjusted_rand_score(labels1, labels2)
+        ari_adjacent[(r1, r2)] = float(ari)
+    return ari_adjacent
+
+
+def _compute_smoothed_stability(
+    resolutions: Sequence[float],
+    ari_adjacent: Dict[Tuple[float, float], float],
+) -> Dict[float, float]:
+    """
+    Smoothed ARI-based stability per resolution.
+    For resolution r_i we average ARI(r_{i-1}, r_i) and ARI(r_i, r_{i+1}) where available.
+    """
+    sorted_res = sorted(resolutions)
+    stab: Dict[float, float] = {}
+
+    for i, r in enumerate(sorted_res):
+        terms: List[float] = []
+        if i > 0:
+            r_prev = sorted_res[i - 1]
+            key = (r_prev, r)
+            if key in ari_adjacent:
+                terms.append(ari_adjacent[key])
+        if i < len(sorted_res) - 1:
+            r_next = sorted_res[i + 1]
+            key = (r, r_next)
+            if key in ari_adjacent:
+                terms.append(ari_adjacent[key])
+        stab[r] = float(np.mean(terms)) if terms else 0.0
+    return stab
+
+
+def _detect_plateaus(
+    metrics: ResolutionMetrics,
+    config: ResolutionSelectionConfig,
+    stability: Dict[float, float],
+) -> List[Plateau]:
+    """
+    Detect plateau segments:
+    - contiguous in sorted resolutions
+    - stability >= threshold
+    - cluster count does not jump more than max_cluster_jump_frac
+    - median cluster size >= min_cluster_size
+    - minimum cluster size >= 5 (hard constraint against singletons)
+    """
+    sorted_res = sorted(metrics.resolutions)
+    plateaus: List[Plateau] = []
+
+    current_segment: List[float] = []
+
+    for idx, r in enumerate(sorted_res):
+        stab_ok = stability.get(r, 0.0) >= config.stability_threshold
+
+        # cluster-count continuity vs previous (with min denominator of 10)
+        if idx > 0:
+            r_prev = sorted_res[idx - 1]
+            n_prev = metrics.cluster_counts[r_prev]
+            n_curr = metrics.cluster_counts[r]
+            denom = max(10, n_prev)
+            jump = robust_cluster_jump(n_prev, n_curr, alpha=10)
+            jump_ok = jump <= config.max_cluster_jump_frac
+        else:
+            jump_ok = True
+
+        # cluster size constraints
+        sizes = metrics.cluster_sizes[r]
+        median_size = float(np.median(sizes)) if sizes.size > 0 else 0.0
+        size_ok = median_size >= config.min_cluster_size
+        min_ok = (sizes.size == 0) or (sizes.min() >= 5)
+
+        if stab_ok and jump_ok and size_ok and min_ok:
+            current_segment.append(r)
+        else:
+            if len(current_segment) >= config.min_plateau_len:
+                mean_stab = float(np.mean([stability[x] for x in current_segment]))
+                plateaus.append(
+                    Plateau(
+                        resolutions=current_segment.copy(),
+                        mean_stability=mean_stab,
+                    )
+                )
+            current_segment = []
+
+    # tail
+    if len(current_segment) >= config.min_plateau_len:
+        mean_stab = float(np.mean([stability[x] for x in current_segment]))
+        plateaus.append(
+            Plateau(
+                resolutions=current_segment.copy(),
+                mean_stability=mean_stab,
+            )
+        )
+
+    return plateaus
+
+
+def _normalize_scores(d: Dict[float, float]) -> Dict[float, float]:
+    """Normalize dict values to [0, 1] to make them comparable."""
+    if not d:
+        return {}
+    vals = np.array(list(d.values()), dtype=float)
+    vmin = float(vals.min())
+    vmax = float(vals.max())
+    if vmax == vmin:
+        return {k: 0.0 for k in d}
+    return {k: (v - vmin) / (vmax - vmin) for k, v in d.items()}
+
+
+def compute_tiny_cluster_penalty(cluster_sizes: np.ndarray, tiny_threshold: int):
+    """
+    Combined tiny-cluster penalty:
+    1. penalty_cluster_fraction: fraction of clusters that are NOT tiny
+    2. penalty_cell_fraction: fraction of cells NOT inside tiny clusters
+
+    Both are in [0,1]. Final score is the mean of the two.
+    """
+    total_clusters = len(cluster_sizes)
+    total_cells = np.sum(cluster_sizes)
+
+    if total_clusters == 0 or total_cells == 0:
+        return 1.0  # neutral high score
+
+    tiny_mask = cluster_sizes < tiny_threshold
+    n_tiny = np.sum(tiny_mask)
+    cells_in_tiny = np.sum(cluster_sizes[tiny_mask])
+
+    # --- 1. cluster-fraction penalty (your old metric)
+    frac_tiny_clusters = n_tiny / total_clusters
+    penalty_cluster_fraction = 1.0 - frac_tiny_clusters
+
+    # --- 2. cell-fraction penalty (Gemini suggestion)
+    frac_cells_in_tiny = cells_in_tiny / total_cells
+    penalty_cell_fraction = 1.0 - frac_cells_in_tiny
+
+    # Combined penalty (equal weights)
+    combined_penalty = 0.5 * (penalty_cluster_fraction + penalty_cell_fraction)
+
+    return float(combined_penalty)
+
+
+def robust_cluster_jump(k_prev, k_curr, alpha=10):
+    """
+    Robust jump metric:
+    jump = |k_curr - k_prev| / max(k_prev, alpha)
+    Prevents division by very small k.
+    """
+    denom = max(k_prev, alpha)
+    return abs(k_curr - k_prev) / denom
+
+
+def select_best_resolution(
+    metrics: ResolutionMetrics,
+    config: ResolutionSelectionConfig,
+) -> ResolutionSelectionResult:
+    """
+    Main entry point for resolution selection.
+
+    Uses:
+    - smoothed ARI stability
+    - centroid-based silhouette
+    - tiny-cluster penalty
+    - plateau detection
+    - local-maxima fallback
+    - border guard to avoid selecting max resolution spuriously
+    """
+    # ------------------------------------------------------------------
+    # 1. Adjacent ARIs (compute if missing)
+    # ------------------------------------------------------------------
+    if metrics.ari_adjacent is None:
+        ari_adjacent = _compute_ari_adjacent(
+            resolutions=metrics.resolutions,
+            labels_per_resolution=metrics.labels_per_resolution,
+        )
+    else:
+        ari_adjacent = metrics.ari_adjacent
+
+    # ------------------------------------------------------------------
+    # 2. Compute stability and penalties
+    # ------------------------------------------------------------------
+    stability = _compute_smoothed_stability(
+        resolutions=metrics.resolutions,
+        ari_adjacent=ari_adjacent,
+    )
+    # Compute tiny-cluster penalty for every resolution
+    tiny_penalty = {}
+
+    for r in sorted(metrics.resolutions):
+        tiny_penalty[r] = compute_tiny_cluster_penalty(
+            metrics.cluster_sizes[r],
+            config.tiny_cluster_size
+        )
+
+    # Normalize tiny penalties to [0,1] (like sil & stab)
+    tiny_vals = np.array(list(tiny_penalty.values()), dtype=float)
+    tiny_min, tiny_max = float(np.nanmin(tiny_vals)), float(np.nanmax(tiny_vals))
+    if tiny_max - tiny_min > 1e-9:
+        tiny_norm = {
+            r: (tiny_penalty[r] - tiny_min) / (tiny_max - tiny_min)
+            for r in tiny_penalty
+        }
+    else:
+        tiny_norm = {r: 1.0 for r in tiny_penalty}
+
+    # Normalized  for weighted scoring
+    sil_norm = _normalize_scores(metrics.silhouette)
+    stab_norm = _normalize_scores(stability)
+
+    # Composite score function
+    def composite_score(r: float) -> float:
+        return (
+            config.w_stab * stab_norm.get(r, 0.0)
+            + config.w_sil * sil_norm.get(r, 0.0)
+            + config.w_tiny * tiny_norm.get(r, 0.0)
+        )
+
+    all_scores = {r: composite_score(r) for r in metrics.resolutions}
+
+    # ------------------------------------------------------------------
+    # 3. Plateau-first selection
+    # ------------------------------------------------------------------
+    plateaus = _detect_plateaus(metrics, config, stability)
+
+    if plateaus:
+        # Sort plateaus by (mean stability, length)
+        plateaus_sorted = sorted(
+            plateaus,
+            key=lambda p: (p.mean_stability, len(p.resolutions)),
+            reverse=True,
+        )
+        best_plateau = plateaus_sorted[0]
+        plateau_res = sorted(best_plateau.resolutions)
+
+        mid_idx = len(plateau_res) // 2
+        best_resolution = float(plateau_res[mid_idx])
+
+        LOGGER.info(
+            "Selected resolution %.3f from plateau [%s] with mean stability=%.3f "
+            "(center-of-plateau rule).",
+            best_resolution,
+            ", ".join(f"{r:.3f}" for r in plateau_res),
+            best_plateau.mean_stability,
+        )
+
+        return ResolutionSelectionResult(
+            best_resolution=best_resolution,
+            scores=all_scores,
+            stability=stability,
+            tiny_cluster_penalty=tiny_penalty,
+            plateaus=plateaus,
+        )
+
+    # ------------------------------------------------------------------
+    # 4. Fallback — no plateau
+    # ------------------------------------------------------------------
+    sorted_res = sorted(metrics.resolutions)
+    max_r = max(sorted_res)
+    min_r = min(sorted_res)
+
+    # Step A — global best resolution by composite score
+    best_r_by_score = max(all_scores, key=all_scores.get)
+
+    # ------------------------------------------------------------------
+    # Step B — Border guard:
+    # NEVER select maximum resolution if silhouette is weak.
+    # ------------------------------------------------------------------
+    if (
+        float(best_r_by_score) == float(max_r)
+        and metrics.silhouette.get(max_r, -1.0) < 0.15
+    ):
+        LOGGER.info(
+            "Border guard: composite optimum at max resolution %.3f but silhouette=%.3f < 0.15. "
+            "Falling back to lowest resolution.",
+            max_r,
+            metrics.silhouette.get(max_r, float('nan')),
+        )
+        best_resolution = float(min_r)
+        return ResolutionSelectionResult(
+            best_resolution=best_resolution,
+            scores=all_scores,
+            stability=stability,
+            tiny_cluster_penalty=tiny_penalty,
+            plateaus=plateaus,
+        )
+
+    # ------------------------------------------------------------------
+    # Step C — Local maxima detection in composite score curve
+    # ------------------------------------------------------------------
+    scores_arr = np.array([all_scores[r] for r in sorted_res])
+    n = len(sorted_res)
+
+    local_max_idx = []
+    for i in range(1, n - 1):
+        if scores_arr[i] > scores_arr[i - 1] and scores_arr[i] > scores_arr[i + 1]:
+            local_max_idx.append(i)
+
+    # Exclude border points (never select 0 or last index)
+    local_max_idx = [i for i in local_max_idx if i not in (0, n - 1)]
+
+    if local_max_idx:
+        # Pick strongest local maximum
+        best_idx = max(local_max_idx, key=lambda k: scores_arr[k])
+        best_resolution = float(sorted_res[best_idx])
+
+        LOGGER.info(
+            "No plateau; selecting strongest LOCAL MAXIMUM at %.3f (score=%.3f).",
+            best_resolution,
+            scores_arr[best_idx],
+        )
+
+        return ResolutionSelectionResult(
+            best_resolution=best_resolution,
+            scores=all_scores,
+            stability=stability,
+            tiny_cluster_penalty=tiny_penalty,
+            plateaus=plateaus,
+        )
+
+    # ------------------------------------------------------------------
+    # Step D — fallback if:
+    #  - no plateau
+    #  - no local maxima
+    # ------------------------------------------------------------------
+    # If global optimum is at border → pick the best *interior* resolution
+    if float(best_r_by_score) in (float(min_r), float(max_r)):
+        interior = sorted_res[1:-1]
+        interior_best = max(interior, key=lambda r: all_scores[r])
+        best_resolution = float(interior_best)
+
+        LOGGER.info(
+            "No plateau and no local maxima; global score peak was at border. "
+            "Selecting best interior resolution %.3f (score=%.3f).",
+            best_resolution,
+            all_scores[best_resolution],
+        )
+    else:
+        # Otherwise accept global best
+        best_resolution = float(best_r_by_score)
+        LOGGER.info(
+            "No plateau and no local maxima; selected %.3f by global composite score.",
+            best_resolution,
+        )
+
+    # ------------------------------------------------------------------
+    # Final return (fallback path)
+    # ------------------------------------------------------------------
+    return ResolutionSelectionResult(
+        best_resolution=best_resolution,
+        scores=all_scores,
+        stability=stability,
+        tiny_cluster_penalty=tiny_penalty,
+        plateaus=plateaus,
+    )
+
+
+# -------------------------------------------------------------------------
+# Resolution sweep and stability
+# -------------------------------------------------------------------------
 def _resolution_sweep(
     adata: ad.AnnData,
     cfg: ClusterAnnotateConfig,
     embedding_key: str,
-) -> Tuple[float, Dict[str, object]]:
+) -> Tuple[float, Dict[str, object], Dict[str, np.ndarray]]:
     """
     Sweep over a range of Leiden resolutions and compute:
-    - Silhouette score in the chosen embedding
-    - Number of clusters
-    - Penalized score = silhouette - alpha * n_clusters
+    - Centroid-based separation score in the chosen embedding
+    - Number of clusters and cluster sizes
     - ARI matrix between all resolutions (Clustree-style)
+    - Composite stability score with plateau-aware selection
+
+    Returns
+    -------
+    best_res : float
+        Selected resolution (as float).
+    sweep : dict
+        Sweep diagnostics, with float-based keys internally.
+    clusterings_str : dict
+        Mapping resolution_key (str, '0.200') -> label array.
     """
     resolutions = _compute_resolutions(cfg)
-    clusterings: Dict[float, np.ndarray] = {}
+    res_list = [float(r) for r in resolutions]
+
+    clusterings_float: Dict[float, np.ndarray] = {}
     silhouette_scores: List[float] = []
     n_clusters_list: List[int] = []
     penalized_scores: List[float] = []
+    cluster_sizes: Dict[float, np.ndarray] = {}
+
+    X = adata.obsm[embedding_key]
 
     # Sweep resolutions
     for res in resolutions:
-        key = f"{cfg.label_key}_{res:.2f}"
-        LOGGER.info("Running Leiden clustering at resolution %.2f -> key '%s'", res, key)
+        res_f = float(res)
+        key = f"{cfg.label_key}_{res_f:.2f}"
+        LOGGER.info("Running Leiden clustering at resolution %.2f -> key '%s'", res_f, key)
         sc.tl.leiden(
             adata,
-            resolution=float(res),
+            resolution=res_f,
             key_added=key,
             random_state=cfg.random_state,
             flavor="igraph",
         )
         labels = adata.obs[key].to_numpy()
-        clusterings[res] = labels
+        clusterings_float[res_f] = labels
 
-        n_clusters = int(np.unique(labels).size)
+        vc = pd.Series(labels).value_counts().sort_index()
+        n_clusters = int(vc.size)
         n_clusters_list.append(n_clusters)
+        sizes = vc.to_numpy(dtype=int)
+        cluster_sizes[res_f] = sizes
 
-        if n_clusters <= 1:
-            sil = -1.0
-        else:
-            sil = float(silhouette_score(adata.obsm[embedding_key], labels))
-
+        sil = _centroid_silhouette(X, labels)
         silhouette_scores.append(sil)
         penalized_scores.append(sil - cfg.penalty_alpha * n_clusters)
 
         LOGGER.info(
-            "Resolution %.2f: %d clusters, silhouette=%.3f, penalized=%.3f",
-            res,
+            "Resolution %.2f: %d clusters, centroid_score=%.3f, penalized=%.3f",
+            res_f,
             n_clusters,
             sil,
             penalized_scores[-1],
         )
 
-    # ARI across all resolutions
-    col_names = [f"{r:.2f}" for r in resolutions]
+    # ARI across all resolutions (for heatmap and debugging)
+    col_names = [f"{r:.2f}" for r in res_list]
     ari_matrix = pd.DataFrame(index=col_names, columns=col_names, dtype=float)
-
-    for i, r1 in enumerate(resolutions):
-        for j, r2 in enumerate(resolutions):
-            ari = adjusted_rand_score(clusterings[r1], clusterings[r2])
+    for i, r1 in enumerate(res_list):
+        for j, r2 in enumerate(res_list):
+            ari = adjusted_rand_score(clusterings_float[r1], clusterings_float[r2])
             ari_matrix.iat[i, j] = float(ari)
 
-    penalized_scores_arr = np.asarray(penalized_scores, dtype=float)
-    best_idx = int(np.argmax(penalized_scores_arr))
-    best_res = float(resolutions[best_idx])
+    # Build metrics for selection
+    metrics = ResolutionMetrics(
+        resolutions=res_list,
+        silhouette={r: s for r, s in zip(res_list, silhouette_scores)},
+        cluster_counts={r: n for r, n in zip(res_list, n_clusters_list)},
+        cluster_sizes=cluster_sizes,
+        labels_per_resolution=clusterings_float,
+    )
+
+    sel_cfg = ResolutionSelectionConfig(
+        stability_threshold=getattr(cfg, "stability_threshold", 0.85),
+        min_plateau_len=getattr(cfg, "min_plateau_len", 3),
+        max_cluster_jump_frac=getattr(cfg, "max_cluster_jump_frac", 0.4),
+        min_cluster_size=getattr(cfg, "min_cluster_size", 20),
+        tiny_cluster_size=getattr(cfg, "tiny_cluster_size", 20),
+        w_stab=getattr(cfg, "w_stab", 0.50),
+        w_sil=getattr(cfg, "w_sil", 0.35),
+        w_tiny=getattr(cfg, "w_tiny", 0.15),
+    )
+
+    selection = select_best_resolution(metrics, sel_cfg)
+    best_res = float(selection.best_resolution)
 
     LOGGER.info(
-        "Selected optimal resolution %.2f (penalized silhouette=%.3f)",
+        "Selected optimal resolution %.3f (composite score=%.3f)",
         best_res,
-        penalized_scores_arr[best_idx],
+        selection.scores[best_res],
     )
 
     sweep = {
-        "resolutions": resolutions,
+        "resolutions": np.array(res_list, dtype=float),
         "silhouette_scores": silhouette_scores,
         "n_clusters": n_clusters_list,
         "penalized_scores": penalized_scores,
         "ari_matrix": ari_matrix,
+        "composite_scores": [selection.scores[r] for r in res_list],
+        "stability_scores": [selection.stability[r] for r in res_list],
+        "tiny_cluster_penalty": [selection.tiny_cluster_penalty[r] for r in res_list],
+        "cluster_sizes": cluster_sizes,
+        "plateaus": [
+            {"resolutions": p.resolutions, "mean_stability": p.mean_stability}
+            for p in selection.plateaus
+        ],
+        "selection_config": asdict(sel_cfg),
     }
-    return best_res, sweep
+
+    # Externally-facing mapping: resolution key as '0.200', '0.600', ...
+    clusterings_str: Dict[str, np.ndarray] = {
+        _res_key(r): labs for r, labs in clusterings_float.items()
+    }
+
+    return best_res, sweep, clusterings_str
 
 
 def _subsampling_stability(
@@ -143,7 +652,7 @@ def _subsampling_stability(
     - Compute ARI vs reference clustering on overlapping cells
     """
     ref_key = f"{cfg.label_key}_stab_ref"
-    LOGGER.info("Computing reference clustering for stability at resolution %.2f", best_res)
+    LOGGER.info("Computing reference clustering for stability at resolution %.3f", best_res)
     sc.tl.leiden(
         adata,
         resolution=float(best_res),
@@ -199,7 +708,7 @@ def _apply_final_clustering(
     and set a consistent color palette.
     """
     LOGGER.info(
-        "Applying final Leiden clustering at resolution %.2f -> key '%s'",
+        "Applying final Leiden clustering at resolution %.3f -> key '%s'",
         best_res,
         cfg.label_key,
     )
@@ -247,8 +756,10 @@ def _run_celltypist_annotation(
     LOGGER.info("Loading CellTypist model from %s", model_path)
     model = Model.load(str(model_path))
 
-    LOGGER.info("Running CellTypist annotation (majority_voting=%s)...",
-                cfg.celltypist_majority_voting)
+    LOGGER.info(
+        "Running CellTypist annotation (majority_voting=%s)...",
+        cfg.celltypist_majority_voting,
+    )
 
     predictions = celltypist.annotate(
         adata,
@@ -256,21 +767,103 @@ def _run_celltypist_annotation(
         majority_voting=cfg.celltypist_majority_voting,
     )
 
-    # Prefer majority voting labels if present
+    # majority_voting labels if available, otherwise main predictions
     if "majority_voting" in predictions.predicted_labels:
-        labels = predictions.predicted_labels["majority_voting"]
+        cell_level_labels = predictions.predicted_labels["majority_voting"]
     else:
-        labels = predictions.predicted_labels
+        cell_level_labels = predictions.predicted_labels
 
-    adata.obs[cfg.celltypist_label_key] = labels
-    adata.obs[cfg.final_label_key] = adata.obs[cfg.celltypist_label_key]
+    # Store per-cell CellTypist labels
+    adata.obs[cfg.celltypist_label_key] = cell_level_labels
+
+    # Collapse to cluster level: majority label per Leiden cluster
+    if cfg.label_key not in adata.obs:
+        raise KeyError(
+            f"label_key '{cfg.label_key}' not found in adata.obs; "
+            "cannot compute cluster-level CellTypist labels."
+        )
+
+    cluster_majority = (
+        adata.obs[[cfg.label_key, cfg.celltypist_label_key]]
+        .groupby(cfg.label_key)[cfg.celltypist_label_key]
+        .agg(lambda x: x.value_counts().idxmax())
+    )
+
+    # Broadcast back to all cells
+    adata.obs[cfg.celltypist_cluster_label_key] = (
+        adata.obs[cfg.label_key].map(cluster_majority)
+    )
+
+    # Use cluster-collapsed labels as the final label key
+    adata.obs[cfg.final_label_key] = adata.obs[cfg.celltypist_cluster_label_key]
 
     LOGGER.info(
-        "Added CellTypist labels to adata.obs['%s'] and final labels to adata.obs['%s']",
+        "Added CellTypist labels to adata.obs['%s'] (cell level), "
+        "cluster-collapsed labels to adata.obs['%s'], and final labels to adata.obs['%s']",
         cfg.celltypist_label_key,
+        cfg.celltypist_cluster_label_key,
         cfg.final_label_key,
     )
     return cfg.celltypist_label_key
+
+
+def _final_real_silhouette_qc(
+    adata: ad.AnnData,
+    cfg: ClusterAnnotateConfig,
+    embedding_key: str,
+    figdir: Path,
+) -> Optional[float]:
+    """
+    Compute true silhouette for the final clustering (QC only) and optionally plot histogram.
+
+    Returns mean silhouette or None if not computable.
+    """
+    if cfg.label_key not in adata.obs:
+        LOGGER.warning(
+            "final_real_silhouette_qc: label_key '%s' not in adata.obs; skipping.",
+            cfg.label_key,
+        )
+        return None
+
+    labels = adata.obs[cfg.label_key].to_numpy()
+    unique = np.unique(labels)
+    if unique.size < 2:
+        LOGGER.warning(
+            "final_real_silhouette_qc: <2 clusters (%d); skipping.", unique.size
+        )
+        return None
+
+    X = adata.obsm[embedding_key]
+    LOGGER.info("Computing true silhouette for final clustering (QC only)...")
+    sil_values = silhouette_samples(X, labels, metric="euclidean")
+    sil_mean = float(np.mean(sil_values))
+
+    adata.uns.setdefault("cluster_and_annotate", {})
+    ca_uns = adata.uns["cluster_and_annotate"]
+    ca_uns["real_silhouette_final"] = sil_mean
+    ca_uns["real_silhouette_summary"] = {
+        "mean": sil_mean,
+        "median": float(np.median(sil_values)),
+        "p10": float(np.percentile(sil_values, 10)),
+        "p90": float(np.percentile(sil_values, 90)),
+    }
+
+    LOGGER.info("Final true silhouette (mean) = %.3f", sil_mean)
+
+    if cfg.make_figures:
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(5, 4))
+        ax.hist(sil_values, bins=40, color="steelblue", alpha=0.85)
+        ax.axvline(sil_mean, color="red", linestyle="--", linewidth=1.0)
+        ax.set_xlabel("Silhouette value")
+        ax.set_ylabel("Number of cells")
+        ax.set_title(f"Final clustering: true silhouette (mean = {sil_mean:.3f})")
+
+        fig.tight_layout()
+        plot_utils.save_multi("final_real_silhouette", figdir, fig)
+
+    return sil_mean
 
 
 # -------------------------------------------------------------------------
@@ -283,7 +876,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
     - Load integrated AnnData
     - Infer batch key (if needed)
     - Build neighbors/UMAP from chosen embedding
-    - Resolution sweep (silhouette, penalized score, ARI matrix)
+    - Resolution sweep (centroid-based separation, ARI matrix, composite stability)
     - Subsampling stability analysis
     - Apply final clustering at optimal resolution
     - Optional CellTypist annotation
@@ -321,57 +914,18 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
     # ------------------------------------------------------------------
     # Resolution sweep
     # ------------------------------------------------------------------
-    best_res, sweep = _resolution_sweep(adata, cfg, embedding_key)
-
-    if cfg.make_figures:
-        plot_utils.plot_clustering_resolution_sweep(
-            resolutions=sweep["resolutions"],
-            silhouette_scores=sweep["silhouette_scores"],
-            n_clusters=sweep["n_clusters"],
-            penalized_scores=sweep["penalized_scores"],
-            figdir=figdir_cluster,
-        )
-        plot_utils.plot_clustering_ari_heatmap(
-            ari_matrix=sweep["ari_matrix"],
-            figdir=figdir_cluster,
-        )
+    best_res, sweep, clusterings = _resolution_sweep(adata, cfg, embedding_key)
 
     # ------------------------------------------------------------------
-    # Stability analysis
+    # Store clustering metadata
     # ------------------------------------------------------------------
-    stability_aris = _subsampling_stability(adata, cfg, embedding_key, best_res)
-    if cfg.make_figures:
-        plot_utils.plot_clustering_stability_ari(
-            stability_aris=stability_aris,
-            figdir=figdir_cluster,
-        )
+    res_list = [float(r) for r in sweep["resolutions"]]
 
-    # ------------------------------------------------------------------
-    # Apply final clustering
-    # ------------------------------------------------------------------
-    _apply_final_clustering(adata, cfg, best_res)
-
-    # UMAPs by cluster / batch
-    if cfg.make_figures:
-        plot_utils.plot_cluster_umaps(
-            adata=adata,
-            label_key=cfg.label_key,
-            batch_key=batch_key,
-            figdir=figdir_cluster,
-        )
-
-    # ------------------------------------------------------------------
-    # CellTypist annotation (optional)
-    # ------------------------------------------------------------------
-    annotation_col = _run_celltypist_annotation(adata, cfg)
-    if cfg.make_figures and annotation_col is not None:
-        plot_utils.umap_by(adata, keys=annotation_col)
-
-    # ------------------------------------------------------------------
-    # Store metadata
-    # ------------------------------------------------------------------
     adata.uns.setdefault("cluster_and_annotate", {})
-    adata.uns["cluster_and_annotate"].update(
+    ca_uns = adata.uns["cluster_and_annotate"]
+
+    # Basic top-level summary (kept for backwards compatibility)
+    ca_uns.update(
         {
             "embedding_key": embedding_key,
             "batch_key": batch_key,
@@ -381,12 +935,141 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
             "silhouette_scores": [float(x) for x in sweep["silhouette_scores"]],
             "n_clusters": [int(x) for x in sweep["n_clusters"]],
             "penalized_scores": [float(x) for x in sweep["penalized_scores"]],
-            "stability_ari": [float(x) for x in stability_aris],
+            "stability_ari": [],  # filled after subsampling stability
             "celltypist_model": cfg.celltypist_model,
-            "celltypist_label_key": cfg.celltypist_label_key if annotation_col else None,
-            "final_label_key": cfg.final_label_key if annotation_col else None,
+            "celltypist_label_key": None,
+            "celltypist_cluster_label_key": None,
+            "final_label_key": None,
         }
     )
+
+    # Detailed clustering metadata (new, canonical string keys)
+    ca_uns["clustering"] = {
+        "tested_resolutions": res_list,
+        "best_resolution": float(best_res),
+        "silhouette_centroid": {
+            _res_key(r): float(s)
+            for r, s in zip(res_list, sweep["silhouette_scores"])
+        },
+        "cluster_counts": {
+            _res_key(r): int(n)
+            for r, n in zip(res_list, sweep["n_clusters"])
+        },
+        "cluster_sizes": {
+            _res_key(r): [int(x) for x in sweep["cluster_sizes"][float(r)]]
+            for r in res_list
+        },
+        "composite_scores": {
+            _res_key(r): float(s)
+            for r, s in zip(res_list, sweep["composite_scores"])
+        },
+        "resolution_stability": {
+            _res_key(r): float(s)
+            for r, s in zip(res_list, sweep["stability_scores"])
+        },
+        "tiny_cluster_penalty": {
+            _res_key(r): float(s)
+            for r, s in zip(res_list, sweep["tiny_cluster_penalty"])
+        },
+        "plateaus": sweep["plateaus"],
+        "selection_config": sweep["selection_config"],
+    }
+
+    # ------------------------------------------------------------------
+    # Sweep QC Plots
+    # ------------------------------------------------------------------
+    if cfg.make_figures:
+        plot_utils.plot_clustering_resolution_sweep(
+            resolutions=sweep["resolutions"],
+            silhouette_scores=sweep["silhouette_scores"],
+            n_clusters=sweep["n_clusters"],
+            penalized_scores=sweep["penalized_scores"],
+            figdir=figdir_cluster,
+        )
+        plot_utils.plot_cluster_tree(
+            labels_per_resolution=clusterings,
+            resolutions=sweep["resolutions"],
+            figdir=figdir_cluster,
+        )
+
+    # ------------------------------------------------------------------
+    # Stability analysis
+    # ------------------------------------------------------------------
+    stability_aris = _subsampling_stability(adata, cfg, embedding_key, best_res)
+    ca_uns["stability_ari"] = [float(x) for x in stability_aris]
+
+    # ------------------------------------------------------------------
+    # Apply final clustering
+    # ------------------------------------------------------------------
+    _apply_final_clustering(adata, cfg, best_res)
+
+    # ------------------------------------------------------------------
+    # Final real silhouette QC (true silhouette, QC only)
+    # ------------------------------------------------------------------
+    _final_real_silhouette_qc(adata, cfg, embedding_key, figdir_cluster)
+
+    # ------------------------------------------------------------------
+    # Clustering QC Plots
+    # ------------------------------------------------------------------
+    if cfg.make_figures:
+        plot_utils.plot_clustering_stability_ari(
+            stability_aris=stability_aris,
+            figdir=figdir_cluster,
+        )
+        plot_utils.plot_cluster_umaps(
+            adata=adata,
+            label_key=cfg.label_key,
+            batch_key=batch_key,
+            figdir=figdir_cluster,
+        )
+        clust = ca_uns["clustering"]
+        plot_utils.plot_stability_curves(
+            resolutions=clust["tested_resolutions"],
+            silhouette=clust["silhouette_centroid"],
+            stability=clust["resolution_stability"],
+            composite=clust["composite_scores"],
+            tiny_cluster_penalty=clust["tiny_cluster_penalty"],
+            best_resolution=clust["best_resolution"],
+            plateaus=clust["plateaus"],
+            figdir=figdir_cluster,
+            figure_formats=cfg.figure_formats,
+        )
+        plot_utils.plot_plateau_highlights(
+            resolutions=clust["tested_resolutions"],
+            silhouette=clust["silhouette_centroid"],
+            stability=clust["resolution_stability"],
+            composite=clust["composite_scores"],
+            best_resolution=clust["best_resolution"],
+            plateaus=clust["plateaus"],
+            figdir=figdir_cluster,
+            figure_formats=cfg.figure_formats,
+        )
+
+    # ------------------------------------------------------------------
+    # CellTypist annotation (optional)
+    # ------------------------------------------------------------------
+    annotation_col = _run_celltypist_annotation(adata, cfg)
+    if cfg.make_figures and annotation_col is not None:
+        # Cell-level CellTypist annotation
+        plot_utils.umap_by(
+            adata,
+            keys=cfg.celltypist_label_key,
+            figdir=figdir_cluster,
+            stem="umap_celltypist_celllevel",
+        )
+        # Cluster-collapsed CellTypist annotation
+        plot_utils.umap_by(
+            adata,
+            keys=cfg.celltypist_cluster_label_key,
+            figdir=figdir_cluster,
+            stem="umap_celltypist_clusterlevel",
+        )
+
+    # Update annotation metadata
+    if annotation_col is not None:
+        ca_uns["celltypist_label_key"] = cfg.celltypist_label_key
+        ca_uns["celltypist_cluster_label_key"] = cfg.celltypist_cluster_label_key
+        ca_uns["final_label_key"] = cfg.final_label_key
 
     # ------------------------------------------------------------------
     # Export annotation table (optional)

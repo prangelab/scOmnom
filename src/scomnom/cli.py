@@ -43,6 +43,12 @@ warnings.filterwarnings(
     category=UserWarning,
     module="lightning.pytorch"
 )
+warnings.filterwarnings(
+    "ignore",
+    message=".*already log-transformed.*",
+    category=UserWarning,
+)
+
 
 
 def _normalize_methods(methods):
@@ -352,8 +358,45 @@ def cluster_and_annotate(
     stability_repeats: int = typer.Option(5),
     subsample_frac: float = typer.Option(0.8),
     random_state: int = typer.Option(42),
+    tiny_cluster_size: int = typer.Option(
+        20,
+        help="Minimum cluster size before it is considered tiny and penalized "
+             "in resolution selection.",
+    ),
+    min_cluster_size: int = typer.Option(
+        20,
+        help="Minimum median cluster size required for a resolution to be "
+             "eligible for plateau detection.",
+    ),
+    min_plateau_len: int = typer.Option(
+        3,
+        help="Minimum number of consecutive stable resolutions required to "
+             "form a stability plateau.",
+    ),
+    max_cluster_jump_frac: float = typer.Option(
+        0.4,
+        help="Maximum allowed fractional jump in number of clusters between "
+             "adjacent resolutions for plateau continuity.",
+    ),
+    stability_threshold: float = typer.Option(
+        0.85,
+        help="Minimum smoothed ARI stability required for a resolution to be "
+             "included in plateau detection.",
+    ),
+    w_stab: float = typer.Option(
+        0.50,
+        help="Weight of stability score in composite resolution scoring.",
+    ),
+    w_sil: float = typer.Option(
+        0.35,
+        help="Weight of centroid silhouette score in composite resolution scoring.",
+    ),
+    w_tiny: float = typer.Option(
+        0.15,
+        help="Weight of tiny-cluster penalty in composite resolution scoring.",
+    ),
 
-    # --- CellTypist annotation ---
+        # --- CellTypist annotation ---
     celltypist_model: Optional[str] = typer.Option(
         "Immune_All_Low.pkl",
         help="Path or name of CellTypist model. If None, skip annotation."
@@ -461,6 +504,15 @@ def cluster_and_annotate(
         stability_repeats=stability_repeats,
         subsample_frac=subsample_frac,
         random_state=random_state,
+
+        tiny_cluster_size=tiny_cluster_size,
+        min_cluster_size=min_cluster_size,
+        min_plateau_len=min_plateau_len,
+        max_cluster_jump_frac=max_cluster_jump_frac,
+        stability_threshold=stability_threshold,
+        w_stab=w_stab,
+        w_sil=w_sil,
+        w_tiny=w_tiny,
 
         celltypist_model=celltypist_model,
         celltypist_majority_voting=celltypist_majority_voting,
