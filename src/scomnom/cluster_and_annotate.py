@@ -1294,6 +1294,16 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
             figdir=figdir_cluster,
             stem="umap_celltypist_clusterlevel",
         )
+        # cluster-level statistics
+        plot_utils.plot_cluster_sizes(adata, cfg.label_key, figdir_cluster)
+        plot_utils.plot_cluster_qc_summary(adata, cfg.label_key, figdir_cluster)
+        plot_utils.plot_cluster_silhouette_by_cluster(
+            adata, cfg.label_key, embedding_key, figdir_cluster
+        )
+        if batch_key is not None:
+            plot_utils.plot_cluster_batch_composition(
+                adata, cfg.label_key, batch_key, figdir_cluster
+            )
 
     if annotation_col is not None:
         ca_uns["celltypist_label_key"] = cfg.celltypist_label_key

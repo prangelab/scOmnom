@@ -5,6 +5,7 @@ from typing import Dict, Sequence, Mapping, Iterable, List, Any
 
 import logging
 import math
+from sklearn.metrics import silhouette_samples
 
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -1324,3 +1325,181 @@ def plot_plateau_highlights(
     plt.tight_layout()
     save_multi(stem, _ensure_path(figdir), fig)
 
+
+# -------------------------------------------------------------------------
+# Cluster-level statistics
+# -------------------------------------------------------------------------
+
+def plot_cluster_sizes(
+    adata,
+    label_key: str,
+    figdir: Path,
+    tiny_threshold: int = 20,
+    stem: str = "cluster_sizes",
+):
+    """
+    Barplot of cluster sizes (absolute), with % label on each bar.
+    Bars use the same colors as UMAP cluster coloring.
+    """
+    if label_key not in adata.obs:
+        LOGGER.warning("plot_cluster_sizes: label_key '%s' missing.", label_key)
+        return
+
+    counts = adata.obs[label_key].value_counts().sort_index()
+    clusters = counts.index.tolist()
+    sizes = counts.values.astype(int)
+    total = sizes.sum()
+
+    # colors from Scanpy palette
+    palette = adata.uns.get(f"{label_key}_colors", None)
+    if palette is None:
+        LOGGER.warning("No cluster palette found for '%s'; using default.", label_key)
+        cmap = plt.get_cmap("tab20")
+        colors = [cmap(i % cmap.N) for i in range(len(clusters))]
+    else:
+        colors = palette[:len(clusters)]
+
+    fig, ax = plt.subplots(figsize=(max(6, len(clusters) * 0.6), 4))
+    _clean_axes(ax)
+
+    x = np.arange(len(clusters))
+    bars = ax.bar(x, sizes, color=colors, alpha=0.9, edgecolor="black", linewidth=0.4)
+
+    # percentage labels
+    for i, bar in enumerate(bars):
+        height = bar.get_height()
+        pct = 100 * height / total if total > 0 else 0
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            height,
+            f"{pct:.1f}%",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+        )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(clusters, rotation=45, ha="right")
+    ax.set_ylabel("Cells")
+    ax.set_title("Cluster sizes")
+
+    fig.tight_layout()
+    save_multi(stem, figdir)
+    plt.close(fig)
+
+
+def plot_cluster_qc_summary(
+    adata,
+    label_key: str,
+    figdir: Path,
+    stem: str = "cluster_qc_summary",
+):
+    """
+    Mean QC metrics per cluster:
+      - n_genes_by_counts
+      - total_counts
+      - pct_counts_mt
+    """
+    if label_key not in adata.obs:
+        LOGGER.warning("plot_cluster_qc_summary: '%s' not in obs.", label_key)
+        return
+
+    metrics = ["n_genes_by_counts", "total_counts", "pct_counts_mt"]
+    missing = [m for m in metrics if m not in adata.obs]
+    if missing:
+        LOGGER.warning("Missing QC fields: %s", missing)
+        return
+
+    df = adata.obs[[label_key] + metrics].groupby(label_key).mean()
+
+    fig, axs = plt.subplots(1, 3, figsize=(14, 4))
+    for ax, m in zip(axs, metrics):
+        _clean_axes(ax)
+        df[m].plot(kind="bar", ax=ax, color="steelblue", edgecolor="black")
+        ax.set_title(m.replace("_", " "))
+        ax.set_xlabel("Cluster")
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right")
+
+    fig.tight_layout()
+    save_multi(stem, figdir)
+    plt.close(fig)
+
+
+def plot_cluster_silhouette_by_cluster(
+    adata,
+    label_key: str,
+    embedding_key: str,
+    figdir: Path,
+    stem: str = "cluster_silhouette_by_cluster",
+):
+    """
+    Violin plot of silhouette values per cluster (true silhouette, not centroid-based).
+    """
+    if label_key not in adata.obs:
+        LOGGER.warning("plot_cluster_silhouette_by_cluster: '%s' missing.", label_key)
+        return
+    if embedding_key not in adata.obsm:
+        LOGGER.warning("Embedding '%s' missing.", embedding_key)
+        return
+
+    labels = adata.obs[label_key].to_numpy()
+    X = adata.obsm[embedding_key]
+    silvals = silhouette_samples(X, labels, metric="euclidean")
+
+    df = pd.DataFrame({"cluster": labels, "silhouette": silvals})
+
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+    _clean_axes(ax)
+
+    df.boxplot(column="silhouette", by="cluster", ax=ax)
+    plt.suptitle("")  # remove pandas default
+    ax.set_title("Silhouette distribution per cluster")
+    ax.set_xlabel("Cluster")
+    ax.set_ylabel("Silhouette")
+
+    fig.tight_layout()
+    save_multi(stem, figdir)
+    plt.close(fig)
+
+
+def plot_cluster_batch_composition(
+    adata,
+    label_key: str,
+    batch_key: str,
+    figdir: Path,
+    stem: str = "cluster_batch_composition",
+):
+    """
+    Stacked barplot showing fraction of each batch within each cluster.
+    """
+    if label_key not in adata.obs or batch_key not in adata.obs:
+        LOGGER.warning("plot_cluster_batch_composition: required columns missing.")
+        return
+
+    df = (
+        adata.obs[[label_key, batch_key]]
+        .groupby([label_key, batch_key])
+        .size()
+        .unstack(fill_value=0)
+    )
+    frac = df.div(df.sum(axis=1), axis=0)
+
+    fig, ax = plt.subplots(figsize=(max(6, len(df) * 0.6), 4))
+    _clean_axes(ax)
+
+    frac.plot(
+        kind="bar",
+        stacked=True,
+        ax=ax,
+        colormap="tab20",
+        edgecolor="black",
+        linewidth=0.3,
+    )
+
+    ax.set_ylabel("Fraction")
+    ax.set_title("Batch composition per cluster")
+    ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right")
+
+    fig.tight_layout()
+    save_multi(stem, figdir)
+    plt.close(fig)
