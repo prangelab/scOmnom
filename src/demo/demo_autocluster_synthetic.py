@@ -133,7 +133,7 @@ def make_synthetic_explainer_dataset(
 def main():
     print("Generating synthetic explainer dataset...")
     adata = make_synthetic_explainer_dataset()
-
+    adata.obs["batch"] = "batch1"
     outdir = Path("synthetic_demo_results")
     outdir.mkdir(exist_ok=True)
 
