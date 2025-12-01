@@ -169,6 +169,25 @@ def _extract_series(
     return np.array(out, dtype=float)
 
 
+def _normalize_array(x: np.ndarray) -> np.ndarray:
+    """Min-max normalize 1D array to [0,1], ignoring NaNs."""
+    x = np.asarray(x, dtype=float)
+    if x.size == 0:
+        return x
+    mask = np.isfinite(x)
+    if not mask.any():
+        return np.zeros_like(x)
+    vmin = float(np.nanmin(x[mask]))
+    vmax = float(np.nanmax(x[mask]))
+    if vmax == vmin:
+        out = np.zeros_like(x)
+        out[mask] = 0.0
+        return out
+    out = np.zeros_like(x)
+    out[mask] = (x[mask] - vmin) / (vmax - vmin)
+    return out
+
+
 def _plateau_spans(plateaus: Sequence[Mapping[str, object]]) -> list[tuple[float, float]]:
     """
     Convert plateau definitions (with 'resolutions' lists) to x-span pairs.
@@ -1089,28 +1108,166 @@ def plot_stability_curves(
     figdir: Path | str,
     figure_formats: Sequence[str] = ("png", "pdf"),
     stem: str = "cluster_selection_stability",
+    # --- optional biological metrics (only used if all are not None) ---
+    bio_homogeneity: Mapping[Any, Any] | None = None,
+    bio_fragmentation: Mapping[Any, Any] | None = None,
+    bio_ari: Mapping[Any, Any] | None = None,
+    selection_config: Mapping[str, Any] | None = None,
 ) -> None:
+    """
+    Plot structural + (optionally) biological metrics vs resolution.
+
+    Structural components:
+      - silhouette (centroid-based)
+      - stability (smoothed ARI)
+      - composite score (actual one used for selection)
+      - tiny-cluster penalty
+
+    Biological components (only if bio-guided mode was used):
+      - homogeneity (0–1, higher better)
+      - fragmentation (shown as 1 - normalized fragmentation, higher better)
+      - bio-ARI (normalized)
+      - biological composite (normalized, based on selection weights)
+    """
     res_sorted = _sorted_resolutions(resolutions)
+
     sil = _extract_series(res_sorted, silhouette)
     stab = _extract_series(res_sorted, stability)
     comp = _extract_series(res_sorted, composite)
     tiny = _extract_series(res_sorted, tiny_cluster_penalty)
 
+    # --- biological metrics availability check ---
+    have_bio = (
+        bio_homogeneity is not None
+        and bio_fragmentation is not None
+        and bio_ari is not None
+        and selection_config is not None
+        and bool(selection_config.get("use_bio", False))
+    )
+
+    if have_bio:
+        hom_raw = _extract_series(res_sorted, bio_homogeneity)
+        frag_raw = _extract_series(res_sorted, bio_fragmentation)
+        ari_raw = _extract_series(res_sorted, bio_ari)
+
+        hom_norm = _normalize_array(hom_raw)
+        frag_norm = _normalize_array(frag_raw)
+        frag_good = 1.0 - frag_norm  # higher = better (less fragmentation)
+        ari_norm = _normalize_array(ari_raw)
+
+        w_hom = float(selection_config.get("w_hom", 0.0))
+        w_frag = float(selection_config.get("w_frag", 0.0))
+        w_bioari = float(selection_config.get("w_bioari", 0.0))
+
+        bio_comp = w_hom * hom_norm + w_frag * frag_good + w_bioari * ari_norm
+    else:
+        hom_norm = frag_good = ari_norm = bio_comp = None
+
     fig, ax = plt.subplots(figsize=(8, 5))
 
+    # plateau shading
     for xmin, xmax in _plateau_spans(plateaus or []):
         ax.axvspan(xmin, xmax, color="0.9", alpha=0.5)
 
+    # structural curves
     ax.plot(res_sorted, sil, label="Centroid silhouette", color="tab:blue")
     ax.plot(res_sorted, stab, label="Stability (smoothed ARI)", color="tab:green")
-    ax.plot(res_sorted, comp, label="Composite score", color="tab:red")
+    ax.plot(res_sorted, comp, label="Composite (used for selection)", color="tab:red")
     ax.plot(res_sorted, tiny, label="Tiny-cluster penalty", color="tab:orange")
+
+    # biological curves (only shown if they were used in selection)
+    if have_bio:
+        ax.plot(res_sorted, hom_norm, label="Biological homogeneity (norm.)", color="purple")
+        ax.plot(
+            res_sorted,
+            frag_good,
+            label="Fragmentation (low→high, norm.)",
+            color="brown",
+        )
+        ax.plot(res_sorted, ari_norm, label="Bio-ARI (norm.)", color="magenta")
+        ax.plot(
+            res_sorted,
+            bio_comp,
+            label="Biological composite (norm.)",
+            color="black",
+            linestyle="--",
+        )
 
     ax.axvline(float(best_resolution), color="k", linestyle="--")
 
     ax.set_xlabel("Resolution")
     ax.set_ylabel("Score")
     ax.set_title("Cluster selection metrics vs resolution")
+    ax.legend(loc="best", fontsize=8)
+    ax.grid(True, alpha=0.2)
+
+    plt.tight_layout()
+    save_multi(stem, _ensure_path(figdir), fig)
+
+
+def plot_biological_metrics(
+    resolutions: Sequence[float | str],
+    bio_homogeneity: Mapping[Any, Any],
+    bio_fragmentation: Mapping[Any, Any],
+    bio_ari: Mapping[Any, Any],
+    selection_config: Mapping[str, Any],
+    best_resolution: float | str,
+    plateaus: Sequence[Mapping[str, object]] | None,
+    figdir: Path | str,
+    figure_formats: Sequence[str] = ("png", "pdf"),
+    stem: str = "biological_metrics",
+) -> None:
+    """
+    Biological-metrics-focused view:
+
+    - normalized homogeneity
+    - normalized fragmentation (inverted, higher=better)
+    - normalized bio-ARI
+    - biological composite (using selection weights)
+    """
+    res_sorted = _sorted_resolutions(resolutions)
+
+    hom_raw = _extract_series(res_sorted, bio_homogeneity)
+    frag_raw = _extract_series(res_sorted, bio_fragmentation)
+    ari_raw = _extract_series(res_sorted, bio_ari)
+
+    hom_norm = _normalize_array(hom_raw)
+    frag_norm = _normalize_array(frag_raw)
+    frag_good = 1.0 - frag_norm
+    ari_norm = _normalize_array(ari_raw)
+
+    w_hom = float(selection_config.get("w_hom", 0.0))
+    w_frag = float(selection_config.get("w_frag", 0.0))
+    w_bioari = float(selection_config.get("w_bioari", 0.0))
+
+    bio_comp = w_hom * hom_norm + w_frag * frag_good + w_bioari * ari_norm
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    for xmin, xmax in _plateau_spans(plateaus or []):
+        ax.axvspan(xmin, xmax, color="0.9", alpha=0.5)
+
+    ax.plot(res_sorted, hom_norm, label="Homogeneity (norm.)", color="purple")
+    ax.plot(
+        res_sorted,
+        frag_good,
+        label="Fragmentation (low→high, norm.)",
+        color="brown",
+    )
+    ax.plot(res_sorted, ari_norm, label="Bio-ARI (norm.)", color="magenta")
+    ax.plot(
+        res_sorted,
+        bio_comp,
+        label="Biological composite (norm.)",
+        color="black",
+        linestyle="--",
+    )
+
+    ax.axvline(float(best_resolution), color="k", linestyle="--")
+
+    ax.set_xlabel("Resolution")
+    ax.set_ylabel("Normalized score")
+    ax.set_title("Biological metrics vs resolution (bio-guided clustering)")
     ax.legend(loc="best", fontsize=8)
     ax.grid(True, alpha=0.2)
 

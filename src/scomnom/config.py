@@ -180,6 +180,12 @@ class ClusterAnnotateConfig(BaseModel):
         description="Final cluster label key in adata.obs",
     )
 
+    # bioARI
+    bio_guided_clustering: bool = True
+    w_hom: float = 0.15
+    w_frag: float = 0.10
+    w_bioari: float = 0.15
+
     # Figure handling
     figdir_name: str = "figures"
     make_figures: bool = True

@@ -15,5 +15,13 @@ src/scomnom.egg-info/dependency_links.txt
 src/scomnom.egg-info/entry_points.txt
 src/scomnom.egg-info/requires.txt
 src/scomnom.egg-info/top_level.txt
+tests/test_cell_qc.py
 tests/test_celltypist_scraper.py
-tests/test_load_and_qc.py
+tests/test_cli.py
+tests/test_cluster_and_annotate.py
+tests/test_config.py
+tests/test_integrate.py
+tests/test_io_utils.py
+tests/test_load_and_filter.py
+tests/test_loggin_utils.py
+tests/test_plot_utils.py

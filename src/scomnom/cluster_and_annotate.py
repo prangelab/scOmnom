@@ -9,7 +9,7 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import scanpy as sc
-from sklearn.metrics import adjusted_rand_score, silhouette_samples, silhouette_score
+from sklearn.metrics import adjusted_rand_score, silhouette_samples
 
 from .config import ClusterAnnotateConfig
 from .load_and_filter import setup_logging
@@ -85,9 +85,8 @@ def _centroid_silhouette(X: np.ndarray, labels: np.ndarray) -> float:
     if k < 2:
         return float("nan")
 
-    # pairwise distances between centroids
     diff = centroids[:, None, :] - centroids[None, :, :]
-    D = np.linalg.norm(diff, axis=2)  # shape (k, k)
+    D = np.linalg.norm(diff, axis=2)  # (k, k)
 
     s_vals = []
     for i in range(k):
@@ -106,6 +105,142 @@ def _centroid_silhouette(X: np.ndarray, labels: np.ndarray) -> float:
 
 
 # -------------------------------------------------------------------------
+# CellTypist: single precompute (per-cell labels + probabilities)
+# -------------------------------------------------------------------------
+def _precompute_celltypist(
+    adata: ad.AnnData,
+    cfg: ClusterAnnotateConfig,
+) -> tuple[Optional[np.ndarray], Optional[pd.DataFrame]]:
+    """
+    Run CellTypist once to obtain per-cell predictions and probability matrix.
+
+    Returns
+    -------
+    labels : np.ndarray or None
+        1-D array of per-cell predicted labels.
+    prob_matrix : pd.DataFrame or None
+        Probability matrix with shape (n_obs, n_classes), index aligned to adata.obs_names.
+    """
+    if cfg.celltypist_model is None:
+        LOGGER.info("No CellTypist model provided; skipping CellTypist precompute.")
+        return None, None
+
+    try:
+        LOGGER.info("Running CellTypist precompute (predictions + probabilities).")
+        adata_ct = adata.copy()
+
+        sc.pp.normalize_total(adata_ct, target_sum=1e4)
+        sc.pp.log1p(adata_ct)
+
+        model_path = get_celltypist_model(cfg.celltypist_model)
+        from celltypist.models import Model
+        import celltypist
+
+        LOGGER.info("Loading CellTypist model from %s", model_path)
+        model = Model.load(str(model_path))
+
+        preds = celltypist.annotate(
+            adata_ct,
+            model=model,
+            majority_voting=False,
+        )
+
+        raw = preds.predicted_labels
+
+        if isinstance(raw, pd.DataFrame):
+            # usually a single column
+            labels = raw.squeeze(axis=1).to_numpy().ravel()
+        elif isinstance(raw, pd.Series):
+            labels = raw.to_numpy().ravel()
+        else:
+            # ndarray-like; flatten
+            labels = np.asarray(raw).ravel()
+
+        if labels.size != adata.n_obs:
+            LOGGER.warning(
+                "CellTypist returned %d labels for %d cells; ignoring CellTypist outputs.",
+                labels.size,
+                adata.n_obs,
+            )
+            return None, None
+
+        # ---------------------------------------------------------------------------
+        # probability_matrix: pd.DataFrame, index must match adata.obs_names
+        prob_matrix = preds.probability_matrix
+        prob_matrix = prob_matrix.loc[adata.obs_names]
+
+        LOGGER.info(
+            "CellTypist precompute completed: %d labels, probability_matrix shape=%s.",
+            labels.size,
+            prob_matrix.shape,
+        )
+        return labels, prob_matrix
+
+    except Exception as e:
+        LOGGER.warning(
+            "CellTypist precompute failed: %s. Proceeding without biological metrics.",
+            e,
+        )
+        return None, None
+
+
+# -------------------------------------------------------------------------
+# Biological metrics (per resolution)
+# -------------------------------------------------------------------------
+def _compute_bio_homogeneity(
+    labels: np.ndarray,
+    bio_labels: np.ndarray,
+) -> float:
+    """
+    Cluster-level biological homogeneity metric.
+
+    For each cluster:
+    - find majority CellTypist label
+    - take fraction of cells with that label
+    Returns mean fraction across clusters in [0, 1].
+    """
+    df = pd.DataFrame({"cl": labels, "bio": bio_labels})
+    groups = df.groupby("cl")
+    homs: List[float] = []
+
+    for _, g in groups:
+        vc = g["bio"].value_counts()
+        if vc.empty:
+            continue
+        maj = vc.iloc[0] / len(g)
+        homs.append(float(maj))
+
+    return float(np.mean(homs)) if homs else 0.0
+
+
+def _compute_bio_fragmentation(
+    labels: np.ndarray,
+    bio_labels: np.ndarray,
+    frac_thr: float = 0.15,
+) -> float:
+    """
+    Biological fragmentation penalty.
+
+    For each cluster C_j:
+        - count how many CellTypist labels have fraction >= frac_thr
+        - let k_j = this count - 1 (minimum 0)
+    Return mean k_j across clusters (0 = perfectly homogeneous).
+    """
+    df = pd.DataFrame({"cl": labels, "bio": bio_labels})
+    groups = df.groupby("cl")
+    frags: List[float] = []
+
+    for _, g in groups:
+        vc = g["bio"].value_counts(normalize=True)
+        if vc.empty:
+            continue
+        k = int((vc >= frac_thr).sum()) - 1
+        frags.append(float(max(k, 0)))
+
+    return float(np.mean(frags)) if frags else 0.0
+
+
+# -------------------------------------------------------------------------
 # Resolution-selection data structures and helpers
 # -------------------------------------------------------------------------
 @dataclass
@@ -116,6 +251,10 @@ class ResolutionMetrics:
     cluster_sizes: Dict[float, np.ndarray]
     labels_per_resolution: Dict[float, np.ndarray]
     ari_adjacent: Optional[Dict[Tuple[float, float], float]] = None
+    # Optional biological metrics (per resolution)
+    bio_homogeneity: Optional[Dict[float, float]] = None
+    bio_fragmentation: Optional[Dict[float, float]] = None
+    bio_ari: Optional[Dict[float, float]] = None
 
 
 @dataclass
@@ -128,6 +267,11 @@ class ResolutionSelectionConfig:
     w_stab: float = 0.50
     w_sil: float = 0.35
     w_tiny: float = 0.15
+    # Biological weights + flag
+    w_hom: float = 0.0
+    w_frag: float = 0.0
+    w_bioari: float = 0.0
+    use_bio: bool = False
 
 
 @dataclass
@@ -143,6 +287,9 @@ class ResolutionSelectionResult:
     stability: Dict[float, float]
     tiny_cluster_penalty: Dict[float, float]
     plateaus: List[Plateau]
+    bio_homogeneity: Optional[Dict[float, float]] = None
+    bio_fragmentation: Optional[Dict[float, float]] = None
+    bio_ari: Optional[Dict[float, float]] = None
 
 
 def _compute_ari_adjacent(
@@ -198,28 +345,26 @@ def _detect_plateaus(
     - stability >= threshold
     - cluster count does not jump more than max_cluster_jump_frac
     - median cluster size >= min_cluster_size
-    - minimum cluster size >= 5 (hard constraint against singletons)
+    - minimum cluster size >= 5
+
+    NOTE: deliberately structural-only; no biological metrics used here.
     """
     sorted_res = sorted(metrics.resolutions)
     plateaus: List[Plateau] = []
-
     current_segment: List[float] = []
 
     for idx, r in enumerate(sorted_res):
         stab_ok = stability.get(r, 0.0) >= config.stability_threshold
 
-        # cluster-count continuity vs previous (with min denominator of 10)
         if idx > 0:
             r_prev = sorted_res[idx - 1]
             n_prev = metrics.cluster_counts[r_prev]
             n_curr = metrics.cluster_counts[r]
-            denom = max(10, n_prev)
             jump = robust_cluster_jump(n_prev, n_curr, alpha=10)
             jump_ok = jump <= config.max_cluster_jump_frac
         else:
             jump_ok = True
 
-        # cluster size constraints
         sizes = metrics.cluster_sizes[r]
         median_size = float(np.median(sizes)) if sizes.size > 0 else 0.0
         size_ok = median_size >= config.min_cluster_size
@@ -238,13 +383,12 @@ def _detect_plateaus(
                 )
             current_segment = []
 
-    # tail
     if len(current_segment) >= config.min_plateau_len:
         mean_stab = float(np.mean([stability[x] for x in current_segment]))
         plateaus.append(
             Plateau(
                 resolutions=current_segment.copy(),
-                mean_stability=mean_stab,
+                mean_stability=mean_stability,
             )
         )
 
@@ -263,7 +407,7 @@ def _normalize_scores(d: Dict[float, float]) -> Dict[float, float]:
     return {k: (v - vmin) / (vmax - vmin) for k, v in d.items()}
 
 
-def compute_tiny_cluster_penalty(cluster_sizes: np.ndarray, tiny_threshold: int):
+def compute_tiny_cluster_penalty(cluster_sizes: np.ndarray, tiny_threshold: int) -> float:
     """
     Combined tiny-cluster penalty:
     1. penalty_cluster_fraction: fraction of clusters that are NOT tiny
@@ -275,27 +419,23 @@ def compute_tiny_cluster_penalty(cluster_sizes: np.ndarray, tiny_threshold: int)
     total_cells = np.sum(cluster_sizes)
 
     if total_clusters == 0 or total_cells == 0:
-        return 1.0  # neutral high score
+        return 1.0
 
     tiny_mask = cluster_sizes < tiny_threshold
     n_tiny = np.sum(tiny_mask)
     cells_in_tiny = np.sum(cluster_sizes[tiny_mask])
 
-    # --- 1. cluster-fraction penalty (your old metric)
     frac_tiny_clusters = n_tiny / total_clusters
     penalty_cluster_fraction = 1.0 - frac_tiny_clusters
 
-    # --- 2. cell-fraction penalty (Gemini suggestion)
     frac_cells_in_tiny = cells_in_tiny / total_cells
     penalty_cell_fraction = 1.0 - frac_cells_in_tiny
 
-    # Combined penalty (equal weights)
     combined_penalty = 0.5 * (penalty_cluster_fraction + penalty_cell_fraction)
-
     return float(combined_penalty)
 
 
-def robust_cluster_jump(k_prev, k_curr, alpha=10):
+def robust_cluster_jump(k_prev, k_curr, alpha=10) -> float:
     """
     Robust jump metric:
     jump = |k_curr - k_prev| / max(k_prev, alpha)
@@ -316,13 +456,14 @@ def select_best_resolution(
     - smoothed ARI stability
     - centroid-based silhouette
     - tiny-cluster penalty
-    - plateau detection
+    - structural plateau detection
+    - optional biological metrics:
+        * homogeneity
+        * fragmentation penalty
+        * ARI vs CellTypist labels
     - local-maxima fallback
     - border guard to avoid selecting max resolution spuriously
     """
-    # ------------------------------------------------------------------
-    # 1. Adjacent ARIs (compute if missing)
-    # ------------------------------------------------------------------
     if metrics.ari_adjacent is None:
         ari_adjacent = _compute_ari_adjacent(
             resolutions=metrics.resolutions,
@@ -331,23 +472,18 @@ def select_best_resolution(
     else:
         ari_adjacent = metrics.ari_adjacent
 
-    # ------------------------------------------------------------------
-    # 2. Compute stability and penalties
-    # ------------------------------------------------------------------
     stability = _compute_smoothed_stability(
         resolutions=metrics.resolutions,
         ari_adjacent=ari_adjacent,
     )
-    # Compute tiny-cluster penalty for every resolution
-    tiny_penalty = {}
 
+    tiny_penalty: Dict[float, float] = {}
     for r in sorted(metrics.resolutions):
         tiny_penalty[r] = compute_tiny_cluster_penalty(
             metrics.cluster_sizes[r],
-            config.tiny_cluster_size
+            config.tiny_cluster_size,
         )
 
-    # Normalize tiny penalties to [0,1] (like sil & stab)
     tiny_vals = np.array(list(tiny_penalty.values()), dtype=float)
     tiny_min, tiny_max = float(np.nanmin(tiny_vals)), float(np.nanmax(tiny_vals))
     if tiny_max - tiny_min > 1e-9:
@@ -358,27 +494,52 @@ def select_best_resolution(
     else:
         tiny_norm = {r: 1.0 for r in tiny_penalty}
 
-    # Normalized  for weighted scoring
     sil_norm = _normalize_scores(metrics.silhouette)
     stab_norm = _normalize_scores(stability)
 
-    # Composite score function
+    use_bio_effective = (
+        config.use_bio
+        and metrics.bio_homogeneity is not None
+        and metrics.bio_fragmentation is not None
+        and metrics.bio_ari is not None
+    )
+
+    if config.use_bio and not use_bio_effective:
+        LOGGER.warning(
+            "bio_guided_clustering=True, but biological metrics are unavailable. "
+            "Falling back to structural-only resolution selection."
+        )
+
+    hom_norm: Dict[float, float] = {}
+    frag_good_norm: Dict[float, float] = {}
+    bioari_norm: Dict[float, float] = {}
+
+    if use_bio_effective:
+        hom_norm = _normalize_scores(metrics.bio_homogeneity)
+        frag_raw_norm = _normalize_scores(metrics.bio_fragmentation)
+        frag_good_norm = {r: 1.0 - frag_raw_norm.get(r, 0.0) for r in frag_raw_norm}
+        bioari_norm = _normalize_scores(metrics.bio_ari)
+
     def composite_score(r: float) -> float:
-        return (
+        s = (
             config.w_stab * stab_norm.get(r, 0.0)
             + config.w_sil * sil_norm.get(r, 0.0)
             + config.w_tiny * tiny_norm.get(r, 0.0)
         )
+        if use_bio_effective:
+            s += (
+                config.w_hom * hom_norm.get(r, 0.0)
+                + config.w_frag * frag_good_norm.get(r, 0.0)
+                + config.w_bioari * bioari_norm.get(r, 0.0)
+            )
+        return float(s)
 
     all_scores = {r: composite_score(r) for r in metrics.resolutions}
 
-    # ------------------------------------------------------------------
-    # 3. Plateau-first selection
-    # ------------------------------------------------------------------
+    # Plateau-first strategy (structural-only)
     plateaus = _detect_plateaus(metrics, config, stability)
 
     if plateaus:
-        # Sort plateaus by (mean stability, length)
         plateaus_sorted = sorted(
             plateaus,
             key=lambda p: (p.mean_stability, len(p.resolutions)),
@@ -391,8 +552,7 @@ def select_best_resolution(
         best_resolution = float(plateau_res[mid_idx])
 
         LOGGER.info(
-            "Selected resolution %.3f from plateau [%s] with mean stability=%.3f "
-            "(center-of-plateau rule).",
+            "Selected resolution %.3f from plateau [%s] with mean stability=%.3f.",
             best_resolution,
             ", ".join(f"{r:.3f}" for r in plateau_res),
             best_plateau.mean_stability,
@@ -404,22 +564,18 @@ def select_best_resolution(
             stability=stability,
             tiny_cluster_penalty=tiny_penalty,
             plateaus=plateaus,
+            bio_homogeneity=metrics.bio_homogeneity,
+            bio_fragmentation=metrics.bio_fragmentation,
+            bio_ari=metrics.bio_ari,
         )
 
-    # ------------------------------------------------------------------
-    # 4. Fallback — no plateau
-    # ------------------------------------------------------------------
+    # No plateau: fallback logic
     sorted_res = sorted(metrics.resolutions)
     max_r = max(sorted_res)
     min_r = min(sorted_res)
 
-    # Step A — global best resolution by composite score
     best_r_by_score = max(all_scores, key=all_scores.get)
 
-    # ------------------------------------------------------------------
-    # Step B — Border guard:
-    # NEVER select maximum resolution if silhouette is weak.
-    # ------------------------------------------------------------------
     if (
         float(best_r_by_score) == float(max_r)
         and metrics.silhouette.get(max_r, -1.0) < 0.15
@@ -428,7 +584,7 @@ def select_best_resolution(
             "Border guard: composite optimum at max resolution %.3f but silhouette=%.3f < 0.15. "
             "Falling back to lowest resolution.",
             max_r,
-            metrics.silhouette.get(max_r, float('nan')),
+            metrics.silhouette.get(max_r, float("nan")),
         )
         best_resolution = float(min_r)
         return ResolutionSelectionResult(
@@ -437,11 +593,11 @@ def select_best_resolution(
             stability=stability,
             tiny_cluster_penalty=tiny_penalty,
             plateaus=plateaus,
+            bio_homogeneity=metrics.bio_homogeneity,
+            bio_fragmentation=metrics.bio_fragmentation,
+            bio_ari=metrics.bio_ari,
         )
 
-    # ------------------------------------------------------------------
-    # Step C — Local maxima detection in composite score curve
-    # ------------------------------------------------------------------
     scores_arr = np.array([all_scores[r] for r in sorted_res])
     n = len(sorted_res)
 
@@ -450,16 +606,14 @@ def select_best_resolution(
         if scores_arr[i] > scores_arr[i - 1] and scores_arr[i] > scores_arr[i + 1]:
             local_max_idx.append(i)
 
-    # Exclude border points (never select 0 or last index)
     local_max_idx = [i for i in local_max_idx if i not in (0, n - 1)]
 
     if local_max_idx:
-        # Pick strongest local maximum
         best_idx = max(local_max_idx, key=lambda k: scores_arr[k])
         best_resolution = float(sorted_res[best_idx])
 
         LOGGER.info(
-            "No plateau; selecting strongest LOCAL MAXIMUM at %.3f (score=%.3f).",
+            "No plateau; selecting strongest local maximum at %.3f (score=%.3f).",
             best_resolution,
             scores_arr[best_idx],
         )
@@ -470,14 +624,11 @@ def select_best_resolution(
             stability=stability,
             tiny_cluster_penalty=tiny_penalty,
             plateaus=plateaus,
+            bio_homogeneity=metrics.bio_homogeneity,
+            bio_fragmentation=metrics.bio_fragmentation,
+            bio_ari=metrics.bio_ari,
         )
 
-    # ------------------------------------------------------------------
-    # Step D — fallback if:
-    #  - no plateau
-    #  - no local maxima
-    # ------------------------------------------------------------------
-    # If global optimum is at border → pick the best *interior* resolution
     if float(best_r_by_score) in (float(min_r), float(max_r)):
         interior = sorted_res[1:-1]
         interior_best = max(interior, key=lambda r: all_scores[r])
@@ -490,22 +641,21 @@ def select_best_resolution(
             all_scores[best_resolution],
         )
     else:
-        # Otherwise accept global best
         best_resolution = float(best_r_by_score)
         LOGGER.info(
             "No plateau and no local maxima; selected %.3f by global composite score.",
             best_resolution,
         )
 
-    # ------------------------------------------------------------------
-    # Final return (fallback path)
-    # ------------------------------------------------------------------
     return ResolutionSelectionResult(
         best_resolution=best_resolution,
         scores=all_scores,
         stability=stability,
         tiny_cluster_penalty=tiny_penalty,
         plateaus=plateaus,
+        bio_homogeneity=metrics.bio_homogeneity,
+        bio_fragmentation=metrics.bio_fragmentation,
+        bio_ari=metrics.bio_ari,
     )
 
 
@@ -516,22 +666,15 @@ def _resolution_sweep(
     adata: ad.AnnData,
     cfg: ClusterAnnotateConfig,
     embedding_key: str,
+    celltypist_labels: Optional[np.ndarray],
 ) -> Tuple[float, Dict[str, object], Dict[str, np.ndarray]]:
     """
     Sweep over a range of Leiden resolutions and compute:
-    - Centroid-based separation score in the chosen embedding
+    - Centroid-based separation score
     - Number of clusters and cluster sizes
-    - ARI matrix between all resolutions (Clustree-style)
+    - ARI matrix between all resolutions
     - Composite stability score with plateau-aware selection
-
-    Returns
-    -------
-    best_res : float
-        Selected resolution (as float).
-    sweep : dict
-        Sweep diagnostics, with float-based keys internally.
-    clusterings_str : dict
-        Mapping resolution_key (str, '0.200') -> label array.
+    - OPTIONAL: CellTypist-guided biological metrics (homogeneity, fragmentation, ARI_bio)
     """
     resolutions = _compute_resolutions(cfg)
     res_list = [float(r) for r in resolutions]
@@ -542,9 +685,21 @@ def _resolution_sweep(
     penalized_scores: List[float] = []
     cluster_sizes: Dict[float, np.ndarray] = {}
 
+    bio_hom: Dict[float, float] = {}
+    bio_frag: Dict[float, float] = {}
+    bio_ari: Dict[float, float] = {}
+
     X = adata.obsm[embedding_key]
 
-    # Sweep resolutions
+    use_bio = bool(getattr(cfg, "bio_guided_clustering", False)) and (
+        celltypist_labels is not None
+    )
+    if getattr(cfg, "bio_guided_clustering", False) and celltypist_labels is None:
+        LOGGER.warning(
+            "bio_guided_clustering=True, but CellTypist labels are unavailable. "
+            "Resolution sweep will use structural metrics only."
+        )
+
     for res in resolutions:
         res_f = float(res)
         key = f"{cfg.label_key}_{res_f:.2f}"
@@ -577,7 +732,24 @@ def _resolution_sweep(
             penalized_scores[-1],
         )
 
-    # ARI across all resolutions (for heatmap and debugging)
+        if use_bio:
+            hom = _compute_bio_homogeneity(labels, celltypist_labels)
+            frag = _compute_bio_fragmentation(labels, celltypist_labels)
+            ari_bio = adjusted_rand_score(labels, celltypist_labels)
+
+            bio_hom[res_f] = hom
+            bio_frag[res_f] = frag
+            bio_ari[res_f] = float(ari_bio)
+
+            LOGGER.info(
+                "Resolution %.2f: bio_homogeneity=%.3f, bio_fragmentation=%.3f, bio_ARI=%.3f",
+                res_f,
+                hom,
+                frag,
+                ari_bio,
+            )
+
+    # ARI across all resolutions
     col_names = [f"{r:.2f}" for r in res_list]
     ari_matrix = pd.DataFrame(index=col_names, columns=col_names, dtype=float)
     for i, r1 in enumerate(res_list):
@@ -585,7 +757,6 @@ def _resolution_sweep(
             ari = adjusted_rand_score(clusterings_float[r1], clusterings_float[r2])
             ari_matrix.iat[i, j] = float(ari)
 
-    # Build metrics for selection
     metrics = ResolutionMetrics(
         resolutions=res_list,
         silhouette={r: s for r, s in zip(res_list, silhouette_scores)},
@@ -593,6 +764,15 @@ def _resolution_sweep(
         cluster_sizes=cluster_sizes,
         labels_per_resolution=clusterings_float,
     )
+
+    if bio_hom and bio_frag and bio_ari:
+        metrics.bio_homogeneity = bio_hom
+        metrics.bio_fragmentation = bio_frag
+        metrics.bio_ari = bio_ari
+    else:
+        metrics.bio_homogeneity = None
+        metrics.bio_fragmentation = None
+        metrics.bio_ari = None
 
     sel_cfg = ResolutionSelectionConfig(
         stability_threshold=getattr(cfg, "stability_threshold", 0.85),
@@ -603,6 +783,10 @@ def _resolution_sweep(
         w_stab=getattr(cfg, "w_stab", 0.50),
         w_sil=getattr(cfg, "w_sil", 0.35),
         w_tiny=getattr(cfg, "w_tiny", 0.15),
+        w_hom=getattr(cfg, "w_hom", 0.0),
+        w_frag=getattr(cfg, "w_frag", 0.0),
+        w_bioari=getattr(cfg, "w_bioari", 0.0),
+        use_bio=getattr(cfg, "bio_guided_clustering", False),
     )
 
     selection = select_best_resolution(metrics, sel_cfg)
@@ -614,7 +798,7 @@ def _resolution_sweep(
         selection.scores[best_res],
     )
 
-    sweep = {
+    sweep: Dict[str, object] = {
         "resolutions": np.array(res_list, dtype=float),
         "silhouette_scores": silhouette_scores,
         "n_clusters": n_clusters_list,
@@ -631,7 +815,15 @@ def _resolution_sweep(
         "selection_config": asdict(sel_cfg),
     }
 
-    # Externally-facing mapping: resolution key as '0.200', '0.600', ...
+    if selection.bio_homogeneity is not None:
+        sweep["bio_homogeneity"] = [selection.bio_homogeneity.get(r, np.nan) for r in res_list]
+        sweep["bio_fragmentation"] = [selection.bio_fragmentation.get(r, np.nan) for r in res_list]
+        sweep["bio_ari"] = [selection.bio_ari.get(r, np.nan) for r in res_list]
+    else:
+        sweep["bio_homogeneity"] = None
+        sweep["bio_fragmentation"] = None
+        sweep["bio_ari"] = None
+
     clusterings_str: Dict[str, np.ndarray] = {
         _res_key(r): labs for r, labs in clusterings_float.items()
     }
@@ -720,7 +912,6 @@ def _apply_final_clustering(
         flavor="igraph",
     )
 
-    # Assign palette
     try:
         from scanpy.plotting.palettes import default_102
 
@@ -733,50 +924,77 @@ def _apply_final_clustering(
 def _run_celltypist_annotation(
     adata: ad.AnnData,
     cfg: ClusterAnnotateConfig,
+    precomputed_labels: Optional[np.ndarray] = None,
+    precomputed_proba: Optional[pd.DataFrame] = None,
 ) -> str | None:
     """
-    Run CellTypist on the dataset if cfg.celltypist_model is provided.
-    Returns the column name containing the primary annotation, or None if skipped.
+    Attach CellTypist annotations to the main AnnData object.
+
+    If `precomputed_labels`/`precomputed_proba` are provided (from _precompute_celltypist),
+    they are used directly; otherwise a fallback CellTypist run is performed on `adata`.
+
+    Steps:
+    - set per-cell labels in adata.obs[cfg.celltypist_label_key]
+    - optionally store probabilities in adata.obsm["celltypist_proba"]
+    - perform cluster-level majority voting to derive cluster labels
+    - set final label key to the cluster-level labels
     """
     if cfg.celltypist_model is None:
         LOGGER.info("No CellTypist model provided; skipping annotation.")
         return None
 
-    LOGGER.info("Normalizing expression for CellTypist annotation...")
-    sc.pp.normalize_total(adata, target_sum=1e4)
-    sc.pp.log1p(adata)
+    # Path A: use precomputed predictions
+    if precomputed_labels is not None:
+        if precomputed_labels.shape[0] != adata.n_obs:
+            raise ValueError(
+                "precomputed_labels length does not match number of cells in adata."
+            )
+        LOGGER.info("Using precomputed CellTypist labels for final annotation.")
+        adata.obs[cfg.celltypist_label_key] = precomputed_labels
 
-    # Resolve model: local path → OK, cache → OK, remote → download
-    LOGGER.info("Resolving CellTypist model: %s", cfg.celltypist_model)
-    model_path = get_celltypist_model(cfg.celltypist_model)
+        if precomputed_proba is not None:
+            # Store probabilities as obsm + column names in uns for interpretability
+            adata.obsm["celltypist_proba"] = precomputed_proba.loc[
+                adata.obs_names
+            ].to_numpy()
+            adata.uns["celltypist_proba_columns"] = list(precomputed_proba.columns)
 
-    from celltypist.models import Model
-    import celltypist
-
-    LOGGER.info("Loading CellTypist model from %s", model_path)
-    model = Model.load(str(model_path))
-
-    LOGGER.info(
-        "Running CellTypist annotation (majority_voting=%s)...",
-        cfg.celltypist_majority_voting,
-    )
-
-    predictions = celltypist.annotate(
-        adata,
-        model=model,
-        majority_voting=cfg.celltypist_majority_voting,
-    )
-
-    # majority_voting labels if available, otherwise main predictions
-    if "majority_voting" in predictions.predicted_labels:
-        cell_level_labels = predictions.predicted_labels["majority_voting"]
+    # Path B: fallback -> run CellTypist on main adata
     else:
-        cell_level_labels = predictions.predicted_labels
+        LOGGER.info("Running CellTypist on main AnnData for final annotation.")
+        sc.pp.normalize_total(adata, target_sum=1e4)
+        sc.pp.log1p(adata)
 
-    # Store per-cell CellTypist labels
-    adata.obs[cfg.celltypist_label_key] = cell_level_labels
+        LOGGER.info("Resolving CellTypist model: %s", cfg.celltypist_model)
+        model_path = get_celltypist_model(cfg.celltypist_model)
 
-    # Collapse to cluster level: majority label per Leiden cluster
+        from celltypist.models import Model
+        import celltypist
+
+        LOGGER.info("Loading CellTypist model from %s", model_path)
+        model = Model.load(str(model_path))
+
+        predictions = celltypist.annotate(
+            adata,
+            model=model,
+            majority_voting=cfg.celltypist_majority_voting,
+        )
+
+        if (
+            isinstance(predictions.predicted_labels, dict)
+            and "majority_voting" in predictions.predicted_labels
+        ):
+            cell_level_labels = predictions.predicted_labels["majority_voting"]
+        else:
+            cell_level_labels = predictions.predicted_labels
+
+        adata.obs[cfg.celltypist_label_key] = cell_level_labels
+
+        if hasattr(predictions, "probability_matrix"):
+            pm = predictions.probability_matrix
+            adata.obsm["celltypist_proba"] = pm.loc[adata.obs_names].to_numpy()
+            adata.uns["celltypist_proba_columns"] = list(pm.columns)
+
     if cfg.label_key not in adata.obs:
         raise KeyError(
             f"label_key '{cfg.label_key}' not found in adata.obs; "
@@ -789,12 +1007,9 @@ def _run_celltypist_annotation(
         .agg(lambda x: x.value_counts().idxmax())
     )
 
-    # Broadcast back to all cells
     adata.obs[cfg.celltypist_cluster_label_key] = (
         adata.obs[cfg.label_key].map(cluster_majority)
     )
-
-    # Use cluster-collapsed labels as the final label key
     adata.obs[cfg.final_label_key] = adata.obs[cfg.celltypist_cluster_label_key]
 
     LOGGER.info(
@@ -815,8 +1030,6 @@ def _final_real_silhouette_qc(
 ) -> Optional[float]:
     """
     Compute true silhouette for the final clustering (QC only) and optionally plot histogram.
-
-    Returns mean silhouette or None if not computable.
     """
     if cfg.label_key not in adata.obs:
         LOGGER.warning(
@@ -874,21 +1087,19 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
     Full clustering + annotation pipeline:
 
     - Load integrated AnnData
-    - Infer batch key (if needed)
-    - Build neighbors/UMAP from chosen embedding
-    - Resolution sweep (centroid-based separation, ARI matrix, composite stability)
-    - Subsampling stability analysis
-    - Apply final clustering at optimal resolution
-    - Optional CellTypist annotation
-    - Generate plots via plot_utils
-    - Save final h5ad and optional annotation CSV
+    - Infer batch key
+    - Precompute CellTypist predictions (optional, once)
+    - Build neighbors/UMAP
+    - Resolution sweep (structural metrics + optional bio metrics)
+    - Subsampling stability
+    - Apply final clustering
+    - Final silhouette QC
+    - CellTypist annotation using precomputed labels
+    - Plots + save outputs
     """
     setup_logging(cfg.logfile)
     LOGGER.info("Starting cluster_and_annotate")
 
-    # ------------------------------------------------------------------
-    # Load data and keys
-    # ------------------------------------------------------------------
     in_path: Path = cfg.input_path
     adata = sc.read_h5ad(str(in_path))
 
@@ -898,33 +1109,28 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
     embedding_key = _ensure_embedding(adata, cfg.embedding_key)
     LOGGER.info("Using embedding_key='%s', batch_key='%s'", embedding_key, batch_key)
 
-    # ------------------------------------------------------------------
-    # Neighbors + UMAP (using chosen embedding)
-    # ------------------------------------------------------------------
+    # CellTypist precompute (may be None, None)
+    celltypist_labels, celltypist_proba = _precompute_celltypist(adata, cfg)
+
     sc.pp.neighbors(adata, use_rep=embedding_key)
     sc.tl.umap(adata)
 
-    # ------------------------------------------------------------------
-    # Setup figures
-    # ------------------------------------------------------------------
     if cfg.make_figures:
         plot_utils.setup_scanpy_figs(cfg.figdir, cfg.figure_formats)
     figdir_cluster = cfg.figdir / "cluster_and_annotate"
 
-    # ------------------------------------------------------------------
-    # Resolution sweep
-    # ------------------------------------------------------------------
-    best_res, sweep, clusterings = _resolution_sweep(adata, cfg, embedding_key)
+    best_res, sweep, clusterings = _resolution_sweep(
+        adata,
+        cfg,
+        embedding_key,
+        celltypist_labels=celltypist_labels,
+    )
 
-    # ------------------------------------------------------------------
-    # Store clustering metadata
-    # ------------------------------------------------------------------
     res_list = [float(r) for r in sweep["resolutions"]]
 
     adata.uns.setdefault("cluster_and_annotate", {})
     ca_uns = adata.uns["cluster_and_annotate"]
 
-    # Basic top-level summary (kept for backwards compatibility)
     ca_uns.update(
         {
             "embedding_key": embedding_key,
@@ -935,7 +1141,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
             "silhouette_scores": [float(x) for x in sweep["silhouette_scores"]],
             "n_clusters": [int(x) for x in sweep["n_clusters"]],
             "penalized_scores": [float(x) for x in sweep["penalized_scores"]],
-            "stability_ari": [],  # filled after subsampling stability
+            "stability_ari": [],
             "celltypist_model": cfg.celltypist_model,
             "celltypist_label_key": None,
             "celltypist_cluster_label_key": None,
@@ -943,7 +1149,6 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
         }
     )
 
-    # Detailed clustering metadata (new, canonical string keys)
     ca_uns["clustering"] = {
         "tested_resolutions": res_list,
         "best_resolution": float(best_res),
@@ -973,11 +1178,25 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
         },
         "plateaus": sweep["plateaus"],
         "selection_config": sweep["selection_config"],
+        "bio_homogeneity": None,
+        "bio_fragmentation": None,
+        "bio_ari": None,
     }
 
-    # ------------------------------------------------------------------
-    # Sweep QC Plots
-    # ------------------------------------------------------------------
+    if sweep.get("bio_homogeneity") is not None:
+        ca_uns["clustering"]["bio_homogeneity"] = {
+            _res_key(r): float(v)
+            for r, v in zip(res_list, sweep["bio_homogeneity"])
+        }
+        ca_uns["clustering"]["bio_fragmentation"] = {
+            _res_key(r): float(v)
+            for r, v in zip(res_list, sweep["bio_fragmentation"])
+        }
+        ca_uns["clustering"]["bio_ari"] = {
+            _res_key(r): float(v)
+            for r, v in zip(res_list, sweep["bio_ari"])
+        }
+
     if cfg.make_figures:
         plot_utils.plot_clustering_resolution_sweep(
             resolutions=sweep["resolutions"],
@@ -992,25 +1211,12 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
             figdir=figdir_cluster,
         )
 
-    # ------------------------------------------------------------------
-    # Stability analysis
-    # ------------------------------------------------------------------
     stability_aris = _subsampling_stability(adata, cfg, embedding_key, best_res)
     ca_uns["stability_ari"] = [float(x) for x in stability_aris]
 
-    # ------------------------------------------------------------------
-    # Apply final clustering
-    # ------------------------------------------------------------------
     _apply_final_clustering(adata, cfg, best_res)
-
-    # ------------------------------------------------------------------
-    # Final real silhouette QC (true silhouette, QC only)
-    # ------------------------------------------------------------------
     _final_real_silhouette_qc(adata, cfg, embedding_key, figdir_cluster)
 
-    # ------------------------------------------------------------------
-    # Clustering QC Plots
-    # ------------------------------------------------------------------
     if cfg.make_figures:
         plot_utils.plot_clustering_stability_ari(
             stability_aris=stability_aris,
@@ -1033,7 +1239,30 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
             plateaus=clust["plateaus"],
             figdir=figdir_cluster,
             figure_formats=cfg.figure_formats,
+            bio_homogeneity=clust.get("bio_homogeneity"),
+            bio_fragmentation=clust.get("bio_fragmentation"),
+            bio_ari=clust.get("bio_ari"),
+            selection_config=clust.get("selection_config"),
         )
+        # Biological metrics plot (only when bio-guided clustering is enabled & metrics present)
+        if (
+                getattr(cfg, "bio_guided_clustering", False)
+                and clust.get("bio_homogeneity") is not None
+                and clust.get("bio_fragmentation") is not None
+                and clust.get("bio_ari") is not None
+        ):
+            plot_utils.plot_biological_metrics(
+                resolutions=clust["tested_resolutions"],
+                bio_homogeneity=clust["bio_homogeneity"],
+                bio_fragmentation=clust["bio_fragmentation"],
+                bio_ari=clust["bio_ari"],
+                selection_config=clust["selection_config"],
+                best_resolution=clust["best_resolution"],
+                plateaus=clust["plateaus"],
+                figdir=figdir_cluster,
+                figure_formats=cfg.figure_formats,
+            )
+
         plot_utils.plot_plateau_highlights(
             resolutions=clust["tested_resolutions"],
             silhouette=clust["silhouette_centroid"],
@@ -1045,19 +1274,20 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
             figure_formats=cfg.figure_formats,
         )
 
-    # ------------------------------------------------------------------
-    # CellTypist annotation (optional)
-    # ------------------------------------------------------------------
-    annotation_col = _run_celltypist_annotation(adata, cfg)
+    annotation_col = _run_celltypist_annotation(
+        adata,
+        cfg,
+        precomputed_labels=celltypist_labels,
+        precomputed_proba=celltypist_proba,
+    )
+
     if cfg.make_figures and annotation_col is not None:
-        # Cell-level CellTypist annotation
         plot_utils.umap_by(
             adata,
             keys=cfg.celltypist_label_key,
             figdir=figdir_cluster,
             stem="umap_celltypist_celllevel",
         )
-        # Cluster-collapsed CellTypist annotation
         plot_utils.umap_by(
             adata,
             keys=cfg.celltypist_cluster_label_key,
@@ -1065,15 +1295,11 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
             stem="umap_celltypist_clusterlevel",
         )
 
-    # Update annotation metadata
     if annotation_col is not None:
         ca_uns["celltypist_label_key"] = cfg.celltypist_label_key
         ca_uns["celltypist_cluster_label_key"] = cfg.celltypist_cluster_label_key
         ca_uns["final_label_key"] = cfg.final_label_key
 
-    # ------------------------------------------------------------------
-    # Export annotation table (optional)
-    # ------------------------------------------------------------------
     if cfg.annotation_csv is not None and annotation_col is not None:
         io_utils.export_cluster_annotations(
             adata,
@@ -1081,9 +1307,6 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
             out_path=cfg.annotation_csv,
         )
 
-    # ------------------------------------------------------------------
-    # Save clustered + annotated h5ad
-    # ------------------------------------------------------------------
     if cfg.output_path is not None:
         out_path = cfg.output_path
     else:
