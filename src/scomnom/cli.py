@@ -222,6 +222,11 @@ def load_and_filter(
         ..., "--metadata-tsv", "-m", exists=True,
         help="[I/O] TSV with sample metadata.",
     ),
+    n_jobs: int = typer.Option(
+        None,
+        "--n-jobs",
+        help="Number of CPU cores to use (default: value from config, typically 4).",
+    ),
 
     # -------------------------------------------------------------
     # QC thresholds
@@ -263,6 +268,9 @@ def load_and_filter(
 
     logfile = output_dir / "load-and-filter.log"
     init_logging(logfile)
+
+    if n_jobs is not None:
+        cfg.n_jobs = n_jobs
 
     cfg = LoadAndQCConfig(
         raw_sample_dir=raw_sample_dir,

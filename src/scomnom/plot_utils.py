@@ -1572,106 +1572,91 @@ def plot_ssgsea_cluster_topn_heatmap(
     adata: anndata.AnnData,
     cluster_key: str = "cluster_label",
     figdir: Path | None = None,
-    n: int = 3,
+    n: int = 5,
     z_score: bool = False,
     cmap: str = "viridis",
 ):
-    """
-    Plot top-N ssGSEA pathways per cluster, one heatmap per gene-set library.
-    - No gridlines (linewidths=0, linecolor=None)
-    - Tick marks preserved
-    - Large manual margins so save_multi() never clips text
-    - Colorblind-friendly palette
-    - Supports z-scoring
-    """
     if figdir is None:
         raise ValueError("figdir must be provided.")
-
     if "ssgsea_cluster_means" not in adata.uns:
-        LOGGER.warning("No ssGSEA cluster means found; skipping heatmaps.")
+        LOGGER.warning("No ssGSEA cluster means found; skipping.")
         return
 
-    df = adata.uns["ssgsea_cluster_means"]
-    if df.empty:
-        LOGGER.warning("ssGSEA cluster means empty; skipping.")
-        return
+    df = adata.uns["ssgsea_cluster_means"].apply(pd.to_numeric, errors="coerce").fillna(0)
 
     import matplotlib.pyplot as plt
     import seaborn as sns
+    import matplotlib.cm as cm
     import numpy as np
-    import pandas as pd
 
-    # ensure numeric
-    df = df.apply(pd.to_numeric, errors="coerce").fillna(0)
+    cmap_force = cm.get_cmap("viridis")  # TRUE viridis colormap
 
-    # detect prefixes
     prefixes = sorted({c.split("::")[0] for c in df.columns})
 
-    # colorblind-friendly palette
-    cmap_use = sns.color_palette("viridis", as_cmap=True) if cmap == "viridis" else cmap
-
     for prefix in prefixes:
+
         cols = [c for c in df.columns if c.startswith(prefix + "::")]
         if not cols:
             continue
 
         sub = df[cols]
 
-        # z-score if needed
         if z_score:
             sub = (sub - sub.mean(0)) / sub.std(0).replace(0, np.nan)
 
-        # top-N selection
+        # ---- select top N ----
         top_terms = []
         for cl in sub.index:
-            vals = sub.loc[cl]
-            top_terms.extend(vals.nlargest(n).index.tolist())
+            top_terms.extend(sub.loc[cl].nlargest(n).index.tolist())
 
         selected = sorted(set(top_terms))
         sub = sub[selected]
 
-        # ----------- build figure (manual robust margin approach) -----------
+        # ---- shorten labels ----
+        short_labels = [c.split("::", 1)[1].replace("_", " ") for c in selected]
+        sub.columns = short_labels
 
-        # one cell ~ 0.45 inches; add padding
+        # ---- figure ----
         fig_w = 2.5 + 0.55 * len(selected)
         fig_h = 2.5 + 0.40 * len(sub)
-
         fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-        # main heatmap
+        # ---- ACTUAL HEATMAP ----
         sns.heatmap(
             sub,
             ax=ax,
-            cmap=cmap_use,
+            cmap=cmap_force,
             annot=False,
             cbar=True,
-            linewidths=0,      # remove cell gridlines
-            linecolor=None,    # ensure no borders
+            linewidths=0,
+            linecolor=None,
         )
 
-        # axis labels
+        # ---- REMOVE ALL SPINES ----
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+
+        # ---- REMOVE ALL GRIDLINES ----
+        ax.grid(False)
+        ax.set_axisbelow(False)
+
+        # ---- ticks ----
+        ax.tick_params(axis="x", rotation=60, labelsize=8, length=4, color="black")
+        ax.tick_params(axis="y", rotation=0, labelsize=8, length=4, color="black")
+        ax.minorticks_off()
+
+        # ---- labels ----
         ax.set_xlabel("Pathway", fontsize=11)
         ax.set_ylabel(cluster_key, fontsize=11)
 
-        # ticks
-        ax.tick_params(axis="x", rotation=60, labelsize=8, pad=6)
-        ax.tick_params(axis="y", rotation=0, labelsize=8, pad=4)
-
-        # title
         title = f"Top {n} ssGSEA pathways per cluster ({prefix})"
         if z_score:
             title += " — Z-score"
         ax.set_title(title, fontsize=14, pad=12)
 
-        # ---------- MANUAL MARGINS (robust, no layout engine needed) ----------
-        fig.subplots_adjust(
-            left=0.32,     # space for left tick labels
-            bottom=0.32,   # space for rotated x labels
-            right=0.98,
-            top=0.88,
-        )
+        # ---- MANUAL MARGINS ----
+        fig.subplots_adjust(left=0.30, bottom=0.32, right=0.98, top=0.88)
 
-        # ---------- SAVE ----------
         stem = f"ssgsea_top{n}_{prefix}"
         if z_score:
             stem += "_z"
@@ -1679,7 +1664,3 @@ def plot_ssgsea_cluster_topn_heatmap(
         save_multi(stem, figdir, fig)
         plt.close(fig)
 
-        LOGGER.info(
-            "Saved ssGSEA top-%d heatmap for '%s' (%d pathways × %d clusters).",
-            n, prefix, sub.shape[1], sub.shape[0]
-        )
