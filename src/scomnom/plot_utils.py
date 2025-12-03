@@ -891,6 +891,7 @@ def plot_cluster_tree(
     labels_per_resolution: Mapping[str, np.ndarray],
     resolutions: Sequence[float | str],
     figdir: Path | str,
+    best_resolution: float | None = None,
     palette: list[str] | None = None,
     min_frac: float = 0.05,
     stem: str = "cluster_tree",
@@ -921,12 +922,14 @@ def plot_cluster_tree(
     cluster_sizes: Dict[tuple[str, int], int] = {}
 
     # Determine color function (cluster_id → color)
-    if palette is None:
-        cmap = plt.get_cmap("tab20")
-        color_lookup = lambda cid: cmap(cid % cmap.N)
-    else:
+    if palette is not None:
+        # Use provided palette directly
         palette = list(palette)
         color_lookup = lambda cid: palette[cid % len(palette)]
+    else:
+        # Fallback to tab20 if no palette provided
+        cmap = plt.get_cmap("tab20")
+        color_lookup = lambda cid: cmap(cid % cmap.N)
 
     for i in range(len(res_keys) - 1):
         k1, k2 = res_keys[i], res_keys[i + 1]
@@ -1089,6 +1092,44 @@ def plot_cluster_tree(
     ax.set_yticklabels([f"{res_sorted[i]:.3f}" for i in range(len(res_sorted))])
     ax.set_ylabel("Resolution")
 
+    # ------------------------------------------------------------------
+    # 7. Highlight best resolution with horizontal dotted line + text box
+    # ------------------------------------------------------------------
+    if best_resolution is not None:
+        r = float(best_resolution)
+
+        # Find exact or closest resolution tick
+        idx = np.argmin([abs(r - rr) for rr in res_sorted])
+        y = -idx  # negative index = y-coordinate in the plot
+
+        # Horizontal dotted line across entire width
+        ax.axhline(
+            y=y,
+            color="red",
+            linestyle=":",
+            linewidth=2.0,
+            alpha=0.9,
+            zorder=50,
+        )
+
+        # Annotation text box on the right side
+        ax.text(
+            ax.get_xlim()[1],  # far right
+            y,
+            f"Best res = {r:.2f}",
+            color="red",
+            fontsize=12,
+            ha="right",
+            va="center",
+            bbox=dict(
+                facecolor="white",
+                edgecolor="red",
+                boxstyle="round,pad=0.3",
+                alpha=0.85,
+            ),
+            zorder=51,
+        )
+
     ax.grid(False)
     plt.tight_layout()
 
@@ -1107,13 +1148,7 @@ def plot_stability_curves(
     best_resolution: float | str,
     plateaus: Sequence[Mapping[str, object]] | None,
     figdir: Path | str,
-    figure_formats: Sequence[str] = ("png", "pdf"),
     stem: str = "cluster_selection_stability",
-    # --- optional biological metrics (only used if all are not None) ---
-    bio_homogeneity: Mapping[Any, Any] | None = None,
-    bio_fragmentation: Mapping[Any, Any] | None = None,
-    bio_ari: Mapping[Any, Any] | None = None,
-    selection_config: Mapping[str, Any] | None = None,
 ) -> None:
     """
     Plot structural + (optionally) biological metrics vs resolution.
@@ -1123,12 +1158,6 @@ def plot_stability_curves(
       - stability (smoothed ARI)
       - composite score (actual one used for selection)
       - tiny-cluster penalty
-
-    Biological components (only if bio-guided mode was used):
-      - homogeneity (0–1, higher better)
-      - fragmentation (shown as 1 - normalized fragmentation, higher better)
-      - bio-ARI (normalized)
-      - biological composite (normalized, based on selection weights)
     """
     res_sorted = _sorted_resolutions(resolutions)
 
@@ -1136,33 +1165,6 @@ def plot_stability_curves(
     stab = _extract_series(res_sorted, stability)
     comp = _extract_series(res_sorted, composite)
     tiny = _extract_series(res_sorted, tiny_cluster_penalty)
-
-    # --- biological metrics availability check ---
-    have_bio = (
-        bio_homogeneity is not None
-        and bio_fragmentation is not None
-        and bio_ari is not None
-        and selection_config is not None
-        and bool(selection_config.get("use_bio", False))
-    )
-
-    if have_bio:
-        hom_raw = _extract_series(res_sorted, bio_homogeneity)
-        frag_raw = _extract_series(res_sorted, bio_fragmentation)
-        ari_raw = _extract_series(res_sorted, bio_ari)
-
-        hom_norm = _normalize_array(hom_raw)
-        frag_norm = _normalize_array(frag_raw)
-        frag_good = 1.0 - frag_norm  # higher = better (less fragmentation)
-        ari_norm = _normalize_array(ari_raw)
-
-        w_hom = float(selection_config.get("w_hom", 0.0))
-        w_frag = float(selection_config.get("w_frag", 0.0))
-        w_bioari = float(selection_config.get("w_bioari", 0.0))
-
-        bio_comp = w_hom * hom_norm + w_frag * frag_good + w_bioari * ari_norm
-    else:
-        hom_norm = frag_good = ari_norm = bio_comp = None
 
     fig, ax = plt.subplots(figsize=(8, 5))
 
@@ -1173,26 +1175,8 @@ def plot_stability_curves(
     # structural curves
     ax.plot(res_sorted, sil, label="Centroid silhouette", color="tab:blue")
     ax.plot(res_sorted, stab, label="Stability (smoothed ARI)", color="tab:green")
-    ax.plot(res_sorted, comp, label="Composite (used for selection)", color="tab:red")
     ax.plot(res_sorted, tiny, label="Tiny-cluster penalty", color="tab:orange")
-
-    # biological curves (only shown if they were used in selection)
-    if have_bio:
-        ax.plot(res_sorted, hom_norm, label="Biological homogeneity (norm.)", color="purple")
-        ax.plot(
-            res_sorted,
-            frag_good,
-            label="Fragmentation (low→high, norm.)",
-            color="brown",
-        )
-        ax.plot(res_sorted, ari_norm, label="Bio-ARI (norm.)", color="magenta")
-        ax.plot(
-            res_sorted,
-            bio_comp,
-            label="Biological composite (norm.)",
-            color="black",
-            linestyle="--",
-        )
+    ax.plot(res_sorted, comp, label="Composite (used for selection)", color="tab:red")
 
     ax.axvline(float(best_resolution), color="k", linestyle="--")
 
@@ -1269,6 +1253,82 @@ def plot_biological_metrics(
     ax.set_xlabel("Resolution")
     ax.set_ylabel("Normalized score")
     ax.set_title("Biological metrics vs resolution (bio-guided clustering)")
+    ax.legend(loc="best", fontsize=8)
+    ax.grid(True, alpha=0.2)
+
+    plt.tight_layout()
+    save_multi(stem, _ensure_path(figdir), fig)
+
+
+def plot_composite_only(
+    resolutions: Sequence[float | str],
+    structural_comp: Mapping[Any, Any],
+    biological_comp: Mapping[Any, Any] | None,
+    total_comp: Mapping[Any, Any],
+    best_resolution: float | str,
+    plateaus: Sequence[Mapping[str, object]] | None,
+    figdir: Path | str,
+    stem: str = "composite_scores",
+) -> None:
+    """
+    Plot only composite curves:
+      - structural composite (norm.)
+      - biological composite (norm.) [if exists]
+      - total composite (norm.)
+
+    Clean 3-line diagnostic.
+    """
+    res_sorted = _sorted_resolutions(resolutions)
+
+    struct_raw = _extract_series(res_sorted, structural_comp)
+    struct_norm = _normalize_array(struct_raw)
+
+    total_raw = _extract_series(res_sorted, total_comp)
+    total_norm = _normalize_array(total_raw)
+
+    if biological_comp is not None:
+        bio_raw = _extract_series(res_sorted, biological_comp)
+        bio_norm = _normalize_array(bio_raw)
+    else:
+        bio_norm = None
+
+    fig, ax = plt.subplots(figsize=(7, 4.2))
+
+    # plateau shading
+    for xmin, xmax in _plateau_spans(plateaus or []):
+        ax.axvspan(xmin, xmax, color="0.9", alpha=0.5)
+
+    # main curves
+    ax.plot(
+        res_sorted,
+        struct_norm,
+        label="Structural composite (norm.)",
+        color="tab:blue",
+        linewidth=2,
+    )
+
+    if bio_norm is not None:
+        ax.plot(
+            res_sorted,
+            bio_norm,
+            label="Biological composite (norm.)",
+            color="tab:green",
+            linewidth=2,
+        )
+
+    ax.plot(
+        res_sorted,
+        total_norm,
+        label="Total composite (norm.)",
+        color="tab:red",
+        linewidth=2,
+    )
+
+    ax.axvline(float(best_resolution), color="k", linestyle="--")
+
+    ax.set_xlabel("Resolution")
+    ax.set_ylabel("Normalized composite score")
+    ax.set_title("Composite score components")
     ax.legend(loc="best", fontsize=8)
     ax.grid(True, alpha=0.2)
 
@@ -1457,9 +1517,12 @@ def plot_cluster_silhouette_by_cluster(
     ax.set_xlabel("Cluster")
     ax.set_ylabel("Silhouette")
 
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+
     fig.tight_layout()
     save_multi(stem, figdir)
     plt.close(fig)
+
 
 
 def plot_cluster_batch_composition(
@@ -1498,8 +1561,125 @@ def plot_cluster_batch_composition(
 
     ax.set_ylabel("Fraction")
     ax.set_title("Batch composition per cluster")
-    ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right")
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
 
     fig.tight_layout()
     save_multi(stem, figdir)
     plt.close(fig)
+
+
+def plot_ssgsea_cluster_topn_heatmap(
+    adata: anndata.AnnData,
+    cluster_key: str = "cluster_label",
+    figdir: Path | None = None,
+    n: int = 3,
+    z_score: bool = False,
+    cmap: str = "viridis",
+):
+    """
+    Plot top-N ssGSEA pathways per cluster, one heatmap per gene-set library.
+    - No gridlines (linewidths=0, linecolor=None)
+    - Tick marks preserved
+    - Large manual margins so save_multi() never clips text
+    - Colorblind-friendly palette
+    - Supports z-scoring
+    """
+    if figdir is None:
+        raise ValueError("figdir must be provided.")
+
+    if "ssgsea_cluster_means" not in adata.uns:
+        LOGGER.warning("No ssGSEA cluster means found; skipping heatmaps.")
+        return
+
+    df = adata.uns["ssgsea_cluster_means"]
+    if df.empty:
+        LOGGER.warning("ssGSEA cluster means empty; skipping.")
+        return
+
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    import numpy as np
+    import pandas as pd
+
+    # ensure numeric
+    df = df.apply(pd.to_numeric, errors="coerce").fillna(0)
+
+    # detect prefixes
+    prefixes = sorted({c.split("::")[0] for c in df.columns})
+
+    # colorblind-friendly palette
+    cmap_use = sns.color_palette("viridis", as_cmap=True) if cmap == "viridis" else cmap
+
+    for prefix in prefixes:
+        cols = [c for c in df.columns if c.startswith(prefix + "::")]
+        if not cols:
+            continue
+
+        sub = df[cols]
+
+        # z-score if needed
+        if z_score:
+            sub = (sub - sub.mean(0)) / sub.std(0).replace(0, np.nan)
+
+        # top-N selection
+        top_terms = []
+        for cl in sub.index:
+            vals = sub.loc[cl]
+            top_terms.extend(vals.nlargest(n).index.tolist())
+
+        selected = sorted(set(top_terms))
+        sub = sub[selected]
+
+        # ----------- build figure (manual robust margin approach) -----------
+
+        # one cell ~ 0.45 inches; add padding
+        fig_w = 2.5 + 0.55 * len(selected)
+        fig_h = 2.5 + 0.40 * len(sub)
+
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+        # main heatmap
+        sns.heatmap(
+            sub,
+            ax=ax,
+            cmap=cmap_use,
+            annot=False,
+            cbar=True,
+            linewidths=0,      # remove cell gridlines
+            linecolor=None,    # ensure no borders
+        )
+
+        # axis labels
+        ax.set_xlabel("Pathway", fontsize=11)
+        ax.set_ylabel(cluster_key, fontsize=11)
+
+        # ticks
+        ax.tick_params(axis="x", rotation=60, labelsize=8, pad=6)
+        ax.tick_params(axis="y", rotation=0, labelsize=8, pad=4)
+
+        # title
+        title = f"Top {n} ssGSEA pathways per cluster ({prefix})"
+        if z_score:
+            title += " — Z-score"
+        ax.set_title(title, fontsize=14, pad=12)
+
+        # ---------- MANUAL MARGINS (robust, no layout engine needed) ----------
+        fig.subplots_adjust(
+            left=0.32,     # space for left tick labels
+            bottom=0.32,   # space for rotated x labels
+            right=0.98,
+            top=0.88,
+        )
+
+        # ---------- SAVE ----------
+        stem = f"ssgsea_top{n}_{prefix}"
+        if z_score:
+            stem += "_z"
+
+        save_multi(stem, figdir, fig)
+        plt.close(fig)
+
+        LOGGER.info(
+            "Saved ssGSEA top-%d heatmap for '%s' (%d pathways × %d clusters).",
+            n, prefix, sub.shape[1], sub.shape[0]
+        )

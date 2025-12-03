@@ -1,12 +1,19 @@
 from __future__ import annotations
 import glob
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
+import typer
 import anndata as ad
 import scanpy as sc
 from .config import LoadAndQCConfig
 from pathlib import Path
 import shutil
+import os
+import re
+import json
+import urllib.request
+import urllib.error
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -262,7 +269,6 @@ def load_raw_data(
         )
 
     return raw_map, read_counts_filtered, read_counts_unfiltered
-
 
 
 def load_filtered_data(cfg: LoadAndQCConfig) -> tuple[Dict[str, ad.AnnData], Dict[str, float]]:
@@ -551,3 +557,284 @@ def export_cluster_annotations(adata: ad.AnnData, columns: List[str], out_path: 
     df.to_csv(out_path, index=True)
     LOGGER.info("Exported cluster annotations → %s", out_path)
 
+
+# =====================================================================
+# ssGSEA IO helpers
+# =====================================================================
+MSIGDB_BASE_URL = "https://data.broadinstitute.org/gsea-msigdb/msigdb/release"
+MSIGDB_INDEX_FILENAME = "msigdb_index.json"
+
+
+def _get_msigdb_cache_dir() -> Path:
+    """
+    Return the local cache directory for MSigDB gene sets.
+
+    Uses:
+      - env var SCOMNOM_MSIGDB_DIR if set
+      - otherwise ~/.cache/scomnom/msigdb
+    """
+    override = os.environ.get("SCOMNOM_MSIGDB_DIR", None)
+    if override is not None:
+        cache_dir = Path(override).expanduser()
+    else:
+        cache_dir = Path.home() / ".cache" / "scomnom" / "msigdb"
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
+def _http_get(url: str) -> bytes:
+    """
+    Minimal HTTP GET helper with basic error handling.
+    """
+    LOGGER.debug("HTTP GET: %s", url)
+    try:
+        with urllib.request.urlopen(url) as resp:
+            return resp.read()
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Failed to fetch URL {url!r}: {e}") from e
+
+
+def _discover_latest_msigdb_release(species_code: str = "Hs") -> str:
+    """
+    Scrape the MSigDB release directory and return the latest <version>.<species> string,
+    e.g. '2023.1.Hs'.
+
+    If discovery fails, falls back to a hard-coded default.
+    """
+    url = MSIGDB_BASE_URL + "/"
+    try:
+        html = _http_get(url).decode("utf-8", errors="ignore")
+        # Look for directory names like 2023.1.Hs/
+        pattern = rf"(\d{{4}}\.\d+\.{re.escape(species_code)})/"
+        candidates = set(re.findall(pattern, html))
+        if not candidates:
+            raise RuntimeError("No MSigDB release directories found in index HTML.")
+
+        def _version_key(v: str) -> Tuple[int, int]:
+            # v looks like "2023.1.Hs"
+            parts = v.split(".")
+            year = int(parts[0])
+            sub = int(parts[1])
+            return year, sub
+
+        latest = sorted(candidates, key=_version_key)[-1]
+        LOGGER.info("Detected latest MSigDB release: %s", latest)
+        return latest
+    except Exception as e:
+        fallback = f"2023.1.{species_code}"
+        LOGGER.warning(
+            "Could not auto-discover latest MSigDB release (%s). "
+            "Falling back to %s.",
+            e,
+            fallback,
+        )
+        return fallback
+
+
+def _download_msigdb_release(release: str) -> Dict[str, str]:
+    """
+    Download ALL *.symbols.gmt files for the given MSigDB release into the cache,
+    and build a keyword → filepath index.
+
+    Returns
+    -------
+    index : Dict[str, str]
+        Mapping from keyword (e.g. 'HALLMARK', 'REACTOME', 'C2_CP_REACTOME') to
+        local .gmt file path (as str).
+    """
+    cache_dir = _get_msigdb_cache_dir()
+    release_dir = cache_dir / release
+    release_dir.mkdir(parents=True, exist_ok=True)
+
+    index_path = cache_dir / MSIGDB_INDEX_FILENAME
+
+    LOGGER.info("Downloading MSigDB release %s into %s", release, release_dir)
+
+    # Fetch directory listing for this release
+    base_url = f"{MSIGDB_BASE_URL}/{release}/"
+    html = _http_get(base_url).decode("utf-8", errors="ignore")
+
+    # Find all *.symbols.gmt files
+    gmt_files = sorted(set(re.findall(r'href="([^"]+\.symbols\.gmt)"', html)))
+    if not gmt_files:
+        raise RuntimeError(f"No .symbols.gmt files found in MSigDB release {release}")
+
+    keyword_to_path: Dict[str, str] = {}
+
+    for fname in gmt_files:
+        file_url = base_url + fname
+        dest = release_dir / fname
+        if not dest.exists():
+            LOGGER.info("Downloading MSigDB file: %s", fname)
+            data = _http_get(file_url)
+            dest.write_bytes(data)
+        else:
+            LOGGER.debug("MSigDB file already cached: %s", dest)
+
+        # Build keyword aliases from filename
+        # Example filenames:
+        #   h.all.v2023.1.Hs.symbols.gmt
+        #   c2.cp.reactome.v2023.1.Hs.symbols.gmt
+        #   c5.go.bp.v2023.1.Hs.symbols.gmt
+        base = fname.split(".v")[0]  # "h.all" or "c2.cp.reactome"
+        parts = base.split(".")
+
+        # Canonical key: whole prefix in upper snake-case
+        canonical_key = "_".join(parts).upper()  # e.g. "H_ALL" or "C2_CP_REACTOME"
+        keyword_to_path[canonical_key] = str(dest)
+
+        # Also add "tail" keyword for convenience where meaningful
+        # - hallmark: h.all -> HALLMARK
+        # - reactome: c2.cp.reactome -> REACTOME
+        # - wikipathways: c2.cp.wikipathways -> WIKIPATHWAYS
+        if len(parts) >= 2:
+            tail = parts[-1].upper()
+            # Avoid overwriting if already mapped
+            if tail not in keyword_to_path:
+                keyword_to_path[tail] = str(dest)
+
+        # Special case: hallmark collection is usually treated as "HALLMARK"
+        if base.startswith("h.all") and "HALLMARK" not in keyword_to_path:
+            keyword_to_path["HALLMARK"] = str(dest)
+
+    # Persist index
+    payload = {
+        "release": release,
+        "files": keyword_to_path,
+    }
+    index_path.write_text(json.dumps(payload, indent=2))
+    LOGGER.info(
+        "MSigDB index written to %s (keywords: %d)", index_path, len(keyword_to_path)
+    )
+    return keyword_to_path
+
+
+def _load_msigdb_index() -> Tuple[str, Dict[str, str]]:
+    """
+    Load the MSigDB keyword → filepath index from cache.
+
+    Returns
+    -------
+    (release, index) where index is a dict: keyword -> filepath
+
+    If index is missing or invalid, triggers a fresh download of the latest
+    MSigDB release and rebuilds the index.
+    """
+    cache_dir = _get_msigdb_cache_dir()
+    index_path = cache_dir / MSIGDB_INDEX_FILENAME
+
+    if index_path.exists():
+        try:
+            obj = json.loads(index_path.read_text())
+            release = obj.get("release", None)
+            files = obj.get("files", {})
+            if isinstance(release, str) and isinstance(files, dict) and files:
+                LOGGER.info(
+                    "Loaded MSigDB index from %s (release %s, keywords=%d)",
+                    index_path,
+                    release,
+                    len(files),
+                )
+                return release, files
+        except Exception as e:
+            LOGGER.warning("Failed to parse MSigDB index %s: %s", index_path, e)
+
+    # If we get here, we need to discover & download a release
+    release = _discover_latest_msigdb_release(species_code="Hs")
+    files = _download_msigdb_release(release)
+    return release, files
+
+
+def list_available_msigdb_keywords() -> List[str]:
+    """
+    Return all known MSigDB keyword aliases (e.g. 'HALLMARK', 'REACTOME', 'C2_CP_REACTOME').
+
+    This is mainly useful for CLI autocompletion / help.
+    """
+    _, index = _load_msigdb_index()
+    return sorted(index.keys())
+
+
+def resolve_msigdb_gene_sets(
+    user_spec: List[str] | None,
+) -> Tuple[List[str], List[str]]:
+    """
+    Resolve user-provided ssGSEA gene set specifiers into local .gmt file paths.
+
+    Parameters
+    ----------
+    user_spec : list[str] or None
+        - None or [] -> default ['HALLMARK', 'REACTOME'] (MSigDB collections)
+        - Each item can be:
+            * an MSigDB keyword (e.g. 'HALLMARK', 'REACTOME', 'C2_CP_REACTOME')
+            * a local/remote path to a .gmt file (endswith '.gmt')
+
+    Returns
+    -------
+    (gmt_files, used_keywords)
+        gmt_files     : list of file paths to feed into ssGSEA
+        used_keywords : list of resolved keywords (for logging / metadata)
+
+    Raises
+    ------
+    ValueError if no usable gene sets could be resolved.
+    """
+    if not user_spec:
+        LOGGER.info(
+            "ssGSEA: no gene sets provided; defaulting to MSigDB HALLMARK + REACTOME."
+        )
+        spec = ["HALLMARK", "REACTOME"]
+    else:
+        spec = [str(x).strip() for x in user_spec if str(x).strip()]
+
+    if not spec:
+        raise ValueError("Empty ssGSEA gene-set specification.")
+
+    release, index = _load_msigdb_index()
+    LOGGER.info("Resolving ssGSEA gene sets for MSigDB release %s", release)
+
+    gmt_files: List[str] = []
+    used_keywords: List[str] = []
+    unresolved: List[str] = []
+
+    for item in spec:
+        # Custom GMT file: user path
+        if item.lower().endswith(".gmt"):
+            path = Path(item)
+            if not path.is_file():
+                LOGGER.warning(
+                    "Custom GMT file '%s' does not exist; skipping.", path
+                )
+                unresolved.append(item)
+                continue
+            gmt_files.append(str(path))
+            used_keywords.append(str(path))
+            continue
+
+        # MSigDB keyword
+        key = item.upper()
+        if key not in index:
+            LOGGER.warning(
+                "ssGSEA: unknown MSigDB keyword '%s'. Known examples: %s",
+                key,
+                ", ".join(sorted(index.keys())[:10]),
+            )
+            unresolved.append(item)
+            continue
+
+        gmt_files.append(index[key])
+        used_keywords.append(key)
+
+    if not gmt_files:
+        raise ValueError(
+            f"No resolvable MSigDB gene sets from spec: {spec}. "
+            f"Unresolved: {unresolved}"
+        )
+
+    LOGGER.info(
+        "Resolved ssGSEA gene sets: %s",
+        ", ".join(f"{k} -> {p}" for k, p in zip(used_keywords, gmt_files)),
+    )
+
+    return gmt_files, used_keywords

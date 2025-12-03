@@ -9,182 +9,179 @@ from .load_and_filter import run_load_and_filter
 from .integrate import run_integration
 from .cluster_and_annotate import run_clustering
 
-from .config import CellQCConfig
-from .config import LoadAndQCConfig
-from .config import IntegrationConfig
-from .config import ClusterAnnotateConfig
-
+from .config import CellQCConfig, LoadAndQCConfig, IntegrationConfig, ClusterAnnotateConfig
 from .logging_utils import init_logging
 
 
 ALLOWED_METHODS = {"scVI", "scANVI", "Scanorama", "Harmony", "BBKNN"}
-app = typer.Typer(help="scOmnom CLI")
+app = typer.Typer(help="scOmnom CLI — high-throughput scRNA-seq preprocessing and analysis pipeline.")
 
-# Globally suppress some warnings
-warnings.filterwarnings(
-    "ignore",
-    message="Variable names are not unique",
-    category=UserWarning,
-    module="anndata",
-)
-warnings.filterwarnings(
-    "ignore",
-    message=".*not compatible with tight_layout.*",
-    category=UserWarning,
-)
-warnings.filterwarnings(
-    "ignore",
-    message="pkg_resources is deprecated as an API",
-    category=UserWarning,
-)
-warnings.filterwarnings(
-    "ignore",
-    message=r".*does not have many workers which may be a bottleneck.*",
-    category=UserWarning,
-    module="lightning.pytorch",
-)
-warnings.filterwarnings(
-    "ignore",
-    message=".*already log-transformed.*",
-    category=UserWarning,
-)
+# Globally suppress noisy warnings
+warnings.filterwarnings("ignore", message="Variable names are not unique", category=UserWarning, module="anndata")
+warnings.filterwarnings("ignore", message=".*not compatible with tight_layout.*", category=UserWarning)
+warnings.filterwarnings("ignore", message="pkg_resources is deprecated as an API", category=UserWarning)
+warnings.filterwarnings("ignore", message=r".*does not have many workers.*", category=UserWarning, module="lightning.pytorch")
+warnings.filterwarnings("ignore", message=".*already log-transformed.*", category=UserWarning)
 
 
+# ---------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------
 def _normalize_methods(methods):
     """
     Normalize and validate integration method inputs.
-
-    Supports:
-    --methods A --methods B
-    --methods A,B,C
-    or mixed.
-
-    Returns a list of validated method names or None.
+    Supports e.g. --methods A,B --methods C.
     """
     if methods is None:
         return None
 
-    # Expand comma-separated entries
     expanded = []
     for m in methods:
         expanded.extend([x.strip() for x in m.split(",") if x.strip()])
 
-    # Validate
     invalid = [m for m in expanded if m not in ALLOWED_METHODS]
     if invalid:
-        allowed = ", ".join(sorted(ALLOWED_METHODS))
-        bad = ", ".join(invalid)
-        raise ValueError(
-            f"Invalid method(s): {bad}. Allowed methods: {allowed}"
-        )
+        raise ValueError(f"Invalid method(s): {', '.join(invalid)}. "
+                         f"Allowed: {', '.join(sorted(ALLOWED_METHODS))}")
 
     return expanded
 
 
-def _methods_completion(
-    ctx: typer.Context,
-    args: List[str],
-    incomplete: str,
-) -> List[str]:
-    """
-    Shell completion for --methods / -m in `integrate`.
-
-    Suggests allowed integration methods whose names start with the
-    currently typed prefix (case-insensitive).
-    """
+def _methods_completion(ctx: typer.Context, args: List[str], incomplete: str) -> List[str]:
     prefix = incomplete.lower()
-    return [
-        m for m in sorted(ALLOWED_METHODS)
-        if m.lower().startswith(prefix)
-    ]
+    return [m for m in sorted(ALLOWED_METHODS) if m.lower().startswith(prefix)]
 
 
-def _celltypist_models_completion(
-    ctx: typer.Context,
-    args: List[str],
-    incomplete: str,
-) -> List[str]:
-    """
-    Shell completion for --celltypist-model / -M in `cluster-and-annotate`.
-
-    Uses the CellTypist registry (if available) and completes model names.
-    """
+def _celltypist_models_completion(ctx: typer.Context, args: List[str], incomplete: str) -> List[str]:
     from .io_utils import get_available_celltypist_models
-
     try:
         models = get_available_celltypist_models()
     except Exception:
         return []
 
     prefix = incomplete.lower()
-    names = [m.get("name", "") for m in models]
-    return [
-        name for name in names
-        if isinstance(name, str) and name.lower().startswith(prefix)
+    return [m.get("name", "") for m in models if m.get("name", "").lower().startswith(prefix)]
+
+
+def _gene_sets_completion(
+    ctx: typer.Context,
+    args: List[str],
+    incomplete: str,
+) -> List[str]:
+    """
+    Autocomplete for --ssgsea-gene-sets.
+
+    Suggests:
+    1. Common MSigDB collection keywords (HALLMARK, REACTOME, BIOCARTA, ...)
+    2. Any locally cached or project .gmt files
+    3. Prefix-matching only (case-insensitive)
+    """
+    prefix = incomplete.lower()
+
+    # -----------------------------------------------------
+    # 1. Known MSigDB collections (broadest modern set)
+    # -----------------------------------------------------
+    standard_sets = [
+        # Hallmark
+        "HALLMARK",
+
+        # MSigDB curated (C2)
+        "REACTOME",
+        "BIOCARTA",
+        "KEGG",
+
+        # GO collections
+        "GO_BP",
+        "GO_MF",
+        "GO_CC",
+
+        # Immunologic signatures
+        "IMMUNO",
+
+        # Oncogenic signatures
+        "ONCOGENIC",
+
+        # Transcription factor targets
+        "TF_TARGETS",
+
+        # MicroRNA targets
+        "MIR_TARGETS",
+
+        # WikiPathways (now part of MSigDB 2024+)
+        "WIKIPATHWAYS",
     ]
+
+    suggestions = [s for s in standard_sets if s.lower().startswith(prefix)]
+
+    # -----------------------------------------------------
+    # 2. Include local *.gmt files if they match prefix
+    # -----------------------------------------------------
+    known_dirs = [
+        Path.cwd(),
+        Path.home(),
+        Path.home() / "msigdb_cache",
+        Path.home() / ".cache/scomnom/msigdb",
+    ]
+
+    for d in known_dirs:
+        if not d.exists():
+            continue
+        for f in d.glob("*.gmt"):
+            if f.name.lower().startswith(prefix):
+                suggestions.append(str(f))
+
+    # Deduplicate but preserve order
+    seen = set()
+    unique = []
+    for s in suggestions:
+        if s not in seen:
+            seen.add(s)
+            unique.append(s)
+
+    return unique
 
 
 # ======================================================================
 #  cell-qc
 # ======================================================================
-@app.command("cell-qc", help="Generate QC comparisons between raw, Cell Ranger–filtered, and CellBender matrices.")
+@app.command("cell-qc", help="QC comparison between raw, filtered, and CellBender matrices.")
 def cell_qc(
-    # Input directories (0–3 provided)
+    # -------------------------------------------------------------
+    # I/O
+    # -------------------------------------------------------------
     raw: Optional[Path] = typer.Option(
         None, "--raw", "-r",
-        help="Directory containing raw 10x matrices (*.raw_feature_bc_matrix)",
+        help="[I/O] Directory containing raw 10x matrices (*.raw_feature_bc_matrix)",
     ),
     filtered: Optional[Path] = typer.Option(
         None, "--filtered", "-f",
-        help="Directory containing filtered 10x matrices (*.filtered_feature_bc_matrix)",
+        help="[I/O] Directory with filtered 10x matrices (*.filtered_feature_bc_matrix)",
     ),
     cellbender: Optional[Path] = typer.Option(
         None, "--cellbender", "-c",
-        help="Directory containing CellBender outputs (*.cellbender_filtered.output)",
+        help="[I/O] Directory containing CellBender outputs (*.cellbender_filtered.output)",
     ),
-
-    # Output
     output_dir: Path = typer.Option(
         ..., "--out", "-o",
-        help="Output directory containing figures/",
+        help="[I/O] Output directory containing figures/",
     ),
 
-    # optional: control figure formats
+    # -------------------------------------------------------------
+    # Figures
+    # -------------------------------------------------------------
     figure_formats: List[str] = typer.Option(
-        ["png", "pdf"],
-        "--format",
-        "-F",
-        help="Figure formats to export (png, pdf, svg)",
+        ["png", "pdf"], "--format", "-F",
+        help="[Figures] Formats to export (png, pdf, svg). Repeat for multiple.",
     ),
 ):
-    """
-    Standalone QC module for comparing multiple input count matrices.
-
-    Supports:
-    - Raw 10x data (before and after knee+GMM filtering)
-    - Cell Ranger filtered matrices
-    - CellBender matrices
-
-    Generates:
-    - Read count comparisons
-    - Knee/GMM UMI plots
-    - Cell count per sample comparisons
-
-    Useful for evaluating barcode calling and dataset quality **before** running full preprocessing.
-    """
     logfile = output_dir / "cell_qc.log"
     init_logging(logfile)
 
-    # --- sanity checks ---
-    if (raw is None) and (filtered is None) and (cellbender is None):
-        raise typer.BadParameter(
-            "Provide at least one input: --raw, --filtered, or --cellbender"
-        )
+    if not (raw or filtered or cellbender):
+        raise typer.BadParameter("Provide at least one of --raw / --filtered / --cellbender")
 
-    # create output dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- build config ---
     cfg = CellQCConfig(
         output_dir=output_dir,
         figdir_name="figures",
@@ -194,94 +191,75 @@ def cell_qc(
         cellbender_dir=cellbender,
         make_figures=True,
     )
-
-    # --- run the module ---
     run_cell_qc(cfg)
 
 
 # ======================================================================
 #  load-and-filter
 # ======================================================================
-@app.command(
-    "load-and-filter",
-    help="Run the full scOmnom preprocessing pipeline to load and filter a dataset",
-)
+@app.command("load-and-filter", help="Full scOmnom preprocessing pipeline.")
 def load_and_filter(
-    raw_sample_dir: Path = typer.Option(
-        None,
-        "--raw-sample-dir",
-        "-r",
-        help="Path with <sample>.raw_feature_bc_matrix folders",
+    # -------------------------------------------------------------
+    # I/O
+    # -------------------------------------------------------------
+    raw_sample_dir: Optional[Path] = typer.Option(
+        None, "--raw-sample-dir", "-r",
+        help="[I/O] Path containing <sample>.raw_feature_bc_matrix folders.",
     ),
-    filtered_sample_dir: Path = typer.Option(
-        None,
-        "--filtered-sample-dir",
-        "-f",
-        help="Path with <sample>.filtered_feature_bc_matrix folders (Cell Ranger output)",
+    filtered_sample_dir: Optional[Path] = typer.Option(
+        None, "--filtered-sample-dir", "-f",
+        help="[I/O] Path with <sample>.filtered_feature_bc_matrix folders.",
     ),
-    cellbender_dir: Path = typer.Option(
-        None,
-        "--cellbender-dir",
-        "-c",
-        help="Path with <sample>.cellbender_filtered.output folders",
+    cellbender_dir: Optional[Path] = typer.Option(
+        None, "--cellbender-dir", "-c",
+        help="[I/O] Path with <sample>.cellbender_filtered.output folders.",
     ),
     output_dir: Path = typer.Option(
-        ...,
-        "--out",
-        "-o",
-        help="Output directory (required). Will contain h5ad + figures/",
+        ..., "--out", "-o",
+        help="[I/O] Output directory for h5ad and figures/",
     ),
     metadata_tsv: Path = typer.Option(
-        ...,
-        "--metadata-tsv",
-        "-m",
-        exists=True,
-        file_okay=True,
-        dir_okay=False,
-        readable=True,
-        help="Sample-level metadata TSV (required)",
+        ..., "--metadata-tsv", "-m", exists=True,
+        help="[I/O] TSV with sample metadata.",
     ),
-    n_jobs: int = typer.Option(4),
-    min_cells: int = typer.Option(3),
-    min_genes: int = typer.Option(200),
-    min_cells_per_sample: int = typer.Option(20),
-    max_pct_mt: float = typer.Option(5.0),
-    make_figures: bool = typer.Option(True),
-    figure_format: list[str] = typer.Option(
-        ["png", "pdf"],
-        "--figure-format",
-        "-F",
-        help="Figure formats to save. Repeat option for multiple formats, e.g. --figure-format png --figure-format pdf",
+
+    # -------------------------------------------------------------
+    # QC thresholds
+    # -------------------------------------------------------------
+    min_cells: int = typer.Option(3, help="[QC] Minimum cells per gene."),
+    min_genes: int = typer.Option(500, help="[QC] Minimum genes per cell. Lower this to ~200 for snRNA-seq"),
+    min_cells_per_sample: int = typer.Option(20, help="[QC] Minimum cells per sample."),
+    max_pct_mt: float = typer.Option(5.0, help="[QC] Max mitochondrial percentage. Increase this to ~30-50% for snRNA-seq"),
+
+    # -------------------------------------------------------------
+    # Figures
+    # -------------------------------------------------------------
+    make_figures: bool = typer.Option(True, help="[Figures] Whether to create QC plots."),
+    figure_format: List[str] = typer.Option(
+        ["png", "pdf"], "--figure-format", "-F",
+        help="[Figures] Formats to save."
     ),
-    batch_key: str = typer.Option(None, "--batch-key", "-b"),
+
+    # -------------------------------------------------------------
+    # HVG / PCA / batch
+    # -------------------------------------------------------------
+    batch_key: Optional[str] = typer.Option(
+        None, "--batch-key", "-b",
+        help="[PCA/Batch] Batch column in .obs.",
+    ),
+
+    # -------------------------------------------------------------
+    # Input pattern overrides (advanced)
+    # -------------------------------------------------------------
     raw_pattern: str = typer.Option("*.raw_feature_bc_matrix"),
     filtered_pattern: str = typer.Option("*.filtered_feature_bc_matrix"),
     cellbender_pattern: str = typer.Option("*.cellbender_filtered.output"),
     cellbender_h5_suffix: str = typer.Option(".cellbender_out.h5"),
 ):
-    """
-    Run the complete scOmnom preprocessing pipeline.
-
-    This includes:
-    - Loading raw, Cell Ranger filtered, or CellBender matrices (exactly one source)
-    - Sample merging
-    - Metadata integration
-    - QC metric computation
-    - Doublet detection
-    - Filtering (genes, cells, mitochondrial content)
-    - Normalization and log transform
-    - HVG selection, PCA, neighbors, UMAP
-    - Leiden clustering
-    - Full QC figure panel
-    - Writing the final preprocessed h5ad
-    """
     if raw_sample_dir and filtered_sample_dir:
         raise typer.BadParameter("Cannot specify both --raw-sample-dir and --filtered-sample-dir")
     if filtered_sample_dir and cellbender_dir:
-        raise typer.BadParameter(
-            "Invalid input: CellBender outputs cannot be combined with Cell Ranger filtered matrices. "
-            "Use --raw-sample-dir instead."
-        )
+        raise typer.BadParameter("CellBender outputs cannot be mixed with Cell Ranger filtered matrices.")
 
     logfile = output_dir / "load-and-filter.log"
     init_logging(logfile)
@@ -292,7 +270,7 @@ def load_and_filter(
         cellbender_dir=cellbender_dir,
         metadata_tsv=metadata_tsv,
         output_dir=output_dir,
-        n_jobs=n_jobs,
+        n_jobs=4,
         min_cells=min_cells,
         min_genes=min_genes,
         min_cells_per_sample=min_cells_per_sample,
@@ -312,63 +290,43 @@ def load_and_filter(
 # ======================================================================
 #  integrate
 # ======================================================================
-@app.command(
-    "integrate",
-    help="Run batch correction and scIB benchmarking on a preprocessed h5ad.",
-)
+@app.command("integrate", help="Run integration and scIB benchmarking.")
 def integrate(
+    # -------------------------------------------------------------
+    # I/O
+    # -------------------------------------------------------------
     input_path: Path = typer.Option(
-        ...,
-        "--input-path",
-        "-i",
-        help="Input h5ad produced by load_and_filter (typically adata.preprocessed.h5ad)",
+        ..., "--input-path", "-i",
+        help="[I/O] Preprocessed h5ad from load-and-filter.",
     ),
     output_path: Optional[Path] = typer.Option(
-        None,
-        "--output-path",
-        "-o",
-        help="Output integrated h5ad. Defaults to <input_stem>.integrated.h5ad",
+        None, "--output-path", "-o",
+        help="[I/O] Output integrated h5ad.",
     ),
+
+    # -------------------------------------------------------------
+    # Integration
+    # -------------------------------------------------------------
     methods: Optional[List[str]] = typer.Option(
-        None,
-        "--methods",
-        "-m",
-        help=(
-            "Integration methods to run. Repeat option for multiple.\n"
-            "Supported: Scanorama, Harmony, scVI, scANVI, BBKNN.\n"
-            "Default: all except scANVI."
-        ),
+        None, "--methods", "-m",
+        help="[Integration] Methods to run (Scanorama, Harmony, scVI, scANVI, BBKNN).",
         case_sensitive=False,
         autocompletion=_methods_completion,
     ),
     batch_key: Optional[str] = typer.Option(
-        None,
-        "--batch-key",
-        "-b",
-        help="Batch column in .obs (default: auto-detect)",
+        None, "--batch-key", "-b",
+        help="[Integration] Batch column in .obs.",
     ),
+
+    # -------------------------------------------------------------
+    # Benchmarking
+    # -------------------------------------------------------------
     label_key: str = typer.Option(
-        "leiden",
-        "--label-key",
-        "-l",
-        help="Label/cluster column for scib-metrics (default: leiden)",
+        "leiden", "--label-key", "-l",
+        help="[scIB] Cluster label for benchmarking.",
     ),
-    benchmark_n_jobs: int = typer.Option(
-        4,
-        help="Parallel workers for scib-metrics",
-    ),
+    benchmark_n_jobs: int = typer.Option(4, help="[scIB] Parallel workers."),
 ):
-    """
-    Perform integration on a preprocessed AnnData object.
-
-    Features:
-    - Run selected integration methods (Scanorama, Harmony, scVI, scANVI, BBKNN)
-    - Compute scIB metrics for objective method comparison
-    - Write an integrated dataset and metrics report
-
-    Use after:
-        scOmnom load-and-filter
-    """
     methods = _normalize_methods(methods)
 
     logfile = input_path.parent / "integrate.log"
@@ -383,7 +341,6 @@ def integrate(
         benchmark_n_jobs=benchmark_n_jobs,
         logfile=logfile,
     )
-
     run_integration(cfg)
 
 
@@ -392,7 +349,7 @@ def integrate(
 # ======================================================================
 @app.command(
     "cluster-and-annotate",
-    help="Perform clustering (resolution sweep + stability) and optional CellTypist annotation.",
+    help="Perform clustering (resolution sweep + stability) and optional CellTypist + ssGSEA annotation.",
 )
 def cluster_and_annotate(
     # --- I/O ---
@@ -430,60 +387,32 @@ def cluster_and_annotate(
     ),
 
     # --- Resolution sweep ---
-    res_min: float = typer.Option(0.2, "--res-min", "-rmin"),
-    res_max: float = typer.Option(2.0, "--res-max", "-rmax"),
-    n_resolutions: int = typer.Option(10, "--n-resolutions", "-nres"),
+    res_min: float = typer.Option(0.1, "--res-min"),
+    res_max: float = typer.Option(2.5, "--res-max"),
+    n_resolutions: int = typer.Option(25, "--n-resolutions"),
     penalty_alpha: float = typer.Option(0.02),
 
     # --- Stability ---
-    stability_repeats: int = typer.Option(5, "--stability-repeats", "-sr"),
-    subsample_frac: float = typer.Option(0.8, "--subsample-frac", "-sf"),
-    random_state: int = typer.Option(42, "--random-state", "-rs"),
-    tiny_cluster_size: int = typer.Option(
-        20,
-        help="Minimum cluster size before it is considered tiny and penalized "
-             "in resolution selection.",
-    ),
-    min_cluster_size: int = typer.Option(
-        20,
-        help="Minimum median cluster size required for a resolution to be "
-             "eligible for plateau detection.",
-    ),
-    min_plateau_len: int = typer.Option(
-        3,
-        help="Minimum number of consecutive stable resolutions required to "
-             "form a stability plateau.",
-    ),
-    max_cluster_jump_frac: float = typer.Option(
-        0.4,
-        help="Maximum allowed fractional jump in number of clusters between "
-             "adjacent resolutions for plateau continuity.",
-    ),
-    stability_threshold: float = typer.Option(
-        0.85,
-        help="Minimum smoothed ARI stability required for a resolution to be "
-             "included in plateau detection.",
-    ),
-    w_stab: float = typer.Option(
-        0.50,
-        help="Weight of stability score in composite resolution scoring.",
-    ),
-    w_sil: float = typer.Option(
-        0.35,
-        help="Weight of centroid silhouette score in composite resolution scoring.",
-    ),
-    w_tiny: float = typer.Option(
-        0.15,
-        help="Weight of tiny-cluster penalty in composite resolution scoring.",
-    ),
+    stability_repeats: int = typer.Option(5),
+    subsample_frac: float = typer.Option(0.8),
+    random_state: int = typer.Option(42),
+    tiny_cluster_size: int = typer.Option(20),
+    min_cluster_size: int = typer.Option(20),
+    min_plateau_len: int = typer.Option(3),
+    max_cluster_jump_frac: float = typer.Option(0.4),
+    stability_threshold: float = typer.Option(0.85),
+
+    w_stab: float = typer.Option(0.50),
+    w_sil: float = typer.Option(0.35),
+    w_tiny: float = typer.Option(0.15),
 
     # --- CellTypist annotation ---
     celltypist_model: Optional[str] = typer.Option(
         "Immune_All_Low.pkl",
         "--celltypist-model",
         "-M",
-        help="Path or name of CellTypist model. If None, skip annotation.",
         autocompletion=_celltypist_models_completion,
+        help="Path or name of CellTypist model. If None, skip annotation.",
     ),
     celltypist_majority_voting: bool = typer.Option(True),
     annotation_csv: Optional[Path] = typer.Option(
@@ -494,98 +423,96 @@ def cluster_and_annotate(
     ),
 
     # --- Model management ---
-    list_models: bool = typer.Option(
-        False,
-        "--list-models",
-        help="List available CellTypist models and exit.",
+    list_models: bool = typer.Option(False, "--list-models"),
+    download_models: bool = typer.Option(False, "--download-models"),
+
+    # --- ssGSEA ---
+    run_ssgsea: bool = typer.Option(
+        True, help="Run ssGSEA enrichment per cell."
     ),
-    download_models: bool = typer.Option(
-        False,
-        "--download-models",
-        help=(
-                "Download ALL official CellTypist models into the scomnom cache.\n\n"
-                "⚠ NOTE: CellTypist v1.x does NOT support downloading a single model.\n"
-                "This option will trigger downloading ~59 models (approx 2–3 GB).\n"
-                "Already-downloaded models are skipped.\n"
-        ),
+    ssgsea_gene_sets_cli: Optional[str] = typer.Option(
+        None,
+        "--ssgsea-gene-sets",
+        help="Comma-separated MSigDB keywords (e.g. 'HALLMARK,REACTOME') or paths to .gmt files.",
+        autocompletion=_gene_sets_completion,
+    ),
+    ssgsea_use_raw: bool = typer.Option(True),
+    ssgsea_min_size: int = typer.Option(10),
+    ssgsea_max_size: int = typer.Option(500),
+    ssgsea_sample_norm_method: str = typer.Option("rank"),
+    ssgsea_nproc: Optional[int] = typer.Option(
+        None,
+        help="Parallel workers. Default = CPU cores - 1.",
     ),
 
     # --- Figures ---
     make_figures: bool = typer.Option(True),
-    figure_format: List[str] = typer.Option(
-        ["png", "pdf"],
-        "--figure-format",
-        "-F",
-    ),
-    figdir_name: str = typer.Option(
-        "figures",
-        "--figdir-name",
-        "-D",
-    ),
+    figure_format: List[str] = typer.Option(["png", "pdf"]),
+    figdir_name: str = typer.Option("figures"),
 ):
     """
-    Run clustering + annotation, or list/download CellTypist models.
+    Run clustering + annotation (CellTypist + ssGSEA).
     """
+
     # ---------------------------------------------------------
-    # 1. Handle --list-models or --download-model EARLY
+    # Handle --list-models / --download-models
     # ---------------------------------------------------------
     if list_models:
         from .io_utils import get_available_celltypist_models
-        from pathlib import Path
-        import os
+        models = get_available_celltypist_models()
 
         typer.echo("\nAvailable CellTypist models:\n")
-        typer.echo("👉 Detailed model information can be found at `https://www.celltypist.org/models`\n")
-
-        models = get_available_celltypist_models()
-        if not models:
-            typer.echo("Unable to fetch model list (offline?).")
-            raise typer.Exit()
-
-        # Hardcoded official CellTypist cache dir
-        cache_dir = Path(os.path.expanduser("~/.celltypist/data/models"))
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        typer.echo(f"Cache directory: {cache_dir}\n")
-
         for m in models:
-            name = m["name"]
-            cached = (cache_dir / name).exists()
-            status = "✔ cached" if cached else "✘ not cached"
-            typer.echo(f"  - {name:<35} [{status}]")
-
+            typer.echo(f"  - {m['name']}")
         raise typer.Exit()
 
     if download_models:
         from .io_utils import download_all_celltypist_models
-        typer.echo("Downloading ALL CellTypist models (required by CellTypist v1.x)...\n")
-        try:
-            download_all_celltypist_models()
-        except Exception as e:
-            typer.echo(f"Failed to download models: {e}")
-            raise typer.Exit(1)
-
-        typer.echo("\nDone.")
+        download_all_celltypist_models()
         raise typer.Exit()
 
     # ---------------------------------------------------------
-    # 2. Normal mode: input_path IS required
+    # Validate required input
     # ---------------------------------------------------------
     if input_path is None:
-        raise typer.BadParameter(
-            "Missing required option --input / -i unless using --list-models or --download-model."
-        )
+        raise typer.BadParameter("Missing required option --input / -i")
 
     # ---------------------------------------------------------
-    # 3. Run full clustering + annotation
+    # Logging
     # ---------------------------------------------------------
     log_path = (
         output_path.parent / "cluster-and-annotate.log"
-        if output_path is not None
+        if output_path
         else input_path.parent / "cluster-and-annotate.log"
     )
     init_logging(log_path)
 
-    cfg = ClusterAnnotateConfig(
+    # ---------------------------------------------------------
+    # Parse ssGSEA gene set list
+    # ---------------------------------------------------------
+    if ssgsea_gene_sets_cli is None:
+        # allow default Hallmark + Reactome from config
+        gene_sets_list = None
+    else:
+        # split user-specified list
+        gene_sets_list = [
+            x.strip()
+            for x in ssgsea_gene_sets_cli.split(",")
+            if x.strip()
+        ]
+
+    # nproc
+    import multiprocessing
+    nproc = (
+        max(1, multiprocessing.cpu_count() - 1)
+        if ssgsea_nproc is None
+        else ssgsea_nproc
+    )
+
+    # ---------------------------------------------------------
+    # Build config
+    # ---------------------------------------------------------
+    kwargs = dict(
         input_path=input_path,
         output_path=output_path,
 
@@ -601,7 +528,6 @@ def cluster_and_annotate(
         stability_repeats=stability_repeats,
         subsample_frac=subsample_frac,
         random_state=random_state,
-
         tiny_cluster_size=tiny_cluster_size,
         min_cluster_size=min_cluster_size,
         min_plateau_len=min_plateau_len,
@@ -615,14 +541,31 @@ def cluster_and_annotate(
         celltypist_majority_voting=celltypist_majority_voting,
         annotation_csv=annotation_csv,
 
+        run_ssgsea=run_ssgsea,
+        ssgsea_use_raw=ssgsea_use_raw,
+        ssgsea_min_size=ssgsea_min_size,
+        ssgsea_max_size=ssgsea_max_size,
+        ssgsea_sample_norm_method=ssgsea_sample_norm_method,
+        ssgsea_nproc=nproc,
+
         make_figures=make_figures,
-        figure_formats=figure_format,
         figdir_name=figdir_name,
+        figure_formats=figure_format,
 
         logfile=log_path,
     )
 
+    # Only insert explicitly if user provided it
+    if gene_sets_list is not None:
+        kwargs["ssgsea_gene_sets"] = gene_sets_list
+
+    cfg = ClusterAnnotateConfig(**kwargs)
+
+    # ---------------------------------------------------------
+    # Run the module
+    # ---------------------------------------------------------
     run_clustering(cfg)
+
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import logging
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Dict, List, Tuple, Sequence, Optional
+import json
 
 import anndata as ad
 import numpy as np
@@ -14,10 +15,14 @@ from sklearn.metrics import adjusted_rand_score, silhouette_samples
 from .config import ClusterAnnotateConfig
 from .load_and_filter import setup_logging
 from . import io_utils, plot_utils
-from .io_utils import get_celltypist_model
+from .io_utils import get_celltypist_model, resolve_msigdb_gene_sets
+from .plot_utils import _extract_series, _normalize_array
 
 
 LOGGER = logging.getLogger(__name__)
+
+# Single pretty cluster label column
+CLUSTER_LABEL_KEY = "cluster_label"
 
 
 # -------------------------------------------------------------------------
@@ -164,7 +169,6 @@ def _precompute_celltypist(
             )
             return None, None
 
-        # ---------------------------------------------------------------------------
         # probability_matrix: pd.DataFrame, index must match adata.obs_names
         prob_matrix = preds.probability_matrix
         prob_matrix = prob_matrix.loc[adata.obs_names]
@@ -937,7 +941,7 @@ def _run_celltypist_annotation(
     - set per-cell labels in adata.obs[cfg.celltypist_label_key]
     - optionally store probabilities in adata.obsm["celltypist_proba"]
     - perform cluster-level majority voting to derive cluster labels
-    - set final label key to the cluster-level labels
+    - create pretty cluster labels in adata.obs[CLUSTER_LABEL_KEY]
     """
     if cfg.celltypist_model is None:
         LOGGER.info("No CellTypist model provided; skipping annotation.")
@@ -1001,6 +1005,7 @@ def _run_celltypist_annotation(
             "cannot compute cluster-level CellTypist labels."
         )
 
+    # Cluster-level majority CellTypist label
     cluster_majority = (
         adata.obs[[cfg.label_key, cfg.celltypist_label_key]]
         .groupby(cfg.label_key)[cfg.celltypist_label_key]
@@ -1010,15 +1015,38 @@ def _run_celltypist_annotation(
     adata.obs[cfg.celltypist_cluster_label_key] = (
         adata.obs[cfg.label_key].map(cluster_majority)
     )
-    adata.obs[cfg.final_label_key] = adata.obs[cfg.celltypist_cluster_label_key]
+
+    # ------------------------------------------------------------------
+    # Pretty final cluster labels:
+    #   "C{leiden_id:02d}: {majority_celltypist_label}"
+    # This keeps the original Leiden cluster numbers as reference.
+    # ------------------------------------------------------------------
+    leiden_ids = adata.obs[cfg.label_key].astype(str)
+    maj_labels = adata.obs[cfg.celltypist_cluster_label_key].astype(str).fillna("Unknown")
+
+    pretty_labels = "C" + leiden_ids.str.zfill(2) + ": " + maj_labels
+    adata.obs[CLUSTER_LABEL_KEY] = pretty_labels.astype("category")
+
+    # Stable color palette for cluster_label
+    try:
+        from scanpy.plotting.palettes import default_102
+
+        cats = adata.obs[CLUSTER_LABEL_KEY].cat.categories
+        adata.uns[f"{CLUSTER_LABEL_KEY}_colors"] = default_102[: len(cats)]
+    except Exception as e:
+        LOGGER.warning("Could not set cluster_label color palette: %s", e)
 
     LOGGER.info(
-        "Added CellTypist labels to adata.obs['%s'] (cell level), "
-        "cluster-collapsed labels to adata.obs['%s'], and final labels to adata.obs['%s']",
+        "Added CellTypist labels to adata.obs['%s'] (cell level) and "
+        "cluster-level majority labels to adata.obs['%s'].",
         cfg.celltypist_label_key,
         cfg.celltypist_cluster_label_key,
-        cfg.final_label_key,
     )
+    LOGGER.info(
+        "Added pretty cluster labels to adata.obs['%s'] using Leiden IDs + majority CellTypist label.",
+        CLUSTER_LABEL_KEY,
+    )
+
     return cfg.celltypist_label_key
 
 
@@ -1079,6 +1107,360 @@ def _final_real_silhouette_qc(
     return sil_mean
 
 
+def _ssgsea_single_gmt(
+    expr_df: pd.DataFrame,
+    gmt: Path | str,
+    cfg: ClusterAnnotateConfig,
+):
+    """
+    Run ssGSEA for a single GMT file on the provided expression DataFrame.
+
+    Parameters
+    ----------
+    expr_df
+        Expression matrix (genes x cells), columns are cell IDs.
+    gmt
+        Path or identifier of the GMT file.
+    cfg
+        ClusterAnnotateConfig with ssGSEA parameters.
+
+    Returns
+    -------
+    pd.DataFrame
+        ES scores with shape (n_cells x n_pathways), columns are pathway names.
+    """
+    import gseapy as gp
+
+    gmt_str = str(gmt)
+    LOGGER.info(
+        "ssGSEA: running on gene_sets='%s' for %d cells and %d genes.",
+        gmt_str,
+        expr_df.shape[1],
+        expr_df.shape[0],
+    )
+
+    ss = gp.ssgsea(
+        data=expr_df,
+        gene_sets=gmt_str,
+        outdir=None,
+        sample_norm_method=getattr(cfg, "ssgsea_sample_norm_method", "rank"),
+        min_size=int(getattr(cfg, "ssgsea_min_size", 10)),
+        max_size=int(getattr(cfg, "ssgsea_max_size", 500)),
+        threads=1,  # we parallelize outside gseapy
+        no_plot=True,
+    )
+
+    res2d = ss.res2d
+    if not isinstance(res2d, pd.DataFrame):
+        res2d = pd.DataFrame(res2d)
+
+    # pathways x samples (ES only)
+    es = res2d.pivot(index="Term", columns="Name", values="ES")
+
+    # Ensure sample order matches expr_df columns (cells)
+    es = es.reindex(columns=expr_df.columns)
+
+    # Transpose to cells x pathways
+    es = es.T
+
+    # Prefix columns with library stem to avoid collisions
+    lib_prefix = Path(gmt_str).stem
+    es.columns = [f"{lib_prefix}::{term}" for term in es.columns]
+
+    return es
+
+
+def _ssgsea_on_cell_chunk(
+    expr_df: pd.DataFrame,
+    gmt_files: Sequence[Path | str],
+    cfg: ClusterAnnotateConfig,
+) -> pd.DataFrame:
+    """
+    Run ssGSEA on a subset of cells (columns) for all GMT files.
+
+    Parameters
+    ----------
+    expr_df
+        Expression matrix (genes x cells) for this chunk.
+    gmt_files
+        Sequence of GMT file paths.
+    cfg
+        ClusterAnnotateConfig.
+
+    Returns
+    -------
+    pd.DataFrame
+        ES scores with shape (cells_in_chunk x total_pathways).
+    """
+    all_scores: list[pd.DataFrame] = []
+
+    for gmt in gmt_files:
+        try:
+            es = _ssgsea_single_gmt(expr_df, gmt, cfg)
+            all_scores.append(es)
+        except Exception as e:
+            LOGGER.warning(
+                "ssGSEA failed for gene_sets='%s' on chunk: %s",
+                gmt,
+                e,
+            )
+
+    if not all_scores:
+        raise RuntimeError("No successful ssGSEA results for this chunk.")
+
+    return pd.concat(all_scores, axis=1)
+
+
+def _run_ssgsea(adata: ad.AnnData, cfg: ClusterAnnotateConfig) -> None:
+    """
+    Run ssGSEA on per-cell expression and store ES scores in adata.obsm.
+
+    Implementation notes
+    --------------------
+    - Uses gseapy.ssgsea under the hood.
+    - Parallelisation is implemented at the level of cell chunks using joblib:
+        * the expression matrix (genes x cells) is split by columns (cells)
+        * each chunk runs ssGSEA independently (threads=1 inside gseapy)
+        * results are concatenated back into a full (cells x pathways) matrix
+    - We keep ES (enrichment score) only; NES is less interpretable for
+      per-cell workflows and adds extra noise.
+    - Results are stored as:
+        * adata.obsm["ssgsea_scores"]  ->  (n_cells x n_pathways) numpy array
+        * adata.uns["ssgsea_scores_columns"] -> list of pathway names
+        * adata.uns["ssgsea_cluster_means"] -> DataFrame (clusters x pathways)
+        * adata.uns["ssgsea"]["config"] -> small config snapshot
+    """
+    if not getattr(cfg, "run_ssgsea", False):
+        LOGGER.info("ssGSEA disabled (run_ssgsea=False); skipping.")
+        return
+
+    try:
+        import gseapy as gp  # noqa: F401  (imported just to check availability)
+    except ImportError:
+        LOGGER.warning(
+            "gseapy is not installed; cannot run ssGSEA. "
+            "Install with `pip install gseapy`."
+        )
+        return
+
+    # ------------------------------------------------------------------
+    # 1) Resolve gene set GMT files (MSigDB + custom)
+    # ------------------------------------------------------------------
+    try:
+        gmt_files, used_keywords = resolve_msigdb_gene_sets(cfg.ssgsea_gene_sets)
+    except Exception as e:
+        LOGGER.warning("ssGSEA: failed to resolve gene sets: %s", e)
+        return
+
+    if not gmt_files:
+        LOGGER.warning("ssGSEA: no gene set files resolved; skipping ssGSEA.")
+        return
+
+    # ------------------------------------------------------------------
+    # 2) Expression matrix: choose source and build DataFrame (genes x cells)
+    # ------------------------------------------------------------------
+    from scipy import sparse
+
+    genes = adata.var_names
+    X = adata.X
+
+    if getattr(cfg, "ssgsea_use_raw", True):
+        if adata.raw is not None:
+            LOGGER.info(
+                "ssGSEA using adata.raw.X (genes=%d, cells=%d).",
+                adata.raw.n_vars,
+                adata.raw.n_obs,
+            )
+            X = adata.raw.X
+            genes = adata.raw.var_names
+        elif "X_raw" in adata.layers:
+            LOGGER.info(
+                "ssGSEA using adata.layers['X_raw'] (genes=%d, cells=%d).",
+                adata.n_vars,
+                adata.n_obs,
+            )
+            X = adata.layers["X_raw"]
+            genes = adata.var_names
+        else:
+            LOGGER.info(
+                "ssGSEA: ssgsea_use_raw=True but no adata.raw / 'X_raw' layer found; "
+                "falling back to adata.X."
+            )
+            X = adata.X
+            genes = adata.var_names
+    else:
+        LOGGER.info(
+            "ssGSEA using adata.X (genes=%d, cells=%d).",
+            adata.n_vars,
+            adata.n_obs,
+        )
+        X = adata.X
+        genes = adata.var_names
+
+    # Convert matrix to dense numpy array safely
+    try:
+        if sparse.issparse(X):
+            X_dense = X.toarray()
+        else:
+            X_dense = np.asarray(X)
+    except Exception as e:
+        LOGGER.error("ssGSEA: failed to densify expression matrix: %s", e)
+        return
+
+    # gseapy.ssgsea expects DataFrame with genes as index and samples as columns
+    expr_df = pd.DataFrame(
+        X_dense.T,  # genes x cells
+        index=genes,
+        columns=adata.obs_names,
+    )
+
+    n_cells = expr_df.shape[1]
+    n_genes = expr_df.shape[0]
+
+    # ------------------------------------------------------------------
+    # 3) Parallel ssGSEA over cell chunks
+    # ------------------------------------------------------------------
+    nproc = int(getattr(cfg, "ssgsea_nproc", 1) or 1)
+
+    # Try to import joblib if we intend to parallelize
+    Parallel = None
+    delayed = None
+    if nproc > 1:
+        try:
+            from joblib import Parallel as _Parallel, delayed as _delayed
+
+            Parallel = _Parallel
+            delayed = _delayed
+        except ImportError:
+            LOGGER.warning(
+                "joblib is not installed; falling back to sequential ssGSEA "
+                "(ssgsea_nproc=%d requested).",
+                nproc,
+            )
+            nproc = 1
+
+    LOGGER.info(
+        "Running ssGSEA on %d cells and %d genes for %d gene set file(s) "
+        "with nproc=%d (joblib-based parallelism).",
+        n_cells,
+        n_genes,
+        len(gmt_files),
+        nproc,
+    )
+
+    # Sequential path (no joblib or nproc == 1)
+    if nproc <= 1 or Parallel is None or delayed is None:
+        try:
+            ssgsea_mat = _ssgsea_on_cell_chunk(expr_df, gmt_files, cfg)
+        except RuntimeError as e:
+            LOGGER.warning("ssGSEA: no successful results (sequential run): %s", e)
+            return
+    else:
+        # Parallel over cell chunks
+        # Number of jobs cannot exceed number of cells
+        n_jobs = min(nproc, n_cells)
+
+        # Split columns into n_jobs chunks
+        all_cols = expr_df.columns.to_numpy()
+        col_indices = np.array_split(np.arange(n_cells), n_jobs)
+
+        chunk_exprs: list[pd.DataFrame] = []
+        for idx in col_indices:
+            if idx.size == 0:
+                continue
+            cols = all_cols[idx]
+            chunk_exprs.append(expr_df.loc[:, cols])
+
+        LOGGER.info(
+            "ssGSEA parallel: %d jobs over %d non-empty chunks (cells per chunk: ~%d).",
+            n_jobs,
+            len(chunk_exprs),
+            int(np.ceil(n_cells / max(1, len(chunk_exprs)))),
+        )
+
+        try:
+            chunk_results = Parallel(n_jobs=n_jobs)(
+                delayed(_ssgsea_on_cell_chunk)(chunk_df, gmt_files, cfg)
+                for chunk_df in chunk_exprs
+            )
+        except Exception as e:
+            LOGGER.warning(
+                "ssGSEA parallel execution failed (%s); falling back to sequential run.",
+                e,
+            )
+            try:
+                ssgsea_mat = _ssgsea_on_cell_chunk(expr_df, gmt_files, cfg)
+            except RuntimeError as e2:
+                LOGGER.warning("ssGSEA: no successful results (fallback sequential): %s", e2)
+                return
+        else:
+            # Concatenate cell chunks (rows are cells)
+            ssgsea_mat = pd.concat(chunk_results, axis=0)
+
+    if ssgsea_mat.empty:
+        LOGGER.warning("No successful ssGSEA results; skipping storage.")
+        return
+
+    # Ensure row order matches adata.obs_names
+    ssgsea_mat = ssgsea_mat.reindex(index=adata.obs_names)
+
+    ssgsea_mat = ssgsea_mat.astype(float)
+
+    # ------------------------------------------------------------------
+    # 4) Store ES matrices in AnnData
+    # ------------------------------------------------------------------
+    adata.obsm["ssgsea_scores"] = ssgsea_mat.to_numpy()
+    adata.uns["ssgsea_scores_columns"] = list(ssgsea_mat.columns)
+
+    LOGGER.info(
+        "Stored ssGSEA ES scores in adata.obsm['ssgsea_scores'] "
+        "with %d pathways.",
+        ssgsea_mat.shape[1],
+    )
+
+    # ------------------------------------------------------------------
+    # 5) Cluster-level means (using best available cluster identifier)
+    # ------------------------------------------------------------------
+    cluster_key = None
+    if "cluster_label" in adata.obs:
+        cluster_key = "cluster_label"
+    elif getattr(cfg, "final_auto_idents_key", None) and cfg.final_auto_idents_key in adata.obs:
+        cluster_key = cfg.final_auto_idents_key
+    elif getattr(cfg, "label_key", None) and cfg.label_key in adata.obs:
+        cluster_key = cfg.label_key
+
+    if cluster_key is not None:
+        cl = adata.obs[cluster_key]
+        cluster_means = ssgsea_mat.groupby(cl).mean()
+        adata.uns["ssgsea_cluster_means"] = cluster_means
+        LOGGER.info(
+            "Computed ssGSEA cluster means using '%s': %d clusters x %d pathways.",
+            cluster_key,
+            cluster_means.shape[0],
+            cluster_means.shape[1],
+        )
+    else:
+        LOGGER.warning(
+            "Could not compute ssGSEA cluster means: no suitable cluster key "
+            "found in adata.obs (looked for 'cluster_label', final_auto_idents_key, label_key)."
+        )
+
+    # ------------------------------------------------------------------
+    # 6) Attach a small config snapshot
+    # ------------------------------------------------------------------
+    adata.uns.setdefault("ssgsea", {})
+    adata.uns["ssgsea"]["config"] = {
+        "run_ssgsea": bool(getattr(cfg, "run_ssgsea", False)),
+        "gene_sets": [str(g) for g in gmt_files],
+        "use_raw": bool(getattr(cfg, "ssgsea_use_raw", True)),
+        "min_size": int(getattr(cfg, "ssgsea_min_size", 10)),
+        "max_size": int(getattr(cfg, "ssgsea_max_size", 500)),
+        "sample_norm_method": getattr(cfg, "ssgsea_sample_norm_method", "rank"),
+        "nproc": int(getattr(cfg, "ssgsea_nproc", 1)),
+        "backend": "gseapy_ssgsea_parallel_joblib",
+    }
+
+
 # -------------------------------------------------------------------------
 # Public orchestrator
 # -------------------------------------------------------------------------
@@ -1136,6 +1518,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
             "embedding_key": embedding_key,
             "batch_key": batch_key,
             "label_key": cfg.label_key,
+            "cluster_label_key": CLUSTER_LABEL_KEY,
             "best_resolution": float(best_res),
             "resolutions": [float(r) for r in sweep["resolutions"]],
             "silhouette_scores": [float(x) for x in sweep["silhouette_scores"]],
@@ -1145,7 +1528,6 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
             "celltypist_model": cfg.celltypist_model,
             "celltypist_label_key": None,
             "celltypist_cluster_label_key": None,
-            "final_label_key": None,
         }
     )
 
@@ -1209,6 +1591,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
             labels_per_resolution=clusterings,
             resolutions=sweep["resolutions"],
             figdir=figdir_cluster,
+            best_resolution=best_res,
         )
 
     stability_aris = _subsampling_stability(adata, cfg, embedding_key, best_res)
@@ -1218,17 +1601,19 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
     _final_real_silhouette_qc(adata, cfg, embedding_key, figdir_cluster)
 
     if cfg.make_figures:
-        plot_utils.plot_clustering_stability_ari(
-            stability_aris=stability_aris,
-            figdir=figdir_cluster,
-        )
+        # UMAP with raw Leiden clusters (reference)
         plot_utils.plot_cluster_umaps(
             adata=adata,
             label_key=cfg.label_key,
             batch_key=batch_key,
             figdir=figdir_cluster,
         )
+        # Stability curves, composite metrics, etc.
         clust = ca_uns["clustering"]
+        plot_utils.plot_clustering_stability_ari(
+            stability_aris=stability_aris,
+            figdir=figdir_cluster,
+        )
         plot_utils.plot_stability_curves(
             resolutions=clust["tested_resolutions"],
             silhouette=clust["silhouette_centroid"],
@@ -1238,18 +1623,14 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
             best_resolution=clust["best_resolution"],
             plateaus=clust["plateaus"],
             figdir=figdir_cluster,
-            figure_formats=cfg.figure_formats,
-            bio_homogeneity=clust.get("bio_homogeneity"),
-            bio_fragmentation=clust.get("bio_fragmentation"),
-            bio_ari=clust.get("bio_ari"),
-            selection_config=clust.get("selection_config"),
         )
+
         # Biological metrics plot (only when bio-guided clustering is enabled & metrics present)
         if (
-                getattr(cfg, "bio_guided_clustering", False)
-                and clust.get("bio_homogeneity") is not None
-                and clust.get("bio_fragmentation") is not None
-                and clust.get("bio_ari") is not None
+            getattr(cfg, "bio_guided_clustering", False)
+            and clust.get("bio_homogeneity") is not None
+            and clust.get("bio_fragmentation") is not None
+            and clust.get("bio_ari") is not None
         ):
             plot_utils.plot_biological_metrics(
                 resolutions=clust["tested_resolutions"],
@@ -1263,6 +1644,72 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                 figure_formats=cfg.figure_formats,
             )
 
+        # === Build structural composite series ===
+        res_list = clust["tested_resolutions"]
+
+        sil_dict = clust["silhouette_centroid"]
+        stab_dict = clust["resolution_stability"]
+        tiny_dict = clust["tiny_cluster_penalty"]
+        cfg_sel = clust["selection_config"]
+
+        # Min–max normalize each metric using the existing helper
+        sil_norm_array = _normalize_array(_extract_series(res_list, sil_dict))
+        stab_norm_array = _normalize_array(_extract_series(res_list, stab_dict))
+        tiny_norm_array = _normalize_array(_extract_series(res_list, tiny_dict))
+
+        w_sil = float(cfg_sel.get("w_sil", 0.0))
+        w_stab = float(cfg_sel.get("w_stab", 0.0))
+        w_tiny = float(cfg_sel.get("w_tiny", 0.0))
+
+        structural_comp = {
+            _res_key(r): (
+                w_sil * sil_norm_array[i]
+                + w_stab * stab_norm_array[i]
+                + w_tiny * tiny_norm_array[i]
+            )
+            for i, r in enumerate(res_list)
+        }
+
+        # === Build biological composite if available ===
+        bio_comp = None
+        if (
+            clust.get("bio_homogeneity") is not None
+            and clust.get("bio_fragmentation") is not None
+            and clust.get("bio_ari") is not None
+        ):
+            hom = clust["bio_homogeneity"]
+            frag = clust["bio_fragmentation"]
+            bioari = clust["bio_ari"]
+
+            hom_norm = _normalize_array(_extract_series(res_list, hom))
+            frag_norm = _normalize_array(_extract_series(res_list, frag))
+            ari_norm = _normalize_array(_extract_series(res_list, bioari))
+
+            w_hom = float(cfg_sel.get("w_hom", 0.0))
+            w_frag = float(cfg_sel.get("w_frag", 0.0))
+            w_bioari = float(cfg_sel.get("w_bioari", 0.0))
+
+            bio_comp = {
+                _res_key(r): (
+                    w_hom * hom_norm[i]
+                    + w_frag * (1 - frag_norm[i])
+                    + w_bioari * ari_norm[i]
+                )
+                for i, r in enumerate(res_list)
+            }
+
+        # Composite-only diagnostic plot
+        plot_utils.plot_composite_only(
+            resolutions=clust["tested_resolutions"],
+            structural_comp=structural_comp,
+            biological_comp=bio_comp,
+            total_comp=clust["composite_scores"],
+            best_resolution=clust["best_resolution"],
+            plateaus=clust["plateaus"],
+            figdir=figdir_cluster,
+        )
+
+        # Plateau diagnostic plot
         plot_utils.plot_plateau_highlights(
             resolutions=clust["tested_resolutions"],
             silhouette=clust["silhouette_centroid"],
@@ -1274,6 +1721,9 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
             figure_formats=cfg.figure_formats,
         )
 
+    # ------------------------------------------------------------------
+    # CellTypist annotation + pretty cluster_label
+    # ------------------------------------------------------------------
     annotation_col = _run_celltypist_annotation(
         adata,
         cfg,
@@ -1282,6 +1732,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
     )
 
     if cfg.make_figures and annotation_col is not None:
+        # UMAPs for CellTypist outputs
         plot_utils.umap_by(
             adata,
             keys=cfg.celltypist_label_key,
@@ -1294,22 +1745,32 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
             figdir=figdir_cluster,
             stem="umap_celltypist_clusterlevel",
         )
-        # cluster-level statistics
-        plot_utils.plot_cluster_sizes(adata, cfg.label_key, figdir_cluster)
-        plot_utils.plot_cluster_qc_summary(adata, cfg.label_key, figdir_cluster)
+        # UMAP using pretty cluster labels
+        plot_utils.umap_by(
+            adata,
+            keys=CLUSTER_LABEL_KEY,
+            figdir=figdir_cluster,
+            stem="umap_cluster_label",
+        )
+
+        # Cluster-level statistics using pretty cluster labels
+        id_key = CLUSTER_LABEL_KEY
+        plot_utils.plot_cluster_sizes(adata, id_key, figdir_cluster)
+        plot_utils.plot_cluster_qc_summary(adata, id_key, figdir_cluster)
         plot_utils.plot_cluster_silhouette_by_cluster(
-            adata, cfg.label_key, embedding_key, figdir_cluster
+            adata, id_key, embedding_key, figdir_cluster
         )
         if batch_key is not None:
             plot_utils.plot_cluster_batch_composition(
-                adata, cfg.label_key, batch_key, figdir_cluster
+                adata, id_key, batch_key, figdir_cluster
             )
 
     if annotation_col is not None:
         ca_uns["celltypist_label_key"] = cfg.celltypist_label_key
         ca_uns["celltypist_cluster_label_key"] = cfg.celltypist_cluster_label_key
-        ca_uns["final_label_key"] = cfg.final_label_key
+        ca_uns["cluster_label_key"] = CLUSTER_LABEL_KEY
 
+    # Optional CSV with cluster annotations
     if cfg.annotation_csv is not None and annotation_col is not None:
         io_utils.export_cluster_annotations(
             adata,
@@ -1317,10 +1778,33 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
             out_path=cfg.annotation_csv,
         )
 
+    # Optional: per-cell ssGSEA enrichment (Hallmark/Reactome)
+    try:
+        _run_ssgsea(adata, cfg)
+    except Exception as e:
+        LOGGER.warning("ssGSEA step failed: %s", e)
+
     if cfg.output_path is not None:
         out_path = cfg.output_path
     else:
         out_path = in_path.with_name(f"{in_path.stem}.clustered.annotated.h5ad")
+
+    if getattr(cfg, "run_ssgsea", False) and "ssgsea_cluster_means" in adata.uns:
+        plot_utils.plot_ssgsea_cluster_topn_heatmap(
+            adata,
+            cluster_key="cluster_label",
+            figdir=figdir_cluster,
+            n=5,
+        )
+
+    # Make 'plateaus' HDF5-safe: JSON-encode list of dicts if present
+    ca_uns = adata.uns.get("cluster_and_annotate", {})
+    clustering = ca_uns.get("clustering", {})
+    plateaus = clustering.get("plateaus", None)
+    if isinstance(plateaus, list):
+        clustering["plateaus"] = json.dumps(plateaus)
+        ca_uns["clustering"] = clustering
+        adata.uns["cluster_and_annotate"] = ca_uns
 
     io_utils.save_adata(adata, out_path)
     LOGGER.info("Finished cluster_and_annotate. Wrote %s", out_path)

@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field, validator
 from pathlib import Path
 from typing import Optional, Dict, List
 from matplotlib.figure import Figure
+import multiprocessing
 
 
 class LoadAndQCConfig(BaseModel):
@@ -19,7 +20,7 @@ class LoadAndQCConfig(BaseModel):
 
     # QC thresholds
     min_cells: int = Field(3, ge=1, description="Minimum cells per gene")
-    min_genes: int = Field(200, ge=1, description="Minimum genes per cell")
+    min_genes: int = Field(500, ge=1, description="Minimum genes per cell")
     min_cells_per_sample: int = Field(20, ge=0)
     max_pct_mt: float = Field(5.0, ge=0.0, description="Mitochondrial % threshold after CB + filters")
 
@@ -179,12 +180,42 @@ class ClusterAnnotateConfig(BaseModel):
         "leiden",
         description="Final cluster label key in adata.obs",
     )
+    final_auto_idents_key: str = "final_auto_idents"
 
     # bioARI
     bio_guided_clustering: bool = True
     w_hom: float = 0.15
     w_frag: float = 0.10
     w_bioari: float = 0.15
+
+    # -------------------------------
+    # ssGSEA defaults
+    # -------------------------------
+    run_ssgsea: bool = True
+
+    # Default gene sets: Hallmark + Reactome (MSigDB)
+    # User may override with CLI like:
+    #   --ssgsea-gene-sets /path/to/hallmark.gmt,/path/to/reactome.gmt
+    ssgsea_gene_sets: List[str] = Field(
+        default_factory=lambda: ["HALLMARK", "REACTOME"],
+        description="Gene set collections to use for ssGSEA."
+    )
+
+    # Expression source: raw counts if present
+    ssgsea_use_raw: bool = True
+
+    # Gene set size filters
+    ssgsea_min_size: int = 10
+    ssgsea_max_size: int = 500
+
+    # Rank-based normalization is standard for ssGSEA
+    ssgsea_sample_norm_method: str = "rank"
+
+    # Parallel workers — auto-detect CPU cores − 1 (but minimum = 1)
+    ssgsea_nproc: int = Field(
+        default_factory=lambda: max(1, multiprocessing.cpu_count() - 1),
+        description="Number of parallel worker processes for ssGSEA."
+    )
 
     # Figure handling
     figdir_name: str = "figures"
@@ -195,9 +226,9 @@ class ClusterAnnotateConfig(BaseModel):
     )
 
     # Resolution sweep
-    res_min: float = Field(0.2, ge=0.0)
-    res_max: float = Field(2.0, ge=0.0)
-    n_resolutions: int = Field(10, ge=2)
+    res_min: float = Field(0.1, ge=0.0)
+    res_max: float = Field(2.5, ge=0.0)
+    n_resolutions: int = Field(25, ge=2)
     penalty_alpha: float = Field(
         0.02,
         ge=0.0,
