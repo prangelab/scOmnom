@@ -269,9 +269,6 @@ def load_and_filter(
     logfile = output_dir / "load-and-filter.log"
     init_logging(logfile)
 
-    if n_jobs is not None:
-        cfg.n_jobs = n_jobs
-
     cfg = LoadAndQCConfig(
         raw_sample_dir=raw_sample_dir,
         filtered_sample_dir=filtered_sample_dir,
@@ -291,6 +288,9 @@ def load_and_filter(
         cellbender_pattern=cellbender_pattern,
         cellbender_h5_suffix=cellbender_h5_suffix,
     )
+
+    if n_jobs is not None:
+        cfg.n_jobs = n_jobs
 
     run_load_and_filter(cfg, logfile)
 
