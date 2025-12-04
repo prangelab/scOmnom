@@ -529,7 +529,7 @@ def _merge_filtered_h5ads_simple(padded_files, batch_key, out_path):
 def merge_samples(
     sample_map: Dict[str, ad.AnnData],
     batch_key: str,
-    tmp_dir: Optional[Path] = None,
+    fast_scratch_prefix: Optional[Path] = None,
 ) -> ad.AnnData:
     """
     High-level disk-backed merge for load-and-filter.
@@ -548,13 +548,9 @@ def merge_samples(
     if not sample_map:
         raise RuntimeError("merge_samples: sample_map is empty.")
 
-    # -----------------------------
-    # Resolve temp directory
-    # -----------------------------
-    if tmp_dir is None:
-        tmp_dir = Path.cwd() / "tmp_merge"
-
+    tmp_dir = Path.cwd() / "tmp_merge"
     tmp_dir = tmp_dir.resolve()
+
     padded_dir = tmp_dir / "padded"
     padded_dir.mkdir(parents=True, exist_ok=True)
 
@@ -578,9 +574,9 @@ def merge_samples(
 
     # Worker-count selection based on cwd prefix (whichs shows if we are on fast NVME or not)
     cwd = str(Path.cwd())
-    prefix = cfg.tmp_dir_prefix
+    on_fast_scratch = cwd.startswith(f"/{fast_scratch_prefix}")
 
-    if cwd.startswith(f"/{prefix}"):
+    if on_fast_scratch:
         n_workers = min(24, len(sample_map))
     else:
         n_workers = min(8, len(sample_map))

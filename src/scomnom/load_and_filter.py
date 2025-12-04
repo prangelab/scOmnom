@@ -490,7 +490,7 @@ def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) ->
     plot_utils.run_qc_plots_pre_filter_df(qc_df, cfg)
 
     # Merge samples
-    adata = io_utils.merge_samples(filtered_sample_map, cfg.batch_key)
+    adata = io_utils.merge_samples(filtered_sample_map, cfg.batch_key, cfg.fast_scratch_prefix)
 
     # metadata
     LOGGER.info("Adding metadata...")
