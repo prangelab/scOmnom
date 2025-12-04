@@ -23,6 +23,7 @@ class LoadAndQCConfig(BaseModel):
     min_genes: int = Field(500, ge=1, description="Minimum genes per cell")
     min_cells_per_sample: int = Field(20, ge=0)
     max_pct_mt: float = Field(5.0, ge=0.0, description="Mitochondrial % threshold after CB + filters")
+    doublet_score_threshold: float = 0.25
 
     # Gene flags
     mt_prefix: str = Field("MT-", description="Prefix for mitochondrial genes")

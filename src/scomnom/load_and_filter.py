@@ -75,45 +75,64 @@ def add_metadata(adata: ad.AnnData, metadata_tsv: Optional[Path], sample_id_col:
 
 
 def compute_qc_metrics(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
+    # Annotate mitochondrial / ribosomal / hemoglobin genes
     adata.var["mt"] = adata.var_names.str.startswith(cfg.mt_prefix)
     adata.var["ribo"] = adata.var_names.str.startswith(tuple(cfg.ribo_prefixes))
     adata.var["hb"] = adata.var_names.str.contains(cfg.hb_regex)
-    sc.pp.calculate_qc_metrics(adata, qc_vars=["mt", "ribo", "hb"], inplace=True, log1p=False)
-    if 'counts_raw' in adata.layers:
-        adata_raw_view = ad.AnnData(adata.layers['counts_raw'], obs=adata.obs, var=adata.var)
-        sc.pp.calculate_qc_metrics(adata_raw_view, qc_vars=["mt"], inplace=True, log1p=False)
-        for k in ["total_counts", "n_genes_by_counts", "pct_counts_mt"]:
-            adata.obs[f"{k}_raw"] = adata_raw_view.obs[k]
+
+    # Standard Scanpy QC
+    sc.pp.calculate_qc_metrics(
+        adata,
+        qc_vars=["mt", "ribo", "hb"],
+        inplace=True,
+        log1p=False,
+    )
+
     return adata
 
 
-def run_scrublet_parallel(adata: ad.AnnData, batch_key: str, n_jobs: int, **kwargs) -> ad.AnnData:
-    batches = [adata[adata.obs[batch_key] == b].copy() for b in adata.obs[batch_key].unique()]
-
-    def _run(batch):
-        sc.pp.scrublet(batch, **kwargs)
-        return batch
-
-    processed = Parallel(n_jobs=n_jobs)(delayed(_run)(b) for b in batches)
-    out = ad.concat(processed, join='outer', merge='same')
-    return out
-
-
 def filter_and_doublets(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
+    import torch
+    from solo.classes.Solo import Solo
+
     # preserve prefilter counts if already set
     pre_counts = adata.uns.get("pre_filter_counts", None)
 
+    # Basic filtering
     sc.pp.filter_cells(adata, min_genes=cfg.min_genes)
     sc.pp.filter_genes(adata, min_cells=cfg.min_cells)
 
-    # After all filters, check per sample
+    # Log remaining cells per sample
     for sample, n in adata.obs[cfg.batch_key].value_counts().items():
         LOGGER.info(f"Remaining cells in {sample}: {n}")
 
-    # doublet detection may return a new AnnData
-    adata = run_scrublet_parallel(adata, batch_key=cfg.batch_key, n_jobs=cfg.n_jobs)
+    # ---- SOLO DOUBLETS----
+    from scvi.external import SOLO
+    import torch
 
-    # reattach if lost
+    # Determine device (CPU or CUDA)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    LOGGER.info(f"Running Solo doublet detection on device: {device}")
+
+    SOLO.setup_anndata(adata, layer=None)
+
+    # Instantiate the SOLO model
+    solo_model = SOLO(adata, device=device)  # Use SOLO (uppercase)
+
+    # Conservative CPU settings, faster GPU settings
+    if device == "cpu":
+        solo_model.train(batch_size=256, max_epochs=40)
+    else:
+        solo_model.train(batch_size=1024, max_epochs=20)
+
+    # Predict doublet scores
+    doublet_scores = solo_model.predict()
+
+    # Apply results to AnnData
+    adata.obs["doublet_score"] = doublet_scores
+    adata.obs["predicted_doublet"] = (doublet_scores > cfg.doublet_score_threshold).astype(bool)
+
+    # Reattach uns if Solo rewrote AnnData
     if pre_counts is not None:
         adata.uns["pre_filter_counts"] = pre_counts
 
