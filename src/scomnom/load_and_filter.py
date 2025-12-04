@@ -75,20 +75,69 @@ def add_metadata(adata: ad.AnnData, metadata_tsv: Optional[Path], sample_id_col:
 
 
 def compute_qc_metrics(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
+    """
+    Memory-safe QC metric computation that avoids Scanpy's dense
+    calculate_qc_metrics() call, which OOMs on large datasets.
+    Produces the same metrics: total_counts, n_genes_by_counts,
+    pct_counts_mt, pct_counts_ribo, pct_counts_hb.
+    """
+
+    import numpy as np
+    from scipy import sparse
+
+    # ---------------------------------------------------------
     # Annotate mitochondrial / ribosomal / hemoglobin genes
+    # ---------------------------------------------------------
     adata.var["mt"] = adata.var_names.str.startswith(cfg.mt_prefix)
     adata.var["ribo"] = adata.var_names.str.startswith(tuple(cfg.ribo_prefixes))
     adata.var["hb"] = adata.var_names.str.contains(cfg.hb_regex)
 
-    # Standard Scanpy QC
-    sc.pp.calculate_qc_metrics(
-        adata,
-        qc_vars=["mt", "ribo", "hb"],
-        inplace=True,
-        log1p=False,
-    )
+    # Ensure CSR for efficient row ops
+    X = adata.X
+    if sparse.issparse(X):
+        X = X.tocsr()
+    else:
+        LOGGER.warning("X is dense — QC may be very slow and large memory-consuming.")
+
+    # ---------------------------------------------------------
+    # Per-cell QC metrics (sparse safe)
+    # ---------------------------------------------------------
+    LOGGER.info("Computing QC metrics (memory-safe sparse mode)...")
+
+    # Total counts per cell
+    total_counts = np.asarray(X.sum(axis=1)).ravel()
+
+    # Number of detected genes per cell
+    n_genes_by_counts = np.diff(X.indptr)
+
+    # Mask indices
+    mt_idx = np.where(adata.var["mt"].values)[0]
+    ribo_idx = np.where(adata.var["ribo"].values)[0]
+    hb_idx = np.where(adata.var["hb"].values)[0]
+
+    # Function for computing percentages safely
+    def pct_from_idx(idx):
+        if len(idx) == 0:
+            return np.zeros_like(total_counts, dtype=float)
+        sub = X[:, idx]
+        vals = np.asarray(sub.sum(axis=1)).ravel()
+        return vals / np.maximum(total_counts, 1)
+
+    pct_mt = pct_from_idx(mt_idx)
+    pct_ribo = pct_from_idx(ribo_idx)
+    pct_hb = pct_from_idx(hb_idx)
+
+    # ---------------------------------------------------------
+    # Write to adata.obs (same API as Scanpy)
+    # ---------------------------------------------------------
+    adata.obs["total_counts"] = total_counts
+    adata.obs["n_genes_by_counts"] = n_genes_by_counts
+    adata.obs["pct_counts_mt"] = pct_mt * 100
+    adata.obs["pct_counts_ribo"] = pct_ribo * 100
+    adata.obs["pct_counts_hb"] = pct_hb * 100
 
     return adata
+
 
 
 def filter_and_doublets(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
