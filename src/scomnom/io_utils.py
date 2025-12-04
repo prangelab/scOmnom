@@ -386,6 +386,17 @@ def load_cellbender_data(cfg: LoadAndQCConfig) -> tuple[Dict[str, ad.AnnData], D
     if cfg.cellbender_dir is None:
         return {}, {}
 
+    # Validate directory structure
+    for cb in cb_dirs:
+        if cb.is_dir() and cb.name.endswith(".cellbender_filtered.output"):
+            # Expected structure: the H5 files live one level up (cfg.cellbender_dir)
+            LOGGER.info(f"Detected CellBender output directory: {cb.name}")
+            # Good — continue
+        elif cb.is_file():
+            LOGGER.warning(
+                f"Found unexpected file '{cb}'. Expected *.cellbender_filtered.output directories."
+            )
+
     cb_dirs = find_cellbender_dirs(cfg.cellbender_dir, cfg.cellbender_pattern)
     if not cb_dirs:
         raise FileNotFoundError(
