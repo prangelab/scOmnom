@@ -522,7 +522,7 @@ def _merge_filtered_h5ads_incremental(
         # Load the existing output and append new rows (efficient)
         merged = ad.read_h5ad(out_path)
 
-        merged = anndata.concat(
+        merged = ad.concat(
             [merged, a],
             axis=0,
             join="outer",
@@ -655,6 +655,16 @@ def merge_samples(
         merged.n_vars,
         list(merged.obs.columns),
     )
+
+    # ------------------------------------------------------------------
+    # DEBUG: Copy merged file into results directory for reuse
+    # ------------------------------------------------------------------
+    debug_copy = output_dir / "merged_union.padded.h5ad"
+    try:
+        shutil.copy2(merged_path, debug_copy)
+        LOGGER.info("DEBUG COPY: merged file duplicated to %s", debug_copy)
+    except Exception as e:
+        LOGGER.warning("DEBUG COPY FAILED: %s", e)
 
     try:
         # Cleanup
