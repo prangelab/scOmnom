@@ -200,73 +200,6 @@ def read_raw_10x(raw_dir: Path) -> ad.AnnData:
     return adata
 
 
-def read_cellbender_h5(cb_dir: Path, sample: str) -> ad.AnnData:
-    """
-    Correct CellBender loader:
-      • ALWAYS load the filtered H5 (final corrected count matrix)
-      • ALWAYS load the barcode CSV containing the called cells
-      • NEVER touch raw or posterior H5 files
-    """
-    import h5py
-    import pandas as pd
-    from scipy import sparse
-
-    sample_dir = cb_dir / f"{sample}.cellbender_filtered.output"
-
-    h5_filtered = sample_dir / f"{sample}.cellbender_out_filtered.h5"
-    barcode_csv = sample_dir / f"{sample}.cellbender_out_cell_barcodes.csv"
-
-    if not h5_filtered.exists():
-        raise FileNotFoundError(f"[{sample}] Missing filtered H5: {h5_filtered}")
-
-    if not barcode_csv.exists():
-        raise FileNotFoundError(f"[{sample}] Missing cell barcode CSV: {barcode_csv}")
-
-    LOGGER.info(f"Loading filtered CellBender matrix: {h5_filtered}")
-
-    # 1) load barcodes called as cells
-    barcodes_keep = (
-        pd.read_csv(barcode_csv, header=None)[0]
-        .astype(str)
-        .tolist()
-    )
-    barcode_set = set(barcodes_keep)
-
-    # 2) load corrected count matrix
-    with h5py.File(h5_filtered, "r") as f:
-        data = f["matrix/data"][:]
-        indices = f["matrix/indices"][:]
-        indptr = f["matrix/indptr"][:]
-        shape = tuple(f["matrix/shape"][:])
-
-        all_barcodes = f["matrix/barcodes"][:].astype(str)
-        feature_ids = f["matrix/features/id"][:].astype(str)
-        features = f["matrix/features/name"][:].astype(str)
-
-    X_full = sparse.csr_matrix((data, indices, indptr), shape=shape)
-
-    # 3) mask to only valid cells
-    mask = [bc in barcode_set for bc in all_barcodes]
-    n_keep = sum(mask)
-
-    LOGGER.info(f"{sample}: keeping {n_keep} / {len(all_barcodes)} barcodes")
-
-    X = X_full[mask, :]
-
-    # 4) build AnnData
-    adata = ad.AnnData(
-        X=X,
-        obs={"barcode": all_barcodes[mask]},
-        var={"gene_ids": feature_ids, "gene_symbols": features},
-    )
-
-    adata.obs_names = adata.obs["barcode"]
-    adata.var_names = adata.var["gene_symbols"]
-    adata.var_names_make_unique()
-
-    return adata
-
-
 def write_filtered_samples_parallel(
     sample_map: Dict[str, ad.AnnData],
     out_dir: Path,
@@ -442,51 +375,79 @@ def load_cellbender_data(cfg: LoadAndQCConfig):
     # Worker: Load one sample safely
     # ------------------------------------------------------------------------------------
     def _load_one(cb_path: Path):
+        import h5py
+        import pandas as pd
+        from scipy import sparse
+        import anndata as ad
+
         sample = cb_path.name.replace(".cellbender_filtered.output", "")
 
         try:
             # ---------------------------------------------------------
-            # 1. Resolve the filtered matrix
+            # 1. Locate filtered H5
             # ---------------------------------------------------------
             candidates = list(cb_path.glob("*_out_filtered.h5"))
             if not candidates:
                 return ("fail", sample, "No *_out_filtered.h5 found")
-
             h5_path = candidates[0]
-            LOGGER.info(f"Loading filtered CellBender matrix: {h5_path}")
 
             # ---------------------------------------------------------
-            # 2. Load barcodes (the TRUE cell list)
+            # 2. Load barcodes (TRUE called cells)
             # ---------------------------------------------------------
             barcode_files = list(cb_path.glob("*_out_cell_barcodes.csv"))
             if not barcode_files:
                 return ("fail", sample, "No *_out_cell_barcodes.csv found")
 
-            barcodes = pd.read_csv(barcode_files[0], header=None)[0].astype(str)
-            n_cells = len(barcodes)
+            barcodes_keep = (
+                pd.read_csv(barcode_files[0], header=None)[0]
+                .astype(str)
+                .tolist()
+            )
+            barcode_set = set(barcodes_keep)
 
             # ---------------------------------------------------------
-            # 3. Read filtered H5 using scanpy
+            # 3. Read H5 manually (robust approach)
             # ---------------------------------------------------------
-            adata = sc.read_10x_h5(str(h5_path))
+            with h5py.File(h5_path, "r") as f:
+                data = f["matrix/data"][:]
+                indices = f["matrix/indices"][:]
+                indptr = f["matrix/indptr"][:]
+                shape = tuple(f["matrix/shape"][:])
 
-            # Now match rows exactly to the barcodes
-            # adata.obs_names contains all barcodes present in filtered.h5
-            try:
-                adata = adata[barcodes.values, :].copy()
-            except Exception as e:
-                return ("fail", sample, f"Failed row selection: {e}")
+                all_barcodes = f["matrix/barcodes"][:].astype(str)
+                feature_ids = f["matrix/features/id"][:].astype(str)
+                features = f["matrix/features/name"][:].astype(str)
+
+            X_full = sparse.csr_matrix((data, indices, indptr), shape=shape)
 
             # ---------------------------------------------------------
-            # 4. Standard AnnData formatting
+            # 4. Mask rows safely (handles any ordering)
             # ---------------------------------------------------------
-            adata.obs["barcode"] = adata.obs_names
-            adata.obs["sample_id"] = sample
+            mask = [bc in barcode_set for bc in all_barcodes]
+            n_keep = sum(mask)
+
+            if n_keep == 0:
+                return ("fail", sample, "No barcodes in H5 matched the barcode CSV")
+
+            LOGGER.info(f"{sample}: keeping {n_keep} / {len(all_barcodes)} barcodes")
+
+            X = X_full[mask, :]
+            kept_barcodes = all_barcodes[mask]
+
+            # ---------------------------------------------------------
+            # 5. Build AnnData safely
+            # ---------------------------------------------------------
+            adata = ad.AnnData(
+                X=X,
+                obs={"barcode": kept_barcodes},
+                var={"gene_ids": feature_ids, "gene_symbols": features},
+            )
+
+            adata.obs_names = adata.obs["barcode"]
+            adata.var_names = adata.var["gene_symbols"]
             adata.var_names_make_unique()
+            adata.obs["sample_id"] = sample
 
-            # ---------------------------------------------------------
-            # 5. Count reads
-            # ---------------------------------------------------------
             reads = int(adata.X.sum())
 
             return ("ok", sample, adata, reads)
@@ -747,6 +708,13 @@ def merge_samples(
         merged.n_vars,
         list(merged.obs.columns),
     )
+
+    try:
+        # Cleanup
+        LOGGER.info("Cleaning up temporary merge directory: %s", tmp_dir)
+        shutil.rmtree(tmp_dir)
+    except Exception as e:
+        LOGGER.warning("Failed to clean up temporary directory %s: %s", tmp_dir, e)
 
     return merged
 
