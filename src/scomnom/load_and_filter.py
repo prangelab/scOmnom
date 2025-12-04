@@ -76,68 +76,133 @@ def add_metadata(adata: ad.AnnData, metadata_tsv: Optional[Path], sample_id_col:
 
 def compute_qc_metrics(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
     """
-    Memory-safe QC metric computation that avoids Scanpy's dense
-    calculate_qc_metrics() call, which OOMs on large datasets.
-    Produces the same metrics: total_counts, n_genes_by_counts,
-    pct_counts_mt, pct_counts_ribo, pct_counts_hb.
+    Memory-safe QC computation that mimics Scanpy's calculate_qc_metrics() API,
+    including per-cell metrics, per-gene metrics, and a lightweight qc_metrics
+    entry in adata.uns — but without densifying sparse matrices or causing OOM.
     """
 
     import numpy as np
     from scipy import sparse
 
+    X = adata.X
+    if sparse.issparse(X):
+        X = X.tocsr()
+    else:
+        LOGGER.warning("X is dense — QC may be slow and memory intensive.")
+
+    n_cells, n_genes = X.shape
+
     # ---------------------------------------------------------
-    # Annotate mitochondrial / ribosomal / hemoglobin genes
+    # Annotate gene categories (mt, ribo, hb)
     # ---------------------------------------------------------
     adata.var["mt"] = adata.var_names.str.startswith(cfg.mt_prefix)
     adata.var["ribo"] = adata.var_names.str.startswith(tuple(cfg.ribo_prefixes))
     adata.var["hb"] = adata.var_names.str.contains(cfg.hb_regex)
 
-    # Ensure CSR for efficient row ops
-    X = adata.X
-    if sparse.issparse(X):
-        X = X.tocsr()
-    else:
-        LOGGER.warning("X is dense — QC may be very slow and large memory-consuming.")
-
-    # ---------------------------------------------------------
-    # Per-cell QC metrics (sparse safe)
-    # ---------------------------------------------------------
-    LOGGER.info("Computing QC metrics (memory-safe sparse mode)...")
-
-    # Total counts per cell
-    total_counts = np.asarray(X.sum(axis=1)).ravel()
-
-    # Number of detected genes per cell
-    n_genes_by_counts = np.diff(X.indptr)
-
-    # Mask indices
     mt_idx = np.where(adata.var["mt"].values)[0]
     ribo_idx = np.where(adata.var["ribo"].values)[0]
     hb_idx = np.where(adata.var["hb"].values)[0]
 
-    # Function for computing percentages safely
+    # ---------------------------------------------------------
+    # Per-cell QC metrics
+    # ---------------------------------------------------------
+    LOGGER.info("Computing sparse per-cell QC metrics...")
+
+    total_counts = np.asarray(X.sum(axis=1)).ravel()
+    n_genes_by_counts = np.diff(X.indptr)
+
     def pct_from_idx(idx):
         if len(idx) == 0:
-            return np.zeros_like(total_counts, dtype=float)
+            return np.zeros(n_cells, dtype=float)
         sub = X[:, idx]
         vals = np.asarray(sub.sum(axis=1)).ravel()
         return vals / np.maximum(total_counts, 1)
 
-    pct_mt = pct_from_idx(mt_idx)
-    pct_ribo = pct_from_idx(ribo_idx)
-    pct_hb = pct_from_idx(hb_idx)
-
-    # ---------------------------------------------------------
-    # Write to adata.obs (same API as Scanpy)
-    # ---------------------------------------------------------
     adata.obs["total_counts"] = total_counts
     adata.obs["n_genes_by_counts"] = n_genes_by_counts
-    adata.obs["pct_counts_mt"] = pct_mt * 100
-    adata.obs["pct_counts_ribo"] = pct_ribo * 100
-    adata.obs["pct_counts_hb"] = pct_hb * 100
+    adata.obs["pct_counts_mt"] = pct_from_idx(mt_idx) * 100
+    adata.obs["pct_counts_ribo"] = pct_from_idx(ribo_idx) * 100
+    adata.obs["pct_counts_hb"] = pct_from_idx(hb_idx) * 100
 
+    # ---------------------------------------------------------
+    # Per-gene QC metrics (Scanpy-compatible)
+    # ---------------------------------------------------------
+    LOGGER.info("Computing sparse per-gene QC metrics (Scanpy-compatible)...")
+
+    # How many cells have nonzero for each gene
+    n_cells_by_counts = np.diff(X.tocsc().indptr)
+
+    # Sum expression for each gene
+    total_counts_gene = np.asarray(X.sum(axis=0)).ravel()
+
+    # Mean expression per gene
+    mean_counts = total_counts_gene / max(n_cells, 1)
+
+    # Dropout fraction
+    pct_dropout = 100 * (1 - (n_cells_by_counts / max(n_cells, 1)))
+
+    # Attach to adata.var
+    adata.var["n_cells_by_counts"] = n_cells_by_counts
+    adata.var["mean_counts"] = mean_counts
+    adata.var["total_counts"] = total_counts_gene
+    adata.var["pct_dropout_by_counts"] = pct_dropout
+
+    # ---------------------------------------------------------
+    # Minimal Scanpy-compatible qc_metrics dictionary in .uns
+    # ---------------------------------------------------------
+    qc_metrics = {
+        "qc_vars": ["mt", "ribo", "hb"],
+        "percent_top": {},  # Scanpy uses this only for violin plotting
+        "log1p": False,
+        "raw_qc_metrics": {},  # We skip computing raw because it's unused
+        "n_cells": int(n_cells),
+        "n_genes": int(n_genes),
+    }
+
+    adata.uns["qc_metrics"] = qc_metrics
+
+    LOGGER.info("QC metrics computed (memory-safe, Scanpy-compatible).")
     return adata
 
+
+def sparse_filter_cells_and_genes(adata: ad.AnnData, min_genes: int, min_cells: int):
+    """
+    Fully sparse filtering for cells and genes.
+    Equivalent to sc.pp.filter_cells + sc.pp.filter_genes,
+    but without densification or CSC conversions.
+    """
+    import numpy as np
+    from scipy import sparse
+
+    X = adata.X
+
+    # Ensure CSR
+    if sparse.issparse(X):
+        X = X.tocsr()
+    else:
+        LOGGER.warning("X is dense—filtering will be memory-heavy.")
+
+    # -------- Cell filtering --------
+    gene_counts = np.diff(X.indptr)
+    cell_mask = gene_counts >= min_genes
+
+    adata = adata[cell_mask].copy()
+
+    # Recompute X after subsetting
+    X = adata.X.tocsr()
+
+    # -------- Gene filtering --------
+    # Sparse-safe n_cells_by_counts (avoid .tocsc())
+    # Count nonzeros by column without matrix transposition
+    indptr = X.indptr
+    indices = X.indices
+    nnz_mask = np.ones_like(indices, dtype=bool)  # dummy for bincount
+    n_cells_by_gene = np.bincount(indices, minlength=X.shape[1])
+
+    gene_mask = n_cells_by_gene >= min_cells
+
+    adata = adata[:, gene_mask].copy()
+    return adata
 
 
 def filter_and_doublets(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
@@ -145,8 +210,11 @@ def filter_and_doublets(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
     pre_counts = adata.uns.get("pre_filter_counts", None)
 
     # Basic filtering
-    sc.pp.filter_cells(adata, min_genes=cfg.min_genes)
-    sc.pp.filter_genes(adata, min_cells=cfg.min_cells)
+    adata = sparse_filter_cells_and_genes(
+        adata,
+        min_genes=cfg.min_genes,
+        min_cells=cfg.min_cells
+    )
 
     # Log remaining cells per sample
     for sample, n in adata.obs[cfg.batch_key].value_counts().items():
