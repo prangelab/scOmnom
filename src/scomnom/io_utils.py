@@ -474,68 +474,96 @@ def load_cellbender_data(cfg: LoadAndQCConfig):
     return out, read_counts
 
 
-def harmonize_gene_space_union(sample_map: dict[str, ad.AnnData]) -> dict[str, ad.AnnData]:
+def harmonize_gene_space_union(sample_map: Dict[str, ad.AnnData]) -> Dict[str, ad.AnnData]:
     """
-    Expand all samples to the UNION gene space across samples.
-    This avoids scanpy.concat() densification and large intermediate objects.
+    Harmonize gene space (var_names) across samples by taking the UNION of genes.
 
-    Returns a new sample_map with each AnnData having:
-        n_vars = |union of all gene names|
-        variables reindexed to union
-        X and all sparse layers remapped accordingly
+    For each sample:
+      - Reindex X to have shape (n_cells, n_union_genes)
+      - Remap columns so each gene's column index matches the global union
+      - All layers are reindexed in the same way (sparse or dense)
+      - .var is expanded to union genes, with metadata filled where available
+
+    This avoids heavy outer-join behavior inside sc.concat and keeps the
+    merged matrix shape consistent across samples.
+
+    Returns
+    -------
+    new_map : Dict[str, AnnData]
+        New mapping with harmonized gene space. The original AnnDatas are not
+        modified in-place.
     """
-
     import numpy as np
     import pandas as pd
     import scipy.sparse as sp
-    import logging
 
-    LOGGER = logging.getLogger(__name__)
+    if not sample_map:
+        raise RuntimeError("harmonize_gene_space_union: empty sample_map")
 
-    # ---------------------------------------------------------
-    # 1) Collect union gene set
-    # ---------------------------------------------------------
+    # ------------------------------------------------------------------
+    # 1) Normalize var_names to str and collect per-sample gene sets
+    # ------------------------------------------------------------------
     gene_sets = []
-    for sample, adata in sample_map.items():
-        gs = set(map(str, adata.var_names))
-        gene_sets.append(gs)
+    for sample, a in sample_map.items():
+        # Just inspect; don't mutate yet
+        genes = set(map(str, a.var_names))
+        gene_sets.append(genes)
 
     union_genes = set().union(*gene_sets)
     union_genes_sorted = sorted(union_genes)
     n_union = len(union_genes_sorted)
 
-    LOGGER.info(f"[Union gene space] Total unique genes across samples: {n_union:,}")
+    LOGGER.info(
+        "harmonize_gene_space_union: union gene space across %d samples = %d genes",
+        len(sample_map),
+        n_union,
+    )
 
-    # Mapping gene → new index
+    # Global mapping: gene symbol -> union column index
     gene_to_union_idx = {g: i for i, g in enumerate(union_genes_sorted)}
 
-    # ---------------------------------------------------------
-    # 2) Process each sample: expand to union dimensions
-    # ---------------------------------------------------------
-    out = {}
+    # ------------------------------------------------------------------
+    # 2) Reindex each AnnData to the union gene space
+    # ------------------------------------------------------------------
+    new_map: Dict[str, ad.AnnData] = {}
 
     for sample, a in sample_map.items():
-        LOGGER.info(f"[Union gene space] Processing {sample}: {a.n_vars:,} → {n_union:,}")
+        # Ensure we NEVER operate on a view: AnnData cannot resize var on views.
+        a = a.copy()
 
-        # Store original var names BEFORE modifying AnnData
+        LOGGER.info(
+            "harmonize_gene_space_union: reindexing sample %s "
+            "(%d cells × %d genes) → %d union genes",
+            sample,
+            a.n_obs,
+            a.n_vars,
+            n_union,
+        )
+
+        # ---- Save original var and gene order BEFORE changing AnnData ----
         old_var = a.var.copy()
         old_var.index = old_var.index.astype(str)
         old_var_names = np.asarray(old_var.index)
         n_old = len(old_var_names)
 
-        # Create index mapping old column index → new union index
+        # Map old column indices → union column indices
         map_old_to_new = np.empty(n_old, dtype=np.int64)
         for j, g in enumerate(old_var_names):
-            map_old_to_new[j] = gene_to_union_idx[g]
+            try:
+                map_old_to_new[j] = gene_to_union_idx[g]
+            except KeyError:
+                # Should not happen because union was built from these names
+                raise KeyError(
+                    f"Gene {g!r} from sample {sample!r} not found in union gene index."
+                )
 
-        # Ensure X is CSR
+        # ---- Remap X to union gene space ----
         X = a.X
         if not sp.issparse(X):
             X = sp.csr_matrix(X)
         else:
             X = X.tocsr()
 
-        # Remap column indices for X
         old_indices = X.indices
         new_indices = map_old_to_new[old_indices]
 
@@ -544,49 +572,52 @@ def harmonize_gene_space_union(sample_map: dict[str, ad.AnnData]) -> dict[str, a
             shape=(X.shape[0], n_union),
         )
 
-        # ---------------------------------------------------------
-        # Expand .var BEFORE assigning X_new
-        # ---------------------------------------------------------
+        # ---- Expand .var to union genes BEFORE assigning X_new ----
         new_index = pd.Index(union_genes_sorted, name=old_var.index.name)
 
         var_new = pd.DataFrame(index=new_index)
         for col in old_var.columns:
+            # Align by gene name; genes absent in this sample become NaN
             var_new[col] = old_var[col].reindex(new_index)
 
-        # Assign new var + var_names → updates AnnData's expected n_vars
+        # This updates AnnData's expected n_vars
         a.var = var_new
         a.var_names = new_index
 
-        # Only now assign X_new
+        # Only now assign X_new with matching n_vars
         a.X = X_new
 
-        # ---------------------------------------------------------
-        # Remap all sparse layers
-        # ---------------------------------------------------------
+        # ---- Remap all layers in the same manner ----
         for lname, layer in list(a.layers.items()):
             if layer is None:
                 continue
 
-            layerX = layer
-            if not sp.issparse(layerX):
-                layerX = sp.csr_matrix(layerX)
+            # Sparse layers: remap indices like X
+            if sp.issparse(layer):
+                L = layer.tocsr()
+                L_indices = map_old_to_new[L.indices]
+                L_new = sp.csr_matrix(
+                    (L.data, L_indices, L.indptr.copy()),
+                    shape=(L.shape[0], n_union),
+                )
+                a.layers[lname] = L_new
             else:
-                layerX = layerX.tocsr()
+                # Dense layers: expand with zeros for missing genes
+                arr = np.asarray(layer)
+                if arr.ndim != 2 or arr.shape[1] != n_old:
+                    raise ValueError(
+                        f"Layer '{lname}' in sample {sample!r} has shape {arr.shape}, "
+                        f"expected (n_cells, {n_old})."
+                    )
+                n_obs = arr.shape[0]
+                new_arr = np.zeros((n_obs, n_union), dtype=arr.dtype)
+                new_arr[:, map_old_to_new] = arr
+                a.layers[lname] = new_arr
 
-            old_indices_layer = layerX.indices
-            new_indices_layer = map_old_to_new[old_indices_layer]
+        new_map[sample] = a
 
-            layer_new = sp.csr_matrix(
-                (layerX.data, new_indices_layer, layerX.indptr.copy()),
-                shape=(layerX.shape[0], n_union),
-            )
-
-            a.layers[lname] = layer_new
-
-        out[sample] = a
-
-    LOGGER.info("[Union gene space] Completed gene harmonization across samples.")
-    return out
+    LOGGER.info("harmonize_gene_space_union: completed gene harmonization.")
+    return new_map
 
 
 
