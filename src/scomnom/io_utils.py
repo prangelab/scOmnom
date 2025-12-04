@@ -256,18 +256,46 @@ def read_raw_10x(raw_dir: Path) -> ad.AnnData:
 def read_cellbender_h5(cb_dir: Path, sample: str, h5_suffix: str) -> ad.AnnData:
     """
     Memory-safe reader for CellBender outputs.
-    Loads only barcodes where is_cell==True.
+    Automatically detects which H5 file contains `matrix/is_cell`.
     """
     import h5py
     from scipy import sparse
 
-    # --- Corrected path resolution (new) ---
-    h5_path = _resolve_cellbender_h5_path(cb_dir, sample, h5_suffix)
+    sample_dir = cb_dir / f"{sample}.cellbender_filtered.output"
 
-    LOGGER.info(f"Loading CellBender file: {h5_path}")
+    if not sample_dir.exists():
+        raise FileNotFoundError(f"No CellBender folder found for {sample}: {sample_dir}")
 
+    # Candidates in priority order
+    candidates = [
+        sample_dir / f"{sample}{h5_suffix}",                     # normally out.h5
+        sample_dir / f"{sample}.cellbender_out_filtered.h5",     # fallback 1
+        sample_dir / f"{sample}.cellbender_out_posterior.h5",    # fallback 2
+    ]
+
+    h5_path = None
+
+    # Find the first file that contains /matrix/is_cell
+    for path in candidates:
+        if path.exists():
+            try:
+                with h5py.File(path, "r") as f:
+                    if "matrix/is_cell" in f["matrix"]:
+                        h5_path = path
+                        break
+            except Exception:
+                continue
+
+    if h5_path is None:
+        raise RuntimeError(
+            f"No CellBender H5 for sample '{sample}' contains 'matrix/is_cell'. "
+            f"Checked: {[p.name for p in candidates if p.exists()]}"
+        )
+
+    LOGGER.info(f"Loading CellBender file (selected): {h5_path}")
+
+    # ---- Load the file now that we've selected it ----
     with h5py.File(h5_path, "r") as f:
-        # --- Extract essential components ---
         data = f["matrix/data"][:]
         indices = f["matrix/indices"][:]
         indptr = f["matrix/indptr"][:]
@@ -277,43 +305,26 @@ def read_cellbender_h5(cb_dir: Path, sample: str, h5_suffix: str) -> ad.AnnData:
         features = f["matrix/features/name"][:].astype(str)
         feature_ids = f["matrix/features/id"][:].astype(str)
 
-        # --- CellBender's cell-calling mask ---
-        if "matrix/is_cell" not in f["matrix"]:
-            raise RuntimeError(
-                "CellBender file does not contain 'is_cell'. "
-                "Cannot distinguish true cells from empty droplets."
-            )
-
         is_cell = f["matrix/is_cell"][:].astype(bool)
-        n_cells_total = len(is_cell)
-        n_cells_keep = int(is_cell.sum())
 
-        LOGGER.info(
-            f"CellBender detected {n_cells_keep} real cells out of {n_cells_total} barcodes "
-            f"({n_cells_total - n_cells_keep} empty droplets dropped)."
-        )
-
-        # --- Sparse matrix (CSR from CellBender) ---
         X_full = sparse.csr_matrix((data, indices, indptr), shape=shape)
-
-        # --- Filter BEFORE constructing AnnData (essential for memory safety) ---
         X = X_full[is_cell, :]
+
         obs = {"barcode": barcodes[is_cell]}
         var = {"gene_ids": feature_ids, "gene_symbols": features}
 
-    # --- Build AnnData ---
     adata = ad.AnnData(X=X, obs=obs, var=var)
-
-    # Standard formatting
     adata.obs_names = adata.obs["barcode"].astype(str)
     adata.var_names = adata.var["gene_symbols"].astype(str)
     adata.var_names_make_unique()
 
     LOGGER.info(
-        f"Loaded sample '{sample}' with {adata.n_obs} cells and {adata.n_vars} genes."
+        f"Loaded sample '{sample}' using {h5_path.name}: "
+        f"{adata.n_obs} cells, {adata.n_vars} genes."
     )
 
     return adata
+
 
 
 def load_raw_data(
