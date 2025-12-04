@@ -539,35 +539,8 @@ def merge_samples(
 ) -> ad.AnnData:
     """
     High-level sample merge for load-and-filter.
-
-    Responsibilities:
-      - Compute the union of gene symbols across all samples.
-      - Disk-back all samples into padded .padded.h5ad files with the same
-        gene order (union).
-      - Incrementally merge those padded files into a single AnnData,
-        in a memory-safe manner.
-      - Preserve per-cell metadata, especially `sample_id` and `barcode`.
-      - Do NOT join external metadata TSV here; the orchestrator
-        (load_and_filter.py) handles that afterwards.
-
-    Parameters
-    ----------
-    sample_map : Dict[str, AnnData]
-        Mapping sample_id -> filtered per-sample AnnData, already QC’d.
-    batch_key : str
-        Name of obs column that will hold the sample identifier
-        (e.g. 'sample_id', 'batch', ...). This must already be present
-        in each AnnData in sample_map, or be added in _prepare_sample_for_merge.
-    tmp_dir : Path, optional
-        Temporary directory where padded .h5ad files and the merged file
-        will be written. If None, defaults to ./tmp_merge under CWD.
-
-    Returns
-    -------
-    merged : AnnData
-        Single merged AnnData with union gene space and all cells stacked.
-        Per-cell metadata (including `sample_id`) is preserved.
     """
+
     import concurrent.futures
 
     if not sample_map:
@@ -596,13 +569,15 @@ def merge_samples(
     LOGGER.info("Union gene space size: %d genes", len(union_genes))
 
     # ------------------------------------------------------------------
-    # 2. Prepare per-sample padded .padded.h5ad files in parallel
+    # 2. Prepare padded .padded.h5ad per sample, with PROGRESS
     # ------------------------------------------------------------------
     padded_files: List[Path] = []
-
-    # up to 8 I/O workers, similar to your loading helpers
     n_workers = min(8, len(sample_map))
-    LOGGER.info("Preparing padded h5ads in parallel with %d workers", n_workers)
+
+    LOGGER.info(
+        "Preparing padded h5ads in parallel with %d workers (%d samples total)",
+        n_workers, len(sample_map)
+    )
 
     def _worker(sample_name: str, adata: ad.AnnData) -> Path:
         return _prepare_sample_for_merge(
@@ -613,17 +588,25 @@ def merge_samples(
             batch_key=batch_key,
         )
 
+    total_samples = len(sample_map)
+    completed = 0
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
         futures = {
             pool.submit(_worker, s, a): s
             for s, a in sample_map.items()
         }
+
         for fut in concurrent.futures.as_completed(futures):
             s = futures[fut]
+            completed += 1
             try:
                 path = fut.result()
                 padded_files.append(path)
-                LOGGER.info("Prepared padded h5ad for sample %s → %s", s, path)
+                LOGGER.info(
+                    "[Pad %02d/%02d] Prepared padded h5ad for sample %s → %s",
+                    completed, total_samples, s, path.name
+                )
             except Exception as e:
                 LOGGER.error("Failed to prepare padded h5ad for sample %s: %s", s, e)
                 raise
@@ -633,27 +616,38 @@ def merge_samples(
         raise RuntimeError("merge_samples: no padded .h5ad files were produced.")
 
     # ------------------------------------------------------------------
-    # 3. Incremental merge of padded h5ads into a single merged file
+    # 3. Incremental merge WITH PROGRESS
     # ------------------------------------------------------------------
-    LOGGER.info("Incrementally merging %d padded h5ads into %s", len(padded_files), merged_path)
-    _merge_filtered_h5ads_incremental(
-        padded_files=padded_files,
-        batch_key=batch_key,
-        out_path=merged_path,
-    )
+    LOGGER.info("Incrementally merging %d padded h5ads → %s",
+                len(padded_files), merged_path)
+
+    total_merge_files = len(padded_files)
+
+    for idx, p in enumerate(padded_files, start=1):
+        LOGGER.info("[Merge %02d/%02d] Processing %s",
+                    idx, total_merge_files, p.name)
+
+        # For all but the first sample, incremental merge happens in-place:
+        if idx == 1:
+            LOGGER.info("[Merge %02d/%02d] Initializing merged file with %s",
+                        idx, total_merge_files, p.name)
+            shutil.copy2(p, merged_path)
+        else:
+            _merge_filtered_h5ads_incremental(
+                padded_files=[p],
+                batch_key=batch_key,
+                out_path=merged_path,
+            )
 
     # ------------------------------------------------------------------
-    # 4. Load final merged AnnData (small overhead compared to concat step)
+    # 4. Load final merged AnnData
     # ------------------------------------------------------------------
     LOGGER.info("Loading merged AnnData from %s", merged_path)
     merged = ad.read_h5ad(merged_path)
 
     LOGGER.info(
-        "Merged AnnData: %d cells × %d genes. "
-        "Columns in obs: %s",
-        merged.n_obs,
-        merged.n_vars,
-        list(merged.obs.columns),
+        "Merged AnnData: %d cells × %d genes. obs columns: %s",
+        merged.n_obs, merged.n_vars, list(merged.obs.columns)
     )
 
     # ------------------------------------------------------------------
@@ -666,14 +660,17 @@ def merge_samples(
     except Exception as e:
         LOGGER.warning("DEBUG COPY FAILED: %s", e)
 
+    # ------------------------------------------------------------------
+    # Clean temporary directory
+    # ------------------------------------------------------------------
     try:
-        # Cleanup
         LOGGER.info("Cleaning up temporary merge directory: %s", tmp_dir)
         shutil.rmtree(tmp_dir)
     except Exception as e:
-        LOGGER.warning("Failed to clean up temporary directory %s: %s", tmp_dir, e)
+        LOGGER.warning("Failed to clean temporary directory %s: %s", tmp_dir, e)
 
     return merged
+
 
 
 def save_adata(adata: ad.AnnData, out_path: Path) -> None:
