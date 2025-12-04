@@ -2,7 +2,7 @@ from __future__ import annotations
 import glob
 import logging
 from typing import Dict, List, Optional, Tuple
-import typer
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import anndata as ad
 import scanpy as sc
 from .config import LoadAndQCConfig
@@ -201,118 +201,201 @@ def read_raw_10x(raw_dir: Path) -> ad.AnnData:
 
 
 def read_cellbender_h5(cb_folder: Path, sample: str, h5_suffix: str) -> Optional[ad.AnnData]:
+    """
+    Memory-safe reader for CellBender outputs.
+    Loads ONLY barcodes that CellBender labels as real cells (is_cell == True).
+    Avoids loading 10X-style millions of empty droplets.
+    """
+    import h5py
+    import numpy as np
+    from scipy import sparse
+
     h5_path = cb_folder / f"{sample}{h5_suffix}"
     if not h5_path.exists():
         LOGGER.warning("CellBender output file missing for %s", sample)
         return None
-    adata = sc.read_10x_h5(str(h5_path), gex_only=True)
+
+    LOGGER.info(f"Loading CellBender file: {h5_path}")
+
+    with h5py.File(h5_path, "r") as f:
+        # --- Extract essential components ---
+        data = f["matrix/data"][:]
+        indices = f["matrix/indices"][:]
+        indptr = f["matrix/indptr"][:]
+        shape = f["matrix/shape"][:]
+
+        barcodes = f["matrix/barcodes"][:].astype(str)
+        features = f["matrix/features/name"][:].astype(str)
+        feature_ids = f["matrix/features/id"][:].astype(str)
+
+        # --- CellBender's cell-calling mask ---
+        if "matrix/is_cell" not in f["matrix"]:
+            raise RuntimeError(
+                "CellBender file does not contain 'is_cell'. "
+                "Cannot distinguish true cells from empty droplets."
+            )
+
+        is_cell = f["matrix/is_cell"][:].astype(bool)
+        n_cells_total = len(is_cell)
+        n_cells_keep = int(is_cell.sum())
+
+        LOGGER.info(
+            f"CellBender detected {n_cells_keep} real cells out of {n_cells_total} barcodes "
+            f"({n_cells_total - n_cells_keep} empty droplets dropped)."
+        )
+
+        # --- Sparse matrix ---
+        X_full = sparse.csr_matrix((data, indices, indptr), shape=shape)
+
+        # --- Filter rows BEFORE constructing AnnData ---
+        X = X_full[is_cell, :]  # Sparse row slicing (cheap, safe)
+        obs = {"barcode": barcodes[is_cell]}
+        var = {
+            "gene_ids": feature_ids,
+            "gene_symbols": features,
+        }
+
+    # --- Build AnnData ---
+    adata = ad.AnnData(
+        X=X,
+        obs=obs,
+        var=var,
+    )
+
+    # Standard formatting
+    adata.obs_names = adata.obs["barcode"].astype(str)
+    adata.var_names = adata.var["gene_symbols"].astype(str)
     adata.var_names_make_unique()
+
+    LOGGER.info(f"Loaded sample '{sample}' with {adata.n_obs} cells and {adata.n_vars} genes.")
+
     return adata
 
 
 def load_raw_data(
-    cfg: LoadAndQCConfig | CellQCConfig,
+    cfg: LoadAndQCConfig,
     record_pre_filter_counts: bool = False,
     plot_dir: Optional[Path] = None,
-) -> tuple[
-    Dict[str, ad.AnnData],
-    Dict[str, float],
-    Optional[Dict[str, float]],
-]:
+):
     raw_dirs = find_raw_dirs(cfg.raw_sample_dir, cfg.raw_pattern)
 
-    raw_map: Dict[str, ad.AnnData] = {}
-    read_counts_filtered: Dict[str, float] = {}
-    read_counts_unfiltered: Optional[Dict[str, float]] = {} if record_pre_filter_counts else None
+    raw_map = {}
+    read_counts_filtered = {}
+    read_counts_unfiltered = {} if record_pre_filter_counts else None
 
-    for raw in raw_dirs:
-        sample = raw.name.split(".raw_feature_bc_matrix")[0]
-        LOGGER.info(f"Loading RAW sample: {sample}")
+    n_workers = min(cfg.n_jobs or 4, 8)
+    LOGGER.info(f"Parallel RAW 10X loading with {n_workers} I/O threads")
 
-        # 1) Read unfiltered matrix
-        adata = read_raw_10x(raw)
-        total_reads_unfiltered = float(adata.X.sum())
-        if record_pre_filter_counts:
-            read_counts_unfiltered[sample] = total_reads_unfiltered
+    def _load_one_raw(raw_path: Path):
+        sample = raw_path.name.split(".raw_feature_bc_matrix")[0]
+        adata = read_raw_10x(raw_path)
+        cnt_raw = float(adata.X.sum())
 
-        # 2) Determine plot_path
-        plot_dir = Path(cfg.output_dir) / cfg.figdir_name
-        if getattr(cfg, "make_figures", False) and plot_dir is not None:
-            # always include subdir under the format namespace
-            plot_path = plot_dir / "cell_qc" / f"{sample}_barcode_knee"
-        elif getattr(cfg, "make_figures", False):
-            # Fallback for load-and-qc:
-            fallback_dir = (
-                Path(cfg.output_dir) / cfg.figdir_name / "QC_plots"
-            )
-            plot_path = fallback_dir / f"{sample}_barcode_knee"
+        # Determine plot_path using your existing routing logic
+        if getattr(cfg, "make_figures", False):
+            base = Path(cfg.output_dir) / cfg.figdir_name / "cell_qc"
+            plot_path = base / f"{sample}_barcode_knee"
         else:
             plot_path = None
 
-        # 3) Apply knee+GMM
+        # Knee+GMM filtering
         adata_f = filter_raw_barcodes(
             adata,
             plot=cfg.make_figures,
             plot_path=plot_path,
         )
+        cnt_filt = float(adata_f.X.sum())
+        return sample, adata_f, cnt_raw, cnt_filt
 
-        # 4) Store counts
-        read_counts_filtered[sample] = float(adata_f.X.sum())
-        raw_map[sample] = adata_f
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = {pool.submit(_load_one_raw, raw): raw for raw in raw_dirs}
 
-        LOGGER.info(
-            "Raw sample %s: %.3e → %.3e reads (before → after filtering); %d cells retained",
-            sample,
-            total_reads_unfiltered,
-            read_counts_filtered[sample],
-            adata_f.n_obs,
-        )
+        for fut in as_completed(futures):
+            sample, adata_f, cnt_raw, cnt_filt = fut.result()
+            raw_map[sample] = adata_f
+            read_counts_filtered[sample] = cnt_filt
+            if record_pre_filter_counts:
+                read_counts_unfiltered[sample] = cnt_raw
+
+            LOGGER.info(
+                f"[I/O] RAW sample {sample}: {cnt_raw:.2e} → {cnt_filt:.2e} UMIs; "
+                f"{adata_f.n_obs} cells retained"
+            )
 
     return raw_map, read_counts_filtered, read_counts_unfiltered
 
 
-def load_filtered_data(cfg: LoadAndQCConfig) -> tuple[Dict[str, ad.AnnData], Dict[str, float]]:
+def load_filtered_data(cfg: LoadAndQCConfig):
     filtered_dirs = find_raw_dirs(cfg.filtered_sample_dir, cfg.filtered_pattern)
-    out: Dict[str, ad.AnnData] = {}
-    read_counts: Dict[str, float] = {}
 
-    for fd in filtered_dirs:
+    out = {}
+    read_counts = {}
+
+    n_workers = min(cfg.n_jobs or 4, 8)
+    LOGGER.info(f"Parallel filtered 10X loading with {n_workers} I/O threads")
+
+    def _load_one(fd: Path):
         sample = fd.name.split(".filtered_feature_bc_matrix")[0]
         adata = read_raw_10x(fd)
-        out[sample] = adata
         total_reads = float(adata.X.sum())
-        read_counts[sample] = total_reads
-        LOGGER.info("Loaded filtered %s: %d cells, %d genes, %.2e total reads",
-                    sample, adata.n_obs, adata.n_vars, total_reads)
+        return sample, adata, total_reads
+
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = {pool.submit(_load_one, fd): fd for fd in filtered_dirs}
+
+        for fut in as_completed(futures):
+            sample, adata, total_reads = fut.result()
+            out[sample] = adata
+            read_counts[sample] = total_reads
+
+            LOGGER.info(
+                f"[I/O] Loaded filtered {sample}: {adata.n_obs} cells, "
+                f"{adata.n_vars} genes, {total_reads:.2e} UMIs"
+            )
+
     return out, read_counts
 
 
 def load_cellbender_data(cfg: LoadAndQCConfig) -> tuple[Dict[str, ad.AnnData], Dict[str, float]]:
+    """
+    Parallel, memory-safe loading of CellBender outputs.
+    """
     if cfg.cellbender_dir is None:
         return {}, {}
 
     cb_dirs = find_cellbender_dirs(cfg.cellbender_dir, cfg.cellbender_pattern)
     if not cb_dirs:
         raise FileNotFoundError(
-            f"No CellBender outputs found in {cfg.cellbender_dir} matching pattern {cfg.cellbender_pattern}"
+            f"No CellBender outputs found in {cfg.cellbender_dir} matching {cfg.cellbender_pattern}"
         )
 
-    out: Dict[str, ad.AnnData] = {}
-    read_counts: Dict[str, float] = {}
+    out = {}
+    read_counts = {}
 
-    for cb in cb_dirs:
-        sample = cb.name.split(".cellbender_filtered.output")[0]
-        adata = read_cellbender_h5(cb, sample, cfg.cellbender_h5_suffix)
-        if adata is None:
-            raise FileNotFoundError(f"Missing CellBender .h5 file for sample {sample} in {cb}")
-        out[sample] = adata
+    # Parallel I/O tuned for HPC (avoid hammering metadata servers)
+    n_workers = min(cfg.n_jobs or 4, 8)
+    LOGGER.info(f"Parallel CellBender loading with {n_workers} I/O threads")
+
+    def _load_one(cb_path: Path):
+        sample = cb_path.name.split(".cellbender_filtered.output")[0]
+        adata = read_cellbender_h5(cb_path.parent, sample, cfg.cellbender_h5_suffix)
         total_reads = float(adata.X.sum())
-        read_counts[sample] = total_reads
-        LOGGER.info(
-            "Loaded CellBender %s: %d cells, %d genes, %.2e total reads",
-            sample, adata.n_obs, adata.n_vars, total_reads,
-        )
+        return sample, adata, total_reads
+
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = {pool.submit(_load_one, cb): cb for cb in cb_dirs}
+
+        for fut in as_completed(futures):
+            sample, adata, total_reads = fut.result()
+            out[sample] = adata
+            read_counts[sample] = total_reads
+            LOGGER.info(
+                f"[I/O] Loaded CellBender {sample}: {adata.n_obs} cells, "
+                f"{adata.n_vars} genes, {total_reads:.2e} reads"
+            )
+
     return out, read_counts
+
 
 
 def merge_samples(sample_map: Dict[str, ad.AnnData], batch_key: str) -> ad.AnnData:

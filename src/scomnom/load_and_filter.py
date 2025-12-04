@@ -165,120 +165,90 @@ def compute_qc_metrics(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
     return adata
 
 
-def sparse_filter_cells_and_genes(adata: ad.AnnData, min_genes: int, min_cells: int):
-    """
-    Fully sparse filtering for cells and genes.
-    Equivalent to sc.pp.filter_cells + sc.pp.filter_genes,
-    but without densification or CSC conversions.
-    """
-    import numpy as np
-    from scipy import sparse
-
-    X = adata.X
-
-    # Ensure CSR
-    if sparse.issparse(X):
-        X = X.tocsr()
-    else:
-        LOGGER.warning("X is dense—filtering will be memory-heavy.")
-
-    # -------- Cell filtering --------
-    gene_counts = np.diff(X.indptr)
-    cell_mask = gene_counts >= min_genes
-
-    adata = adata[cell_mask].copy()
-
-    # Recompute X after subsetting
-    X = adata.X.tocsr()
-
-    # -------- Gene filtering --------
-    # Sparse-safe n_cells_by_counts (avoid .tocsc())
-    # Count nonzeros by column without matrix transposition
-    indptr = X.indptr
-    indices = X.indices
-    nnz_mask = np.ones_like(indices, dtype=bool)  # dummy for bincount
-    n_cells_by_gene = np.bincount(indices, minlength=X.shape[1])
-
-    gene_mask = n_cells_by_gene >= min_cells
-
-    adata = adata[:, gene_mask].copy()
-    return adata
-
-def sparse_filter_cells_and_genes_debug(
+def sparse_filter_cells_and_genes(
     adata: ad.AnnData,
-    min_genes: int,
-    min_cells: int
-):
+    min_genes: int = 200,
+    min_cells: int = 3,
+) -> ad.AnnData:
     """
-    Debug version of sparse filter that logs memory use and
-    progress before every potentially expensive operation.
+    Memory-efficient filtering of cells and genes for massive sparse matrices.
+    - Computes nnz-per-cell from CSR.indptr
+    - Computes nnz-per-gene directly from CSR.indices without CSC conversion
     """
+
     import numpy as np
-    from scipy import sparse
+    import scipy.sparse as sp
     import psutil
+    import logging
+    LOGGER = logging.getLogger(__name__)
 
-    def mem():
-        return psutil.Process().memory_info().rss / 1e9
-
-    LOGGER.info(f"[DEBUG] Start filtering: mem={mem():.2f} GB")
-    LOGGER.info(f"[DEBUG] Initial matrix shape: {adata.shape}")
-    LOGGER.info(f"[DEBUG] AnnData attributes: "
-                f"obs={adata.obs.shape}, var={adata.var.shape}, "
-                f"layers={list(adata.layers.keys())}")
-
-    X = adata.X
-
-    # -------------------------------
+    # ----------------------------------------------------
     # Ensure CSR
-    # -------------------------------
-    LOGGER.info(f"[DEBUG] Checking CSR format... mem={mem():.2f} GB")
-    if sparse.issparse(X):
-        if not sparse.isspmatrix_csr(X):
-            LOGGER.info("[DEBUG] Converting X to CSR (this can allocate large memory!)")
-            X = X.tocsr()  # potential OOM spot
-            LOGGER.info(f"[DEBUG] Converted to CSR: mem={mem():.2f} GB")
+    # ----------------------------------------------------
+    if not sp.issparse(adata.X):
+        adata.X = sp.csr_matrix(adata.X)
     else:
-        LOGGER.warning("[DEBUG] X is dense — memory usage will explode.")
+        adata.X = adata.X.tocsr()
 
-    # -------------------------------
-    # CELL FILTERING
-    # -------------------------------
-    LOGGER.info("[DEBUG] Counting genes per cell (np.diff on CSR.indptr)...")
-    gene_counts = np.diff(X.indptr)
-    LOGGER.info(f"[DEBUG] gene_counts computed, mem={mem():.2f} GB")
+    # Log initial memory state
+    rss0 = psutil.Process().memory_info().rss / 1024**3
+    LOGGER.info(
+        f"[Filtering] Start: {adata.n_obs:,} cells × {adata.n_vars:,} genes "
+        f"(RSS={rss0:.2f} GB)"
+    )
 
+    X = adata.X  # CSR matrix
+
+    # ----------------------------------------------------
+    # 1) Filter cells by gene count (nnz per row)
+    # ----------------------------------------------------
+    gene_counts = np.diff(X.indptr)  # nnz per row
     cell_mask = gene_counts >= min_genes
-    LOGGER.info(f"[DEBUG] cell_mask created: keeping {cell_mask.sum()} / {len(cell_mask)} cells")
 
-    LOGGER.info("[DEBUG] Subsetting cells (adata[cell_mask].copy())")
-    adata = adata[cell_mask].copy()   # potential OOM spot
-    LOGGER.info(f"[DEBUG] After cell filtering: adata={adata.shape}, mem={mem():.2f} GB")
+    n_before = adata.n_obs
+    n_after = int(cell_mask.sum())
 
-    X = adata.X
-    if sparse.issparse(X) and not sparse.isspmatrix_csr(X):
-        LOGGER.info("[DEBUG] Re-converting X to CSR after subset")
-        X = X.tocsr()
-        LOGGER.info(f"[DEBUG] After reconvert: mem={mem():.2f} GB")
+    if n_after == 0:
+        raise ValueError(
+            f"All cells removed by min_genes={min_genes}."
+        )
 
-    # -------------------------------
-    # GENE FILTERING
-    # -------------------------------
-    LOGGER.info("[DEBUG] Counting cells per gene using bincount(indices)...")
+    # Subset cells
+    adata = adata[cell_mask].copy()
+    X = adata.X  # Update reference
 
-    indices = X.indices
-    LOGGER.info(f"[DEBUG] X has {len(indices)} nonzeros (nnz); mem={mem():.2f} GB")
+    LOGGER.info(
+        f"[Filtering] Cells kept: {n_after:,} / {n_before:,} "
+        f"({100*n_after/n_before:.1f}%)"
+    )
 
-    n_cells_by_gene = np.bincount(indices, minlength=X.shape[1])
-    LOGGER.info(f"[DEBUG] n_cells_by_gene computed; mem={mem():.2f} GB")
+    # ----------------------------------------------------
+    # 2) Filter genes by occurrence across cells
+    # ----------------------------------------------------
+    # We need nnz per column.
+    # For CSR, column indices live in X.indices.
+    # Counting occurrences: bincount(indices)
+    gene_nnz = np.bincount(X.indices, minlength=adata.n_vars)
 
-    gene_mask = n_cells_by_gene >= min_cells
-    LOGGER.info(f"[DEBUG] gene_mask created: keeping {gene_mask.sum()} / {len(gene_mask)} genes")
+    gene_mask = gene_nnz >= min_cells
 
-    LOGGER.info("[DEBUG] Subsetting genes (adata[:, gene_mask].copy())")
-    adata = adata[:, gene_mask].copy()    # potential OOM spot
-    LOGGER.info(f"[DEBUG] After gene filtering: adata={adata.shape}, mem={mem():.2f} GB")
+    g_before = adata.n_vars
+    g_after = int(gene_mask.sum())
 
-    LOGGER.info("[DEBUG] Filtering complete.")
+    if g_after == 0:
+        raise ValueError(
+            f"All genes removed by min_cells={min_cells}."
+        )
+
+    # Subset genes
+    adata = adata[:, gene_mask].copy()
+
+    rss1 = psutil.Process().memory_info().rss / 1024**3
+    LOGGER.info(
+        f"[Filtering] Genes kept: {g_after:,} / {g_before:,} "
+        f"({100*g_after/g_before:.1f}%), final RSS={rss1:.2f} GB"
+    )
+
     return adata
 
 
@@ -287,10 +257,10 @@ def filter_and_doublets(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
     pre_counts = adata.uns.get("pre_filter_counts", None)
 
     # Basic filtering
-    adata = sparse_filter_cells_and_genes_debug(
+    adata = sparse_filter_cells_and_genes(
         adata,
         min_genes=cfg.min_genes,
-        min_cells=cfg.min_cells
+        min_cells=cfg.min_cells,
     )
 
     # Log remaining cells per sample
