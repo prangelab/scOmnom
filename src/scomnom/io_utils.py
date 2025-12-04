@@ -381,7 +381,7 @@ def load_filtered_data(cfg: LoadAndQCConfig):
 
 def load_cellbender_data(cfg: LoadAndQCConfig) -> tuple[Dict[str, ad.AnnData], Dict[str, float]]:
     """
-    Parallel, memory-safe loading of CellBender outputs.
+    Parallel loading of CellBender outputs.
     """
     if cfg.cellbender_dir is None:
         return {}, {}
