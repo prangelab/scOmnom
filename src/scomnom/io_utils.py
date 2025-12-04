@@ -384,31 +384,30 @@ def load_cellbender_data(cfg: LoadAndQCConfig):
 
         try:
             # ---------------------------------------------------------
-            # 1. Locate filtered H5
+            # 1. Require the EXACT filtered h5 (no globs!)
             # ---------------------------------------------------------
-            candidates = list(cb_path.glob("*_out_filtered.h5"))
-            if not candidates:
-                return ("fail", sample, "No *_out_filtered.h5 found")
-            h5_path = candidates[0]
+            h5_filtered = cb_path / f"{sample}.cellbender_out_filtered.h5"
+            if not h5_filtered.exists():
+                return ("fail", sample, f"Missing filtered H5: {h5_filtered}")
 
             # ---------------------------------------------------------
-            # 2. Load barcodes (TRUE called cells)
+            # 2. Barcodes: require exact filename too
             # ---------------------------------------------------------
-            barcode_files = list(cb_path.glob("*_out_cell_barcodes.csv"))
-            if not barcode_files:
-                return ("fail", sample, "No *_out_cell_barcodes.csv found")
+            barcode_csv = cb_path / f"{sample}.cellbender_out_cell_barcodes.csv"
+            if not barcode_csv.exists():
+                return ("fail", sample, f"Missing barcode CSV: {barcode_csv}")
 
             barcodes_keep = (
-                pd.read_csv(barcode_files[0], header=None)[0]
+                pd.read_csv(barcode_csv, header=None)[0]
                 .astype(str)
                 .tolist()
             )
             barcode_set = set(barcodes_keep)
 
             # ---------------------------------------------------------
-            # 3. Read H5 manually (robust approach)
+            # 3. Read filtered H5 manually (robust)
             # ---------------------------------------------------------
-            with h5py.File(h5_path, "r") as f:
+            with h5py.File(h5_filtered, "r") as f:
                 data = f["matrix/data"][:]
                 indices = f["matrix/indices"][:]
                 indptr = f["matrix/indptr"][:]
@@ -418,16 +417,17 @@ def load_cellbender_data(cfg: LoadAndQCConfig):
                 feature_ids = f["matrix/features/id"][:].astype(str)
                 features = f["matrix/features/name"][:].astype(str)
 
+            # Reconstruct CSR correctly
             X_full = sparse.csr_matrix((data, indices, indptr), shape=shape)
 
             # ---------------------------------------------------------
-            # 4. Mask rows safely (handles any ordering)
+            # 4. Mask rows safely
             # ---------------------------------------------------------
             mask = [bc in barcode_set for bc in all_barcodes]
             n_keep = sum(mask)
 
             if n_keep == 0:
-                return ("fail", sample, "No barcodes in H5 matched the barcode CSV")
+                return ("fail", sample, "No barcodes in H5 matched barcode CSV")
 
             LOGGER.info(f"{sample}: keeping {n_keep} / {len(all_barcodes)} barcodes")
 
@@ -435,7 +435,7 @@ def load_cellbender_data(cfg: LoadAndQCConfig):
             kept_barcodes = all_barcodes[mask]
 
             # ---------------------------------------------------------
-            # 5. Build AnnData safely
+            # 5. Build AnnData
             # ---------------------------------------------------------
             adata = ad.AnnData(
                 X=X,
