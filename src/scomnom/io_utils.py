@@ -651,11 +651,16 @@ def merge_samples(
     )
 
     # ------------------------------------------------------------------
-    # DEBUG: Copy merged file into results directory for reuse
+    # DEBUG: Copy merged file into a stable location for reuse
     # ------------------------------------------------------------------
-    debug_copy = output_dir / "merged_union.padded.h5ad"
     try:
+        home = Path(os.environ["HOME"])
+        debug_dir = home / "data" / "baria" / "vfat"
+        debug_dir.mkdir(parents=True, exist_ok=True)
+
+        debug_copy = debug_dir / "merged_union.padded.h5ad"
         shutil.copy2(merged_path, debug_copy)
+
         LOGGER.info("DEBUG COPY: merged file duplicated to %s", debug_copy)
     except Exception as e:
         LOGGER.warning("DEBUG COPY FAILED: %s", e)
