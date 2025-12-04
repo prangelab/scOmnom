@@ -498,59 +498,50 @@ def _compute_union_genes(sample_map: Dict[str, ad.AnnData]) -> List[str]:
     return sorted(genes)
 
 
-def _merge_filtered_h5ads_incremental(
+def _merge_filtered_h5ads_simple(
     padded_files: List[Path],
     batch_key: str,
     out_path: Path,
 ):
     """
-    Simple merge strategy:
-      • Read padded files one-by-one.
-      • First file initializes the merged H5AD.
-      • Remaining files are appended using anndata.append(), which
-        updates the backing HDF5 without loading everything into RAM.
+    Fast and memory-safe row-append H5AD merge.
+    Uses anndata.append(), which appends obs rows without loading
+    the entire dataset into memory.
 
-    This is slower than a pure in-memory concat but dramatically faster
-    than repeatedly rewriting via anndata.concat(), and still memory-safe.
+    Parameters
+    ----------
+    padded_files : list of .padded.h5ad paths
+        All pre-harmonized, disk-backed sample matrices.
+    batch_key : str
+        Name of obs field containing sample identifiers.
+    out_path : Path
+        Output merged file path.
     """
-
     import anndata as ad
 
-    if not padded_files:
-        raise RuntimeError("_merge_filtered_h5ads_incremental: no input files.")
+    if out_path.exists():
+        out_path.unlink()
 
-    LOGGER.info("Starting simple append-based merge into %s", out_path)
+    LOGGER.info("Starting simple append-based merge → %s", out_path)
 
     first = True
-    for i, p in enumerate(padded_files, start=1):
-        LOGGER.info("[Merge %02d/%d] Processing %s", i, len(padded_files), p.name)
+    total = len(padded_files)
 
-        try:
-            a = ad.read_h5ad(p)
-        except Exception as e:
-            LOGGER.error("Failed to read padded file %s: %s", p, e)
-            raise
+    for i, p in enumerate(padded_files, start=1):
+        LOGGER.info("[Merge %02d/%02d] Processing %s", i, total, p.name)
+
+        a = ad.read_h5ad(p)
 
         if first:
-            LOGGER.info("[Merge %02d/%d] Initializing merged file with %s",
-                        i, len(padded_files), p.name)
-            try:
-                a.write(out_path, compression="gzip")
-            except Exception as e:
-                LOGGER.error("Failed to write initial merged file %s: %s", out_path, e)
-                raise
+            # First file initializes the merged dataset
+            a.write(out_path)
             first = False
             continue
 
-        # Append safely
-        try:
-            ad.append(out_path, a, force_backing=True)
-        except Exception as e:
-            LOGGER.error("Failed to append %s to %s: %s", p, out_path, e)
-            raise
+        # Append new rows into existing HDF5 structure
+        ad.append(out_path, a, force_backing=True)
 
     LOGGER.info("Append-based merge complete → %s", out_path)
-
 
 
 def merge_samples(
@@ -559,7 +550,15 @@ def merge_samples(
     tmp_dir: Optional[Path] = None,
 ) -> ad.AnnData:
     """
-    High-level sample merge for load-and-filter.
+    High-level disk-backed merge for load-and-filter.
+
+    Steps:
+      1. Compute union genes.
+      2. Pad each sample to union gene order → write .padded.h5ad.
+      3. Append-merge all padded files into a single H5AD.
+      4. Load final merged AnnData & return.
+
+    Metadata TSV join occurs in the orchestrator.
     """
 
     import concurrent.futures
@@ -567,6 +566,9 @@ def merge_samples(
     if not sample_map:
         raise RuntimeError("merge_samples: sample_map is empty.")
 
+    # -----------------------------
+    # Resolve temp directory
+    # -----------------------------
     if tmp_dir is None:
         tmp_dir = Path.cwd() / "tmp_merge"
 
@@ -577,21 +579,19 @@ def merge_samples(
     merged_path = tmp_dir / "merged_union.padded.h5ad"
 
     LOGGER.info(
-        "Merging %d samples with disk-backed union gene space. "
-        "Temporary dir: %s",
-        len(sample_map),
-        tmp_dir,
+        "Merging %d samples with disk-backed union gene space. Temporary dir: %s",
+        len(sample_map), tmp_dir
     )
 
-    # ------------------------------------------------------------------
-    # 1. Compute union of gene symbols across all samples
-    # ------------------------------------------------------------------
+    # -----------------------------
+    # 1. Compute union gene set
+    # -----------------------------
     union_genes = _compute_union_genes(sample_map)
-    LOGGER.info("Union gene space size: %d genes", len(union_genes))
+    LOGGER.info("Union gene space size: %d", len(union_genes))
 
-    # ------------------------------------------------------------------
-    # 2. Prepare padded .padded.h5ad per sample, with PROGRESS
-    # ------------------------------------------------------------------
+    # -----------------------------
+    # 2. Prepare padded .h5ad files in parallel
+    # -----------------------------
     padded_files: List[Path] = []
     n_workers = min(8, len(sample_map))
 
@@ -609,94 +609,73 @@ def merge_samples(
             batch_key=batch_key,
         )
 
-    total_samples = len(sample_map)
-    completed = 0
-
     with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
         futures = {
-            pool.submit(_worker, s, a): s
-            for s, a in sample_map.items()
+            pool.submit(_worker, s, a): s for s, a in sample_map.items()
         }
-
+        count = 0
         for fut in concurrent.futures.as_completed(futures):
             s = futures[fut]
-            completed += 1
+            count += 1
             try:
                 path = fut.result()
                 padded_files.append(path)
-                LOGGER.info(
-                    "[Pad %02d/%02d] Prepared padded h5ad for sample %s → %s",
-                    completed, total_samples, s, path.name
-                )
+                LOGGER.info("[Pad %02d/%02d] Prepared padded h5ad for sample %s → %s",
+                            count, len(sample_map), s, path.name)
             except Exception as e:
                 LOGGER.error("Failed to prepare padded h5ad for sample %s: %s", s, e)
                 raise
 
-    padded_files = sorted(padded_files)
     if not padded_files:
         raise RuntimeError("merge_samples: no padded .h5ad files were produced.")
 
-    # ------------------------------------------------------------------
-    # 3. Incremental merge WITH PROGRESS
-    # ------------------------------------------------------------------
-    LOGGER.info("Incrementally merging %d padded h5ads → %s",
-                len(padded_files), merged_path)
+    padded_files = sorted(padded_files)
 
-    total_merge_files = len(padded_files)
+    # -----------------------------
+    # 3. Append-based merge ONCE
+    # -----------------------------
+    LOGGER.info(
+        "Incrementally merging %d padded h5ads → %s",
+        len(padded_files), merged_path
+    )
 
-    for idx, p in enumerate(padded_files, start=1):
-        LOGGER.info("[Merge %02d/%02d] Processing %s",
-                    idx, total_merge_files, p.name)
+    _merge_filtered_h5ads_simple(
+        padded_files=padded_files,
+        batch_key=batch_key,
+        out_path=merged_path,
+    )
 
-        # For all but the first sample, incremental merge happens in-place:
-        if idx == 1:
-            LOGGER.info("[Merge %02d/%02d] Initializing merged file with %s",
-                        idx, total_merge_files, p.name)
-            shutil.copy2(p, merged_path)
-        else:
-            _merge_filtered_h5ads_incremental(
-                padded_files=[p],
-                batch_key=batch_key,
-                out_path=merged_path,
-            )
-
-    # ------------------------------------------------------------------
+    # -----------------------------
     # 4. Load final merged AnnData
-    # ------------------------------------------------------------------
+    # -----------------------------
     LOGGER.info("Loading merged AnnData from %s", merged_path)
     merged = ad.read_h5ad(merged_path)
 
     LOGGER.info(
         "Merged AnnData: %d cells × %d genes. obs columns: %s",
-        merged.n_obs, merged.n_vars, list(merged.obs.columns)
+        merged.n_obs, merged.n_vars, list(merged.obs.columns),
     )
 
-    # ------------------------------------------------------------------
-    # DEBUG: Copy merged file into a stable location for reuse
-    # ------------------------------------------------------------------
+    # -----------------------------
+    # DEBUG: copy merged file to results area
+    # -----------------------------
+    debug_copy = Path("/home/kprange/data/baria/vfat/merged_union.padded.h5ad")
     try:
-        home = Path(os.environ["HOME"])
-        debug_dir = home / "data" / "baria" / "vfat"
-        debug_dir.mkdir(parents=True, exist_ok=True)
-
-        debug_copy = debug_dir / "merged_union.padded.h5ad"
         shutil.copy2(merged_path, debug_copy)
-
         LOGGER.info("DEBUG COPY: merged file duplicated to %s", debug_copy)
     except Exception as e:
         LOGGER.warning("DEBUG COPY FAILED: %s", e)
 
-    # ------------------------------------------------------------------
-    # Clean temporary directory
-    # ------------------------------------------------------------------
+    # -----------------------------
+    # Cleanup
+    # -----------------------------
     try:
         LOGGER.info("Cleaning up temporary merge directory: %s", tmp_dir)
         shutil.rmtree(tmp_dir)
     except Exception as e:
-        LOGGER.warning("Failed to clean temporary directory %s: %s", tmp_dir, e)
+        LOGGER.warning("Failed to clean temporary dir %s: %s", tmp_dir, e)
 
     return merged
-
 
 
 def save_adata(adata: ad.AnnData, out_path: Path) -> None:
