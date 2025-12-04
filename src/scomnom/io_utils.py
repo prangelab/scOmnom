@@ -349,17 +349,21 @@ def load_filtered_data(cfg: LoadAndQCConfig):
 
 def load_cellbender_data(cfg: LoadAndQCConfig):
     """
-    Load CellBender outputs using ONLY:
-      • <sample>_cellbender_out_filtered.h5  (the correct filtered matrix)
-      • <sample>_cellbender_out_cell_barcodes.csv  (the called-cell list)
+    Load CellBender filtered matrices using a robust, mask-based sparse reader.
 
-    This avoids all CSR shape mismatches and all is_cell inconsistencies.
-    If ANY sample fails, the pipeline aborts after reporting all failures.
+    This implementation:
+      • Reads <sample>_cellbender_out_filtered.h5 via h5py (not scanpy)
+      • Loads barcodes from <sample>_cell_barcodes.csv
+      • Uses an exact boolean mask to subset rows (fully stable)
+      • Avoids all scanpy CSR pointer mismatches
+      • Preserves parallelism and existing return structure
     """
 
     import concurrent.futures
     import pandas as pd
-    import scanpy as sc
+    import anndata as ad
+    import h5py
+    from scipy import sparse
 
     cb_dirs = sorted(
         [p for p in cfg.cellbender_dir.glob(cfg.cellbender_pattern) if p.is_dir()]
@@ -371,83 +375,80 @@ def load_cellbender_data(cfg: LoadAndQCConfig):
     read_counts = {}
     failed = {}
 
-    # ------------------------------------------------------------------------------------
-    # Worker: Load one sample safely
-    # ------------------------------------------------------------------------------------
-    def _load_one(cb_path: Path):
-        import h5py
-        import pandas as pd
-        from scipy import sparse
-        import anndata as ad
+    # ------------------------------------------------------------------
+    # Internal helper: robust exact CellBender filtered H5 reader
+    # ------------------------------------------------------------------
+    def _read_cellbender_filtered_exact(h5_path: Path, barcode_csv: Path, sample: str):
+        """
+        Fully explicit CellBender loader:
+          • Reads CSR arrays manually from H5
+          • Filters rows using a boolean mask (no reindexing)
+        """
+        # Load barcodes called as cells
+        barcodes_keep = pd.read_csv(barcode_csv, header=None)[0].astype(str).tolist()
+        barcode_set = set(barcodes_keep)
 
+        with h5py.File(h5_path, "r") as f:
+            data = f["matrix/data"][:]
+            indices = f["matrix/indices"][:]
+            indptr = f["matrix/indptr"][:]
+            shape = tuple(f["matrix/shape"][:])
+
+            all_barcodes = f["matrix/barcodes"][:].astype(str)
+            gene_ids = f["matrix/features/id"][:].astype(str)
+            gene_symbols = f["matrix/features/name"][:].astype(str)
+
+        # Build sparse matrix
+        X_full = sparse.csr_matrix((data, indices, indptr), shape=shape)
+
+        # Boolean mask of requested barcodes
+        mask = [bc in barcode_set for bc in all_barcodes]
+        kept = all_barcodes[mask]
+
+        if len(kept) == 0:
+            raise ValueError(f"{sample}: none of the barcodes in CSV exist in H5.")
+
+        X = X_full[mask, :]
+
+        # Build AnnData
+        adata = ad.AnnData(
+            X=X,
+            obs={"barcode": kept, "sample_id": sample},
+            var={"gene_ids": gene_ids, "gene_symbols": gene_symbols},
+        )
+        adata.obs_names = kept
+        adata.var_names = gene_symbols
+        adata.var_names_make_unique()
+
+        return adata
+
+    # ------------------------------------------------------------------
+    # Worker: load one sample
+    # ------------------------------------------------------------------
+    def _load_one(cb_path: Path):
         sample = cb_path.name.replace(".cellbender_filtered.output", "")
 
         try:
-            # ---------------------------------------------------------
-            # 1. Require the EXACT filtered h5 (no globs!)
-            # ---------------------------------------------------------
-            h5_filtered = cb_path / f"{sample}.cellbender_out_filtered.h5"
-            if not h5_filtered.exists():
-                return ("fail", sample, f"Missing filtered H5: {h5_filtered}")
+            # Locate filtered H5
+            h5_candidates = list(cb_path.glob("*_out_filtered.h5"))
+            if not h5_candidates:
+                return ("fail", sample, "No *_out_filtered.h5 found")
 
-            # ---------------------------------------------------------
-            # 2. Barcodes: require exact filename too
-            # ---------------------------------------------------------
-            barcode_csv = cb_path / f"{sample}.cellbender_out_cell_barcodes.csv"
-            if not barcode_csv.exists():
-                return ("fail", sample, f"Missing barcode CSV: {barcode_csv}")
+            h5_path = h5_candidates[0]
 
-            barcodes_keep = (
-                pd.read_csv(barcode_csv, header=None)[0]
-                .astype(str)
-                .tolist()
-            )
-            barcode_set = set(barcodes_keep)
+            # Locate barcode CSV
+            bc_candidates = list(cb_path.glob("*_out_cell_barcodes.csv"))
+            if not bc_candidates:
+                return ("fail", sample, "No *_out_cell_barcodes.csv found")
 
-            # ---------------------------------------------------------
-            # 3. Read filtered H5 manually (robust)
-            # ---------------------------------------------------------
-            with h5py.File(h5_filtered, "r") as f:
-                data = f["matrix/data"][:]
-                indices = f["matrix/indices"][:]
-                indptr = f["matrix/indptr"][:]
-                shape = tuple(f["matrix/shape"][:])
+            barcode_csv = bc_candidates[0]
 
-                all_barcodes = f["matrix/barcodes"][:].astype(str)
-                feature_ids = f["matrix/features/id"][:].astype(str)
-                features = f["matrix/features/name"][:].astype(str)
+            LOGGER.info(f"[{sample}] Loading filtered CellBender H5: {h5_path}")
 
-            # Reconstruct CSR correctly
-            X_full = sparse.csr_matrix((data, indices, indptr), shape=shape)
+            # Robust manual CSR reader
+            adata = _read_cellbender_filtered_exact(h5_path, barcode_csv, sample)
 
-            # ---------------------------------------------------------
-            # 4. Mask rows safely
-            # ---------------------------------------------------------
-            mask = [bc in barcode_set for bc in all_barcodes]
-            n_keep = sum(mask)
-
-            if n_keep == 0:
-                return ("fail", sample, "No barcodes in H5 matched barcode CSV")
-
-            LOGGER.info(f"{sample}: keeping {n_keep} / {len(all_barcodes)} barcodes")
-
-            X = X_full[mask, :]
-            kept_barcodes = all_barcodes[mask]
-
-            # ---------------------------------------------------------
-            # 5. Build AnnData
-            # ---------------------------------------------------------
-            adata = ad.AnnData(
-                X=X,
-                obs={"barcode": kept_barcodes},
-                var={"gene_ids": feature_ids, "gene_symbols": features},
-            )
-
-            adata.obs_names = adata.obs["barcode"]
-            adata.var_names = adata.var["gene_symbols"]
-            adata.var_names_make_unique()
-            adata.obs["sample_id"] = sample
-
+            # Read count
             reads = int(adata.X.sum())
 
             return ("ok", sample, adata, reads)
@@ -455,9 +456,9 @@ def load_cellbender_data(cfg: LoadAndQCConfig):
         except Exception as e:
             return ("fail", sample, str(e))
 
-    # ------------------------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Parallel execution
-    # ------------------------------------------------------------------------------------
+    # ------------------------------------------------------------------
     n_workers = min(cfg.n_jobs or 8, 8)
     LOGGER.info(f"Parallel CellBender loading with {n_workers} threads")
 
@@ -465,33 +466,30 @@ def load_cellbender_data(cfg: LoadAndQCConfig):
         futures = {pool.submit(_load_one, p): p for p in cb_dirs}
 
         for fut in concurrent.futures.as_completed(futures):
-            result = fut.result()
-            status = result[0]
-            sample = result[1]
+            status, sample, *rest = fut.result()
 
             if status == "ok":
-                _, _, adata, reads = result
+                adata, reads = rest
                 out[sample] = adata
                 read_counts[sample] = reads
             else:
-                errmsg = result[2]
+                errmsg = rest[0]
                 LOGGER.error(f"[FAIL] {sample}: {errmsg}")
                 failed[sample] = errmsg
 
-    # ------------------------------------------------------------------------------------
-    # After all threads complete: FAIL if any sample failed
-    # ------------------------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Abort if any samples failed
+    # ------------------------------------------------------------------
     if failed:
         LOGGER.error("\n================================================")
         LOGGER.error(" FATAL: One or more CellBender samples failed")
         LOGGER.error("================================================")
+
         for s, msg in failed.items():
             LOGGER.error(f" • {s}: {msg}")
-        LOGGER.error("Pipeline will abort. Please inspect logs.\n")
 
         raise RuntimeError(
-            f"CellBender loading failed for {len(failed)} samples: "
-            f"{', '.join(failed.keys())}"
+            f"CellBender loading failed for {len(failed)} samples: {', '.join(failed)}"
         )
 
     return out, read_counts
