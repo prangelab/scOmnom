@@ -352,21 +352,23 @@ def load_filtered_data(cfg: LoadAndQCConfig):
     return out, read_counts
 
 
-def load_cellbender_data(cfg: LoadAndQCConfig) -> tuple[Dict[str, ad.AnnData], Dict[str, float]]:
+def load_cellbender_data(cfg: LoadAndQCConfig):
     """
-    Parallel CellBender loader:
-      • Loads only *_out_filtered.h5 + *_out_cell_barcodes.csv
-      • Per-sample failure is recorded but does not immediately abort
-      • At the end, pipeline aborts if any sample failed
-    """
-    if cfg.cellbender_dir is None:
-        return {}, {}
+    Load CellBender outputs using ONLY:
+      • <sample>_cellbender_out_filtered.h5  (the correct filtered matrix)
+      • <sample>_cellbender_out_cell_barcodes.csv  (the called-cell list)
 
-    cb_dirs = find_cellbender_dirs(cfg.cellbender_dir, cfg.cellbender_pattern)
-    if not cb_dirs:
-        raise FileNotFoundError(
-            f"No CellBender outputs found in {cfg.cellbender_dir} using pattern {cfg.cellbender_pattern}"
-        )
+    This avoids all CSR shape mismatches and all is_cell inconsistencies.
+    If ANY sample fails, the pipeline aborts after reporting all failures.
+    """
+
+    import concurrent.futures
+    import pandas as pd
+    import scanpy as sc
+
+    cb_dirs = sorted(
+        [p for p in cfg.cellbender_dir.glob(cfg.cellbender_pattern) if p.is_dir()]
+    )
 
     LOGGER.info(f"Found {len(cb_dirs)} CellBender output dirs")
 
@@ -374,43 +376,103 @@ def load_cellbender_data(cfg: LoadAndQCConfig) -> tuple[Dict[str, ad.AnnData], D
     read_counts = {}
     failed = {}
 
-    n_workers = min(8, cfg.n_jobs) if cfg.n_jobs else 8
+    # ------------------------------------------------------------------------------------
+    # Worker: Load one sample safely
+    # ------------------------------------------------------------------------------------
+    def _load_one(cb_path: Path):
+        sample = cb_path.name.replace(".cellbender_filtered.output", "")
+
+        try:
+            # ---------------------------------------------------------
+            # 1. Resolve the filtered matrix
+            # ---------------------------------------------------------
+            candidates = list(cb_path.glob("*_out_filtered.h5"))
+            if not candidates:
+                return ("fail", sample, "No *_out_filtered.h5 found")
+
+            h5_path = candidates[0]
+            LOGGER.info(f"Loading filtered CellBender matrix: {h5_path}")
+
+            # ---------------------------------------------------------
+            # 2. Load barcodes (the TRUE cell list)
+            # ---------------------------------------------------------
+            barcode_files = list(cb_path.glob("*_out_cell_barcodes.csv"))
+            if not barcode_files:
+                return ("fail", sample, "No *_out_cell_barcodes.csv found")
+
+            barcodes = pd.read_csv(barcode_files[0], header=None)[0].astype(str)
+            n_cells = len(barcodes)
+
+            # ---------------------------------------------------------
+            # 3. Read filtered H5 using scanpy
+            # ---------------------------------------------------------
+            adata = sc.read_10x_h5(str(h5_path))
+
+            # Now match rows exactly to the barcodes
+            # adata.obs_names contains all barcodes present in filtered.h5
+            try:
+                adata = adata[barcodes.values, :]
+            except Exception as e:
+                return ("fail", sample, f"Failed row selection: {e}")
+
+            # ---------------------------------------------------------
+            # 4. Standard AnnData formatting
+            # ---------------------------------------------------------
+            adata.obs["barcode"] = adata.obs_names
+            adata.obs["sample_id"] = sample
+            adata.var_names_make_unique()
+
+            # ---------------------------------------------------------
+            # 5. Count reads
+            # ---------------------------------------------------------
+            reads = int(adata.X.sum())
+
+            return ("ok", sample, adata, reads)
+
+        except Exception as e:
+            return ("fail", sample, str(e))
+
+    # ------------------------------------------------------------------------------------
+    # Parallel execution
+    # ------------------------------------------------------------------------------------
+    n_workers = min(cfg.n_jobs or 8, 8)
     LOGGER.info(f"Parallel CellBender loading with {n_workers} threads")
 
-    def _load_one(cb_path: Path):
-        sample = cb_path.name.split(".cellbender_filtered.output")[0]
-        try:
-            adata = read_cellbender_h5(cfg.cellbender_dir, sample)
-            return sample, "ok", adata, float(adata.X.sum())
-        except Exception as e:
-            return sample, "fail", str(e), None
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = {pool.submit(_load_one, p): p for p in cb_dirs}
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        futures = {pool.submit(_load_one, cb): cb for cb in cb_dirs}
-
-        for fut in as_completed(futures):
-            sample, status, result, reads = fut.result()
+        for fut in concurrent.futures.as_completed(futures):
+            result = fut.result()
+            status = result[0]
+            sample = result[1]
 
             if status == "ok":
-                out[sample] = result
+                _, _, adata, reads = result
+                out[sample] = adata
                 read_counts[sample] = reads
-                LOGGER.info(f"[OK] {sample}: {result.n_obs} cells, {result.n_vars} genes, {reads:.2e} UMIs")
             else:
-                failed[sample] = result
-                LOGGER.error(f"[FAIL] {sample}: {result}")
+                errmsg = result[2]
+                LOGGER.error(f"[FAIL] {sample}: {errmsg}")
+                failed[sample] = errmsg
 
-    # final fail-fast behaviour
+    # ------------------------------------------------------------------------------------
+    # After all threads complete: FAIL if any sample failed
+    # ------------------------------------------------------------------------------------
     if failed:
-        LOGGER.error("=" * 50)
+        LOGGER.error("\n================================================")
         LOGGER.error(" FATAL: One or more CellBender samples failed")
-        LOGGER.error("=" * 50)
+        LOGGER.error("================================================")
         for s, msg in failed.items():
             LOGGER.error(f" • {s}: {msg}")
-        LOGGER.error("Pipeline will abort. Please inspect logs.")
-        raise RuntimeError(f"CellBender loading failed for {len(failed)} samples: {', '.join(failed.keys())}")
+        LOGGER.error("Pipeline will abort. Please inspect logs.\n")
+
+        raise RuntimeError(
+            f"CellBender loading failed for {len(failed)} samples: "
+            f"{', '.join(failed.keys())}"
+        )
 
     return out, read_counts
+
 
 
 def merge_samples(sample_map: Dict[str, ad.AnnData], batch_key: str) -> ad.AnnData:
