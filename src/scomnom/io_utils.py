@@ -414,19 +414,14 @@ def load_filtered_data(cfg: LoadAndQCConfig):
 
 def load_cellbender_data(cfg: LoadAndQCConfig) -> tuple[Dict[str, ad.AnnData], Dict[str, float]]:
     """
-    Parallel loading of CellBender outputs with:
-      - strict directory validation
-      - robust H5 resolution
-      - automatic fallback for older CellBender versions
-      - safe parallel execution (HPC-friendly)
-      - graceful skipping of failed samples rather than crashing
+    Parallel loading of CellBender outputs.
 
-    Returns
-    -------
-    sample_map : dict
-        {sample → AnnData}
-    read_counts : dict
-        {sample → total UMIs}
+    Behavior:
+      - Load each sample independently (parallel threads)
+      - If a sample fails: record the sample + error, but continue loading others
+      - After all threads finish:
+            * If ANY sample failed → abort the pipeline with a clear fatal message
+            * Else → return the loaded dataset
     """
     if cfg.cellbender_dir is None:
         return {}, {}
@@ -444,70 +439,78 @@ def load_cellbender_data(cfg: LoadAndQCConfig) -> tuple[Dict[str, ad.AnnData], D
             continue
         LOGGER.warning(
             f"[WARN] Unexpected item in CellBender dir: {cb}. "
-            f"Expected directories ending in '.cellbender_filtered.output'"
+            f"Expected '*.cellbender_filtered.output' directories."
         )
 
-    # HPC-safe: cap I/O threads at 8 unless user requested fewer
+    # HPC-safe thread cap
     n_workers = min(cfg.n_jobs or 8, 8)
-    LOGGER.info(f"Parallel CellBender loading using {n_workers} I/O threads")
+    LOGGER.info(f"Parallel CellBender loading with {n_workers} I/O threads")
 
-    out: Dict[str, ad.AnnData] = {}
+    loaded: Dict[str, ad.AnnData] = {}
     read_counts: Dict[str, float] = {}
 
-    def _load_one_dir(cb_path: Path):
-        """
-        Load a single sample.
-        Returns either (sample, adata, reads) or raises.
-        """
+    failed_samples = {}  # sample → error message
+
+    def _load_one(cb_path: Path):
+        """Load a single CellBender sample. Always returns a tuple."""
         sample = cb_path.name.split(".cellbender_filtered.output")[0]
+
         try:
             adata = read_cellbender_h5(
                 cb_dir=cfg.cellbender_dir,
                 sample=sample,
                 h5_suffix=cfg.cellbender_h5_suffix,
             )
+
             total_reads = float(adata.X.sum())
-            return sample, adata, total_reads
+            return ("ok", sample, adata, total_reads)
 
         except Exception as e:
-            # Exception is logged here, but does not abort the entire pipeline
-            LOGGER.error(f"Failed to load {cb_path}: {e}")
-            return None
+            return ("fail", sample, str(e))
 
-    # Run in parallel
+    # Execute in parallel
     from concurrent.futures import ThreadPoolExecutor, as_completed
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        futures = {pool.submit(_load_one_dir, cb): cb for cb in cb_dirs}
+        futures = {pool.submit(_load_one, cb): cb for cb in cb_dirs}
 
         for fut in as_completed(futures):
-            result = fut.result()
+            status, *rest = fut.result()
 
-            if result is None:
-                continue
+            if status == "ok":
+                sample, adata, total_reads = rest
+                loaded[sample] = adata
+                read_counts[sample] = total_reads
 
-            sample, adata, total_reads = result
-            out[sample] = adata
-            read_counts[sample] = total_reads
+                LOGGER.info(
+                    f"[I/O] Loaded CellBender sample {sample}: "
+                    f"{adata.n_obs} cells, {adata.n_vars} genes, "
+                    f"{total_reads:.2e} UMIs"
+                )
 
-            LOGGER.info(
-                f"[I/O] Loaded CellBender sample {sample}: "
-                f"{adata.n_obs} cells, {adata.n_vars} genes, {total_reads:.2e} UMIs"
-            )
+            else:  # failure
+                sample, errmsg = rest
+                failed_samples[sample] = errmsg
+                LOGGER.error(f"[ERROR] Failed to load sample {sample}: {errmsg}")
 
-    if not out:
+    # ------------------------------------------------------------------
+    # STRICT MODE: abort if ANY sample failed
+    # ------------------------------------------------------------------
+    if failed_samples:
+        LOGGER.error("===============================================")
+        LOGGER.error(" FATAL: One or more CellBender samples failed ")
+        LOGGER.error("===============================================")
+        for s, msg in failed_samples.items():
+            LOGGER.error(f" • {s}: {msg}")
+        LOGGER.error("Pipeline will abort. Please inspect the logs.")
+
         raise RuntimeError(
-            "All CellBender samples failed to load. "
-            "Check logs for detailed failure reasons."
+            f"CellBender loading failed for {len(failed_samples)} samples: "
+            f"{', '.join(failed_samples.keys())}"
         )
 
-    LOGGER.info(
-        f"Successfully loaded {len(out)} CellBender samples "
-        f"(skipped {len(cb_dirs) - len(out)} failed samples)."
-    )
-
-    return out, read_counts
-
-
+    # No failures → continue
+    LOGGER.info(f"Successfully loaded ALL {len(loaded)} CellBender samples.")
+    return loaded, read_counts
 
 
 def merge_samples(sample_map: Dict[str, ad.AnnData], batch_key: str) -> ad.AnnData:
