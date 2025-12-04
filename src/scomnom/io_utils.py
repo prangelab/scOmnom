@@ -27,55 +27,51 @@ CELLTYPIST_CACHE.mkdir(parents=True, exist_ok=True)
 
 def _resolve_cellbender_h5_path(cb_dir: Path, sample: str, suffix: str) -> Path:
     """
-    Locate the correct CellBender H5 file.
+    Locate the correct CellBender H5 file for a given sample.
 
     Expected structure:
         cb_dir/
             SAMPLE.cellbender_filtered.output/
                 SAMPLE.cellbender_out.h5
                 SAMPLE.cellbender_out_filtered.h5
+                SAMPLE.cellbender_out_posterior.h5
+                SAMPLE.cellbender_out_cell_barcodes.csv
                 ...
     """
     sample_dir = cb_dir / f"{sample}.cellbender_filtered.output"
 
     if not sample_dir.exists() or not sample_dir.is_dir():
         raise FileNotFoundError(
-            f"CellBender output directory for sample '{sample}' not found.\n"
-            f"Expected directory: {sample_dir}"
+            f"expected CellBender output directory for sample '{sample}' not found:\n"
+            f"{sample_dir}"
         )
 
     # Primary expected file
-    expected_h5 = sample_dir / f"{sample}{suffix}"
-    if expected_h5.exists():
-        return expected_h5
+    expected = sample_dir / f"{sample}{suffix}"
+    if expected.exists():
+        return expected
 
-    # Fallback 1: take the filtered file
-    filtered_candidate = sample_dir / f"{sample}.cellbender_out_filtered.h5"
-    if filtered_candidate.exists():
-        LOGGER.warning(
-            f"Primary CellBender H5 '{expected_h5.name}' not found; "
-            f"using filtered file instead: {filtered_candidate.name}"
-        )
-        return filtered_candidate
-
-    # Fallback 2: search for any matching H5 file
+    # Fallback: any H5 matching sample prefix
     candidates = list(sample_dir.glob(f"{sample}*.h5"))
     if len(candidates) == 1:
         return candidates[0]
 
     if len(candidates) > 1:
+        # Prefer the unfiltered output (largest, contains droplet matrix)
+        preferred = [p for p in candidates if p.name.endswith("_out.h5")]
+        if len(preferred) == 1:
+            return preferred[0]
         raise FileNotFoundError(
-            f"Multiple H5 files found for sample '{sample}' in {sample_dir}\n"
+            f"Ambiguous CellBender H5 for '{sample}':\n"
             + "\n".join(str(c) for c in candidates)
         )
 
-    # Nothing found
+    # Nothing found → full diagnostic
     raise FileNotFoundError(
-        f"CellBender H5 for sample '{sample}' not found.\n"
-        f"Tried: {expected_h5}\n"
+        f"No usable H5 for sample '{sample}'.\n"
+        f"Expected: {expected}\n"
         f"Directory listing: {[p.name for p in sample_dir.iterdir()]}"
     )
-
 
 
 def detect_sample_dirs(base: Path, patterns: list[str]) -> List[Path]:
@@ -256,75 +252,80 @@ def read_raw_10x(raw_dir: Path) -> ad.AnnData:
 def read_cellbender_h5(cb_dir: Path, sample: str, h5_suffix: str) -> ad.AnnData:
     """
     Memory-safe reader for CellBender outputs.
-    Automatically detects which H5 file contains `matrix/is_cell`.
-    """
-    import h5py
-    from scipy import sparse
 
+    Loads only cell droplets using:
+    1) matrix/is_cell (preferred)
+    2) <sample>_cell_barcodes.csv (fallback for older CellBender versions)
+    """
+
+    import h5py
+    import numpy as np
+    from scipy import sparse
+    import pandas as pd
+
+    # ---- Locate correct H5 file ----
+    h5_path = _resolve_cellbender_h5_path(cb_dir, sample, h5_suffix)
     sample_dir = cb_dir / f"{sample}.cellbender_filtered.output"
 
-    if not sample_dir.exists():
-        raise FileNotFoundError(f"No CellBender folder found for {sample}: {sample_dir}")
+    LOGGER.info(f"Loading CellBender file: {h5_path}")
 
-    # Candidates in priority order
-    candidates = [
-        sample_dir / f"{sample}{h5_suffix}",                     # normally out.h5
-        sample_dir / f"{sample}.cellbender_out_filtered.h5",     # fallback 1
-        sample_dir / f"{sample}.cellbender_out_posterior.h5",    # fallback 2
-    ]
-
-    h5_path = None
-
-    # Find the first file that contains /matrix/is_cell
-    for path in candidates:
-        if path.exists():
-            try:
-                with h5py.File(path, "r") as f:
-                    if "matrix/is_cell" in f["matrix"]:
-                        h5_path = path
-                        break
-            except Exception:
-                continue
-
-    if h5_path is None:
-        raise RuntimeError(
-            f"No CellBender H5 for sample '{sample}' contains 'matrix/is_cell'. "
-            f"Checked: {[p.name for p in candidates if p.exists()]}"
-        )
-
-    LOGGER.info(f"Loading CellBender file (selected): {h5_path}")
-
-    # ---- Load the file now that we've selected it ----
     with h5py.File(h5_path, "r") as f:
+
+        # ---- Load barcodes & features ----
+        barcodes = f["matrix/barcodes"][:].astype(str)
+        features = f["matrix/features/name"][:].astype(str)
+        feature_ids = f["matrix/features/id"][:].astype(str)
+
+        # ---- Handle is_cell mask ----
+        if "matrix/is_cell" in f["matrix"]:
+            is_cell = f["matrix/is_cell"][:].astype(bool)
+            LOGGER.info(
+                f"{sample}: using 'matrix/is_cell' mask ({is_cell.sum()} cells)"
+            )
+        else:
+            # ---- Fallback to barcode CSV ----
+            csv_path = sample_dir / f"{sample}.cellbender_out_cell_barcodes.csv"
+            if not csv_path.exists():
+                raise RuntimeError(
+                    f"CellBender sample '{sample}' has no 'is_cell' mask and no "
+                    f"{csv_path.name} file. Cannot determine true cells."
+                )
+
+            good_barcodes = pd.read_csv(csv_path, header=None)[0].astype(str).values
+            good = set(good_barcodes)
+            is_cell = np.array([bc in good for bc in barcodes], dtype=bool)
+
+            LOGGER.warning(
+                f"{sample}: 'is_cell' missing in H5 → using barcode CSV "
+                f"({is_cell.sum()} cells)"
+            )
+
+        # ---- Extract sparse matrix ----
         data = f["matrix/data"][:]
         indices = f["matrix/indices"][:]
         indptr = f["matrix/indptr"][:]
         shape = f["matrix/shape"][:]
 
-        barcodes = f["matrix/barcodes"][:].astype(str)
-        features = f["matrix/features/name"][:].astype(str)
-        feature_ids = f["matrix/features/id"][:].astype(str)
+        X_full = sparse.csr_matrix((data, indices, indptr), tuple(shape))
 
-        is_cell = f["matrix/is_cell"][:].astype(bool)
-
-        X_full = sparse.csr_matrix((data, indices, indptr), shape=shape)
+        # ---- Apply filtering BEFORE creating AnnData ----
         X = X_full[is_cell, :]
-
         obs = {"barcode": barcodes[is_cell]}
         var = {"gene_ids": feature_ids, "gene_symbols": features}
 
+    # ---- Build AnnData ----
     adata = ad.AnnData(X=X, obs=obs, var=var)
+
     adata.obs_names = adata.obs["barcode"].astype(str)
     adata.var_names = adata.var["gene_symbols"].astype(str)
     adata.var_names_make_unique()
 
     LOGGER.info(
-        f"Loaded sample '{sample}' using {h5_path.name}: "
-        f"{adata.n_obs} cells, {adata.n_vars} genes."
+        f"Loaded {sample}: {adata.n_obs} cells, {adata.n_vars} genes "
+        f"({is_cell.sum()} kept, {len(is_cell) - is_cell.sum()} dropped)"
     )
 
     return adata
-
 
 
 def load_raw_data(
@@ -413,7 +414,19 @@ def load_filtered_data(cfg: LoadAndQCConfig):
 
 def load_cellbender_data(cfg: LoadAndQCConfig) -> tuple[Dict[str, ad.AnnData], Dict[str, float]]:
     """
-    Parallel loading of CellBender outputs.
+    Parallel loading of CellBender outputs with:
+      - strict directory validation
+      - robust H5 resolution
+      - automatic fallback for older CellBender versions
+      - safe parallel execution (HPC-friendly)
+      - graceful skipping of failed samples rather than crashing
+
+    Returns
+    -------
+    sample_map : dict
+        {sample → AnnData}
+    read_counts : dict
+        {sample → total UMIs}
     """
     if cfg.cellbender_dir is None:
         return {}, {}
@@ -421,39 +434,79 @@ def load_cellbender_data(cfg: LoadAndQCConfig) -> tuple[Dict[str, ad.AnnData], D
     cb_dirs = find_cellbender_dirs(cfg.cellbender_dir, cfg.cellbender_pattern)
     if not cb_dirs:
         raise FileNotFoundError(
-            f"No CellBender outputs found in {cfg.cellbender_dir} matching {cfg.cellbender_pattern}"
+            f"No CellBender outputs found in {cfg.cellbender_dir} matching pattern "
+            f"'{cfg.cellbender_pattern}'"
         )
 
-    out = {}
-    read_counts = {}
+    # Validate directory structure
+    for cb in cb_dirs:
+        if cb.is_dir() and cb.name.endswith(".cellbender_filtered.output"):
+            continue
+        LOGGER.warning(
+            f"[WARN] Unexpected item in CellBender dir: {cb}. "
+            f"Expected directories ending in '.cellbender_filtered.output'"
+        )
 
-    # Parallel I/O tuned for HPC (avoid hammering metadata servers)
-    n_workers = min(8, cfg.n_jobs) if cfg.n_jobs else 8
-    LOGGER.info(f"Parallel CellBender loading with {n_workers} I/O threads")
+    # HPC-safe: cap I/O threads at 8 unless user requested fewer
+    n_workers = min(cfg.n_jobs or 8, 8)
+    LOGGER.info(f"Parallel CellBender loading using {n_workers} I/O threads")
 
-    def _load_one(cb_path: Path):
+    out: Dict[str, ad.AnnData] = {}
+    read_counts: Dict[str, float] = {}
+
+    def _load_one_dir(cb_path: Path):
+        """
+        Load a single sample.
+        Returns either (sample, adata, reads) or raises.
+        """
+        sample = cb_path.name.split(".cellbender_filtered.output")[0]
         try:
-            sample = cb_path.name.split(".cellbender_filtered.output")[0]
-            adata = read_cellbender_h5(cfg.cellbender_dir, sample, cfg.cellbender_h5_suffix)
+            adata = read_cellbender_h5(
+                cb_dir=cfg.cellbender_dir,
+                sample=sample,
+                h5_suffix=cfg.cellbender_h5_suffix,
+            )
             total_reads = float(adata.X.sum())
             return sample, adata, total_reads
+
         except Exception as e:
+            # Exception is logged here, but does not abort the entire pipeline
             LOGGER.error(f"Failed to load {cb_path}: {e}")
             return None
 
+    # Run in parallel
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        futures = {pool.submit(_load_one, cb): cb for cb in cb_dirs}
+        futures = {pool.submit(_load_one_dir, cb): cb for cb in cb_dirs}
 
         for fut in as_completed(futures):
-            sample, adata, total_reads = fut.result()
+            result = fut.result()
+
+            if result is None:
+                continue
+
+            sample, adata, total_reads = result
             out[sample] = adata
             read_counts[sample] = total_reads
+
             LOGGER.info(
-                f"[I/O] Loaded CellBender {sample}: {adata.n_obs} cells, "
-                f"{adata.n_vars} genes, {total_reads:.2e} reads"
+                f"[I/O] Loaded CellBender sample {sample}: "
+                f"{adata.n_obs} cells, {adata.n_vars} genes, {total_reads:.2e} UMIs"
             )
 
+    if not out:
+        raise RuntimeError(
+            "All CellBender samples failed to load. "
+            "Check logs for detailed failure reasons."
+        )
+
+    LOGGER.info(
+        f"Successfully loaded {len(out)} CellBender samples "
+        f"(skipped {len(cb_dirs) - len(out)} failed samples)."
+    )
+
     return out, read_counts
+
 
 
 
