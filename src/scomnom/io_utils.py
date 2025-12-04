@@ -306,7 +306,7 @@ def load_raw_data(
     read_counts_filtered = {}
     read_counts_unfiltered = {} if record_pre_filter_counts else None
 
-    n_workers = min(cfg.n_jobs or 8)
+    n_workers = min(8, cfg.n_jobs) if cfg.n_jobs else 8
     LOGGER.info(f"Parallel RAW 10X loading with {n_workers} I/O threads")
 
     def _load_one_raw(raw_path: Path):
@@ -354,7 +354,7 @@ def load_filtered_data(cfg: LoadAndQCConfig):
     out = {}
     read_counts = {}
 
-    n_workers = min(cfg.n_jobs or 8)
+    n_workers = min(8, cfg.n_jobs) if cfg.n_jobs else 8
     LOGGER.info(f"Parallel filtered 10X loading with {n_workers} I/O threads")
 
     def _load_one(fd: Path):
@@ -407,7 +407,7 @@ def load_cellbender_data(cfg: LoadAndQCConfig) -> tuple[Dict[str, ad.AnnData], D
     read_counts = {}
 
     # Parallel I/O tuned for HPC (avoid hammering metadata servers)
-    n_workers = min(cfg.n_jobs or 8)
+    n_workers = min(8, cfg.n_jobs) if cfg.n_jobs else 8
     LOGGER.info(f"Parallel CellBender loading with {n_workers} I/O threads")
 
     def _load_one(cb_path: Path):
