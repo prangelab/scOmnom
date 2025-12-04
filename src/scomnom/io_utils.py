@@ -504,32 +504,53 @@ def _merge_filtered_h5ads_incremental(
     out_path: Path,
 ):
     """
-    Incrementally append padded AnnData files to create a single merged file.
-    This avoids holding all data in memory.
+    Simple merge strategy:
+      • Read padded files one-by-one.
+      • First file initializes the merged H5AD.
+      • Remaining files are appended using anndata.append(), which
+        updates the backing HDF5 without loading everything into RAM.
 
-    The padded files already share identical var_names (union_genes).
+    This is slower than a pure in-memory concat but dramatically faster
+    than repeatedly rewriting via anndata.concat(), and still memory-safe.
     """
 
+    import anndata as ad
+
+    if not padded_files:
+        raise RuntimeError("_merge_filtered_h5ads_incremental: no input files.")
+
+    LOGGER.info("Starting simple append-based merge into %s", out_path)
+
     first = True
-    for p in padded_files:
-        a = ad.read_h5ad(p)
+    for i, p in enumerate(padded_files, start=1):
+        LOGGER.info("[Merge %02d/%d] Processing %s", i, len(padded_files), p.name)
+
+        try:
+            a = ad.read_h5ad(p)
+        except Exception as e:
+            LOGGER.error("Failed to read padded file %s: %s", p, e)
+            raise
 
         if first:
-            a.write(out_path, compression="gzip")
+            LOGGER.info("[Merge %02d/%d] Initializing merged file with %s",
+                        i, len(padded_files), p.name)
+            try:
+                a.write(out_path, compression="gzip")
+            except Exception as e:
+                LOGGER.error("Failed to write initial merged file %s: %s", out_path, e)
+                raise
             first = False
             continue
 
-        # Load the existing output and append new rows (efficient)
-        merged = ad.read_h5ad(out_path)
+        # Append safely
+        try:
+            ad.append(out_path, a, force_backing=True)
+        except Exception as e:
+            LOGGER.error("Failed to append %s to %s: %s", p, out_path, e)
+            raise
 
-        merged = ad.concat(
-            [merged, a],
-            axis=0,
-            join="outer",
-            merge="first",
-        )
+    LOGGER.info("Append-based merge complete → %s", out_path)
 
-        merged.write(out_path, compression="gzip")
 
 
 def merge_samples(
