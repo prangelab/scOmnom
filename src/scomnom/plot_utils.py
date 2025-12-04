@@ -434,22 +434,77 @@ def plot_mt_histogram(adata, cfg, suffix: str):
 # -------------------------------------------------------------------------
 # QC plots: pre + post filter
 # -------------------------------------------------------------------------
-def run_qc_plots_pre_filter(adata, cfg):
+def run_qc_plots_pre_filter_df(qc_df: pd.DataFrame, cfg) -> None:
+    """
+    Pre-filter QC plots using a lightweight DataFrame instead of a giant AnnData.
+
+    Expects qc_df with columns:
+      - 'sample'
+      - 'total_counts'
+      - 'n_genes_by_counts'
+      - 'pct_counts_mt'
+    """
     if not cfg.make_figures:
         return
 
     figdir_qc = cfg.figdir / "QC_plots"
+    figdir_qc.mkdir(parents=True, exist_ok=True)
 
-    if "doublet_score" in adata.obs:
-        sc.pl.violin(
-            adata,
-            ["doublet_score"],
-            groupby=cfg.batch_key,
-            show=False,
-        )
-        save_multi("QC_doublet_score_violin_prefilter", figdir_qc)
+    # -----------------------------
+    # 1) Histogram of pct_counts_mt
+    # -----------------------------
+    fig, ax = plt.subplots(figsize=(5, 4))
+    _clean_axes(ax)
 
-    plot_mt_histogram(adata, cfg, "prefilter")
+    vals = qc_df["pct_counts_mt"].to_numpy()
+    ax.hist(vals, bins=50, color="steelblue", alpha=0.85)
+
+    ax.set_xlabel("Percent mitochondrial counts")
+    ax.set_ylabel("Number of cells")
+    ax.set_title("Distribution of mitochondrial content (prefilter)")
+
+    fig.tight_layout()
+    save_multi("prefilter_QC_hist_pct_mt", figdir_qc)
+
+    # -----------------------------
+    # 2) Global barcode rank vs UMI knee plot
+    #    based only on total_counts
+    # -----------------------------
+    from kneed import KneeLocator
+
+    total = qc_df["total_counts"].to_numpy()
+    total = total[np.isfinite(total) & (total > 0)]
+
+    if total.size == 0:
+        LOGGER.warning("run_qc_plots_pre_filter_df: no finite total_counts; skipping elbow/knee plot.")
+        plt.close(fig)
+        return
+
+    sorted_counts = np.sort(total)[::-1]
+    ranks = np.arange(1, len(sorted_counts) + 1)
+
+    kl = KneeLocator(ranks, sorted_counts, curve="convex", direction="decreasing")
+    knee_rank = kl.elbow
+
+    fig2, ax2 = plt.subplots(figsize=(6, 5))
+    ax2.plot(ranks, sorted_counts, lw=1, color="steelblue")
+
+    if knee_rank is not None:
+        knee_val = sorted_counts[knee_rank - 1]
+        ax2.axvline(knee_rank, color="red", linestyle="--", lw=0.8)
+        ax2.axhline(knee_val, color="red", linestyle="--", lw=0.8)
+
+    ax2.set_xscale("log")
+    ax2.set_yscale("log")
+    ax2.set_xlabel("Barcode rank (all samples)")
+    ax2.set_ylabel("Total UMI counts")
+    ax2.set_title("Barcode Rank UMI Knee Plot (prefilter)")
+
+    _clean_axes(ax2)
+    fig2.tight_layout()
+
+    save_multi("QC_elbow_knee_prefilter", figdir_qc)
+    plt.close(fig2)
 
 
 def run_qc_plots_postfilter(adata, cfg):

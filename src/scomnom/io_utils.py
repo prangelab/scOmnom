@@ -411,7 +411,7 @@ def load_cellbender_data(cfg: LoadAndQCConfig):
             # Now match rows exactly to the barcodes
             # adata.obs_names contains all barcodes present in filtered.h5
             try:
-                adata = adata[barcodes.values, :]
+                adata = adata[barcodes.values, :].copy()
             except Exception as e:
                 return ("fail", sample, f"Failed row selection: {e}")
 

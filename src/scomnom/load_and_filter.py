@@ -165,6 +165,72 @@ def compute_qc_metrics(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
     return adata
 
 
+def qc_and_filter_samples(
+    sample_map: Dict[str, ad.AnnData],
+    cfg: LoadAndQCConfig,
+) -> tuple[Dict[str, ad.AnnData], "pd.DataFrame"]:
+    """
+    Run QC and basic filtering per sample to avoid OOM on a giant merged matrix.
+
+    Returns
+    -------
+    filtered_samples : Dict[str, AnnData]
+        Per-sample AnnData objects after min_genes / min_cells filtering.
+    qc_df : pd.DataFrame
+        Long-form QC summary with columns:
+        ['sample', 'total_counts', 'n_genes_by_counts', 'pct_counts_mt'].
+        Used for pre-filter QC plots without materializing a huge AnnData.
+    """
+    import pandas as pd
+
+    filtered_samples: Dict[str, ad.AnnData] = {}
+    qc_rows: list[pd.DataFrame] = []
+
+    for sample, a in sample_map.items():
+        LOGGER.info(
+            f"[Per-sample QC] {sample}: {a.n_obs:,} cells × {a.n_vars:,} genes"
+        )
+
+        # Compute QC metrics on this sample only
+        a = compute_qc_metrics(a, cfg)
+
+        # Extract lightweight QC summary for plotting
+        qc_rows.append(
+            pd.DataFrame(
+                {
+                    "sample": sample,
+                    "total_counts": a.obs["total_counts"].to_numpy(),
+                    "n_genes_by_counts": a.obs["n_genes_by_counts"].to_numpy(),
+                    "pct_counts_mt": a.obs["pct_counts_mt"].to_numpy(),
+                }
+            )
+        )
+
+        # Per-sample sparse filtering (min_genes / min_cells)
+        a = sparse_filter_cells_and_genes(
+            a,
+            min_genes=cfg.min_genes,
+            min_cells=cfg.min_cells,
+        )
+
+        LOGGER.info(
+            f"[Per-sample QC] {sample}: {a.n_obs:,} cells × {a.n_vars:,} genes after filtering"
+        )
+
+        filtered_samples[sample] = a
+
+    if qc_rows:
+        import pandas as pd
+        qc_df = pd.concat(qc_rows, axis=0, ignore_index=True)
+    else:
+        import pandas as pd
+        qc_df = pd.DataFrame(
+            columns=["sample", "total_counts", "n_genes_by_counts", "pct_counts_mt"]
+        )
+
+    return filtered_samples, qc_df
+
+
 def sparse_filter_cells_and_genes(
     adata: ad.AnnData,
     min_genes: int = 200,
@@ -252,33 +318,31 @@ def sparse_filter_cells_and_genes(
     return adata
 
 
-def filter_and_doublets(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
-    # preserve prefilter counts if already set
-    pre_counts = adata.uns.get("pre_filter_counts", None)
+def doublets_detection(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
+    """
+    Run SOLO doublet detection on an already-filtered AnnData.
 
-    # Basic filtering
-    adata = sparse_filter_cells_and_genes(
-        adata,
-        min_genes=cfg.min_genes,
-        min_cells=cfg.min_cells,
-    )
-
-    # Log remaining cells per sample
-    for sample, n in adata.obs[cfg.batch_key].value_counts().items():
-        LOGGER.info(f"Remaining cells in {sample}: {n}")
+    Per-sample min_genes / min_cells filtering has already been applied
+    before merging, so we do NOT perform any additional global cell/gene
+    filtering here to avoid large CSR copies.
+    """
+    # Log remaining cells per sample (after basic filtering)
+    if cfg.batch_key in adata.obs:
+        for sample, n in adata.obs[cfg.batch_key].value_counts().items():
+            LOGGER.info(f"Remaining cells in {sample}: {n}")
 
     # ---- SOLO DOUBLETS----
     from scvi.external import SOLO
     import torch
 
     # Determine device (CPU or CUDA)
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     LOGGER.info(f"Running Solo doublet detection on device: {device}")
 
     SOLO.setup_anndata(adata, layer=None)
 
     # Instantiate the SOLO model
-    solo_model = SOLO(adata, device=device)  # Use SOLO (uppercase)
+    solo_model = SOLO(adata, device=device)
 
     # Conservative CPU settings, faster GPU settings
     if device == "cpu":
@@ -291,11 +355,9 @@ def filter_and_doublets(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
 
     # Apply results to AnnData
     adata.obs["doublet_score"] = doublet_scores
-    adata.obs["predicted_doublet"] = (doublet_scores > cfg.doublet_score_threshold).astype(bool)
-
-    # Reattach uns if Solo rewrote AnnData
-    if pre_counts is not None:
-        adata.uns["pre_filter_counts"] = pre_counts
+    adata.obs["predicted_doublet"] = (
+        doublet_scores > cfg.doublet_score_threshold
+    ).astype(bool)
 
     return adata
 
@@ -341,15 +403,19 @@ def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) ->
     plot_utils.setup_scanpy_figs(cfg.figdir, cfg.figure_formats)
 
     # infer batch key
-    batch_key = io_utils.infer_batch_key_from_metadata_tsv(cfg.metadata_tsv, cfg.batch_key)
+    batch_key = io_utils.infer_batch_key_from_metadata_tsv(
+        cfg.metadata_tsv, cfg.batch_key
+    )
     cfg.batch_key = batch_key
 
     # get input
-    n_sources = sum([
-        cfg.raw_sample_dir is not None,
-        cfg.filtered_sample_dir is not None,
-        cfg.cellbender_dir is not None,
-    ])
+    n_sources = sum(
+        [
+            cfg.raw_sample_dir is not None,
+            cfg.filtered_sample_dir is not None,
+            cfg.cellbender_dir is not None,
+        ]
+    )
     if n_sources != 1:
         raise RuntimeError(
             "Exactly one input source must be provided: "
@@ -360,7 +426,10 @@ def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) ->
     if cfg.raw_sample_dir:
         LOGGER.info("Loading raw 10x matrices with CellRanger-like cell calling...")
         qc_plot_dir = cfg.output_dir / "figures" / "QC_plots"
-        sample_map, read_counts, _ = io_utils.load_raw_data(cfg, plot_dir=qc_plot_dir,)
+        sample_map, read_counts, _ = io_utils.load_raw_data(
+            cfg,
+            plot_dir=qc_plot_dir,
+        )
 
     elif cfg.filtered_sample_dir:
         LOGGER.info("Loading CellRanger filtered matrices...")
@@ -410,33 +479,41 @@ def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) ->
             f"but {len(loaded_samples)} samples were loaded."
         )
 
-    # merge
+    # ------------------------------------------------------------------
+    # Per-sample QC + filtering (avoid global OOM)
+    # ------------------------------------------------------------------
+    LOGGER.info("Running per-sample QC and filtering...")
+    filtered_sample_map, qc_df = qc_and_filter_samples(sample_map, cfg)
+
+    # Pre-filter QC plots from lightweight QC dataframe
+    LOGGER.info("Plotting pre-filter QC...")
+    plot_utils.run_qc_plots_pre_filter_df(qc_df, cfg)
+
+    # ------------------------------------------------------------------
+    # Merge filtered samples
+    # ------------------------------------------------------------------
     LOGGER.info("Merging samples...")
-    adata = io_utils.merge_samples(sample_map, batch_key=cfg.batch_key)
+    adata = io_utils.merge_samples(filtered_sample_map, batch_key=cfg.batch_key)
 
     # metadata
     LOGGER.info("Adding metadata...")
     adata = add_metadata(adata, cfg.metadata_tsv, sample_id_col=cfg.batch_key)
     adata.uns["batch_key"] = batch_key
 
-    # QC metrics + plots
-    LOGGER.info("Running QC...")
+    # QC metrics on merged, already-filtered data (for post-filter plots)
+    LOGGER.info("Running QC on merged filtered data...")
     adata = compute_qc_metrics(adata, cfg)
-    LOGGER.info(" Plotting pre-filter QC...")
-    plot_utils.run_qc_plots_pre_filter(adata, cfg)
-    plot_utils.plot_elbow_knee(
-        adata,
-        figpath_stem="QC_elbow_knee_prefilter",
-        figdir=cfg.figdir / "QC_plots"
-    )
 
     # filtering + normalization + reduction + clustering
-    LOGGER.info("Filtering...")
-    adata = filter_and_doublets(adata, cfg)
+    LOGGER.info("Running doublet detection...")
+    adata = doublets_detection(adata, cfg)
+
     LOGGER.info("Normalising...")
     adata = normalize_and_hvg(adata, cfg)
+
     LOGGER.info("Reducing dimensions...")
     adata = pca_neighbors_umap(adata, cfg)
+
     LOGGER.info("Clustering and cleaning up...")
     adata = cluster_and_cleanup_qc(adata, cfg)
 
@@ -446,11 +523,10 @@ def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) ->
     plot_utils.plot_elbow_knee(
         adata,
         figpath_stem="QC_elbow_knee_postfilter",
-        figdir=cfg.figdir / "QC_plots"
+        figdir=cfg.figdir / "QC_plots",
     )
 
     LOGGER.info("Saving...")
     io_utils.save_adata(adata, cfg.output_dir / cfg.output_name)
     LOGGER.info("Finished load_and_filter")
     return adata
-
