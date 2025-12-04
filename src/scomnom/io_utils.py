@@ -267,6 +267,68 @@ def read_cellbender_h5(cb_dir: Path, sample: str) -> ad.AnnData:
     return adata
 
 
+def write_filtered_samples_parallel(
+    sample_map: Dict[str, ad.AnnData],
+    out_dir: Path,
+    n_jobs: int | None = None,
+    suffix: str = ".filtered.h5ad",
+) -> Dict[str, Path]:
+    """
+    Write per-sample filtered AnnData objects to disk in parallel.
+
+    Parameters
+    ----------
+    sample_map : Dict[str, AnnData]
+        Mapping sample_id -> filtered AnnData (already QC'ed / filtered).
+    out_dir : Path
+        Directory where per-sample .h5ad files will be stored.
+    n_jobs : int or None
+        Max number of parallel writer threads. If None, defaults to 8.
+    suffix : str
+        Filename suffix to append to each sample id.
+
+    Returns
+    -------
+    Dict[str, Path]
+        Mapping sample_id -> path to written .h5ad file.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if not sample_map:
+        raise RuntimeError("write_filtered_samples_parallel: sample_map is empty.")
+
+    max_workers = min(8, n_jobs or 8)
+    LOGGER.info(
+        "Writing %d filtered samples to disk (%d writer threads) → %s",
+        len(sample_map),
+        max_workers,
+        out_dir,
+    )
+
+    def _write_one(sample: str, adata: ad.AnnData) -> tuple[str, Path]:
+        # Use a simple, deterministic filename: <sample><suffix>
+        out_path = out_dir / f"{sample}{suffix}"
+        LOGGER.info("[Write] %s → %s", sample, out_path)
+        adata.write_h5ad(str(out_path), compression="gzip")
+        return sample, out_path
+
+    sample_paths: Dict[str, Path] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(_write_one, sample, adata): sample
+            for sample, adata in sample_map.items()
+        }
+
+        for fut in as_completed(futures):
+            sample, out_path = fut.result()
+            sample_paths[sample] = out_path
+
+    LOGGER.info(
+        "Finished writing %d filtered samples to %s", len(sample_paths), out_dir
+    )
+    return sample_paths
+
 
 def load_raw_data(
     cfg: LoadAndQCConfig,
@@ -474,166 +536,218 @@ def load_cellbender_data(cfg: LoadAndQCConfig):
     return out, read_counts
 
 
-def harmonize_gene_space_union(sample_map):
+def _prepare_sample_for_merge(
+    sample_name: str,
+    adata: ad.AnnData,
+    union_genes: List[str],
+    out_dir: Path,
+    batch_key: str,
+) -> Path:
     """
-    Harmonize gene space across samples using the UNION of genes.
+    Pad sample to union gene space, ensure consistent gene ordering,
+    and write a .padded.h5ad file.
 
-    Uses private AnnData attributes (_X, _var, _var_names) because AnnData
-    forbids dimension changes through public setters.
+    Returns
+    -------
+    Path : file path to padded h5ad
     """
     import numpy as np
-    import pandas as pd
     import scipy.sparse as sp
-    import anndata as ad
 
-    if not sample_map:
-        raise RuntimeError("Empty sample_map")
+    # Ensure sparse
+    X = adata.X.tocsr()
 
-    # ---------------------------------------------------------
-    # 1) Build union gene index
-    # ---------------------------------------------------------
-    gene_sets = [set(map(str, adx.var_names)) for adx in sample_map.values()]
-    union_genes = sorted(set().union(*gene_sets))
-    n_union = len(union_genes)
+    # Map old genes to new indices
+    old_to_new = np.searchsorted(union_genes, adata.var_names)
 
-    LOGGER.info("Union gene space = %d genes across %d samples",
-                n_union, len(sample_map))
+    # Build padded matrix
+    X_padded = sp.csr_matrix(
+        (X.data, old_to_new[X.indices], X.indptr),
+        shape=(adata.n_obs, len(union_genes))
+    )
 
-    gene_to_idx = {g: i for i, g in enumerate(union_genes)}
+    # Build new AnnData
+    a = ad.AnnData(
+        X=X_padded,
+        obs=adata.obs.copy(),
+        var={"gene_symbols": union_genes},
+        layers={"counts_raw": X_padded.copy()},
+    )
 
-    # ---------------------------------------------------------
-    # 2) Reindex each sample
-    # ---------------------------------------------------------
-    new_map = {}
+    a.obs[batch_key] = sample_name
+    a.obs_names = [f"{sample_name}_{x}" for x in adata.obs_names]
 
-    for sample, a in sample_map.items():
-        a = a.copy()  # ensure no views
+    out_path = out_dir / f"{sample_name}.padded.h5ad"
+    a.write(out_path, compression="gzip")
 
-        LOGGER.info("Reindexing %s (%d cells × %d genes) → %d genes",
-                    sample, a.n_obs, a.n_vars, n_union)
+    return out_path
 
-        # --- extract old info before mutation ---
-        old_var = a.var.copy()
-        old_var.index = old_var.index.astype(str)
-        old_names = np.asarray(old_var.index)
-        n_old = len(old_names)
 
-        # map old column index → union index
-        map_old_to_new = np.array([gene_to_idx[g] for g in old_names],
-                                  dtype=np.int32)
+def _compute_union_genes(sample_map: Dict[str, ad.AnnData]) -> List[str]:
+    genes = set()
+    for a in sample_map.values():
+        genes.update(a.var_names)
+    return sorted(genes)
 
-        # -----------------------------------------------------
-        # Build X_new first (AnnData forbids resizing otherwise)
-        # -----------------------------------------------------
-        X = a.X
-        if sp.issparse(X):
-            X = X.tocsr()
-        else:
-            X = sp.csr_matrix(X)
 
-        new_indices = map_old_to_new[X.indices]
+def _merge_filtered_h5ads_incremental(
+    padded_files: List[Path],
+    batch_key: str,
+    out_path: Path,
+):
+    """
+    Incrementally append padded AnnData files to create a single merged file.
+    This avoids holding all data in memory.
 
-        X_new = sp.csr_matrix(
-            (X.data, new_indices, X.indptr.copy()),
-            shape=(X.shape[0], n_union),
+    The padded files already share identical var_names (union_genes).
+    """
+
+    first = True
+    for p in padded_files:
+        a = ad.read_h5ad(p)
+
+        if first:
+            a.write(out_path, compression="gzip")
+            first = False
+            continue
+
+        # Load the existing output and append new rows (efficient)
+        merged = ad.read_h5ad(out_path)
+
+        merged = merged.concatenate(
+            a,
+            join="exact",     # all features must match
+            batch_key=batch_key,
         )
 
-        # -----------------------------------------------------
-        # Expand .var BEFORE assigning to AnnData (offline)
-        # -----------------------------------------------------
-        new_index = pd.Index(union_genes, name=old_var.index.name)
-
-        var_new = pd.DataFrame(index=new_index)
-        for col in old_var.columns:
-            var_new[col] = old_var[col].reindex(new_index)
-
-        # -----------------------------------------------------
-        # CRITICAL PART — assign private fields in safe order
-        # -----------------------------------------------------
-        a._X = X_new                    # bypass shape checks
-        a._var = var_new                # bypass setter checks
-        a._var_names = new_index        # bypass shape validation
-
-        # -----------------------------------------------------
-        # Remap layers (same strategy)
-        # -----------------------------------------------------
-        for lname, layer in a.layers.items():
-            if layer is None:
-                continue
-
-            if sp.issparse(layer):
-                L = layer.tocsr()
-                L_idx = map_old_to_new[L.indices]
-                L_new = sp.csr_matrix(
-                    (L.data, L_idx, L.indptr.copy()),
-                    shape=(L.shape[0], n_union),
-                )
-                a.layers[lname] = L_new
-            else:
-                arr = np.asarray(layer)
-                n_obs = arr.shape[0]
-                new_arr = np.zeros((n_obs, n_union), dtype=arr.dtype)
-                new_arr[:, map_old_to_new] = arr
-                a.layers[lname] = new_arr
-
-        new_map[sample] = a
-
-    return new_map
+        merged.write(out_path, compression="gzip")
 
 
-def merge_samples(sample_map: Dict[str, ad.AnnData], batch_key: str) -> ad.AnnData:
+def merge_samples(
+    sample_map: Dict[str, ad.AnnData],
+    batch_key: str,
+    tmp_dir: Optional[Path] = None,
+) -> ad.AnnData:
     """
-    Merge per-sample AnnData objects along the cell axis after:
+    High-level sample merge for load-and-filter.
 
-      - harmonizing gene space via UNION across samples
-      - adding batch_key to .obs
-      - prefixing obs_names with sample ID
-      - storing raw counts in .layers["counts_raw"]
+    Responsibilities:
+      - Compute the union of gene symbols across all samples.
+      - Disk-back all samples into padded .padded.h5ad files with the same
+        gene order (union).
+      - Incrementally merge those padded files into a single AnnData,
+        in a memory-safe manner.
+      - Preserve per-cell metadata, especially `sample_id` and `barcode`.
+      - Do NOT join external metadata TSV here; the orchestrator
+        (load_and_filter.py) handles that afterwards.
 
-    The gene space is first harmonized to a union so that sc.concat can use
-    join='inner' safely without performing an expensive outer join internally.
+    Parameters
+    ----------
+    sample_map : Dict[str, AnnData]
+        Mapping sample_id -> filtered per-sample AnnData, already QC’d.
+    batch_key : str
+        Name of obs column that will hold the sample identifier
+        (e.g. 'sample_id', 'batch', ...). This must already be present
+        in each AnnData in sample_map, or be added in _prepare_sample_for_merge.
+    tmp_dir : Path, optional
+        Temporary directory where padded .h5ad files and the merged file
+        will be written. If None, defaults to ./tmp_merge under CWD.
+
+    Returns
+    -------
+    merged : AnnData
+        Single merged AnnData with union gene space and all cells stacked.
+        Per-cell metadata (including `sample_id`) is preserved.
     """
+    import concurrent.futures
+
     if not sample_map:
-        raise RuntimeError("No samples loaded.")
+        raise RuntimeError("merge_samples: sample_map is empty.")
 
-    # Harmonize gene space across samples (union of genes)
-    LOGGER.info("Harmonizing gene space across samples before merge...")
-    sample_map = harmonize_gene_space_union(sample_map)
+    if tmp_dir is None:
+        tmp_dir = Path.cwd() / "tmp_merge"
 
-    adatas: list[ad.AnnData] = []
+    tmp_dir = tmp_dir.resolve()
+    padded_dir = tmp_dir / "padded"
+    padded_dir.mkdir(parents=True, exist_ok=True)
 
-    for sample, adx in sample_map.items():
-        adx = adx.copy()
+    merged_path = tmp_dir / "merged_union.padded.h5ad"
 
-        import scipy.sparse as sp
-
-        if not sp.issparse(adx.X):
-            adx.X = sp.csr_matrix(adx.X)
-        else:
-            adx.X = adx.X.tocsr()
-
-        # Store raw counts in a layer for downstream QC/plots
-        adx.layers["counts_raw"] = adx.X.copy()
-
-        # Annotate batch/sample
-        adx.obs[batch_key] = sample
-
-        # Prefix cell barcodes with sample ID to ensure uniqueness
-        adx.obs_names = [f"{sample}_{bc}" for bc in adx.obs_names]
-
-        adatas.append(adx)
-
-    if not adatas:
-        raise RuntimeError("No valid AnnData objects after harmonization.")
-
-    # Now that all adatas share the same var_names, we can safely use join='inner'
     LOGGER.info(
-        "Concatenating %d samples with harmonized gene space (join='inner')",
-        len(adatas),
+        "Merging %d samples with disk-backed union gene space. "
+        "Temporary dir: %s",
+        len(sample_map),
+        tmp_dir,
     )
-    adata_all = sc.concat(adatas, axis=0, join="inner", merge="first")
-    adata_all.obs_names_make_unique()
-    return adata_all
+
+    # ------------------------------------------------------------------
+    # 1. Compute union of gene symbols across all samples
+    # ------------------------------------------------------------------
+    union_genes = _compute_union_genes(sample_map)
+    LOGGER.info("Union gene space size: %d genes", len(union_genes))
+
+    # ------------------------------------------------------------------
+    # 2. Prepare per-sample padded .padded.h5ad files in parallel
+    # ------------------------------------------------------------------
+    padded_files: List[Path] = []
+
+    # up to 8 I/O workers, similar to your loading helpers
+    n_workers = min(8, len(sample_map))
+    LOGGER.info("Preparing padded h5ads in parallel with %d workers", n_workers)
+
+    def _worker(sample_name: str, adata: ad.AnnData) -> Path:
+        return _prepare_sample_for_merge(
+            sample_name=sample_name,
+            adata=adata,
+            union_genes=union_genes,
+            out_dir=padded_dir,
+            batch_key=batch_key,
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = {
+            pool.submit(_worker, s, a): s
+            for s, a in sample_map.items()
+        }
+        for fut in concurrent.futures.as_completed(futures):
+            s = futures[fut]
+            try:
+                path = fut.result()
+                padded_files.append(path)
+                LOGGER.info("Prepared padded h5ad for sample %s → %s", s, path)
+            except Exception as e:
+                LOGGER.error("Failed to prepare padded h5ad for sample %s: %s", s, e)
+                raise
+
+    padded_files = sorted(padded_files)
+    if not padded_files:
+        raise RuntimeError("merge_samples: no padded .h5ad files were produced.")
+
+    # ------------------------------------------------------------------
+    # 3. Incremental merge of padded h5ads into a single merged file
+    # ------------------------------------------------------------------
+    LOGGER.info("Incrementally merging %d padded h5ads into %s", len(padded_files), merged_path)
+    _merge_filtered_h5ads_incremental(
+        padded_files=padded_files,
+        batch_key=batch_key,
+        out_path=merged_path,
+    )
+
+    # ------------------------------------------------------------------
+    # 4. Load final merged AnnData (small overhead compared to concat step)
+    # ------------------------------------------------------------------
+    LOGGER.info("Loading merged AnnData from %s", merged_path)
+    merged = ad.read_h5ad(merged_path)
+
+    LOGGER.info(
+        "Merged AnnData: %d cells × %d genes. "
+        "Columns in obs: %s",
+        merged.n_obs,
+        merged.n_vars,
+        list(merged.obs.columns),
+    )
+
+    return merged
 
 
 def save_adata(adata: ad.AnnData, out_path: Path) -> None:

@@ -1794,7 +1794,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
             adata,
             cluster_key="cluster_label",
             figdir=figdir_cluster,
-            n=5,
+            top_n=5,
         )
 
     # Make 'plateaus' HDF5-safe: JSON-encode list of dicts if present
