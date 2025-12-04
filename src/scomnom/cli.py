@@ -227,6 +227,11 @@ def load_and_filter(
         "--n-jobs",
         help="Number of CPU cores to use (default: value from config, typically 4).",
     ),
+    fast_scratch_prefix: Path= typer.Option(
+        "scratch-node",
+        "--fast-scratch-prefix",
+        help="[I/O] Prefix for NVME scratch detection on HPCs (default: scratch-node).",
+    ),
 
     # -------------------------------------------------------------
     # QC thresholds
@@ -276,6 +281,7 @@ def load_and_filter(
         metadata_tsv=metadata_tsv,
         output_dir=output_dir,
         n_jobs=4,
+        fast_scratch_prefix=fast_scratch_prefix,
         min_cells=min_cells,
         min_genes=min_genes,
         min_cells_per_sample=min_cells_per_sample,

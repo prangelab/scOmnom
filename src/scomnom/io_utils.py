@@ -4,6 +4,7 @@ import logging
 from typing import Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import anndata as ad
+from anndata._io.h5ad import append as ad_append
 import scanpy as sc
 from .config import LoadAndQCConfig
 from pathlib import Path
@@ -539,7 +540,7 @@ def _merge_filtered_h5ads_simple(
             continue
 
         # Append new rows into existing HDF5 structure
-        ad.append(out_path, a, force_backing=True)
+        ad_append(out_path, a, force_backing=True)
 
     LOGGER.info("Append-based merge complete → %s", out_path)
 
@@ -593,7 +594,15 @@ def merge_samples(
     # 2. Prepare padded .h5ad files in parallel
     # -----------------------------
     padded_files: List[Path] = []
-    n_workers = min(8, len(sample_map))
+
+    # Worker-count selection based on cwd prefix (whichs shows if we are on fast NVME or not)
+    cwd = str(Path.cwd())
+    prefix = cfg.tmp_dir_prefix
+
+    if cwd.startswith(f"/{prefix}"):
+        n_workers = min(24, len(sample_map))
+    else:
+        n_workers = min(8, len(sample_map))
 
     LOGGER.info(
         "Preparing padded h5ads in parallel with %d workers (%d samples total)",

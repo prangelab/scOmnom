@@ -17,6 +17,7 @@ class LoadAndQCConfig(BaseModel):
 
     # Parallelism
     n_jobs: int = Field(4, ge=1)
+    fast_scratch_prefix: Path = Field(..., description="Prefix for NVME scratch detection on HPCs")
 
     # QC thresholds
     min_cells: int = Field(3, ge=1, description="Minimum cells per gene")
