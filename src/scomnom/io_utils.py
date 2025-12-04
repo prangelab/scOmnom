@@ -614,10 +614,11 @@ def _merge_filtered_h5ads_incremental(
         # Load the existing output and append new rows (efficient)
         merged = ad.read_h5ad(out_path)
 
-        merged = merged.concatenate(
-            a,
-            join="exact",     # all features must match
-            batch_key=batch_key,
+        merged = anndata.concat(
+            [merged, a],
+            axis=0,
+            join="outer",
+            merge="first",
         )
 
         merged.write(out_path, compression="gzip")
