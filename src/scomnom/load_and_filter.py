@@ -141,9 +141,6 @@ def compute_qc_metrics(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
 
 
 def filter_and_doublets(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
-    import torch
-    from solo.classes.Solo import Solo
-
     # preserve prefilter counts if already set
     pre_counts = adata.uns.get("pre_filter_counts", None)
 
