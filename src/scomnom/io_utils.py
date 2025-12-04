@@ -25,55 +25,6 @@ CELLTYPIST_CACHE = Path.home() / ".cache" / "scomnom" / "celltypist_models"
 CELLTYPIST_CACHE.mkdir(parents=True, exist_ok=True)
 
 
-def _resolve_cellbender_h5_path(cb_dir: Path, sample: str, suffix: str) -> Path:
-    """
-    Locate the correct CellBender H5 file for a given sample.
-
-    Expected structure:
-        cb_dir/
-            SAMPLE.cellbender_filtered.output/
-                SAMPLE.cellbender_out.h5
-                SAMPLE.cellbender_out_filtered.h5
-                SAMPLE.cellbender_out_posterior.h5
-                SAMPLE.cellbender_out_cell_barcodes.csv
-                ...
-    """
-    sample_dir = cb_dir / f"{sample}.cellbender_filtered.output"
-
-    if not sample_dir.exists() or not sample_dir.is_dir():
-        raise FileNotFoundError(
-            f"expected CellBender output directory for sample '{sample}' not found:\n"
-            f"{sample_dir}"
-        )
-
-    # Primary expected file
-    expected = sample_dir / f"{sample}{suffix}"
-    if expected.exists():
-        return expected
-
-    # Fallback: any H5 matching sample prefix
-    candidates = list(sample_dir.glob(f"{sample}*.h5"))
-    if len(candidates) == 1:
-        return candidates[0]
-
-    if len(candidates) > 1:
-        # Prefer the unfiltered output (largest, contains droplet matrix)
-        preferred = [p for p in candidates if p.name.endswith("_out.h5")]
-        if len(preferred) == 1:
-            return preferred[0]
-        raise FileNotFoundError(
-            f"Ambiguous CellBender H5 for '{sample}':\n"
-            + "\n".join(str(c) for c in candidates)
-        )
-
-    # Nothing found → full diagnostic
-    raise FileNotFoundError(
-        f"No usable H5 for sample '{sample}'.\n"
-        f"Expected: {expected}\n"
-        f"Directory listing: {[p.name for p in sample_dir.iterdir()]}"
-    )
-
-
 def detect_sample_dirs(base: Path, patterns: list[str]) -> List[Path]:
     """
     Detect sample folders based on user-specified patterns in config.
@@ -249,83 +200,72 @@ def read_raw_10x(raw_dir: Path) -> ad.AnnData:
     return adata
 
 
-def read_cellbender_h5(cb_dir: Path, sample: str, h5_suffix: str) -> ad.AnnData:
+def read_cellbender_h5(cb_dir: Path, sample: str) -> ad.AnnData:
     """
-    Memory-safe reader for CellBender outputs.
-
-    Loads only cell droplets using:
-    1) matrix/is_cell (preferred)
-    2) <sample>_cell_barcodes.csv (fallback for older CellBender versions)
+    Correct CellBender loader:
+      • ALWAYS load the filtered H5 (final corrected count matrix)
+      • ALWAYS load the barcode CSV containing the called cells
+      • NEVER touch raw or posterior H5 files
     """
-
     import h5py
-    import numpy as np
-    from scipy import sparse
     import pandas as pd
+    from scipy import sparse
 
-    # ---- Locate correct H5 file ----
-    h5_path = _resolve_cellbender_h5_path(cb_dir, sample, h5_suffix)
     sample_dir = cb_dir / f"{sample}.cellbender_filtered.output"
 
-    LOGGER.info(f"Loading CellBender file: {h5_path}")
+    h5_filtered = sample_dir / f"{sample}.cellbender_out_filtered.h5"
+    barcode_csv = sample_dir / f"{sample}.cellbender_out_cell_barcodes.csv"
 
-    with h5py.File(h5_path, "r") as f:
+    if not h5_filtered.exists():
+        raise FileNotFoundError(f"[{sample}] Missing filtered H5: {h5_filtered}")
 
-        # ---- Load barcodes & features ----
-        barcodes = f["matrix/barcodes"][:].astype(str)
-        features = f["matrix/features/name"][:].astype(str)
-        feature_ids = f["matrix/features/id"][:].astype(str)
+    if not barcode_csv.exists():
+        raise FileNotFoundError(f"[{sample}] Missing cell barcode CSV: {barcode_csv}")
 
-        # ---- Handle is_cell mask ----
-        if "matrix/is_cell" in f["matrix"]:
-            is_cell = f["matrix/is_cell"][:].astype(bool)
-            LOGGER.info(
-                f"{sample}: using 'matrix/is_cell' mask ({is_cell.sum()} cells)"
-            )
-        else:
-            # ---- Fallback to barcode CSV ----
-            csv_path = sample_dir / f"{sample}.cellbender_out_cell_barcodes.csv"
-            if not csv_path.exists():
-                raise RuntimeError(
-                    f"CellBender sample '{sample}' has no 'is_cell' mask and no "
-                    f"{csv_path.name} file. Cannot determine true cells."
-                )
+    LOGGER.info(f"Loading filtered CellBender matrix: {h5_filtered}")
 
-            good_barcodes = pd.read_csv(csv_path, header=None)[0].astype(str).values
-            good = set(good_barcodes)
-            is_cell = np.array([bc in good for bc in barcodes], dtype=bool)
+    # 1) load barcodes called as cells
+    barcodes_keep = (
+        pd.read_csv(barcode_csv, header=None)[0]
+        .astype(str)
+        .tolist()
+    )
+    barcode_set = set(barcodes_keep)
 
-            LOGGER.warning(
-                f"{sample}: 'is_cell' missing in H5 → using barcode CSV "
-                f"({is_cell.sum()} cells)"
-            )
-
-        # ---- Extract sparse matrix ----
+    # 2) load corrected count matrix
+    with h5py.File(h5_filtered, "r") as f:
         data = f["matrix/data"][:]
         indices = f["matrix/indices"][:]
         indptr = f["matrix/indptr"][:]
-        shape = f["matrix/shape"][:]
+        shape = tuple(f["matrix/shape"][:])
 
-        X_full = sparse.csr_matrix((data, indices, indptr), tuple(shape))
+        all_barcodes = f["matrix/barcodes"][:].astype(str)
+        feature_ids = f["matrix/features/id"][:].astype(str)
+        features = f["matrix/features/name"][:].astype(str)
 
-        # ---- Apply filtering BEFORE creating AnnData ----
-        X = X_full[is_cell, :]
-        obs = {"barcode": barcodes[is_cell]}
-        var = {"gene_ids": feature_ids, "gene_symbols": features}
+    X_full = sparse.csr_matrix((data, indices, indptr), shape=shape)
 
-    # ---- Build AnnData ----
-    adata = ad.AnnData(X=X, obs=obs, var=var)
+    # 3) mask to only valid cells
+    mask = [bc in barcode_set for bc in all_barcodes]
+    n_keep = sum(mask)
 
-    adata.obs_names = adata.obs["barcode"].astype(str)
-    adata.var_names = adata.var["gene_symbols"].astype(str)
-    adata.var_names_make_unique()
+    LOGGER.info(f"{sample}: keeping {n_keep} / {len(all_barcodes)} barcodes")
 
-    LOGGER.info(
-        f"Loaded {sample}: {adata.n_obs} cells, {adata.n_vars} genes "
-        f"({is_cell.sum()} kept, {len(is_cell) - is_cell.sum()} dropped)"
+    X = X_full[mask, :]
+
+    # 4) build AnnData
+    adata = ad.AnnData(
+        X=X,
+        obs={"barcode": all_barcodes[mask]},
+        var={"gene_ids": feature_ids, "gene_symbols": features},
     )
 
+    adata.obs_names = adata.obs["barcode"]
+    adata.var_names = adata.var["gene_symbols"]
+    adata.var_names_make_unique()
+
     return adata
+
 
 
 def load_raw_data(
@@ -414,14 +354,10 @@ def load_filtered_data(cfg: LoadAndQCConfig):
 
 def load_cellbender_data(cfg: LoadAndQCConfig) -> tuple[Dict[str, ad.AnnData], Dict[str, float]]:
     """
-    Parallel loading of CellBender outputs.
-
-    Behavior:
-      - Load each sample independently (parallel threads)
-      - If a sample fails: record the sample + error, but continue loading others
-      - After all threads finish:
-            * If ANY sample failed → abort the pipeline with a clear fatal message
-            * Else → return the loaded dataset
+    Parallel CellBender loader:
+      • Loads only *_out_filtered.h5 + *_out_cell_barcodes.csv
+      • Per-sample failure is recorded but does not immediately abort
+      • At the end, pipeline aborts if any sample failed
     """
     if cfg.cellbender_dir is None:
         return {}, {}
@@ -429,88 +365,52 @@ def load_cellbender_data(cfg: LoadAndQCConfig) -> tuple[Dict[str, ad.AnnData], D
     cb_dirs = find_cellbender_dirs(cfg.cellbender_dir, cfg.cellbender_pattern)
     if not cb_dirs:
         raise FileNotFoundError(
-            f"No CellBender outputs found in {cfg.cellbender_dir} matching pattern "
-            f"'{cfg.cellbender_pattern}'"
+            f"No CellBender outputs found in {cfg.cellbender_dir} using pattern {cfg.cellbender_pattern}"
         )
 
-    # Validate directory structure
-    for cb in cb_dirs:
-        if cb.is_dir() and cb.name.endswith(".cellbender_filtered.output"):
-            continue
-        LOGGER.warning(
-            f"[WARN] Unexpected item in CellBender dir: {cb}. "
-            f"Expected '*.cellbender_filtered.output' directories."
-        )
+    LOGGER.info(f"Found {len(cb_dirs)} CellBender output dirs")
 
-    # HPC-safe thread cap
-    n_workers = min(cfg.n_jobs or 8, 8)
-    LOGGER.info(f"Parallel CellBender loading with {n_workers} I/O threads")
+    out = {}
+    read_counts = {}
+    failed = {}
 
-    loaded: Dict[str, ad.AnnData] = {}
-    read_counts: Dict[str, float] = {}
-
-    failed_samples = {}  # sample → error message
+    n_workers = min(8, cfg.n_jobs) if cfg.n_jobs else 8
+    LOGGER.info(f"Parallel CellBender loading with {n_workers} threads")
 
     def _load_one(cb_path: Path):
-        """Load a single CellBender sample. Always returns a tuple."""
         sample = cb_path.name.split(".cellbender_filtered.output")[0]
-
         try:
-            adata = read_cellbender_h5(
-                cb_dir=cfg.cellbender_dir,
-                sample=sample,
-                h5_suffix=cfg.cellbender_h5_suffix,
-            )
-
-            total_reads = float(adata.X.sum())
-            return ("ok", sample, adata, total_reads)
-
+            adata = read_cellbender_h5(cfg.cellbender_dir, sample)
+            return sample, "ok", adata, float(adata.X.sum())
         except Exception as e:
-            return ("fail", sample, str(e))
+            return sample, "fail", str(e), None
 
-    # Execute in parallel
     from concurrent.futures import ThreadPoolExecutor, as_completed
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
         futures = {pool.submit(_load_one, cb): cb for cb in cb_dirs}
 
         for fut in as_completed(futures):
-            status, *rest = fut.result()
+            sample, status, result, reads = fut.result()
 
             if status == "ok":
-                sample, adata, total_reads = rest
-                loaded[sample] = adata
-                read_counts[sample] = total_reads
+                out[sample] = result
+                read_counts[sample] = reads
+                LOGGER.info(f"[OK] {sample}: {result.n_obs} cells, {result.n_vars} genes, {reads:.2e} UMIs")
+            else:
+                failed[sample] = result
+                LOGGER.error(f"[FAIL] {sample}: {result}")
 
-                LOGGER.info(
-                    f"[I/O] Loaded CellBender sample {sample}: "
-                    f"{adata.n_obs} cells, {adata.n_vars} genes, "
-                    f"{total_reads:.2e} UMIs"
-                )
-
-            else:  # failure
-                sample, errmsg = rest
-                failed_samples[sample] = errmsg
-                LOGGER.error(f"[ERROR] Failed to load sample {sample}: {errmsg}")
-
-    # ------------------------------------------------------------------
-    # STRICT MODE: abort if ANY sample failed
-    # ------------------------------------------------------------------
-    if failed_samples:
-        LOGGER.error("===============================================")
-        LOGGER.error(" FATAL: One or more CellBender samples failed ")
-        LOGGER.error("===============================================")
-        for s, msg in failed_samples.items():
+    # final fail-fast behaviour
+    if failed:
+        LOGGER.error("=" * 50)
+        LOGGER.error(" FATAL: One or more CellBender samples failed")
+        LOGGER.error("=" * 50)
+        for s, msg in failed.items():
             LOGGER.error(f" • {s}: {msg}")
-        LOGGER.error("Pipeline will abort. Please inspect the logs.")
+        LOGGER.error("Pipeline will abort. Please inspect logs.")
+        raise RuntimeError(f"CellBender loading failed for {len(failed)} samples: {', '.join(failed.keys())}")
 
-        raise RuntimeError(
-            f"CellBender loading failed for {len(failed_samples)} samples: "
-            f"{', '.join(failed_samples.keys())}"
-        )
-
-    # No failures → continue
-    LOGGER.info(f"Successfully loaded ALL {len(loaded)} CellBender samples.")
-    return loaded, read_counts
+    return out, read_counts
 
 
 def merge_samples(sample_map: Dict[str, ad.AnnData], batch_key: str) -> ad.AnnData:
