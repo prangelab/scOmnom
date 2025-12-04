@@ -4,7 +4,6 @@ import logging
 from typing import Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import anndata as ad
-from anndata._io.h5ad import append as ad_append
 import scanpy as sc
 from .config import LoadAndQCConfig
 from pathlib import Path
@@ -499,50 +498,32 @@ def _compute_union_genes(sample_map: Dict[str, ad.AnnData]) -> List[str]:
     return sorted(genes)
 
 
-def _merge_filtered_h5ads_simple(
-    padded_files: List[Path],
-    batch_key: str,
-    out_path: Path,
-):
-    """
-    Fast and memory-safe row-append H5AD merge.
-    Uses anndata.append(), which appends obs rows without loading
-    the entire dataset into memory.
-
-    Parameters
-    ----------
-    padded_files : list of .padded.h5ad paths
-        All pre-harmonized, disk-backed sample matrices.
-    batch_key : str
-        Name of obs field containing sample identifiers.
-    out_path : Path
-        Output merged file path.
-    """
+def _merge_filtered_h5ads_simple(padded_files, batch_key, out_path):
     import anndata as ad
 
-    if out_path.exists():
-        out_path.unlink()
+    merged = None
 
-    LOGGER.info("Starting simple append-based merge → %s", out_path)
-
-    first = True
-    total = len(padded_files)
-
-    for i, p in enumerate(padded_files, start=1):
-        LOGGER.info("[Merge %02d/%02d] Processing %s", i, total, p.name)
-
+    for i, p in enumerate(padded_files, 1):
+        LOGGER.info(f"[Merge {i:02d}/{len(padded_files)}] Loading {p.name}")
         a = ad.read_h5ad(p)
 
-        if first:
-            # First file initializes the merged dataset
-            a.write(out_path)
-            first = False
+        if merged is None:
+            merged = a
             continue
 
-        # Append new rows into existing HDF5 structure
-        ad_append(out_path, a, force_backing=True)
+        LOGGER.info(f"[Merge {i:02d}/{len(padded_files)}] Concatenating in-memory...")
+        merged = ad.concat(
+            [merged, a],
+            axis=0,
+            join="outer",
+            merge="same",
+        )
 
-    LOGGER.info("Append-based merge complete → %s", out_path)
+        # Free memory aggressively
+        del a
+
+    LOGGER.info(f"Writing merged AnnData → {out_path}")
+    merged.write(out_path, compression="gzip")
 
 
 def merge_samples(
