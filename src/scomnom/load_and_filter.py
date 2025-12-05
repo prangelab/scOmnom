@@ -540,6 +540,12 @@ def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) ->
     LOGGER.info("Running QC on merged filtered data...")
     adata = compute_qc_metrics(adata, cfg)
 
+    # Save to zarr
+    out_zarr = Path(cfg.output_dir) / (cfg.output_name + ".zarr")
+    LOGGER.info(f"Saving dataset to → {out_zarr}")
+    io_utils.save_dataset(adata, out_zarr, fmt="zarr")
+    return adata
+
     # filtering + normalization + reduction + clustering
     LOGGER.info("Running doublet detection...")
     adata = doublets_detection(adata, cfg)
@@ -561,6 +567,7 @@ def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) ->
         figpath_stem="QC_elbow_knee_postfilter",
         figdir=cfg.figdir / "QC_plots",
     )
+
     # Save to zarr
     out_zarr = Path(cfg.output_dir) / (cfg.output_name + ".zarr")
     LOGGER.info(f"Saving dataset to → {out_zarr}")
