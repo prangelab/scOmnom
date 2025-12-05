@@ -536,7 +536,6 @@ def merge_samples(
     sample_map: Dict[str, ad.AnnData],
     batch_key: str,
     out_path: Path,
-    fast_scratch_prefix: Optional[Path] = None,
 ) -> ad.AnnData:
     """
     Memory-safe union-gene merge using disk-backed padded Zarr intermediates.
@@ -578,14 +577,7 @@ def merge_samples(
     # --------------------------------------------------------
     # 2. Prepare padded Zarrs in parallel
     # --------------------------------------------------------
-    cwd = str(Path.cwd())
-    on_fast_scratch = False
-    if fast_scratch_prefix is not None:
-        fast_prefix = str(fast_scratch_prefix)
-        on_fast_scratch = cwd.startswith(f"/{fast_prefix}")
-
-    # IO dominates → thread pool is fine
-    n_workers = min(24 if on_fast_scratch else 8, len(sample_map))
+    n_workers = min( 8, len(sample_map))
     LOGGER.info("Writing padded Zarrs with %d workers", n_workers)
 
     padded_files: List[Path] = []

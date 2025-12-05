@@ -170,65 +170,96 @@ def qc_and_filter_samples(
     cfg: LoadAndQCConfig,
 ) -> tuple[Dict[str, ad.AnnData], "pd.DataFrame"]:
     """
-    Run QC and basic filtering per sample to avoid OOM on a giant merged matrix.
-
-    Returns
-    -------
-    filtered_samples : Dict[str, AnnData]
-        Per-sample AnnData objects after min_genes / min_cells filtering.
-    qc_df : pd.DataFrame
-        Long-form QC summary with columns:
-        ['sample', 'total_counts', 'n_genes_by_counts', 'pct_counts_mt'].
-        Used for pre-filter QC plots without materializing a huge AnnData.
+    Run per-sample QC + filtering in parallel.
+    Each worker processes exactly one sample.
+    Returns:
+      filtered_sample_map : dict of AnnData
+      qc_df               : long-form QC summary dataframe
     """
-    import pandas as pd
 
-    filtered_samples: Dict[str, ad.AnnData] = {}
+    import pandas as pd
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    n_workers = cfg.n_jobs or 4
+    LOGGER.info(f"Running per-sample QC/filtering in parallel with {n_workers} workers...")
+
+    # ----------------------------------------------------------------------
+    # Worker function — defined inline to avoid global namespace complexity
+    # ----------------------------------------------------------------------
+    def _worker(sample: str, a: ad.AnnData, cfg_dict: dict):
+        """
+        Worker must receive only picklable objects; AnnData is picklable.
+        Config passed as a dict to avoid BaseModel pickling quirks.
+        """
+        from .load_and_filter import compute_qc_metrics, sparse_filter_cells_and_genes
+        import pandas as pd
+
+        # Reconstruct cfg-like access
+        min_genes = cfg_dict["min_genes"]
+        min_cells = cfg_dict["min_cells"]
+
+        # QC
+        a = compute_qc_metrics(a, cfg=cfg)
+
+        # Prepare small QC summary
+        qc_df = pd.DataFrame(
+            {
+                "sample": sample,
+                "total_counts": a.obs["total_counts"].to_numpy(),
+                "n_genes_by_counts": a.obs["n_genes_by_counts"].to_numpy(),
+                "pct_counts_mt": a.obs["pct_counts_mt"].to_numpy(),
+            }
+        )
+
+        # Filtering
+        a_filt = sparse_filter_cells_and_genes(a, min_genes=min_genes, min_cells=min_cells)
+
+        return sample, a_filt, qc_df
+
+    # ----------------------------------------------------------------------
+    # Launch parallel jobs
+    # ----------------------------------------------------------------------
+    filtered_sample_map: Dict[str, ad.AnnData] = {}
     qc_rows: list[pd.DataFrame] = []
 
-    for sample, a in sample_map.items():
-        LOGGER.info(
-            f"[Per-sample QC] {sample}: {a.n_obs:,} cells × {a.n_vars:,} genes"
-        )
+    # Convert cfg → pure dict with only what worker needs
+    cfg_dict = {
+        "min_genes": cfg.min_genes,
+        "min_cells": cfg.min_cells,
+    }
 
-        # Compute QC metrics on this sample only
-        a = compute_qc_metrics(a, cfg)
+    with ProcessPoolExecutor(max_workers=n_workers) as pool:
+        futures = {
+            pool.submit(_worker, s, a, cfg_dict): s
+            for s, a in sample_map.items()
+        }
 
-        # Extract lightweight QC summary for plotting
-        qc_rows.append(
-            pd.DataFrame(
-                {
-                    "sample": sample,
-                    "total_counts": a.obs["total_counts"].to_numpy(),
-                    "n_genes_by_counts": a.obs["n_genes_by_counts"].to_numpy(),
-                    "pct_counts_mt": a.obs["pct_counts_mt"].to_numpy(),
-                }
-            )
-        )
+        for fut in as_completed(futures):
+            sample = futures[fut]
+            try:
+                s, filt, qc_df = fut.result()
+                filtered_sample_map[s] = filt
+                qc_rows.append(qc_df)
+                LOGGER.info(
+                    f"[Per-sample QC] {s}: {filt.n_obs:,} cells × {filt.n_vars:,} genes after filtering"
+                )
+            except Exception as e:
+                LOGGER.error(f"QC/filter failed for sample {sample}: {e}")
+                raise
 
-        # Per-sample sparse filtering (min_genes / min_cells)
-        a = sparse_filter_cells_and_genes(
-            a,
-            min_genes=cfg.min_genes,
-            min_cells=cfg.min_cells,
-        )
-
-        LOGGER.info(
-            f"[Per-sample QC] {sample}: {a.n_obs:,} cells × {a.n_vars:,} genes after filtering"
-        )
-
-        filtered_samples[sample] = a
-
+    # ----------------------------------------------------------------------
+    # Combine QC rows
+    # ----------------------------------------------------------------------
     if qc_rows:
         import pandas as pd
-        qc_df = pd.concat(qc_rows, axis=0, ignore_index=True)
+        qc_df_all = pd.concat(qc_rows, axis=0, ignore_index=True)
     else:
-        import pandas as pd
-        qc_df = pd.DataFrame(
+        qc_df_all = pd.DataFrame(
             columns=["sample", "total_counts", "n_genes_by_counts", "pct_counts_mt"]
         )
 
-    return filtered_samples, qc_df
+    return filtered_sample_map, qc_df_all
+
 
 
 def sparse_filter_cells_and_genes(
@@ -498,7 +529,6 @@ def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) ->
         filtered_sample_map,
         cfg.batch_key,
         out_path=merge_out,
-        fast_scratch_prefix=cfg.fast_scratch_prefix,
     )
 
     # metadata
