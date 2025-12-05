@@ -25,6 +25,7 @@ dependencies:
   # Scanpy ecosystem
   - scanpy
   - anndata=0.11.4
+  - zarr
   - igraph
   - python-igraph
   - leidenalg

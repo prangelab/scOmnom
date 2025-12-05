@@ -13,6 +13,10 @@ import re
 import json
 import urllib.request
 import urllib.error
+import zarr
+import numpy as np
+import pandas as pd
+import scipy.sparse as sp
 
 
 LOGGER = logging.getLogger(__name__)
@@ -200,69 +204,6 @@ def read_raw_10x(raw_dir: Path) -> ad.AnnData:
     return adata
 
 
-def write_filtered_samples_parallel(
-    sample_map: Dict[str, ad.AnnData],
-    out_dir: Path,
-    n_jobs: int | None = None,
-    suffix: str = ".filtered.h5ad",
-) -> Dict[str, Path]:
-    """
-    Write per-sample filtered AnnData objects to disk in parallel.
-
-    Parameters
-    ----------
-    sample_map : Dict[str, AnnData]
-        Mapping sample_id -> filtered AnnData (already QC'ed / filtered).
-    out_dir : Path
-        Directory where per-sample .h5ad files will be stored.
-    n_jobs : int or None
-        Max number of parallel writer threads. If None, defaults to 8.
-    suffix : str
-        Filename suffix to append to each sample id.
-
-    Returns
-    -------
-    Dict[str, Path]
-        Mapping sample_id -> path to written .h5ad file.
-    """
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    if not sample_map:
-        raise RuntimeError("write_filtered_samples_parallel: sample_map is empty.")
-
-    max_workers = min(8, n_jobs or 8)
-    LOGGER.info(
-        "Writing %d filtered samples to disk (%d writer threads) → %s",
-        len(sample_map),
-        max_workers,
-        out_dir,
-    )
-
-    def _write_one(sample: str, adata: ad.AnnData) -> tuple[str, Path]:
-        # Use a simple, deterministic filename: <sample><suffix>
-        out_path = out_dir / f"{sample}{suffix}"
-        LOGGER.info("[Write] %s → %s", sample, out_path)
-        adata.write_h5ad(str(out_path), compression="gzip")
-        return sample, out_path
-
-    sample_paths: Dict[str, Path] = {}
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {
-            pool.submit(_write_one, sample, adata): sample
-            for sample, adata in sample_map.items()
-        }
-
-        for fut in as_completed(futures):
-            sample, out_path = fut.result()
-            sample_paths[sample] = out_path
-
-    LOGGER.info(
-        "Finished writing %d filtered samples to %s", len(sample_paths), out_dir
-    )
-    return sample_paths
-
-
 def load_raw_data(
     cfg: LoadAndQCConfig,
     record_pre_filter_counts: bool = False,
@@ -444,230 +385,239 @@ def load_cellbender_data(cfg: LoadAndQCConfig):
     return out, read_counts
 
 
-def _prepare_sample_for_merge(
-    sample_name: str,
-    adata: ad.AnnData,
-    union_genes: List[str],
-    out_dir: Path,
-    batch_key: str,
-) -> Path:
-    """
-    Pad sample to union gene space, ensure consistent gene ordering,
-    and write a .padded.h5ad file.
-
-    Returns
-    -------
-    Path : file path to padded h5ad
-    """
-    import numpy as np
-    import scipy.sparse as sp
-
-    # Ensure sparse
-    X = adata.X.tocsr()
-
-    # Map old genes to new indices
-    old_to_new = np.searchsorted(union_genes, adata.var_names)
-
-    # Build padded matrix
-    X_padded = sp.csr_matrix(
-        (X.data, old_to_new[X.indices], X.indptr),
-        shape=(adata.n_obs, len(union_genes))
-    )
-
-    # Build new AnnData
-    a = ad.AnnData(
-        X=X_padded,
-        obs=adata.obs.copy(),
-        var={"gene_symbols": union_genes},
-        layers={"counts_raw": X_padded.copy()},
-    )
-
-    a.obs[batch_key] = sample_name
-    a.obs_names = [f"{sample_name}_{x}" for x in adata.obs_names]
-
-    out_path = out_dir / f"{sample_name}.padded.h5ad"
-    a.write(out_path, compression="gzip")
-
-    return out_path
-
-
-def _compute_union_genes(sample_map: Dict[str, ad.AnnData]) -> List[str]:
-    genes = set()
-    for a in sample_map.values():
-        genes.update(a.var_names)
-    return sorted(genes)
-
-
-def _merge_filtered_h5ads_simple(padded_files, batch_key, out_path):
-    import anndata as ad
-
-    merged = None
-
-    for i, p in enumerate(padded_files, 1):
-        LOGGER.info(f"[Merge {i:02d}/{len(padded_files)}] Loading {p.name}")
-        a = ad.read_h5ad(p)
-
-        if merged is None:
-            merged = a
-            continue
-
-        LOGGER.info(f"[Merge {i:02d}/{len(padded_files)}] Concatenating in-memory...")
-        merged = ad.concat(
-            [merged, a],
-            axis=0,
-            join="outer",
-            merge="same",
-        )
-
-        # Free memory aggressively
-        del a
-
-    LOGGER.info(f"Writing merged AnnData → {out_path}")
-    merged.write(out_path, compression="gzip")
-
-
-def merge_samples(
-    sample_map: Dict[str, ad.AnnData],
-    batch_key: str,
-    fast_scratch_prefix: Optional[Path] = None,
-) -> ad.AnnData:
-    """
-    High-level disk-backed merge for load-and-filter.
-
-    Steps:
-      1. Compute union genes.
-      2. Pad each sample to union gene order → write .padded.h5ad.
-      3. Append-merge all padded files into a single H5AD.
-      4. Load final merged AnnData & return.
-
-    Metadata TSV join occurs in the orchestrator.
-    """
-
-    import concurrent.futures
-
-    if not sample_map:
-        raise RuntimeError("merge_samples: sample_map is empty.")
-
-    tmp_dir = Path.cwd() / "tmp_merge"
-    tmp_dir = tmp_dir.resolve()
-
-    padded_dir = tmp_dir / "padded"
-    padded_dir.mkdir(parents=True, exist_ok=True)
-
-    merged_path = tmp_dir / "merged_union.padded.h5ad"
-
-    LOGGER.info(
-        "Merging %d samples with disk-backed union gene space. Temporary dir: %s",
-        len(sample_map), tmp_dir
-    )
-
-    # -----------------------------
-    # 1. Compute union gene set
-    # -----------------------------
-    union_genes = _compute_union_genes(sample_map)
-    LOGGER.info("Union gene space size: %d", len(union_genes))
-
-    # -----------------------------
-    # 2. Prepare padded .h5ad files in parallel
-    # -----------------------------
-    padded_files: List[Path] = []
-
-    # Worker-count selection based on cwd prefix (whichs shows if we are on fast NVME or not)
-    cwd = str(Path.cwd())
-    on_fast_scratch = cwd.startswith(f"/{fast_scratch_prefix}")
-
-    if on_fast_scratch:
-        n_workers = min(24, len(sample_map))
-    else:
-        n_workers = min(8, len(sample_map))
-
-    LOGGER.info(
-        "Preparing padded h5ads in parallel with %d workers (%d samples total)",
-        n_workers, len(sample_map)
-    )
-
-    def _worker(sample_name: str, adata: ad.AnnData) -> Path:
-        return _prepare_sample_for_merge(
-            sample_name=sample_name,
-            adata=adata,
-            union_genes=union_genes,
-            out_dir=padded_dir,
-            batch_key=batch_key,
-        )
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
-        futures = {
-            pool.submit(_worker, s, a): s for s, a in sample_map.items()
-        }
-        count = 0
-        for fut in concurrent.futures.as_completed(futures):
-            s = futures[fut]
-            count += 1
-            try:
-                path = fut.result()
-                padded_files.append(path)
-                LOGGER.info("[Pad %02d/%02d] Prepared padded h5ad for sample %s → %s",
-                            count, len(sample_map), s, path.name)
-            except Exception as e:
-                LOGGER.error("Failed to prepare padded h5ad for sample %s: %s", s, e)
-                raise
-
-    if not padded_files:
-        raise RuntimeError("merge_samples: no padded .h5ad files were produced.")
-
-    padded_files = sorted(padded_files)
-
-    # -----------------------------
-    # 3. Append-based merge ONCE
-    # -----------------------------
-    LOGGER.info(
-        "Incrementally merging %d padded h5ads → %s",
-        len(padded_files), merged_path
-    )
-
-    _merge_filtered_h5ads_simple(
-        padded_files=padded_files,
-        batch_key=batch_key,
-        out_path=merged_path,
-    )
-
-    # -----------------------------
-    # 4. Load final merged AnnData
-    # -----------------------------
-    LOGGER.info("Loading merged AnnData from %s", merged_path)
-    merged = ad.read_h5ad(merged_path)
-
-    LOGGER.info(
-        "Merged AnnData: %d cells × %d genes. obs columns: %s",
-        merged.n_obs, merged.n_vars, list(merged.obs.columns),
-    )
-
-    # -----------------------------
-    # DEBUG: copy merged file to results area
-    # -----------------------------
-    debug_copy = Path("/home/kprange/data/baria/vfat/merged_union.padded.h5ad")
-    try:
-        shutil.copy2(merged_path, debug_copy)
-        LOGGER.info("DEBUG COPY: merged file duplicated to %s", debug_copy)
-    except Exception as e:
-        LOGGER.warning("DEBUG COPY FAILED: %s", e)
-
-    # -----------------------------
-    # Cleanup
-    # -----------------------------
-    try:
-        LOGGER.info("Cleaning up temporary merge directory: %s", tmp_dir)
-        shutil.rmtree(tmp_dir)
-    except Exception as e:
-        LOGGER.warning("Failed to clean temporary dir %s: %s", tmp_dir, e)
-
-    return merged
-
-
 def save_adata(adata: ad.AnnData, out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     adata.write(str(out_path), compression="gzip")
     LOGGER.info("Wrote %s", out_path)
+
+
+# =====================================================================
+# ZARR-BACKED STREAMING MERGER
+# =====================================================================
+
+class ZarrBackedMerger:
+    """
+    Memory-safe streaming merger for large AnnData objects.
+
+    Design:
+      • Computes union gene space
+      • Two-pass algorithm:
+            1) Detect nnz_total and row layout
+            2) Stream padded CSR blocks into a Zarr CSR layout
+      • Produces a disk-backed AnnData that never materializes the full matrix.
+
+    Result:
+      merged.zarr/  (ZarrGroup)
+         X/data
+         X/indices
+         X/indptr
+         obs/...
+         var/...
+    """
+
+    def __init__(
+        self,
+        sample_map: Dict[str, ad.AnnData],
+        batch_key: str,
+        out_store: Path,
+    ):
+        self.sample_map = sample_map
+        self.batch_key = batch_key
+        self.out_store = Path(out_store)
+        self.out_store.mkdir(parents=True, exist_ok=True)
+
+        if not self.sample_map:
+            raise RuntimeError("ZarrBackedMerger: sample_map is empty.")
+
+        # Compute union gene set
+        self.union_genes = self._compute_union_genes()
+        LOGGER.info(f"[ZarrMerge] Union genes: {len(self.union_genes)}")
+
+        # Compute total rows
+        self.N_total = sum(a.n_obs for a in self.sample_map.values())
+
+    # --------------------------------------------------------
+    # Union gene helper
+    # --------------------------------------------------------
+    def _compute_union_genes(self) -> List[str]:
+        genes = set()
+        for a in self.sample_map.values():
+            genes.update(a.var_names)
+        return sorted(genes)
+
+    # --------------------------------------------------------
+    # Padding helper (in-memory CSR transform)
+    # --------------------------------------------------------
+    def _pad_to_union(self, X: sp.spmatrix, var_names: pd.Index) -> sp.csr_matrix:
+        """
+        Pads CSR matrix X (shape n_obs × old_genes) to the union gene space.
+        """
+        X = X.tocsr()
+        old_genes = var_names.values
+        old_to_new = np.searchsorted(self.union_genes, old_genes)
+        X_padded = sp.csr_matrix(
+            (X.data, old_to_new[X.indices], X.indptr),
+            shape=(X.shape[0], len(self.union_genes)),
+        )
+        return X_padded
+
+    # --------------------------------------------------------
+    # First pass: determine nnz_total to allocate Zarr arrays
+    # --------------------------------------------------------
+    def _compute_nnz(self) -> int:
+        nnz_total = 0
+        LOGGER.info("[ZarrMerge] First pass: measuring nnz for allocation")
+
+        for sample, adata in self.sample_map.items():
+            Xp = self._pad_to_union(adata.X, adata.var_names)
+            nnz_total += Xp.nnz
+            LOGGER.info(f"[ZarrMerge] Sample {sample}: padded nnz={Xp.nnz}")
+
+        LOGGER.info(f"[ZarrMerge] Total nnz: {nnz_total}")
+        return nnz_total
+
+    # --------------------------------------------------------
+    # Write obs + var tables
+    # --------------------------------------------------------
+    def _write_obs_var(self, root: zarr.Group):
+        # Concatenate obs in correct row order
+        obs_list = []
+        for sample, adata in self.sample_map.items():
+            df = adata.obs.copy()
+            df[self.batch_key] = sample
+            obs_list.append(df)
+        obs = pd.concat(obs_list, axis=0)
+        obs.to_zarr(root.create_group("obs"))
+        LOGGER.info("[ZarrMerge] Wrote obs table")
+
+        # Write var table
+        var = pd.DataFrame(index=self.union_genes)
+        var.to_zarr(root.create_group("var"))
+        LOGGER.info("[ZarrMerge] Wrote var table")
+
+    # --------------------------------------------------------
+    # Main merge
+    # --------------------------------------------------------
+    def merge(self) -> ad.AnnData:
+        # --------------------------
+        # First pass
+        # --------------------------
+        nnz_total = self._compute_nnz()
+
+        # --------------------------
+        # Create Zarr store
+        # --------------------------
+        store = zarr.DirectoryStore(str(self.out_store))
+        root = zarr.group(store=store, overwrite=True)
+
+        X_data = root.create_dataset(
+            "X/data",
+            shape=(nnz_total,),
+            dtype="float32",
+            chunks=(10_000_000,),
+        )
+        X_indices = root.create_dataset(
+            "X/indices",
+            shape=(nnz_total,),
+            dtype="int32",
+            chunks=(10_000_000,),
+        )
+        X_indptr = root.create_dataset(
+            "X/indptr",
+            shape=(self.N_total + 1,),
+            dtype="int64",
+            chunks=(100_000,),
+        )
+
+        LOGGER.info("[ZarrMerge] Allocated Zarr CSR arrays")
+
+        # --------------------------
+        # Second pass: write CSR
+        # --------------------------
+        data_cursor = 0
+        row_cursor = 0
+
+        for sample, adata in self.sample_map.items():
+            LOGGER.info(f"[ZarrMerge] Writing sample {sample}")
+            Xp = self._pad_to_union(adata.X, adata.var_names).tocsr()
+            rows = Xp.shape[0]
+            L = Xp.nnz
+
+            # Write data + indices
+            X_data[data_cursor:data_cursor + L] = Xp.data
+            X_indices[data_cursor:data_cursor + L] = Xp.indices
+
+            # Write indptr block (shifted)
+            # NOTE: Xp.indptr is length rows+1; we fill rows entries here.
+            X_indptr[row_cursor:row_cursor + rows] = Xp.indptr[:-1] + data_cursor
+
+            data_cursor += L
+            row_cursor += rows
+
+            del Xp
+
+        # Final indptr entry
+        X_indptr[self.N_total] = nnz_total
+
+        LOGGER.info("[ZarrMerge] Finished writing CSR arrays")
+
+        # --------------------------
+        # Write obs + var tables
+        # --------------------------
+        self._write_obs_var(root)
+
+        # --------------------------
+        # Build AnnData reference (backed=read)
+        # --------------------------
+        LOGGER.info(f"[ZarrMerge] Building backed AnnData → {self.out_store}")
+        adata = ad.AnnData(
+            X=root["X"],
+            obs=pd.read_zarr(root["obs"]),
+            var=pd.read_zarr(root["var"]),
+            filename=str(self.out_store),
+            backed="r",
+        )
+
+        return adata
+
+
+# Public merge_samples() function to handle the merge
+def merge_samples(
+    sample_map: Dict[str, ad.AnnData],
+    batch_key: str,
+) -> ad.AnnData:
+    """
+    High-level merge interface .
+
+    Performs a streaming, memory-safe Zarr-backed merge via
+    ZarrBackedMerger.
+
+    Parameters
+    ----------
+    sample_map : Dict[str, AnnData]
+        Mapping sample_name → per-sample filtered AnnData objects.
+    batch_key : str
+        Column name to assign for sample identity in obs.
+
+    Returns
+    -------
+    AnnData (backed='r')
+        A merged AnnData object backed by a Zarr store in the current
+        working directory named 'merged.zarr'.
+    """
+    if not sample_map:
+        raise RuntimeError("merge_samples: sample_map is empty.")
+
+    out_store = Path.cwd() / "merged.zarr"
+    LOGGER.info("[merge_samples] Performing Zarr-backed merge → %s", out_store)
+
+    merger = ZarrBackedMerger(
+        sample_map=sample_map,
+        batch_key=batch_key,
+        out_store=out_store,
+    )
+    return merger.merge()
+
 
 
 # =====================================================================
