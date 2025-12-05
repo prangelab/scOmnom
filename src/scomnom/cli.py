@@ -216,7 +216,7 @@ def load_and_filter(
     ),
     output_dir: Path = typer.Option(
         ..., "--out", "-o",
-        help="[I/O] Output directory for h5ad and figures/",
+        help="[I/O] Output directory for anndata and figures/",
     ),
     metadata_tsv: Path = typer.Option(
         ..., "--metadata-tsv", "-m", exists=True,

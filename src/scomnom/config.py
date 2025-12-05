@@ -12,8 +12,8 @@ class LoadAndQCConfig(BaseModel):
     filtered_sample_dir: Optional[Path] = Field(None,description="Directory with 10x filtered_feature_bc_matrix folders")
     cellbender_dir: Optional[Path] = Field(None, description="Directory with CellBender outputs")
     metadata_tsv: Optional[Path] = Field(None, description="TSV with per-sample metadata indexed by sample ID")
-    output_dir: Path = Field(..., description="Directory for outputs (h5ad + figures)")
-    output_name: str = Field("adata.preprocessed.h5ad", description="Output h5ad filename")
+    output_dir: Path = Field(..., description="Directory for outputs (anndata + figures)")
+    output_name: str = Field("adata.preprocessed", description="Output filename")
     save_h5ad: bool = False
     n_jobs: int = Field(4, ge=1)
 

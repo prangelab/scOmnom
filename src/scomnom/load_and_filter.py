@@ -394,6 +394,67 @@ def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) ->
     LOGGER.info("Starting load_and_filter")
     plot_utils.setup_scanpy_figs(cfg.figdir, cfg.figure_formats)
 
+    # ================================================================
+    # DEV HACK: Restore merged AnnData from a stored Zarr
+    # ================================================================
+    DEV_RESTORE_ZARR = Path("/home/kprange/data/baria/vfat/results/adata.preprocessed.h5ad.zarr")  # <-- set this
+
+    if DEV_RESTORE_ZARR.exists():
+        LOGGER.warning(
+            f"[DEV MODE] Restoring merged AnnData from {DEV_RESTORE_ZARR}.\n"
+            "Skipping LOAD → QC → FILTER → MERGE → METADATA.\n"
+            "Remove DEV_RESTORE_ZARR to run the full preprocessing."
+        )
+
+        # Load Zarr fully into RAM (expected for downstream steps)
+        adata = io_utils.load_dataset(DEV_RESTORE_ZARR)
+        LOGGER.info(
+            f"[DEV MODE] Loaded restored AnnData: {adata.n_obs:,} cells × {adata.n_vars:,} genes"
+        )
+
+        # Batch key must already exist in obs from metadata merge
+        if cfg.batch_key not in adata.obs:
+            raise RuntimeError(
+                f"[DEV MODE] batch_key '{cfg.batch_key}' not found in restored Zarr. "
+                "Metadata in Zarr must already be complete."
+            )
+
+        # -----------------------------------------------------------
+        # Resume pipeline EXACTLY as it is after metadata assignment
+        # -----------------------------------------------------------
+
+        LOGGER.info("[DEV MODE] Running QC on merged filtered dataset...")
+        adata = compute_qc_metrics(adata, cfg)
+
+        LOGGER.info("[DEV MODE] Running doublet detection...")
+        adata = doublets_detection(adata, cfg)
+
+        LOGGER.info("[DEV MODE] Normalising + HVG selection...")
+        adata = normalize_and_hvg(adata, cfg)
+
+        LOGGER.info("[DEV MODE] Running PCA / neighbors / UMAP...")
+        adata = pca_neighbors_umap(adata, cfg)
+
+        LOGGER.info("[DEV MODE] Clustering + QC cleanup...")
+        adata = cluster_and_cleanup_qc(adata, cfg)
+
+        # Save final zarr
+        out_zarr = Path(cfg.output_dir) / (cfg.output_name + ".zarr")
+        LOGGER.info(f"[DEV MODE] Saving dataset to → {out_zarr}")
+        io_utils.save_dataset(adata, out_zarr, fmt="zarr")
+
+        # Optional H5AD
+        if getattr(cfg, "save_h5ad", False):
+            h5ad_out = cfg.output_dir / (cfg.output_name + ".h5ad")
+            LOGGER.warning("[DEV MODE] Writing H5AD (RAM heavy)")
+            io_utils.save_dataset(adata, h5ad_out, fmt="h5ad")
+
+        LOGGER.info("[DEV MODE] Completed load-and-filter via fast-forward restore.")
+        return adata
+
+    # ================================================================
+    # END DEV FAST-FORWARD HACK — full pipeline continues normally
+    # ================================================================
     # infer batch key
     batch_key = io_utils.infer_batch_key_from_metadata_tsv(
         cfg.metadata_tsv, cfg.batch_key
@@ -500,12 +561,6 @@ def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) ->
     # QC metrics on merged, already-filtered data (for post-filter plots)
     LOGGER.info("Running QC on merged filtered data...")
     adata = compute_qc_metrics(adata, cfg)
-
-    # Save to zarr
-    out_zarr = Path(cfg.output_dir) / (cfg.output_name + ".zarr")
-    LOGGER.info(f"Saving dataset to → {out_zarr}")
-    io_utils.save_dataset(adata, out_zarr, fmt="zarr")
-    return adata
 
     # filtering + normalization + reduction + clustering
     LOGGER.info("Running doublet detection...")
