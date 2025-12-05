@@ -412,13 +412,6 @@ def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) ->
             f"[DEV MODE] Loaded restored AnnData: {adata.n_obs:,} cells × {adata.n_vars:,} genes"
         )
 
-        # Batch key must already exist in obs from metadata merge
-        if cfg.batch_key not in adata.obs:
-            raise RuntimeError(
-                f"[DEV MODE] batch_key '{cfg.batch_key}' not found in restored Zarr. "
-                "Metadata in Zarr must already be complete."
-            )
-
         # -----------------------------------------------------------
         # Resume pipeline EXACTLY as it is after metadata assignment
         # -----------------------------------------------------------
