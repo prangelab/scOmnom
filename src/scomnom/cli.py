@@ -227,6 +227,11 @@ def load_and_filter(
         "--n-jobs",
         help="Number of CPU cores to use (default: value from config, typically 4).",
     ),
+    save_h5ad: bool = typer.Option(
+            False,
+            "--save-h5ad/--no-save-h5ad",
+            help="Also write a .h5ad copy of the merged dataset (WARNING: loads full matrix into RAM).",
+        ),
 
     # -------------------------------------------------------------
     # QC thresholds
@@ -275,6 +280,7 @@ def load_and_filter(
         cellbender_dir=cellbender_dir,
         metadata_tsv=metadata_tsv,
         output_dir=output_dir,
+        save_h5ad=save_h5ad,
         n_jobs=4,
         min_cells=min_cells,
         min_genes=min_genes,

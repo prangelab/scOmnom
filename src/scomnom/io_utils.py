@@ -585,39 +585,113 @@ class ZarrBackedMerger:
 def merge_samples(
     sample_map: Dict[str, ad.AnnData],
     batch_key: str,
+    out_path: Path,
 ) -> ad.AnnData:
     """
-    High-level merge interface .
-
-    Performs a streaming, memory-safe Zarr-backed merge via
-    ZarrBackedMerger.
+    Merge samples using the ZarrBackedMerger.
 
     Parameters
     ----------
     sample_map : Dict[str, AnnData]
-        Mapping sample_name → per-sample filtered AnnData objects.
+        Per-sample filtered AnnData objects.
     batch_key : str
-        Column name to assign for sample identity in obs.
+        Column added to obs to indicate sample identity.
+    out_path : Path
+        Location of the final merged Zarr store. Will be overwritten.
 
     Returns
     -------
     AnnData (backed='r')
-        A merged AnnData object backed by a Zarr store in the current
-        working directory named 'merged.zarr'.
+        Zarr-backed merged dataset living directly at out_path.
     """
     if not sample_map:
         raise RuntimeError("merge_samples: sample_map is empty.")
 
-    out_store = Path.cwd() / "merged.zarr"
-    LOGGER.info("[merge_samples] Performing Zarr-backed merge → %s", out_store)
+    out_path = Path(out_path)
+    LOGGER.info("[merge_samples] Zarr merge -> %s", out_path)
 
     merger = ZarrBackedMerger(
         sample_map=sample_map,
         batch_key=batch_key,
-        out_store=out_store,
+        out_store=out_path,
     )
     return merger.merge()
 
+
+
+# =====================================================================
+# ZARR I/O UTILITIES
+# =====================================================================
+
+def save_zarr(adata: ad.AnnData, out_path: Path) -> None:
+    """
+    Save a (possibly backed) AnnData object to a Zarr store.
+
+    Parameters
+    ----------
+    adata : AnnData
+        Can be backed='r' (pointing to a zarr store) or in-memory.
+    out_path : Path
+        Directory to write the Zarr store to.
+
+    Behavior
+    --------
+    • If adata is backed='r' and already points to `out_path`, nothing happens.
+    • If adata is backed and filename != out_path, this copies the Zarr store.
+    • If adata is in-memory, this writes a new Zarr store.
+    """
+
+    out_path = Path(out_path)
+    if adata.isbacked and adata.filename == str(out_path):
+        LOGGER.info(f"Zarr store already at {out_path}; nothing to do.")
+        return
+
+    LOGGER.info(f"Saving AnnData Zarr store → {out_path}")
+    out_path.mkdir(parents=True, exist_ok=True)
+    adata.write_zarr(str(out_path), chunks=None)
+    LOGGER.info(f"Saved Zarr store: {out_path}")
+
+
+def load_zarr(path: Path) -> ad.AnnData:
+    """
+    Load a Zarr-backed AnnData object.
+
+    Parameters
+    ----------
+    path : Path
+        Directory of a Zarr store previously written.
+
+    Returns
+    -------
+    AnnData (backed='r')
+    """
+    path = Path(path)
+    LOGGER.info(f"Loading Zarr store → {path}")
+    return ad.read_zarr(str(path), backed="r")
+
+
+def convert_zarr_to_h5ad(zarr_path: Path, out_h5ad: Path) -> None:
+    """
+    Convert a Zarr-backed dataset to a full H5AD file.
+
+    CAUTION
+    -------
+    This will load the ENTIRE expression matrix into RAM.
+    For very large datasets this may cause OOM.
+
+    Only call this if the user explicitly requests H5AD output.
+    """
+
+    LOGGER.warning(
+        "Converting Zarr → H5AD forces full matrix load and may cause OOM "
+        f"(input={zarr_path}). Proceeding…"
+    )
+
+    adata = ad.read_zarr(str(zarr_path))   # loads into memory
+    out_h5ad.parent.mkdir(parents=True, exist_ok=True)
+    LOGGER.info(f"Writing full H5AD → {out_h5ad}")
+    adata.write(str(out_h5ad), compression="gzip")
+    LOGGER.info(f"Wrote {out_h5ad}")
 
 
 # =====================================================================

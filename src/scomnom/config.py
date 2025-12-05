@@ -14,6 +14,7 @@ class LoadAndQCConfig(BaseModel):
     metadata_tsv: Optional[Path] = Field(None, description="TSV with per-sample metadata indexed by sample ID")
     output_dir: Path = Field(..., description="Directory for outputs (h5ad + figures)")
     output_name: str = Field("adata.preprocessed.h5ad", description="Output h5ad filename")
+    save_h5ad: bool = False
 
     # Parallelism
     n_jobs: int = Field(4, ge=1)
