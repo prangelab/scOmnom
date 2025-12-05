@@ -167,18 +167,35 @@ def compute_qc_metrics(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
 
 def _qc_worker(args):
     """
-    Module-level function so multiprocessing can pickle it.
-    Args is a tuple: (sample_name, adata, min_genes, min_cells, max_pct_mt)
+    args: (sample, adata, min_genes, min_cells, mt_prefix, ribo_prefixes, hb_regex)
     """
-    sample, a, min_genes, min_cells, max_pct_mt = args
+    (
+        sample,
+        a,
+        min_genes,
+        min_cells,
+        mt_prefix,
+        ribo_prefixes,
+        hb_regex,
+    ) = args
 
-    from .load_and_filter import compute_qc_metrics, sparse_filter_cells_and_genes
     import pandas as pd
+    from .load_and_filter import sparse_filter_cells_and_genes
 
-    # QC metrics
-    a = compute_qc_metrics(a, max_pct_mt=max_pct_mt)
+    # --- inline minimal cfg substitute for compute_qc_metrics ---
+    class _TmpCfg:
+        pass
 
-    # Build QC DF
+    cfg = _TmpCfg()
+    cfg.mt_prefix = mt_prefix
+    cfg.ribo_prefixes = ribo_prefixes
+    cfg.hb_regex = hb_regex
+
+    # compute qc
+    from .load_and_filter import compute_qc_metrics
+    a = compute_qc_metrics(a, cfg)
+
+    # build qc dataframe
     qc_df = pd.DataFrame({
         "sample": sample,
         "total_counts": a.obs["total_counts"].to_numpy(),
@@ -186,12 +203,13 @@ def _qc_worker(args):
         "pct_counts_mt": a.obs["pct_counts_mt"].to_numpy(),
     })
 
-    # Filter
+    # filter
     a_filt = sparse_filter_cells_and_genes(
         a, min_genes=min_genes, min_cells=min_cells
     )
 
     return sample, a_filt, qc_df
+
 
 
 def qc_and_filter_samples(sample_map, cfg):
@@ -212,7 +230,9 @@ def qc_and_filter_samples(sample_map, cfg):
             adata,
             cfg.min_genes,
             cfg.min_cells,
-            cfg.max_pct_mt,
+            cfg.mt_prefix,
+            cfg.ribo_prefixes,
+            cfg.hb_regex,
         )
         for sample, adata in sample_map.items()
     ]
