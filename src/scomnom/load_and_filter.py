@@ -310,91 +310,46 @@ def sparse_filter_cells_and_genes(
     return adata
 
 
-def doublets_detection(adata: ad.AnnData, cfg) -> ad.AnnData:
-    """
-    Run SOLO doublet detection using scvi-tools.
-
-    Automatically selects CPU/GPU settings and trains the SOLO model.
-    Adds:
-      - adata.obs["doublet_score"]
-      - adata.obs["predicted_doublet"]
-    """
-
-    import torch
-    import pytorch_lightning as pl
+def doublets_detection(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
     from scvi.external import SOLO
+    import torch
 
-    LOGGER.info("Running doublet detection with SOLO...")
-
-    # ---------------------------
-    # Hardware detection
-    # ---------------------------
+    # Decide device
     has_gpu = torch.cuda.is_available()
-    device_str = "cuda" if has_gpu else "cpu"
-    LOGGER.info(f"SOLO will run on: {device_str.upper()}")
+    device = "cuda" if has_gpu else "cpu"
 
-    # ---------------------------
-    # Training hyperparameters
-    # ---------------------------
-    if has_gpu:
-        max_epochs = 40
-        batch_size = 2048
-        precision = "16-mixed"
-    else:
-        # CPU = slow → drastically reduce epochs
-        max_epochs = 5
-        batch_size = 256
-        precision = 32
+    LOGGER.info(f"Running SOLO on device: {device}")
 
-    LOGGER.info(
-        f"SOLO hyperparameters: epochs={max_epochs}, "
-        f"batch_size={batch_size}, precision={precision}"
-    )
+    # Setup AnnData
+    SOLO.setup_anndata(adata, layer="counts_raw")
 
-    # ---------------------------
-    # AnnData preparation
-    # ---------------------------
-    # Use raw counts if available
-    layer = "counts_raw" if "counts_raw" in adata.layers else None
-    SOLO.setup_anndata(adata, layer=layer)
-
-    # Instantiate SOLO model (no .to(device) needed)
+    # Instantiate model (scvi-tools automatically moves to GPU)
     solo_model = SOLO(adata)
 
-    # ---------------------------
-    # Lightning Trainer
-    # ---------------------------
-    trainer = pl.Trainer(
-        accelerator="gpu" if has_gpu else "cpu",
-        devices=1,
+    # Choose hyperparams
+    if has_gpu:
+        batch_size = 1024
+        max_epochs = 20
+    else:
+        batch_size = 256
+        max_epochs = 5
+
+    LOGGER.info(f"Training SOLO: batch_size={batch_size}, epochs={max_epochs}")
+
+    # Train using scvi-tools API (NOT Lightning)
+    solo_model.train(
         max_epochs=max_epochs,
-        precision=precision,
-        enable_checkpointing=False,
-        log_every_n_steps=20,
+        batch_size=batch_size,
     )
 
-    # ---------------------------
-    # Train model
-    # ---------------------------
-    LOGGER.info("Training SOLO model...")
-    trainer.fit(solo_model)
-    LOGGER.info("SOLO training complete.")
+    LOGGER.info("SOLO training complete. Predicting doublets...")
 
-    # ---------------------------
-    # Predict doublets
-    # ---------------------------
-    LOGGER.info("Computing doublet scores...")
-    scores = solo_model.predict(adata, batch_size=batch_size)
-    adata.obs["doublet_score"] = scores["doublet_score"].astype(float)
+    scores = solo_model.predict()
+
+    adata.obs["doublet_score"] = scores
     adata.obs["predicted_doublet"] = (
-        adata.obs["doublet_score"] > cfg.doublet_score_threshold
-    )
-
-    LOGGER.info(
-        "Doublet detection done. Mean score = %.4f, predicted doublets = %.2f%%",
-        float(adata.obs["doublet_score"].mean()),
-        100 * float(adata.obs["predicted_doublet"].mean()),
-    )
+        scores > cfg.doublet_score_threshold
+    ).astype(bool)
 
     return adata
 
