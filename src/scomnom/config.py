@@ -15,8 +15,10 @@ class LoadAndQCConfig(BaseModel):
     output_dir: Path = Field(..., description="Directory for outputs (h5ad + figures)")
     output_name: str = Field("adata.preprocessed.h5ad", description="Output h5ad filename")
     save_h5ad: bool = False
-
-    # Parallelism
+    fast_scratch_prefix: Optional[Path] = Field(
+        default="scratch-node",
+        description="Prefix of NVMe scratch path (e.g., '/scratch-node') to enable higher parallelism during merge."
+    )
     n_jobs: int = Field(4, ge=1)
 
     # QC thresholds

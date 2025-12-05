@@ -490,11 +490,15 @@ def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) ->
     plot_utils.run_qc_plots_pre_filter_df(qc_df, cfg)
 
     # Merge samples
-    merge_out = cfg.output_dir / (cfg.output_name + ".zarr")
+    tmp_dir = Path.cwd() / "tmp_merge"
+    tmp_dir.mkdir(exist_ok=True)
+    merge_out = tmp_dir / "merged.zarr"
+
     adata = io_utils.merge_samples(
         filtered_sample_map,
         cfg.batch_key,
         out_path=merge_out,
+        fast_scratch_prefix=cfg.fast_scratch_prefix,
     )
 
     # metadata
@@ -527,15 +531,18 @@ def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) ->
         figpath_stem="QC_elbow_knee_postfilter",
         figdir=cfg.figdir / "QC_plots",
     )
+    # Save to zarr
+    out_zarr = Path(cfg.output_dir) / (cfg.output_name + ".zarr")
+    LOGGER.info(f"Saving dataset to → {out_zarr}")
+    io_utils.save_dataset(adata, out_zarr, fmt="zarr")
 
     # Optional H5AD output
     if getattr(cfg, "save_h5ad", False):
         LOGGER.warning(
-            "User requested H5AD output. This will load the full matrix into RAM "
-            "and is NOT recommended for large datasets."
+            "User requested H5AD output. This is NOT recommended for large datasets."
         )
         h5ad_out = cfg.output_dir / (cfg.output_name + ".h5ad")
-        io_utils.convert_zarr_to_h5ad(zarr_out, h5ad_out)
+        io_utils.save_dataset(adata, h5ad_out, fmt="h5ad")
         LOGGER.info(f"Saved H5AD dataset → {h5ad_out}")
 
     LOGGER.info("Finished load_and_filter")

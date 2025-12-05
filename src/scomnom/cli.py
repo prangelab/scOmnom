@@ -231,7 +231,13 @@ def load_and_filter(
             False,
             "--save-h5ad/--no-save-h5ad",
             help="Also write a .h5ad copy of the merged dataset (WARNING: loads full matrix into RAM).",
-        ),
+    ),
+    fast_scratch_prefix: Optional[Path] = typer.Option(
+        None,
+        "--fast-scratch-prefix",
+        help="Prefix path (e.g. '/scratch-node') to detect NVMe scratch and increase merge parallelism.",
+    ),
+
 
     # -------------------------------------------------------------
     # QC thresholds
@@ -281,6 +287,7 @@ def load_and_filter(
         metadata_tsv=metadata_tsv,
         output_dir=output_dir,
         save_h5ad=save_h5ad,
+        fast_scratch_prefix=fast_scratch_prefix,
         n_jobs=4,
         min_cells=min_cells,
         min_genes=min_genes,

@@ -13,10 +13,6 @@ import re
 import json
 import urllib.request
 import urllib.error
-import zarr
-import numpy as np
-import pandas as pd
-import scipy.sparse as sp
 
 
 LOGGER = logging.getLogger(__name__)
@@ -204,6 +200,69 @@ def read_raw_10x(raw_dir: Path) -> ad.AnnData:
     return adata
 
 
+def write_filtered_samples_parallel(
+    sample_map: Dict[str, ad.AnnData],
+    out_dir: Path,
+    n_jobs: int | None = None,
+    suffix: str = ".filtered.h5ad",
+) -> Dict[str, Path]:
+    """
+    Write per-sample filtered AnnData objects to disk in parallel.
+
+    Parameters
+    ----------
+    sample_map : Dict[str, AnnData]
+        Mapping sample_id -> filtered AnnData (already QC'ed / filtered).
+    out_dir : Path
+        Directory where per-sample .h5ad files will be stored.
+    n_jobs : int or None
+        Max number of parallel writer threads. If None, defaults to 8.
+    suffix : str
+        Filename suffix to append to each sample id.
+
+    Returns
+    -------
+    Dict[str, Path]
+        Mapping sample_id -> path to written .h5ad file.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if not sample_map:
+        raise RuntimeError("write_filtered_samples_parallel: sample_map is empty.")
+
+    max_workers = min(8, n_jobs or 8)
+    LOGGER.info(
+        "Writing %d filtered samples to disk (%d writer threads) → %s",
+        len(sample_map),
+        max_workers,
+        out_dir,
+    )
+
+    def _write_one(sample: str, adata: ad.AnnData) -> tuple[str, Path]:
+        # Use a simple, deterministic filename: <sample><suffix>
+        out_path = out_dir / f"{sample}{suffix}"
+        LOGGER.info("[Write] %s → %s", sample, out_path)
+        adata.write_h5ad(str(out_path), compression="gzip")
+        return sample, out_path
+
+    sample_paths: Dict[str, Path] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(_write_one, sample, adata): sample
+            for sample, adata in sample_map.items()
+        }
+
+        for fut in as_completed(futures):
+            sample, out_path = fut.result()
+            sample_paths[sample] = out_path
+
+    LOGGER.info(
+        "Finished writing %d filtered samples to %s", len(sample_paths), out_dir
+    )
+    return sample_paths
+
+
 def load_raw_data(
     cfg: LoadAndQCConfig,
     record_pre_filter_counts: bool = False,
@@ -385,313 +444,269 @@ def load_cellbender_data(cfg: LoadAndQCConfig):
     return out, read_counts
 
 
-def save_adata(adata: ad.AnnData, out_path: Path) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    adata.write(str(out_path), compression="gzip")
-    LOGGER.info("Wrote %s", out_path)
-
-
-# =====================================================================
-# ZARR-BACKED STREAMING MERGER
-# =====================================================================
-
-class ZarrBackedMerger:
+def _prepare_sample_for_merge(
+    sample_name: str,
+    adata: ad.AnnData,
+    union_genes: List[str],
+    out_dir: Path,
+    batch_key: str,
+) -> Path:
     """
-    Memory-safe streaming merger for large AnnData objects.
+    Pad sample to union gene space, ensure consistent gene ordering,
+    and write a .padded.zarr store.
 
-    Design:
-      • Computes union gene space
-      • Two-pass algorithm:
-            1) Detect nnz_total and row layout
-            2) Stream padded CSR blocks into a Zarr CSR layout
-      • Produces a disk-backed AnnData that never materializes the full matrix.
-
-    Result:
-      merged.zarr/  (ZarrGroup)
-         X/data
-         X/indices
-         X/indptr
-         obs/...
-         var/...
+    Returns
+    -------
+    Path : path to padded .zarr directory
     """
+    import numpy as np
+    import scipy.sparse as sp
 
-    def __init__(
-        self,
-        sample_map: Dict[str, ad.AnnData],
-        batch_key: str,
-        out_store: Path,
-    ):
-        self.sample_map = sample_map
-        self.batch_key = batch_key
-        self.out_store = Path(out_store)
-        self.out_store.mkdir(parents=True, exist_ok=True)
+    # Ensure sparse CSR
+    X = adata.X.tocsr()
 
-        if not self.sample_map:
-            raise RuntimeError("ZarrBackedMerger: sample_map is empty.")
+    # Map old genes to new indices in the union
+    old_to_new = np.searchsorted(union_genes, adata.var_names)
 
-        # Compute union gene set
-        self.union_genes = self._compute_union_genes()
-        LOGGER.info(f"[ZarrMerge] Union genes: {len(self.union_genes)}")
+    # Build padded matrix in union gene space
+    X_padded = sp.csr_matrix(
+        (X.data, old_to_new[X.indices], X.indptr),
+        shape=(adata.n_obs, len(union_genes)),
+    )
 
-        # Compute total rows
-        self.N_total = sum(a.n_obs for a in self.sample_map.values())
+    # Build new AnnData in union gene space
+    a = ad.AnnData(
+        X=X_padded,
+        obs=adata.obs.copy(),
+        var={"gene_symbols": union_genes},
+        layers={"counts_raw": X_padded.copy()},
+    )
 
-    # --------------------------------------------------------
-    # Union gene helper
-    # --------------------------------------------------------
-    def _compute_union_genes(self) -> List[str]:
-        genes = set()
-        for a in self.sample_map.values():
-            genes.update(a.var_names)
-        return sorted(genes)
+    a.obs[batch_key] = sample_name
+    a.obs_names = [f"{sample_name}_{x}" for x in adata.obs_names]
 
-    # --------------------------------------------------------
-    # Padding helper (in-memory CSR transform)
-    # --------------------------------------------------------
-    def _pad_to_union(self, X: sp.spmatrix, var_names: pd.Index) -> sp.csr_matrix:
-        """
-        Pads CSR matrix X (shape n_obs × old_genes) to the union gene space.
-        """
-        X = X.tocsr()
-        old_genes = var_names.values
-        old_to_new = np.searchsorted(self.union_genes, old_genes)
-        X_padded = sp.csr_matrix(
-            (X.data, old_to_new[X.indices], X.indptr),
-            shape=(X.shape[0], len(self.union_genes)),
-        )
-        return X_padded
+    out_path = out_dir / f"{sample_name}.padded.zarr"
+    LOGGER.info("[Pad] %s → %s", sample_name, out_path)
+    out_path.mkdir(parents=True, exist_ok=True)
+    a.write_zarr(str(out_path), chunks=None)
 
-    # --------------------------------------------------------
-    # First pass: determine nnz_total to allocate Zarr arrays
-    # --------------------------------------------------------
-    def _compute_nnz(self) -> int:
-        nnz_total = 0
-        LOGGER.info("[ZarrMerge] First pass: measuring nnz for allocation")
+    return out_path
 
-        for sample, adata in self.sample_map.items():
-            Xp = self._pad_to_union(adata.X, adata.var_names)
-            nnz_total += Xp.nnz
-            LOGGER.info(f"[ZarrMerge] Sample {sample}: padded nnz={Xp.nnz}")
 
-        LOGGER.info(f"[ZarrMerge] Total nnz: {nnz_total}")
-        return nnz_total
 
-    # --------------------------------------------------------
-    # Write obs + var tables
-    # --------------------------------------------------------
-    def _write_obs_var(self, root: zarr.Group):
-        # Concatenate obs in correct row order
-        obs_list = []
-        for sample, adata in self.sample_map.items():
-            df = adata.obs.copy()
-            df[self.batch_key] = sample
-            obs_list.append(df)
-        obs = pd.concat(obs_list, axis=0)
-        obs.to_zarr(root.create_group("obs"))
-        LOGGER.info("[ZarrMerge] Wrote obs table")
+def _compute_union_genes(sample_map: Dict[str, ad.AnnData]) -> List[str]:
+    genes = set()
+    for a in sample_map.values():
+        genes.update(a.var_names)
+    return sorted(genes)
 
-        # Write var table
-        var = pd.DataFrame(index=self.union_genes)
-        var.to_zarr(root.create_group("var"))
-        LOGGER.info("[ZarrMerge] Wrote var table")
 
-    # --------------------------------------------------------
-    # Main merge
-    # --------------------------------------------------------
-    def merge(self) -> ad.AnnData:
-        # --------------------------
-        # First pass
-        # --------------------------
-        nnz_total = self._compute_nnz()
+def _merge_filtered_zarr_simple(padded_dirs: List[Path]) -> ad.AnnData:
+    """
+    Sequentially merge padded .zarr AnnData stores in-memory using ad.concat.
+    """
+    merged: Optional[ad.AnnData] = None
 
-        # --------------------------
-        # Create Zarr store
-        # --------------------------
-        store = zarr.DirectoryStore(str(self.out_store))
-        root = zarr.group(store=store, overwrite=True)
+    for i, p in enumerate(padded_dirs, 1):
+        LOGGER.info(f"[Merge {i:02d}/{len(padded_dirs)}] Loading {p.name}")
+        a = ad.read_zarr(str(p))  # load into memory (NOT backed)
 
-        X_data = root.create_dataset(
-            "X/data",
-            shape=(nnz_total,),
-            dtype="float32",
-            chunks=(10_000_000,),
-        )
-        X_indices = root.create_dataset(
-            "X/indices",
-            shape=(nnz_total,),
-            dtype="int32",
-            chunks=(10_000_000,),
-        )
-        X_indptr = root.create_dataset(
-            "X/indptr",
-            shape=(self.N_total + 1,),
-            dtype="int64",
-            chunks=(100_000,),
+        if merged is None:
+            merged = a
+            continue
+
+        LOGGER.info(f"[Merge {i:02d}/{len(padded_dirs)}] Concatenating in-memory...")
+        merged = ad.concat(
+            [merged, a],
+            axis=0,
+            join="outer",
+            merge="same",
         )
 
-        LOGGER.info("[ZarrMerge] Allocated Zarr CSR arrays")
+        # Free memory aggressively
+        del a
 
-        # --------------------------
-        # Second pass: write CSR
-        # --------------------------
-        data_cursor = 0
-        row_cursor = 0
+    if merged is None:
+        raise RuntimeError("_merge_filtered_zarr_simple: no inputs?")
 
-        for sample, adata in self.sample_map.items():
-            LOGGER.info(f"[ZarrMerge] Writing sample {sample}")
-            Xp = self._pad_to_union(adata.X, adata.var_names).tocsr()
-            rows = Xp.shape[0]
-            L = Xp.nnz
-
-            # Write data + indices
-            X_data[data_cursor:data_cursor + L] = Xp.data
-            X_indices[data_cursor:data_cursor + L] = Xp.indices
-
-            # Write indptr block (shifted)
-            # NOTE: Xp.indptr is length rows+1; we fill rows entries here.
-            X_indptr[row_cursor:row_cursor + rows] = Xp.indptr[:-1] + data_cursor
-
-            data_cursor += L
-            row_cursor += rows
-
-            del Xp
-
-        # Final indptr entry
-        X_indptr[self.N_total] = nnz_total
-
-        LOGGER.info("[ZarrMerge] Finished writing CSR arrays")
-
-        # --------------------------
-        # Write obs + var tables
-        # --------------------------
-        self._write_obs_var(root)
-
-        # --------------------------
-        # Build AnnData reference (backed=read)
-        # --------------------------
-        LOGGER.info(f"[ZarrMerge] Building backed AnnData → {self.out_store}")
-        adata = ad.AnnData(
-            X=root["X"],
-            obs=pd.read_zarr(root["obs"]),
-            var=pd.read_zarr(root["var"]),
-            filename=str(self.out_store),
-            backed="r",
-        )
-
-        return adata
+    return merged
 
 
-# Public merge_samples() function to handle the merge
 def merge_samples(
     sample_map: Dict[str, ad.AnnData],
     batch_key: str,
     out_path: Path,
+    fast_scratch_prefix: Optional[Path] = None,
 ) -> ad.AnnData:
     """
-    Merge samples using the ZarrBackedMerger.
+    Memory-safe union-gene merge using disk-backed padded Zarr intermediates.
 
-    Parameters
-    ----------
-    sample_map : Dict[str, AnnData]
-        Per-sample filtered AnnData objects.
-    batch_key : str
-        Column added to obs to indicate sample identity.
-    out_path : Path
-        Location of the final merged Zarr store. Will be overwritten.
+    Behavior:
+      1. Compute union gene list across samples.
+      2. Pad each sample to the union gene space → <sample>.padded.zarr.
+      3. Sequential in-memory merge using ad.concat (reliable + fast).
+      4. DO NOT write output Zarr here.
+         The caller (orchestrator) decides where/when to save.
+      5. Temporary padded files are cleaned up automatically.
 
     Returns
     -------
-    AnnData (backed='r')
-        Zarr-backed merged dataset living directly at out_path.
+    AnnData
+        Fully in-memory merged AnnData. (backed=None)
     """
+
+    import concurrent.futures
+
     if not sample_map:
         raise RuntimeError("merge_samples: sample_map is empty.")
 
-    out_path = Path(out_path)
-    LOGGER.info("[merge_samples] Zarr merge -> %s", out_path)
+    tmp_dir = Path.cwd() / "tmp_merge"
+    padded_dir = tmp_dir / "padded"
+    padded_dir.mkdir(parents=True, exist_ok=True)
 
-    merger = ZarrBackedMerger(
-        sample_map=sample_map,
-        batch_key=batch_key,
-        out_store=out_path,
+    LOGGER.info(
+        "Starting merge of %d samples. tmp_merge=%s",
+        len(sample_map), tmp_dir
     )
-    return merger.merge()
+
+    # --------------------------------------------------------
+    # 1. Compute union genes
+    # --------------------------------------------------------
+    union_genes = _compute_union_genes(sample_map)
+    LOGGER.info("Union gene set contains %d genes", len(union_genes))
+
+    # --------------------------------------------------------
+    # 2. Prepare padded Zarrs in parallel
+    # --------------------------------------------------------
+    cwd = str(Path.cwd())
+    on_fast_scratch = False
+    if fast_scratch_prefix is not None:
+        fast_prefix = str(fast_scratch_prefix)
+        on_fast_scratch = cwd.startswith(f"/{fast_prefix}")
+
+    # IO dominates → thread pool is fine
+    n_workers = min(24 if on_fast_scratch else 8, len(sample_map))
+    LOGGER.info("Writing padded Zarrs with %d workers", n_workers)
+
+    padded_files: List[Path] = []
+
+    def _worker(sample: str, adata: ad.AnnData) -> Path:
+        return _prepare_sample_for_merge(
+            sample_name=sample,
+            adata=adata,
+            union_genes=union_genes,
+            out_dir=padded_dir,
+            batch_key=batch_key,
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = {pool.submit(_worker, s, a): s for s, a in sample_map.items()}
+        count = 0
+        for fut in concurrent.futures.as_completed(futures):
+            sample = futures[fut]
+            count += 1
+            path = fut.result()
+            padded_files.append(path)
+            LOGGER.info("[Pad %02d/%02d] %s → %s", count, len(sample_map), sample, path.name)
+
+    if not padded_files:
+        raise RuntimeError("merge_samples: no padded Zarr stores were created.")
+
+    padded_files = sorted(padded_files)
+
+    # --------------------------------------------------------
+    # 3. Merge all padded samples into memory
+    # --------------------------------------------------------
+    LOGGER.info(
+        "Merging %d padded Zarrs via ad.concat (fully in-memory)...",
+        len(padded_files)
+    )
+    merged = _merge_filtered_zarr_simple(padded_files)
+
+    LOGGER.info(
+        "Merged dataset: %d cells × %d genes",
+        merged.n_obs, merged.n_vars
+    )
+
+    # --------------------------------------------------------
+    # 4. Cleanup temporary padded files
+    # --------------------------------------------------------
+    try:
+        LOGGER.info("Cleaning tmp_merge directory: %s", tmp_dir)
+        shutil.rmtree(tmp_dir)
+    except Exception as e:
+        LOGGER.warning("Failed to clean temporary dir %s: %s", tmp_dir, e)
+
+    # --------------------------------------------------------
+    # 5. Return in-memory AnnData (caller will write final Zarr)
+    # --------------------------------------------------------
+    LOGGER.info(
+        "merge_samples() complete. Returning in-memory AnnData. "
+        "Caller is responsible for writing the final Zarr."
+    )
+    return merged
 
 
-
-# =====================================================================
-# ZARR I/O UTILITIES
-# =====================================================================
-
-def save_zarr(adata: ad.AnnData, out_path: Path) -> None:
+# ============================================================
+# Dataset IO Helpers
+# ============================================================
+def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr") -> None:
     """
-    Save a (possibly backed) AnnData object to a Zarr store.
+    Save an AnnData object either as .zarr or .h5ad.
 
     Parameters
     ----------
     adata : AnnData
-        Can be backed='r' (pointing to a zarr store) or in-memory.
+        The in-memory dataset to save.
     out_path : Path
-        Directory to write the Zarr store to.
-
-    Behavior
-    --------
-    • If adata is backed='r' and already points to `out_path`, nothing happens.
-    • If adata is backed and filename != out_path, this copies the Zarr store.
-    • If adata is in-memory, this writes a new Zarr store.
+        Destination path (directory for zarr, file for h5ad).
+    fmt : str
+        "zarr" or "h5ad"
     """
-
     out_path = Path(out_path)
-    if adata.isbacked and adata.filename == str(out_path):
-        LOGGER.info(f"Zarr store already at {out_path}; nothing to do.")
-        return
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    LOGGER.info(f"Saving AnnData Zarr store → {out_path}")
-    out_path.mkdir(parents=True, exist_ok=True)
-    adata.write_zarr(str(out_path), chunks=None)
-    LOGGER.info(f"Saved Zarr store: {out_path}")
+    if fmt == "zarr":
+        LOGGER.info(f"Saving dataset as Zarr → {out_path}")
+        adata.write_zarr(str(out_path), chunks=None)
+
+    elif fmt == "h5ad":
+        LOGGER.info(f"Saving dataset as H5AD → {out_path}")
+        adata.write_h5ad(str(out_path), compression="gzip")
+
+    else:
+        raise ValueError(f"Unknown dataset format '{fmt}'. Expected 'zarr' or 'h5ad'.")
+
+    LOGGER.info(f"Finished writing dataset → {out_path}")
 
 
-def load_zarr(path: Path) -> ad.AnnData:
+def load_dataset(path: Path) -> ad.AnnData:
     """
-    Load a Zarr-backed AnnData object.
+    Load a dataset from Zarr or H5AD into memory.
 
     Parameters
     ----------
     path : Path
-        Directory of a Zarr store previously written.
+        Path to .zarr directory or .h5ad file.
 
     Returns
     -------
-    AnnData (backed='r')
+    AnnData
     """
     path = Path(path)
-    LOGGER.info(f"Loading Zarr store → {path}")
-    return ad.read_zarr(str(path), backed="r")
 
+    if not path.exists():
+        raise FileNotFoundError(f"Dataset not found: {path}")
 
-def convert_zarr_to_h5ad(zarr_path: Path, out_h5ad: Path) -> None:
-    """
-    Convert a Zarr-backed dataset to a full H5AD file.
+    if path.suffix == ".h5ad":
+        LOGGER.info(f"Loading H5AD dataset → {path}")
+        return ad.read_h5ad(str(path))
 
-    CAUTION
-    -------
-    This will load the ENTIRE expression matrix into RAM.
-    For very large datasets this may cause OOM.
+    if path.suffix == ".zarr" or path.is_dir():
+        LOGGER.info(f"Loading Zarr dataset → {path}")
+        return ad.read_zarr(str(path))  # fully in-memory
 
-    Only call this if the user explicitly requests H5AD output.
-    """
-
-    LOGGER.warning(
-        "Converting Zarr → H5AD forces full matrix load and may cause OOM "
-        f"(input={zarr_path}). Proceeding…"
-    )
-
-    adata = ad.read_zarr(str(zarr_path))   # loads into memory
-    out_h5ad.parent.mkdir(parents=True, exist_ok=True)
-    LOGGER.info(f"Writing full H5AD → {out_h5ad}")
-    adata.write(str(out_h5ad), compression="gzip")
-    LOGGER.info(f"Wrote {out_h5ad}")
+    raise ValueError(f"Cannot load dataset from: {path}. Expected .zarr directory or .h5ad file.")
 
 
 # =====================================================================
@@ -1184,3 +1199,4 @@ def resolve_msigdb_gene_sets(
     )
 
     return gmt_files, used_keywords
+
