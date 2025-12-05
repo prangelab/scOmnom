@@ -311,47 +311,37 @@ def sparse_filter_cells_and_genes(
 
 
 def doublets_detection(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
-    """
-    Run SOLO doublet detection on an already-filtered AnnData.
-
-    Per-sample min_genes / min_cells filtering has already been applied
-    before merging, so we do NOT perform any additional global cell/gene
-    filtering here to avoid large CSR copies.
-    """
-    # Log remaining cells per sample (after basic filtering)
-    if cfg.batch_key in adata.obs:
-        for sample, n in adata.obs[cfg.batch_key].value_counts().items():
-            LOGGER.info(f"Remaining cells in {sample}: {n}")
-
-    # ---- SOLO DOUBLETS----
     from scvi.external import SOLO
     import torch
 
-    # Determine device (CPU or CUDA)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    LOGGER.info(f"Running Solo doublet detection on device: {device}")
+    LOGGER.info(f"Running SOLO doublet detection on device: {device}")
 
+    # 1. Setup AnnData
     SOLO.setup_anndata(adata, layer=None)
 
-    # Instantiate the SOLO model
-    solo_model = SOLO(adata, device=device)
+    # 2. Instantiate WITHOUT device=
+    solo_model = SOLO(adata)
 
-    # Conservative CPU settings, faster GPU settings
+    # 3. Move model to device
+    solo_model.to(device)
+
+    # 4. Train
     if device == "cpu":
         solo_model.train(batch_size=256, max_epochs=40)
     else:
         solo_model.train(batch_size=1024, max_epochs=20)
 
-    # Predict doublet scores
+    # 5. Predict
     doublet_scores = solo_model.predict()
 
-    # Apply results to AnnData
     adata.obs["doublet_score"] = doublet_scores
     adata.obs["predicted_doublet"] = (
         doublet_scores > cfg.doublet_score_threshold
     ).astype(bool)
 
     return adata
+
 
 
 def normalize_and_hvg(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
