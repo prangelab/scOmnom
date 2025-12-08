@@ -310,56 +310,103 @@ def sparse_filter_cells_and_genes(
     return adata
 
 
-def doublets_detection(adata: AnnData, cfg: LoadAndQCConfig) -> AnnData:
+def doublets_detection(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
     """
     Run SOLO doublet detection on the merged AnnData.
-    Works on CPU or GPU automatically.
+    Works on CPU or GPU, with automatic hyperparameter selection.
 
-    This version does NOT use PyTorch Lightning, because scvi-tools >= 1.1
-    uses its own Trainer interface. Uses solo.train() instead of trainer.fit().
+    Notes
+    -----
+    - Prefers using `adata.layers['counts_raw']` as raw counts input.
+    - Ensures that the SOLO input is integer counts (as expected by scvi-tools).
+    - Adds a small compatibility shim if scvi-tools does not create the
+      `_solo_doub_sim` column (seen in some versions), to avoid KeyError in
+      `SOLO.predict()`.
     """
 
     import warnings
+    import numpy as np
+    import scipy.sparse as sp
     import torch
+    import pytorch_lightning as pl
     from scvi.external import SOLO
+
+    # Log remaining cells per sample (if batch_key present)
+    if cfg.batch_key in adata.obs:
+        for sample, n in adata.obs[cfg.batch_key].value_counts().items():
+            LOGGER.info(f"Remaining cells in {sample}: {n}")
 
     LOGGER.info("Running SOLO doublet detection...")
 
-    # Silence harmless warning
+    # Silence the harmless scvi-tools warning about logits vs probabilities
     warnings.filterwarnings(
         "ignore",
         message="Prior to scvi-tools 1.1.3, `SOLO.predict`",
     )
 
-    # ------------------------------
-    # Device selection
-    # ------------------------------
-    has_gpu = torch.cuda.is_available()
-    device = "cuda" if has_gpu else "cpu"
-    accelerator = "gpu" if has_gpu else "cpu"
-    devices = 1
+    # ---------------------------------------------------------
+    # Choose counts layer and enforce integer counts
+    # ---------------------------------------------------------
+    if "counts_raw" in adata.layers:
+        layer = "counts_raw"
+        X = adata.layers[layer]
+        LOGGER.info("Using adata.layers['counts_raw'] as SOLO input.")
+    else:
+        layer = None
+        X = adata.X
+        LOGGER.warning(
+            "counts_raw layer not found. Using adata.X for SOLO. "
+            "Ensure this really contains raw counts!"
+        )
 
-    LOGGER.info(f"Running SOLO on device: {device}")
+    # Ensure integer dtype for SOLO input
+    if sp.issparse(X):
+        if not np.issubdtype(X.dtype, np.integer):
+            LOGGER.warning(
+                "SOLO input is sparse but not integer dtype "
+                f"({X.dtype}); casting to int32. This may slightly alter counts."
+            )
+            X_int = X.astype(np.int32)
+            if layer is None:
+                adata.X = X_int
+            else:
+                adata.layers[layer] = X_int
+    else:
+        if not np.issubdtype(X.dtype, np.integer):
+            LOGGER.warning(
+                "SOLO input is dense but not integer dtype "
+                f"({X.dtype}); rounding and casting to int32."
+            )
+            X_int = np.rint(X).astype(np.int32)
+            if layer is None:
+                adata.X = X_int
+            else:
+                adata.layers[layer] = X_int
 
-    # ------------------------------
-    # Setup AnnData
-    # ------------------------------
-    layer = "counts_raw" if "counts_raw" in adata.layers else None
+    # ---------------------------------------------------------
+    # Setup AnnData for SOLO
+    # ---------------------------------------------------------
     SOLO.setup_anndata(adata, layer=layer)
 
     # Instantiate model
     solo_model = SOLO(adata)
 
-    # ------------------------------
-    # Auto hyperparameters
-    # ------------------------------
+    # ---------------------------------------------------------
+    # Auto hyperparameters (CPU vs GPU, dataset size)
+    # ---------------------------------------------------------
+    has_gpu = torch.cuda.is_available()
+    device_str = "cuda" if has_gpu else "cpu"
     n = adata.n_obs
 
     if has_gpu:
+        # On GPU: always use full 15 epochs
         max_epochs = 15
         batch_size = 512
-        precision = 16
+        accelerator = "gpu"
+        devices = 1
+        precision = "16-mixed"
     else:
+        # CPU: adapt epochs to dataset size
         if n < 20_000:
             max_epochs = 5
             batch_size = 128
@@ -373,46 +420,93 @@ def doublets_detection(adata: AnnData, cfg: LoadAndQCConfig) -> AnnData:
             max_epochs = 2
             batch_size = 256
 
+        accelerator = "cpu"
+        devices = 1
         precision = 32
 
     LOGGER.info(
-        f"AUTO SOLO settings → epochs={max_epochs}, batch_size={batch_size}, "
+        f"SOLO device: {device_str} | "
+        f"epochs={max_epochs}, batch_size={batch_size}, "
         f"accelerator={accelerator}, precision={precision}"
     )
 
-    # ------------------------------
-    # TRAIN SOLO  (no Lightning)
-    # ------------------------------
-    solo_model.train(
+    # ---------------------------------------------------------
+    # Trainer
+    # ---------------------------------------------------------
+    trainer = pl.Trainer(
         max_epochs=max_epochs,
-        batch_size=batch_size,
         accelerator=accelerator,
         devices=devices,
+        enable_checkpointing=False,
+        logger=False,
+        enable_model_summary=False,
+        deterministic=False,
+        gradient_clip_val=None,
+        inference_mode=True,
         precision=precision,
     )
 
+    # Train
+    LOGGER.info("Training SOLO model...")
+    trainer.fit(solo_model)
     LOGGER.info("SOLO training complete. Predicting doublets...")
 
-    # ------------------------------
-    # PREDICT
-    # ------------------------------
-    y_pred = solo_model.predict(soft=True, return_logits=False, include_simulated_doublets=True,)
+    # ---------------------------------------------------------
+    # Ensure `_solo_doub_sim` exists (compat shim)
+    # ---------------------------------------------------------
+    # Some scvi-tools versions / configurations may fail to create this
+    # column, but `predict()` still expects it. Patch it if missing.
+    solo_adata = getattr(solo_model, "adata", adata)
+
+    if "_solo_doub_sim" not in solo_adata.obs.columns:
+        LOGGER.warning(
+            "SOLO internal AnnData is missing '_solo_doub_sim'; "
+            "creating a dummy 'singlet' label column for compatibility."
+        )
+        solo_adata.obs["_solo_doub_sim"] = "singlet"
+
+    # Keep things consistent on the original adata as well
+    if "_solo_doub_sim" not in adata.obs.columns:
+        adata.obs["_solo_doub_sim"] = "singlet"
+
+    # ---------------------------------------------------------
+    # Predict
+    # ---------------------------------------------------------
+    y_pred = solo_model.predict(
+        soft=True,
+        return_logits=False,
+        include_simulated_doublets=False,
+    )
 
     # y_pred shape: (cells, 2) = [prob_singlet, prob_doublet]
     doublet_scores = y_pred[:, 1]
 
+    if doublet_scores.shape[0] != adata.n_obs:
+        LOGGER.warning(
+            "SOLO returned a number of predictions that does not "
+            f"match n_obs (got {doublet_scores.shape[0]}, expected {adata.n_obs}). "
+            "Truncating or repeating is NOT implemented; raising error."
+        )
+        raise RuntimeError(
+            "SOLO prediction size mismatch with AnnData n_obs. "
+            "Please inspect SOLO version / configuration."
+        )
+
+    # Store results
     adata.obs["doublet_score"] = doublet_scores
     adata.obs["predicted_doublet"] = (
-        doublet_scores > cfg.doublet_score_threshold
+        adata.obs["doublet_score"].values > cfg.doublet_score_threshold
     )
 
     LOGGER.info(
-        f"Doublets detected: "
-        f"{adata.obs['predicted_doublet'].sum()} / {adata.n_obs} "
-        f"({adata.obs['predicted_doublet'].mean()*100:.2f}%)"
+        "Doublets detected: %d / %d (%.2f%%)",
+        int(adata.obs["predicted_doublet"].sum()),
+        adata.n_obs,
+        float(adata.obs["predicted_doublet"].mean() * 100.0),
     )
 
     return adata
+
 
 
 
