@@ -314,85 +314,96 @@ def doublets_detection(adata: AnnData, cfg: LoadAndQCConfig) -> AnnData:
     """
     Run SOLO doublet detection on the merged AnnData.
     Works on CPU or GPU automatically.
+
+    This version does NOT use PyTorch Lightning, because scvi-tools >= 1.1
+    uses its own Trainer interface. Uses solo.train() instead of trainer.fit().
     """
 
     import warnings
-    from scvi.external import SOLO
     import torch
-    import pytorch_lightning as pl
+    from scvi.external import SOLO
 
     LOGGER.info("Running SOLO doublet detection...")
 
-    # Silence the harmless scvi-tools warning about logits vs probabilities
+    # Silence harmless warning
     warnings.filterwarnings(
         "ignore",
         message="Prior to scvi-tools 1.1.3, `SOLO.predict`",
     )
 
-    # Pick CPU or GPU
+    # ------------------------------
+    # Device selection
+    # ------------------------------
     has_gpu = torch.cuda.is_available()
     device = "cuda" if has_gpu else "cpu"
+    accelerator = "gpu" if has_gpu else "cpu"
+    devices = 1
 
     LOGGER.info(f"Running SOLO on device: {device}")
 
-    # Prepare AnnData for SOLO
+    # ------------------------------
+    # Setup AnnData
+    # ------------------------------
     layer = "counts_raw" if "counts_raw" in adata.layers else None
-
     SOLO.setup_anndata(adata, layer=layer)
 
     # Instantiate model
     solo_model = SOLO(adata)
 
-    # Training hyperparameters
+    # ------------------------------
+    # Auto hyperparameters
+    # ------------------------------
+    n = adata.n_obs
+
     if has_gpu:
         max_epochs = 15
         batch_size = 512
-        accelerator = "gpu"
-        devices = 1
-        precision = "16-mixed"
+        precision = 16
     else:
-        max_epochs = 1
-        batch_size = 256
-        accelerator = "cpu"
-        devices = 1
+        if n < 20_000:
+            max_epochs = 5
+            batch_size = 128
+        elif n < 100_000:
+            max_epochs = 8
+            batch_size = 256
+        elif n < 300_000:
+            max_epochs = 12
+            batch_size = 256
+        else:
+            max_epochs = 2
+            batch_size = 256
+
         precision = 32
 
     LOGGER.info(
-        f"Training SOLO: batch_size={batch_size}, epochs={max_epochs}, "
+        f"AUTO SOLO settings → epochs={max_epochs}, batch_size={batch_size}, "
         f"accelerator={accelerator}, precision={precision}"
     )
 
-    # ---------------------------------------------------------------------
-    # Trainer
-    # ---------------------------------------------------------------------
-    trainer = pl.Trainer(
+    # ------------------------------
+    # TRAIN SOLO  (no Lightning)
+    # ------------------------------
+    solo_model.train(
         max_epochs=max_epochs,
+        batch_size=batch_size,
         accelerator=accelerator,
         devices=devices,
-        enable_checkpointing=False,
-        logger=False,
-        enable_model_summary=False,
-        deterministic=False,
-        gradient_clip_val=None,
-        inference_mode=True,
         precision=precision,
     )
 
-    # Train
-    trainer.fit(solo_model)
     LOGGER.info("SOLO training complete. Predicting doublets...")
 
-    # Predict probabilities.
-
+    # ------------------------------
+    # PREDICT
+    # ------------------------------
     y_pred = solo_model.predict(soft=True, return_logits=False)
 
-    # y_pred shape: (cells, 2) → [prob_singlet, prob_doublet]
+    # y_pred shape: (cells, 2) = [prob_singlet, prob_doublet]
     doublet_scores = y_pred[:, 1]
 
-    # Store results
     adata.obs["doublet_score"] = doublet_scores
     adata.obs["predicted_doublet"] = (
-        adata.obs["doublet_score"].values > cfg.doublet_score_threshold
+        doublet_scores > cfg.doublet_score_threshold
     )
 
     LOGGER.info(
@@ -402,6 +413,7 @@ def doublets_detection(adata: AnnData, cfg: LoadAndQCConfig) -> AnnData:
     )
 
     return adata
+
 
 
 def normalize_and_hvg(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
