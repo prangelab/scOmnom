@@ -392,7 +392,6 @@ def doublets_detection(adata: AnnData, cfg: LoadAndQCConfig) -> AnnData:
     SOLO.setup_anndata(adata, layer=layer)
 
     solo_model = SOLO(adata)
-
     trainer = pl.Trainer(
         max_epochs=max_epochs,
         accelerator=accelerator,
@@ -400,6 +399,8 @@ def doublets_detection(adata: AnnData, cfg: LoadAndQCConfig) -> AnnData:
         enable_checkpointing=False,
         logger=False,
         enable_model_summary=False,
+        enable_progress_bar=False,
+        callbacks=[],
         deterministic=False,
         precision=precision,
     )
