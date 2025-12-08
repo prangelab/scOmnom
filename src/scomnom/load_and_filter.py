@@ -376,7 +376,6 @@ def doublets_detection(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
         scrub = scr.Scrublet(
             X_chunk,
             expected_doublet_rate=getattr(cfg, "expected_doublet_rate", 0.06),
-            verbose=False,
         )
 
         try:
