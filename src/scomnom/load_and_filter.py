@@ -310,50 +310,98 @@ def sparse_filter_cells_and_genes(
     return adata
 
 
-def doublets_detection(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
+def doublets_detection(adata: AnnData, cfg: LoadAndQCConfig) -> AnnData:
+    """
+    Run SOLO doublet detection on the merged AnnData.
+    Works on CPU or GPU automatically.
+    """
+
+    import warnings
     from scvi.external import SOLO
     import torch
+    import pytorch_lightning as pl
 
-    # Decide device
+    LOGGER.info("Running SOLO doublet detection...")
+
+    # Silence the harmless scvi-tools warning about logits vs probabilities
+    warnings.filterwarnings(
+        "ignore",
+        message="Prior to scvi-tools 1.1.3, `SOLO.predict`",
+    )
+
+    # Pick CPU or GPU
     has_gpu = torch.cuda.is_available()
     device = "cuda" if has_gpu else "cpu"
 
     LOGGER.info(f"Running SOLO on device: {device}")
 
-    # Setup AnnData
-    SOLO.setup_anndata(adata, layer="counts_raw")
+    # Prepare AnnData for SOLO
+    layer = "counts_raw" if "counts_raw" in adata.layers else None
 
-    # Instantiate model (scvi-tools automatically moves to GPU)
+    SOLO.setup_anndata(adata, layer=layer)
+
+    # Instantiate model
     solo_model = SOLO(adata)
 
-    # Choose hyperparams
+    # Training hyperparameters
     if has_gpu:
-        batch_size = 1024
-        max_epochs = 20
+        max_epochs = 15
+        batch_size = 512
+        accelerator = "gpu"
+        devices = 1
+        precision = "16-mixed"
     else:
+        max_epochs = 1
         batch_size = 256
-        max_epochs = 5
+        accelerator = "cpu"
+        devices = 1
+        precision = 32
 
-    LOGGER.info(f"Training SOLO: batch_size={batch_size}, epochs={max_epochs}")
-
-    # Train using scvi-tools API (NOT Lightning)
-    solo_model.train(
-        max_epochs=max_epochs,
-        batch_size=batch_size,
+    LOGGER.info(
+        f"Training SOLO: batch_size={batch_size}, epochs={max_epochs}, "
+        f"accelerator={accelerator}, precision={precision}"
     )
 
+    # ---------------------------------------------------------------------
+    # Trainer
+    # ---------------------------------------------------------------------
+    trainer = pl.Trainer(
+        max_epochs=max_epochs,
+        accelerator=accelerator,
+        devices=devices,
+        enable_checkpointing=False,
+        logger=False,
+        enable_model_summary=False,
+        deterministic=False,
+        gradient_clip_val=None,
+        inference_mode=True,
+        precision=precision,
+    )
+
+    # Train
+    trainer.fit(solo_model)
     LOGGER.info("SOLO training complete. Predicting doublets...")
 
-    scores = solo_model.predict()
+    # Predict probabilities.
 
-    adata.obs["doublet_score"] = scores
+    y_pred = solo_model.predict(soft=True, return_logits=False)
+
+    # y_pred shape: (cells, 2) → [prob_singlet, prob_doublet]
+    doublet_scores = y_pred[:, 1]
+
+    # Store results
+    adata.obs["doublet_score"] = doublet_scores
     adata.obs["predicted_doublet"] = (
-        scores > cfg.doublet_score_threshold
-    ).astype(bool)
+        adata.obs["doublet_score"].values > cfg.doublet_score_threshold
+    )
+
+    LOGGER.info(
+        f"Doublets detected: "
+        f"{adata.obs['predicted_doublet'].sum()} / {adata.n_obs} "
+        f"({adata.obs['predicted_doublet'].mean()*100:.2f}%)"
+    )
 
     return adata
-
-
 
 
 def normalize_and_hvg(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
