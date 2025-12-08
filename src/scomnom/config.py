@@ -1,5 +1,5 @@
 from __future__ import annotations
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, validator, model_validator
 from pathlib import Path
 from typing import Optional, Dict, List
 from matplotlib.figure import Figure
