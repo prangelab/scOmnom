@@ -34,13 +34,14 @@ dependencies:
   - typer
   - pydantic
   - bbknn
-  - pytorch::pytorch=2.1.0
-  - pytorch::torchvision=0.16.0
-  - pytorch::torchaudio=2.1.0
+  - pytorch=2.1.0
+  - pytorch-lightning=1.9.5
+  - torchvision=0.16.0
+  - torchaudio=2.1.0
   # # GPU ACCELERATION:
   # # ON A MAC: AUTO ENABLED (METAL)
   # # ON LINUX (NVIDIA GPU A100) - UNCOMMENT THIS LINE (ALSO ON HPC)
-  # # - pytorch::pytorch-cuda=12.1
+  # # - pytorch-cuda=12.1
 
   # Testing
   - pytest
@@ -55,7 +56,7 @@ dependencies:
       - umap-learn
       - scanorama
       - harmonypy
-      - scvi-tools
+      - scvi-tools==1.3.3
       - scib-metrics
       - types-pytz
       - celltypist

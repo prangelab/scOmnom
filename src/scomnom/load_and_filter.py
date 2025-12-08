@@ -315,8 +315,6 @@ def doublets_detection(adata: AnnData, cfg: LoadAndQCConfig) -> AnnData:
     Run SOLO doublet detection on the merged AnnData.
     """
 
-    import numpy as np
-    import scipy.sparse as sp
     import warnings
     import torch
     import pytorch_lightning as pl
@@ -337,23 +335,8 @@ def doublets_detection(adata: AnnData, cfg: LoadAndQCConfig) -> AnnData:
 
     if layer is None:
         LOGGER.warning("No counts_raw layer found, using adata.X.")
-        X = adata.X
     else:
-        X = adata.layers[layer]
         LOGGER.info(f"Using adata.layers['{layer}'] as SOLO input.")
-
-    # Debug: log sparse/dtype information
-    if sp.issparse(X):
-        LOGGER.info(
-            f"SOLO input is sparse ({type(X).__name__}), "
-            f"shape={X.shape}, nnz={X.nnz}, dtype={X.dtype}"
-        )
-    else:
-        LOGGER.info(
-            f"SOLO input is dense ndarray, shape={X.shape}, dtype={X.dtype}"
-        )
-
-    LOGGER.info(f"SOLO sparse data integer dtype? {np.issubdtype(X.dtype, np.integer)}")
 
     # ---------------------------
     # DEVICE + AUTO HYPERPARAMS
