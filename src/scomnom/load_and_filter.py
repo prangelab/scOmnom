@@ -16,11 +16,26 @@ LOGGER = logging.getLogger(__name__)
 
 # ---- logging helper ----
 def setup_logging(logfile: Optional[Path]):
-    handlers = [logging.StreamHandler()]
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+
+    # Remove all existing handlers to avoid double-formatting and Rich interception
+    for h in list(logger.handlers):
+        logger.removeHandler(h)
+
+    fmt = logging.Formatter(fmt="%(asctime)s [%(levelname)s] %(message)s")
+
+    # Console
+    ch = logging.StreamHandler()
+    ch.setFormatter(fmt)
+    logger.addHandler(ch)
+
+    # File handler
     if logfile:
         logfile.parent.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(str(logfile), mode="w"))
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", handlers=handlers)
+        fh = logging.FileHandler(str(logfile), mode="w")
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
 
 
 # ---- step functions ----
