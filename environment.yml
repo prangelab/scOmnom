@@ -8,11 +8,11 @@ channels:
 
 dependencies:
   # Python
-  - python=3.10
-  - setuptools=69.5.1
+  - python=3.11
+  - setuptools
 
   # Numeric stack
-  - numpy<2
+  - numpy
   - scipy
   - pandas
   - matplotlib
@@ -24,7 +24,7 @@ dependencies:
 
   # Scanpy ecosystem
   - scanpy
-  - anndata=0.11.4
+  - anndata
   - zarr
   - igraph
   - python-igraph
@@ -36,15 +36,15 @@ dependencies:
   - bbknn
 
   # PyTorch / Lightning
-  - pytorch=1.13.1
-  - torchvision=0.14.1
-  - torchaudio=0.13.1
-  - pytorch-lightning=1.9.5
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-lightning
 
   # GPU acceleration:
   # On macOS: Metal/MPS enabled automatically.
   # On Linux (NVIDIA GPU) uncomment the next line.
-  # - pytorch-cuda=11.7
+  # - pytorch-cuda=12.1
 
   # Testing
   - pytest
@@ -57,9 +57,7 @@ dependencies:
       - wheel>=0.42
 
       - umap-learn
-      - scanorama
-      - harmonypy
-      - scvi-tools==1.3.3
+      - scvi-tools
       - scib-metrics
       - types-pytz
       - celltypist
