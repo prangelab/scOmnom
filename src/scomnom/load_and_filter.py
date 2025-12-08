@@ -330,16 +330,22 @@ def sparse_filter_cells_and_genes(
 
 def doublets_detection(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
     """
-    Multi-GPU–aware SOLO doublet detection.
+    Run SOLO doublet detection via a SCVI backbone, using scvi-tools' own
+    train() wrappers (no direct Lightning Trainer usage).
 
-    Supports:
-      - CPU
-      - GPU (single)
-      - Multi-GPU via DDP
-      - Apple MPS
+    Steps:
+      1. Train SCVI on the count layer.
+      2. Build SOLO from that SCVI model.
+      3. Train SOLO.
+      4. SOLO.predict(soft=True) → doublet scores.
     """
 
-    LOGGER.info("Running SOLO doublet detection...")
+    import torch
+    import warnings
+    from scvi.model import SCVI
+    from scvi.external import SOLO
+
+    LOGGER.info("Running SOLO doublet detection (SCVI → SOLO pipeline)...")
 
     # ---------------------------
     # SELECT COUNTS LAYER
@@ -348,110 +354,91 @@ def doublets_detection(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
     if layer is None:
         LOGGER.warning("No counts_raw layer found; using adata.X.")
     else:
-        LOGGER.info(f"Using layer = {layer}")
+        LOGGER.info(f"Using layer '{layer}' for SCVI + SOLO.")
 
     # ---------------------------
-    # DEVICE + ACCELERATOR SELECTION
+    # DEVICE SELECTION
     # ---------------------------
-    # Determine GPU count
-    gpu_count = torch.cuda.device_count()
-
-    if gpu_count > 1:
+    if torch.cuda.is_available():
         accelerator = "gpu"
-        devices = gpu_count
-        strategy = "ddp"
-        precision = "16-mixed"
-        LOGGER.info(f"SOLO using MULTI-GPU: {gpu_count} GPUs (DDP)")
-
-    elif gpu_count == 1:
-        accelerator = "gpu"
-        devices = 1
-        strategy = "auto"
-        precision = "16-mixed"
-        LOGGER.info("SOLO using single GPU")
-
+        devices = "auto"  # let Lightning/scvi decide GPU count
+        LOGGER.info("SCVI/SOLO accelerator: GPU (auto devices)")
     elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
         accelerator = "mps"
         devices = 1
-        strategy = "auto"
-        precision = 32
-        LOGGER.info("SOLO using Apple MPS backend")
-
+        LOGGER.info("SCVI/SOLO accelerator: Apple MPS")
     else:
         accelerator = "cpu"
-        devices = 1
-        strategy = "auto"
-        precision = 32
-        LOGGER.info("SOLO using CPU")
+        devices = "auto"
+        LOGGER.info("SCVI/SOLO accelerator: CPU")
 
-    # ---------------------------
-    # TRAIN HYPERPARAMS
-    # ---------------------------
-    n = adata.n_obs
+    n_cells = adata.n_obs
 
-    if accelerator in ("gpu", "mps"):
-        max_epochs = 12
-        base_batch = 512
+    # Heuristic epochs based on dataset size
+    if n_cells < 50_000:
+        scvi_epochs = 80
+    elif n_cells < 200_000:
+        scvi_epochs = 60
     else:
-        if n < 20_000:
-            max_epochs = 5
-            base_batch = 128
-        elif n < 100_000:
-            max_epochs = 8
-            base_batch = 256
-        elif n < 300_000:
-            max_epochs = 10
-            base_batch = 256
-        else:
-            max_epochs = 2
-            base_batch = 256
+        scvi_epochs = 40
 
-    # Scale batch size by number of GPUs
-    batch_size = base_batch * (gpu_count if gpu_count > 1 else 1)
+    solo_epochs = 10
+    batch_size = 256
 
     LOGGER.info(
-        f"SOLO config: accelerator={accelerator}, devices={devices}, strategy={strategy}, "
-        f"batch_size={batch_size}, epochs={max_epochs}, precision={precision}"
+        f"SCVI train config: epochs={scvi_epochs}, batch_size={batch_size}, "
+        f"accelerator={accelerator}, devices={devices}"
     )
 
     # ---------------------------
-    # INIT SOLO
+    # SETUP ANNDATA FOR SCVI
     # ---------------------------
     with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message="Prior to scvi-tools")
+        warnings.filterwarnings("ignore", message=".*setup_anndata is overwriting.*")
+        warnings.filterwarnings("ignore", message=".*non-sequential data.*")
 
-    SOLO.setup_anndata(adata, layer=layer)
-    model = SOLO(adata)
+        SCVI.setup_anndata(
+            adata,
+            layer=layer,
+            batch_key=getattr(cfg, "batch_key", None),
+        )
 
     # ---------------------------
-    # TRAIN
+    # TRAIN SCVI BACKBONE
     # ---------------------------
-    trainer = pl.Trainer(
+    vae = SCVI(adata)
+
+    vae.train(
+        max_epochs=scvi_epochs,
         accelerator=accelerator,
         devices=devices,
-        strategy=strategy,
-        max_epochs=max_epochs,
-        precision=precision,
-        logger=False,
-        enable_checkpointing=False,
-        enable_progress_bar=False,
+        batch_size=batch_size,
     )
 
-    LOGGER.info("Training SOLO model...")
-    trainer.fit(model)
+    LOGGER.info(
+        f"Training SOLO classifier on SCVI latent space "
+        f"(epochs={solo_epochs}, batch_size={batch_size})"
+    )
 
     # ---------------------------
-    # PREDICT
+    # SOLO FROM SCVI MODEL
     # ---------------------------
-    LOGGER.info("Predicting doublets...")
+    solo = SOLO.from_scvi_model(vae)
 
-    # In DDP mode, prediction runs on each worker.
-    # Lightning 2.x automatically gathers outputs.
-    y_pred = model.predict(soft=True)
+    solo.train(
+        max_epochs=solo_epochs,
+        accelerator=accelerator,
+        devices=devices,
+        batch_size=batch_size,
+    )
 
-    # y_pred shape: (cells, 2)
-    doublet_scores = y_pred[:, 1]
+    # ---------------------------
+    # PREDICT DOUBLETS
+    # ---------------------------
+    LOGGER.info("Predicting doublet probabilities with SOLO...")
+    probs = solo.predict(soft=True)  # shape: (n_cells, 2)
 
+    doublet_scores = probs[:, 1]
     adata.obs["doublet_score"] = doublet_scores
     adata.obs["predicted_doublet"] = (
         doublet_scores > cfg.doublet_score_threshold
@@ -464,7 +451,6 @@ def doublets_detection(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
     )
 
     return adata
-
 
 
 
