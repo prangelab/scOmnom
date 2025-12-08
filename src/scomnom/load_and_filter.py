@@ -327,17 +327,15 @@ def sparse_filter_cells_and_genes(
 
     return adata
 
-
 def doublets_detection(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
     """
-    Run SOLO doublet detection via a SCVI backbone, using scvi-tools' own
-    train() wrappers (no direct Lightning Trainer usage).
+    SOLO doublet detection with SCVI backbone, using robust GPU OOM-safe
+    auto batch-size scaling (Lightning-style) for both SCVI and SOLO.
 
-    Steps:
-      1. Train SCVI on the count layer.
-      2. Build SOLO from that SCVI model.
-      3. Train SOLO.
-      4. SOLO.predict(soft=True) → doublet scores.
+    Strategy:
+      - Try batch sizes [1024, 512, 256, 128, 64, 32].
+      - Train SCVI using the first that does not OOM.
+      - Train SOLO with the same batch size.
     """
 
     import torch
@@ -345,10 +343,10 @@ def doublets_detection(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
     from scvi.model import SCVI
     from scvi.external import SOLO
 
-    LOGGER.info("Running SOLO doublet detection (SCVI → SOLO pipeline)...")
+    LOGGER.info("Running SOLO doublet detection (SCVI → SOLO) with auto batch-size scaling...")
 
     # ---------------------------
-    # SELECT COUNTS LAYER
+    # CHOOSE LAYER
     # ---------------------------
     layer = "counts_raw" if "counts_raw" in adata.layers else None
     if layer is None:
@@ -361,8 +359,8 @@ def doublets_detection(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
     # ---------------------------
     if torch.cuda.is_available():
         accelerator = "gpu"
-        devices = "auto"  # let Lightning/scvi decide GPU count
-        LOGGER.info("SCVI/SOLO accelerator: GPU (auto devices)")
+        devices = "auto"
+        LOGGER.info("SCVI/SOLO accelerator: GPU")
     elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
         accelerator = "mps"
         devices = 1
@@ -374,7 +372,7 @@ def doublets_detection(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
 
     n_cells = adata.n_obs
 
-    # Heuristic epochs based on dataset size
+    # Heuristic epochs
     if n_cells < 50_000:
         scvi_epochs = 80
     elif n_cells < 200_000:
@@ -383,66 +381,100 @@ def doublets_detection(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
         scvi_epochs = 40
 
     solo_epochs = 10
-    batch_size = 256
-
-    LOGGER.info(
-        f"SCVI train config: epochs={scvi_epochs}, batch_size={batch_size}, "
-        f"accelerator={accelerator}, devices={devices}"
-    )
 
     # ---------------------------
-    # SETUP ANNDATA FOR SCVI
+    # AUTO BATCH-SIZE LADDER
     # ---------------------------
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message=".*setup_anndata is overwriting.*")
-        warnings.filterwarnings("ignore", message=".*non-sequential data.*")
+    batch_ladder = [1024, 512, 256, 128, 64, 32]
 
-        SCVI.setup_anndata(
-            adata,
-            layer=layer,
-            batch_key=getattr(cfg, "batch_key", None),
+    def _is_oom_error(e):
+        txt = str(e).lower()
+        return (
+            "out of memory" in txt
+            or "cuda error" in txt
+            or "cublas_status_alloc_failed" in txt
+            or "mps" in txt and "oom" in txt
         )
 
     # ---------------------------
-    # TRAIN SCVI BACKBONE
+    # TRY BATCH SIZES (SCVI)
     # ---------------------------
-    vae = SCVI(adata)
+    chosen_batch = None
+    last_exception = None
 
-    vae.train(
-        max_epochs=scvi_epochs,
-        accelerator=accelerator,
-        devices=devices,
-        batch_size=batch_size,
-    )
+    for b in batch_ladder:
+        LOGGER.info(f"Trying SCVI batch_size={b} ...")
+        try:
+            # Setup fresh anndata manager every attempt
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=".*setup_anndata is overwriting.*")
+                SCVI.setup_anndata(
+                    adata,
+                    layer=layer,
+                    batch_key=getattr(cfg, "batch_key", None),
+                )
 
+            vae = SCVI(adata)
+
+            vae.train(
+                max_epochs=scvi_epochs,
+                accelerator=accelerator,
+                devices=devices,
+                batch_size=b,
+            )
+
+            LOGGER.info(f"SCVI successfully trained with batch_size={b}")
+            chosen_batch = b
+            break
+
+        except RuntimeError as e:
+            if _is_oom_error(e):
+                LOGGER.warning(f"OOM at batch_size={b}; retrying with smaller batch...")
+                last_exception = e
+                torch.cuda.empty_cache()
+                continue
+            raise
+        except Exception as e:
+            raise
+
+    if chosen_batch is None:
+        LOGGER.error("All batch sizes failed for SCVI — last error:")
+        raise last_exception
+
+    # ---------------------------
+    # TRAIN SOLO WITH SAME BATCH SIZE
+    # ---------------------------
     LOGGER.info(
-        f"Training SOLO classifier on SCVI latent space "
-        f"(epochs={solo_epochs}, batch_size={batch_size})"
+        f"Training SOLO with batch_size={chosen_batch} "
+        f"(epochs={solo_epochs})"
     )
 
-    # ---------------------------
-    # SOLO FROM SCVI MODEL
-    # ---------------------------
     solo = SOLO.from_scvi_model(vae)
 
-    solo.train(
-        max_epochs=solo_epochs,
-        accelerator=accelerator,
-        devices=devices,
-        batch_size=batch_size,
-    )
+    try:
+        solo.train(
+            max_epochs=solo_epochs,
+            accelerator=accelerator,
+            devices=devices,
+            batch_size=chosen_batch,
+        )
+    except RuntimeError as e:
+        if _is_oom_error(e):
+            LOGGER.error(
+                f"Unexpected OOM while training SOLO with batch_size={chosen_batch} "
+                "after SCVI succeeded — this is very unusual."
+            )
+        raise
 
     # ---------------------------
-    # PREDICT DOUBLETS
+    # PREDICT
     # ---------------------------
-    LOGGER.info("Predicting doublet probabilities with SOLO...")
-    probs = solo.predict(soft=True)  # shape: (n_cells, 2)
-
+    LOGGER.info("Predicting doublet probabilities...")
+    probs = solo.predict(soft=True)
     doublet_scores = probs[:, 1]
+
     adata.obs["doublet_score"] = doublet_scores
-    adata.obs["predicted_doublet"] = (
-        doublet_scores > cfg.doublet_score_threshold
-    )
+    adata.obs["predicted_doublet"] = doublet_scores > cfg.doublet_score_threshold
 
     LOGGER.info(
         f"Doublets detected: "
@@ -451,7 +483,6 @@ def doublets_detection(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
     )
 
     return adata
-
 
 
 def normalize_and_hvg(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
