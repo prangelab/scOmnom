@@ -327,110 +327,121 @@ def sparse_filter_cells_and_genes(
 
 def doublets_detection(adata: AnnData, cfg: LoadAndQCConfig) -> AnnData:
     """
-    Run SOLO doublet detection on the merged AnnData.
+    Run SOLO doublet detection on the merged AnnData, with hardened print/repr
+    guards to prevent rich.pretty.Node from corrupting the SOLO LightningModule.
     """
 
     import warnings
     import torch
     import pytorch_lightning as pl
     from scvi.external import SOLO
+    import builtins
 
     LOGGER.info("Running SOLO doublet detection...")
 
-    # Silence expected scvi-tools warning
-    warnings.filterwarnings(
-        "ignore",
-        message="Prior to scvi-tools",
-    )
+    # -------------------------------------------------------------
+    # HARDEN: Disable rich repr/print globally for duration of SOLO
+    # -------------------------------------------------------------
+    real_print = builtins.print
+    real_repr = builtins.repr
 
-    # ---------------------------
-    # PICK COUNTS LAYER
-    # ---------------------------
-    layer = "counts_raw" if "counts_raw" in adata.layers else None
+    def safe_print(*args, **kwargs):
+        # Prevent Lightning from invoking rich model printing
+        real_print("[print suppressed during SOLO training]")
 
-    if layer is None:
-        LOGGER.warning("No counts_raw layer found, using adata.X.")
-    else:
-        LOGGER.info(f"Using adata.layers['{layer}'] as SOLO input.")
+    def safe_repr(obj):
+        # Always return a minimal repr to avoid rich hijacking
+        return f"<{obj.__class__.__name__} object>"
 
-    # ---------------------------
-    # DEVICE + AUTO HYPERPARAMS
-    # ---------------------------
-    has_gpu = torch.cuda.is_available()
-    device_str = "cuda" if has_gpu else "cpu"
-    accelerator = "gpu" if has_gpu else "cpu"
-    devices = 1
+    builtins.print = safe_print
+    builtins.repr = safe_repr
 
-    n = adata.n_obs
-    if has_gpu:
-        max_epochs = 15
-        batch_size = 512
-        precision = "16-mixed"
-    else:
-        if n < 20_000:
-            max_epochs = 5
-            batch_size = 128
-        elif n < 100_000:
-            max_epochs = 8
-            batch_size = 256
-        elif n < 300_000:
-            max_epochs = 12
-            batch_size = 256
+    try:
+        # Silence expected scvi-tools warning
+        warnings.filterwarnings(
+            "ignore",
+            message="Prior to scvi-tools",
+        )
+
+        # Pick layer
+        layer = "counts_raw" if "counts_raw" in adata.layers else None
+        if layer is None:
+            LOGGER.warning("No counts_raw layer found, using adata.X.")
         else:
-            max_epochs = 2
-            batch_size = 256
-        precision = 32
+            LOGGER.info(f"Using adata.layers['{layer}'] as SOLO input.")
 
-    LOGGER.info(
-        f"SOLO device: {device_str} | epochs={max_epochs}, batch_size={batch_size}, "
-        f"accelerator={accelerator}, precision={precision}"
-    )
+        # Device
+        has_gpu = torch.cuda.is_available()
+        device_str = "cuda" if has_gpu else "cpu"
+        accelerator = "gpu" if has_gpu else "cpu"
+        devices = 1
 
-    # ---------------------------
-    # SCVI SETUP
-    # ---------------------------
-    SOLO.setup_anndata(adata, layer=layer)
+        n = adata.n_obs
+        if has_gpu:
+            max_epochs = 15
+            batch_size = 512
+            precision = "16-mixed"
+        else:
+            if n < 20_000:
+                max_epochs = 5
+                batch_size = 128
+            elif n < 100_000:
+                max_epochs = 8
+                batch_size = 256
+            elif n < 300_000:
+                max_epochs = 12
+                batch_size = 256
+            else:
+                max_epochs = 2
+                batch_size = 256
+            precision = 32
 
-    solo_model = SOLO(adata)
-    trainer = pl.Trainer(
-        max_epochs=max_epochs,
-        accelerator=accelerator,
-        devices=devices,
-        enable_checkpointing=False,
-        logger=False,
-        enable_model_summary=False,
-        enable_progress_bar=False,
-        callbacks=[],
-        deterministic=False,
-        precision=precision,
-    )
+        LOGGER.info(
+            f"SOLO device: {device_str} | epochs={max_epochs}, batch_size={batch_size}, "
+            f"accelerator={accelerator}, precision={precision}"
+        )
 
-    LOGGER.info("Training SOLO model...")
+        # Setup + training
+        SOLO.setup_anndata(adata, layer=layer)
+        solo_model = SOLO(adata)
 
-    trainer.fit(solo_model)
+        trainer = pl.Trainer(
+            max_epochs=max_epochs,
+            accelerator=accelerator,
+            devices=devices,
+            enable_checkpointing=False,
+            logger=False,
+            enable_model_summary=False,
+            enable_progress_bar=False,
+            callbacks=[],  # remove any implicit callbacks
+            deterministic=False,
+            precision=precision,
+        )
 
-    LOGGER.info("SOLO training complete. Predicting doublets...")
+        LOGGER.info("Training SOLO model...")
+        trainer.fit(solo_model)
 
-    # ---------------------------
-    # CANONICAL PREDICTION CALL
-    # ---------------------------
-    y_pred = solo_model.predict(soft=True,)
+        LOGGER.info("SOLO training complete. Predicting doublets...")
+        y_pred = solo_model.predict(soft=True, return_logits=False)
+        doublet_scores = y_pred[:, 1]
 
-    doublet_col = [c for c in y_pred.columns if "doublet" in c.lower()][0]
-    doublet_scores = y_pred[doublet_col].to_numpy()
+        adata.obs["doublet_score"] = doublet_scores
+        adata.obs["predicted_doublet"] = (
+            adata.obs["doublet_score"].values > cfg.doublet_score_threshold
+        )
 
-    adata.obs["doublet_score"] = doublet_scores
-    adata.obs["predicted_doublet"] = (
-        adata.obs["doublet_score"].values > cfg.doublet_score_threshold
-    )
+        LOGGER.info(
+            f"Doublets detected: "
+            f"{adata.obs['predicted_doublet'].sum()} / {adata.n_obs} "
+            f"({adata.obs['predicted_doublet'].mean()*100:.2f}%)"
+        )
 
-    LOGGER.info(
-        f"Doublets detected: "
-        f"{adata.obs['predicted_doublet'].sum()} / {adata.n_obs} "
-        f"({adata.obs['predicted_doublet'].mean()*100:.2f}%)"
-    )
+        return adata
 
-    return adata
+    finally:
+        # Restore the real print and repr after SOLO training
+        builtins.print = real_print
+        builtins.repr = real_repr
 
 
 
