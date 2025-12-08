@@ -6,6 +6,73 @@ from matplotlib.figure import Figure
 import multiprocessing
 
 
+class LoadDataConfig(BaseModel):
+    """
+    Configuration for the new load_data module:
+    - Load raw/filtered/CellBender matrices
+    - Merge samples
+    - Add metadata
+    - Save to Zarr (+ optional H5AD)
+    """
+
+    # -------------------------------
+    # I/O
+    # -------------------------------
+    raw_sample_dir: Optional[Path] = None
+    filtered_sample_dir: Optional[Path] = None
+    cellbender_dir: Optional[Path] = None
+
+    metadata_tsv: Path = Field(..., description="TSV with per-sample metadata indexed by sample ID")
+
+    output_dir: Path = Field(..., description="Directory for merged Zarr/H5AD output")
+    output_name: str = Field("adata.merged", description="Base name for output (without suffix)")
+
+    save_h5ad: bool = False
+
+    # -------------------------------
+    # CPU / performance
+    # -------------------------------
+    n_jobs: int = Field(4, ge=1)
+
+    # -------------------------------
+    # Batch key
+    # -------------------------------
+    batch_key: Optional[str] = Field(
+        None,
+        description="Column in metadata TSV used as batch/sample ID. Auto-detected if None."
+    )
+
+    # -------------------------------
+    # Patterns (pass-through to io_utils)
+    # -------------------------------
+    raw_pattern: str = "*.raw_feature_bc_matrix"
+    filtered_pattern: str = "*.filtered_feature_bc_matrix"
+    cellbender_pattern: str = "*.cellbender_filtered.output"
+    cellbender_h5_suffix: str = ".cellbender_out.h5"
+
+    # -------------------------------
+    # Validators
+    # -------------------------------
+    @validator("output_name")
+    def strip_suffix(cls, v):
+        # Ensure user does NOT accidentally pass ".h5ad"
+        return v.replace(".h5ad", "").replace(".zarr", "")
+
+    @model_validator(mode="after")
+    def check_exactly_one_source(self):
+        sources = [
+            self.raw_sample_dir,
+            self.filtered_sample_dir,
+            self.cellbender_dir,
+        ]
+        if sum(x is not None for x in sources) != 1:
+            raise ValueError(
+                "Exactly one of raw_sample_dir, filtered_sample_dir, cellbender_dir must be set."
+            )
+        return self
+
+
+
 class LoadAndQCConfig(BaseModel):
     # I/O
     raw_sample_dir: Optional[Path] = Field(None, description="Directory with 10x raw_feature_bc_matrix folders")

@@ -193,6 +193,79 @@ def cell_qc(
     )
     run_cell_qc(cfg)
 
+# ======================================================================
+#  load-data  (new module)
+# ======================================================================
+@app.command("load-data", help="Load samples, merge, attach metadata, and save Zarr (no QC/filtering).")
+def load_data(
+    # -----------------------
+    # I/O
+    # -----------------------
+    raw_sample_dir: Optional[Path] = typer.Option(
+        None, "--raw-sample-dir", "-r",
+        help="Directory with <sample>.raw_feature_bc_matrix folders",
+    ),
+    filtered_sample_dir: Optional[Path] = typer.Option(
+        None, "--filtered-sample-dir", "-f",
+        help="Directory with <sample>.filtered_feature_bc_matrix folders",
+    ),
+    cellbender_dir: Optional[Path] = typer.Option(
+        None, "--cellbender-dir", "-c",
+        help="Directory with <sample>.cellbender_filtered.output folders",
+    ),
+    metadata_tsv: Path = typer.Option(
+        ..., "--metadata-tsv", "-m",
+        help="TSV with per-sample metadata",
+    ),
+    output_dir: Path = typer.Option(
+        ..., "--out", "-o",
+        help="Output directory; Zarr will be written here",
+    ),
+    output_name: str = typer.Option(
+        "adata.merged", "--output-name",
+        help="Base name for Zarr/H5AD output",
+    ),
+    save_h5ad: bool = typer.Option(
+        False, "--save-h5ad/--no-save-h5ad",
+        help="Optionally write .h5ad (memory-heavy)",
+    ),
+
+    # -----------------------
+    # Performance
+    # -----------------------
+    n_jobs: int = typer.Option(4, "--n-jobs"),
+
+    # -----------------------
+    # Patterns
+    # -----------------------
+    raw_pattern: str = typer.Option("*.raw_feature_bc_matrix"),
+    filtered_pattern: str = typer.Option("*.filtered_feature_bc_matrix"),
+    cellbender_pattern: str = typer.Option("*.cellbender_filtered.output"),
+    cellbender_h5_suffix: str = typer.Option(".cellbender_out.h5"),
+):
+    logfile = output_dir / "load-data.log"
+    init_logging(logfile)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    cfg = LoadDataConfig(
+        raw_sample_dir=raw_sample_dir,
+        filtered_sample_dir=filtered_sample_dir,
+        cellbender_dir=cellbender_dir,
+        metadata_tsv=metadata_tsv,
+        output_dir=output_dir,
+        output_name=output_name,
+        save_h5ad=save_h5ad,
+        n_jobs=n_jobs,
+        raw_pattern=raw_pattern,
+        filtered_pattern=filtered_pattern,
+        cellbender_pattern=cellbender_pattern,
+        cellbender_h5_suffix=cellbender_h5_suffix,
+    )
+
+    from .load_data import run_load_data
+    run_load_data(cfg, logfile)
+
 
 # ======================================================================
 #  load-and-filter
