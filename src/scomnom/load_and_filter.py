@@ -396,7 +396,7 @@ def doublets_detection(adata: AnnData, cfg: LoadAndQCConfig) -> AnnData:
     # ------------------------------
     # PREDICT
     # ------------------------------
-    y_pred = solo_model.predict(soft=True, return_logits=False)
+    y_pred = solo_model.predict(soft=True, return_logits=False, include_simulated_doublets=True,)
 
     # y_pred shape: (cells, 2) = [prob_singlet, prob_doublet]
     doublet_scores = y_pred[:, 1]
