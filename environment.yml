@@ -34,14 +34,17 @@ dependencies:
   - typer
   - pydantic
   - bbknn
-  - pytorch=2.1.0
+
+  # PyTorch / Lightning
+  - pytorch=1.13.1
+  - torchvision=0.14.1
+  - torchaudio=0.13.1
   - pytorch-lightning=1.9.5
-  - torchvision=0.16.0
-  - torchaudio=2.1.0
-  # # GPU ACCELERATION:
-  # # ON A MAC: AUTO ENABLED (METAL)
-  # # ON LINUX (NVIDIA GPU A100) - UNCOMMENT THIS LINE (ALSO ON HPC)
-  # # - pytorch-cuda=12.1
+
+  # GPU acceleration:
+  # On macOS: Metal/MPS enabled automatically.
+  # On Linux (NVIDIA GPU) uncomment the next line.
+  # - pytorch-cuda=11.7
 
   # Testing
   - pytest
