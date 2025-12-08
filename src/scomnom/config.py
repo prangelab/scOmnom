@@ -6,57 +6,63 @@ from matplotlib.figure import Figure
 import multiprocessing
 
 
+# -------------------------------
+# LoadDataConfig
+# -------------------------------
 class LoadDataConfig(BaseModel):
     """
-    Configuration for the new load_data module:
-    - Load raw/filtered/CellBender matrices
-    - Merge samples
-    - Add metadata
-    - Save to Zarr (+ optional H5AD)
+    Configuration for the lightweight load_data module:
+    Load → Metadata → Merge → Optional readcount QC → Save.
+    No filtering, no QC thresholds, no dimensionality reduction.
     """
 
-    # -------------------------------
     # I/O
-    # -------------------------------
-    raw_sample_dir: Optional[Path] = None
-    filtered_sample_dir: Optional[Path] = None
-    cellbender_dir: Optional[Path] = None
-
-    metadata_tsv: Path = Field(..., description="TSV with per-sample metadata indexed by sample ID")
-
-    output_dir: Path = Field(..., description="Directory for merged Zarr/H5AD output")
-    output_name: str = Field("adata.merged", description="Base name for output (without suffix)")
-
-    save_h5ad: bool = False
-
-    # -------------------------------
-    # CPU / performance
-    # -------------------------------
-    n_jobs: int = Field(4, ge=1)
-
-    # -------------------------------
-    # Batch key
-    # -------------------------------
-    batch_key: Optional[str] = Field(
-        None,
-        description="Column in metadata TSV used as batch/sample ID. Auto-detected if None."
+    raw_sample_dir: Optional[Path] = Field(
+        None, description="Directory with <sample>.raw_feature_bc_matrix folders"
+    )
+    filtered_sample_dir: Optional[Path] = Field(
+        None, description="Directory with <sample>.filtered_feature_bc_matrix folders"
+    )
+    cellbender_dir: Optional[Path] = Field(
+        None, description="Directory with CellBender outputs"
+    )
+    metadata_tsv: Optional[Path] = Field(
+        None, description="TSV with per-sample metadata indexed by sample ID"
     )
 
-    # -------------------------------
-    # Patterns (pass-through to io_utils)
-    # -------------------------------
+    output_dir: Path = Field(..., description="Directory for outputs (zarr + figures)")
+    output_name: str = Field("adata.loaded", description="Output filename stem")
+    save_h5ad: bool = False
+
+    n_jobs: int = Field(4, ge=1)
+
+    # 10x patterns
     raw_pattern: str = "*.raw_feature_bc_matrix"
     filtered_pattern: str = "*.filtered_feature_bc_matrix"
     cellbender_pattern: str = "*.cellbender_filtered.output"
     cellbender_h5_suffix: str = ".cellbender_out.h5"
 
-    # -------------------------------
-    # Validators
-    # -------------------------------
-    @validator("output_name")
-    def strip_suffix(cls, v):
-        # Ensure user does NOT accidentally pass ".h5ad"
-        return v.replace(".h5ad", "").replace(".zarr", "")
+    # Figures
+    make_figures: bool = True
+    figdir_name: str = "figures"
+    figure_formats: List[str] = Field(default_factory=lambda: ["png", "pdf"])
+
+    batch_key: Optional[str] = None  # determined from metadata
+
+    @property
+    def figdir(self) -> Path:
+        return self.output_dir / self.figdir_name
+
+    @validator("figure_formats", each_item=True)
+    def validate_formats(cls, fmt: str):
+        supported = Figure().canvas.get_supported_filetypes()
+        fmt = fmt.lower()
+        if fmt not in supported:
+            raise ValueError(
+                f"Unsupported figure format '{fmt}'. "
+                f"Supported: {', '.join(sorted(supported))}"
+            )
+        return fmt
 
     @model_validator(mode="after")
     def check_exactly_one_source(self):
@@ -67,10 +73,9 @@ class LoadDataConfig(BaseModel):
         ]
         if sum(x is not None for x in sources) != 1:
             raise ValueError(
-                "Exactly one of raw_sample_dir, filtered_sample_dir, cellbender_dir must be set."
+                "Exactly one of raw_sample_dir, filtered_sample_dir, or cellbender_dir must be set."
             )
         return self
-
 
 
 class LoadAndQCConfig(BaseModel):
@@ -190,40 +195,6 @@ class IntegrationConfig(BaseModel):
         if v is None:
             return None
         return [m.strip() for m in v]
-
-
-class CellQCConfig(BaseModel):
-    # Paths
-    output_dir: Path
-
-    # Figure handling
-    figdir_name: str = "figures"
-    figure_formats: List[str] = ["png", "pdf"]
-
-    # 10x directory patterns (same defaults as LoadAndQCConfig for compatibility)
-    raw_pattern: str = "*.raw_feature_bc_matrix"
-    filtered_pattern: str = "*.filtered_feature_bc_matrix"
-    cellbender_pattern: str = "*.cellbender_filtered.output"
-    cellbender_h5_suffix: str = ".cellbender_out.h5"
-
-    # These are assigned dynamically by cell-qc
-    raw_sample_dir: Optional[Path] = None
-    filtered_sample_dir: Optional[Path] = None
-    cellbender_dir: Optional[Path] = None
-
-    # Metadata not used in cell-qc, but included for compatibility with io_utils
-    metadata_tsv: Optional[Path] = None
-    batch_key: Optional[str] = None
-
-    make_figures: bool = True
-
-    @validator("figure_formats", each_item=True)
-    def validate_formats(cls, fmt):
-        supported = Figure().canvas.get_supported_filetypes()
-        fmt = fmt.lower()
-        if fmt not in supported:
-            raise ValueError(f"Unsupported figure format '{fmt}'. Supported: {', '.join(sorted(supported))}")
-        return fmt
 
 
 class ClusterAnnotateConfig(BaseModel):

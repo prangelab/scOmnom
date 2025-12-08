@@ -4,7 +4,6 @@ import typer
 from pathlib import Path
 import warnings
 
-from .cell_qc import run_cell_qc
 from .load_and_filter import run_load_and_filter
 from .integrate import run_integration
 from .cluster_and_annotate import run_clustering
@@ -142,102 +141,52 @@ def _gene_sets_completion(
 
 
 # ======================================================================
-#  cell-qc
+#  load-data
 # ======================================================================
-@app.command("cell-qc", help="QC comparison between raw, filtered, and CellBender matrices.")
-def cell_qc(
-    # -------------------------------------------------------------
-    # I/O
-    # -------------------------------------------------------------
-    raw: Optional[Path] = typer.Option(
-        None, "--raw", "-r",
-        help="[I/O] Directory containing raw 10x matrices (*.raw_feature_bc_matrix)",
-    ),
-    filtered: Optional[Path] = typer.Option(
-        None, "--filtered", "-f",
-        help="[I/O] Directory with filtered 10x matrices (*.filtered_feature_bc_matrix)",
-    ),
-    cellbender: Optional[Path] = typer.Option(
-        None, "--cellbender", "-c",
-        help="[I/O] Directory containing CellBender outputs (*.cellbender_filtered.output)",
-    ),
-    output_dir: Path = typer.Option(
-        ..., "--out", "-o",
-        help="[I/O] Output directory containing figures/",
-    ),
-
-    # -------------------------------------------------------------
-    # Figures
-    # -------------------------------------------------------------
-    figure_formats: List[str] = typer.Option(
-        ["png", "pdf"], "--format", "-F",
-        help="[Figures] Formats to export (png, pdf, svg). Repeat for multiple.",
-    ),
-):
-    logfile = output_dir / "cell_qc.log"
-    init_logging(logfile)
-
-    if not (raw or filtered or cellbender):
-        raise typer.BadParameter("Provide at least one of --raw / --filtered / --cellbender")
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    cfg = CellQCConfig(
-        output_dir=output_dir,
-        figdir_name="figures",
-        figure_formats=figure_formats,
-        raw_sample_dir=raw,
-        filtered_sample_dir=filtered,
-        cellbender_dir=cellbender,
-        make_figures=True,
-    )
-    run_cell_qc(cfg)
-
-# ======================================================================
-#  load-data  (new module)
-# ======================================================================
-@app.command("load-data", help="Load samples, merge, attach metadata, and save Zarr (no QC/filtering).")
+@app.command("load-data", help="Load data, attach metadata, merge samples, and save merged .zarr (+ optional .h5ad)")
 def load_data(
-    # -----------------------
-    # I/O
-    # -----------------------
+    # I/O -------------------------------------------------------------
     raw_sample_dir: Optional[Path] = typer.Option(
         None, "--raw-sample-dir", "-r",
-        help="Directory with <sample>.raw_feature_bc_matrix folders",
+        help="Directory with <sample>.raw_feature_bc_matrix folders.",
     ),
     filtered_sample_dir: Optional[Path] = typer.Option(
         None, "--filtered-sample-dir", "-f",
-        help="Directory with <sample>.filtered_feature_bc_matrix folders",
+        help="Directory with <sample>.filtered_feature_bc_matrix folders.",
     ),
     cellbender_dir: Optional[Path] = typer.Option(
         None, "--cellbender-dir", "-c",
-        help="Directory with <sample>.cellbender_filtered.output folders",
+        help="Directory with <sample>.cellbender_filtered.output folders.",
     ),
     metadata_tsv: Path = typer.Option(
-        ..., "--metadata-tsv", "-m",
-        help="TSV with per-sample metadata",
+        ..., "--metadata-tsv", "-m", exists=True,
+        help="TSV with per-sample metadata (must contain sample ID column).",
     ),
     output_dir: Path = typer.Option(
         ..., "--out", "-o",
-        help="Output directory; Zarr will be written here",
+        help="Output directory where merged dataset will be written.",
     ),
     output_name: str = typer.Option(
-        "adata.merged", "--output-name",
-        help="Base name for Zarr/H5AD output",
+        "adata.loaded", "--output-name",
+        help="Output filename stem (no extension).",
     ),
     save_h5ad: bool = typer.Option(
-        False, "--save-h5ad/--no-save-h5ad",
-        help="Optionally write .h5ad (memory-heavy)",
+        False,
+        "--save-h5ad/--no-save-h5ad",
+        help="Also write an .h5ad copy (loads full matrix into RAM).",
     ),
 
-    # -----------------------
-    # Performance
-    # -----------------------
+    # Compute ---------------------------------------------------------
     n_jobs: int = typer.Option(4, "--n-jobs"),
 
-    # -----------------------
-    # Patterns
-    # -----------------------
+    # Figures ---------------------------------------------------------
+    make_figures: bool = typer.Option(True, help="Whether to generate read-count QC plots."),
+    figure_format: List[str] = typer.Option(
+        ["png", "pdf"], "--figure-format", "-F",
+        help="Figure formats to save (repeat for multiple).",
+    ),
+
+    # Pattern overrides ----------------------------------------------
     raw_pattern: str = typer.Option("*.raw_feature_bc_matrix"),
     filtered_pattern: str = typer.Option("*.filtered_feature_bc_matrix"),
     cellbender_pattern: str = typer.Option("*.cellbender_filtered.output"),
@@ -245,8 +194,6 @@ def load_data(
 ):
     logfile = output_dir / "load-data.log"
     init_logging(logfile)
-
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     cfg = LoadDataConfig(
         raw_sample_dir=raw_sample_dir,
@@ -257,13 +204,14 @@ def load_data(
         output_name=output_name,
         save_h5ad=save_h5ad,
         n_jobs=n_jobs,
+        make_figures=make_figures,
+        figure_formats=figure_format,
         raw_pattern=raw_pattern,
         filtered_pattern=filtered_pattern,
         cellbender_pattern=cellbender_pattern,
         cellbender_h5_suffix=cellbender_h5_suffix,
     )
 
-    from .load_data import run_load_data
     run_load_data(cfg, logfile)
 
 
