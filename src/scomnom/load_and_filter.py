@@ -313,120 +313,61 @@ def sparse_filter_cells_and_genes(
 def doublets_detection(adata: AnnData, cfg: LoadAndQCConfig) -> AnnData:
     """
     Run SOLO doublet detection on the merged AnnData.
-    Works on CPU or GPU automatically.
-
-    This version includes extra debug logging about the SOLO input
-    (dtype, integer-ness, etc.) to help diagnose issues with counts.
+    Version intended for a *non-broken* scvi-tools installation.
     """
 
-    import warnings
     import numpy as np
     import scipy.sparse as sp
-    from scvi.external import SOLO
+    import warnings
     import torch
     import pytorch_lightning as pl
+    from scvi.external import SOLO
 
     LOGGER.info("Running SOLO doublet detection...")
 
-    # Silence the harmless scvi-tools warning about logits vs probabilities
+    # Silence expected scvi-tools warning
     warnings.filterwarnings(
         "ignore",
-        message="Prior to scvi-tools 1.1.3, `SOLO.predict`",
+        message="Prior to scvi-tools",
     )
 
-    # ---------------------------------------------------------
-    # Choose input layer for SOLO
-    # ---------------------------------------------------------
-    if "counts_raw" in adata.layers:
-        layer = "counts_raw"
-        X = adata.layers[layer]
-        LOGGER.info("Using adata.layers['%s'] as SOLO input.", layer)
-    else:
-        layer = None
+    # ---------------------------
+    # PICK COUNTS LAYER
+    # ---------------------------
+    layer = "counts_raw" if "counts_raw" in adata.layers else None
+
+    if layer is None:
+        LOGGER.warning("No counts_raw layer found, using adata.X.")
         X = adata.X
-        LOGGER.info("Using adata.X as SOLO input (no 'counts_raw' layer found).")
+    else:
+        X = adata.layers[layer]
+        LOGGER.info(f"Using adata.layers['{layer}'] as SOLO input.")
 
-    # ---------------------------------------------------------
-    # DEBUG: inspect dtype + integer-ness of the SOLO input
-    # ---------------------------------------------------------
-    try:
-        if sp.issparse(X):
-            data = X.data
-            LOGGER.info(
-                "SOLO input is sparse (%s), shape=%s, nnz=%d, dtype=%s",
-                type(X).__name__,
-                X.shape,
-                data.size,
-                data.dtype,
-            )
-            is_int_dtype = np.issubdtype(data.dtype, np.integer)
-            LOGGER.info("SOLO sparse data integer dtype? %s", is_int_dtype)
+    # Debug: log sparse/dtype information
+    if sp.issparse(X):
+        LOGGER.info(
+            f"SOLO input is sparse ({type(X).__name__}), "
+            f"shape={X.shape}, nnz={X.nnz}, dtype={X.dtype}"
+        )
+    else:
+        LOGGER.info(
+            f"SOLO input is dense ndarray, shape={X.shape}, dtype={X.dtype}"
+        )
 
-            if data.size > 0 and not is_int_dtype:
-                # Sample up to 100k nonzero entries to check for fractional values
-                n_sample = min(100_000, data.size)
-                idx = np.random.choice(data.size, size=n_sample, replace=False)
-                sample = data[idx].astype(np.float64)
-                frac = sample - np.round(sample)
-                max_abs_frac = float(np.max(np.abs(frac)))
-                frac_non_integer = float(np.mean(np.abs(frac) > 1e-6))
-                LOGGER.info(
-                    "SOLO sparse data non-integer diagnostics: "
-                    "max_abs_fractional_part=%.3g, frac_non_integer=%.3g "
-                    "(sampled %d entries)",
-                    max_abs_frac,
-                    frac_non_integer,
-                    n_sample,
-                )
-        else:
-            arr = np.asarray(X)
-            LOGGER.info(
-                "SOLO input is dense, shape=%s, dtype=%s",
-                arr.shape,
-                arr.dtype,
-            )
-            is_int_dtype = np.issubdtype(arr.dtype, np.integer)
-            LOGGER.info("SOLO dense data integer dtype? %s", is_int_dtype)
+    LOGGER.info(f"SOLO sparse data integer dtype? {np.issubdtype(X.dtype, np.integer)}")
 
-            if arr.size > 0 and not is_int_dtype:
-                flat = arr.ravel()
-                n_sample = min(100_000, flat.size)
-                idx = np.random.choice(flat.size, size=n_sample, replace=False)
-                sample = flat[idx].astype(np.float64)
-                frac = sample - np.round(sample)
-                max_abs_frac = float(np.max(np.abs(frac)))
-                frac_non_integer = float(np.mean(np.abs(frac) > 1e-6))
-                LOGGER.info(
-                    "SOLO dense data non-integer diagnostics: "
-                    "max_abs_fractional_part=%.3g, frac_non_integer=%.3g "
-                    "(sampled %d entries)",
-                    max_abs_frac,
-                    frac_non_integer,
-                    n_sample,
-                )
-    except Exception as e:
-        LOGGER.warning("Failed to run SOLO input dtype diagnostics: %s", e)
-
-    # ---------------------------------------------------------
-    # Prepare AnnData for SOLO
-    # ---------------------------------------------------------
-    SOLO.setup_anndata(adata, layer=layer)
-
-    # Instantiate model
-    solo_model = SOLO(adata)
-
-    # ---------------------------------------------------------
-    # Auto hyperparameters (your existing logic)
-    # ---------------------------------------------------------
-    n = adata.n_obs
+    # ---------------------------
+    # DEVICE + AUTO HYPERPARAMS
+    # ---------------------------
     has_gpu = torch.cuda.is_available()
     device_str = "cuda" if has_gpu else "cpu"
+    accelerator = "gpu" if has_gpu else "cpu"
+    devices = 1
 
+    n = adata.n_obs
     if has_gpu:
         max_epochs = 15
         batch_size = 512
-        accelerator = "gpu"
-        devices = 1
         precision = "16-mixed"
     else:
         if n < 20_000:
@@ -441,23 +382,24 @@ def doublets_detection(adata: AnnData, cfg: LoadAndQCConfig) -> AnnData:
         else:
             max_epochs = 15
             batch_size = 256
-
-        accelerator = "cpu"
-        devices = 1
         precision = 32
 
     LOGGER.info(
-        "SOLO device: %s | epochs=%d, batch_size=%d, accelerator=%s, precision=%s",
-        device_str,
-        max_epochs,
-        batch_size,
-        accelerator,
-        precision,
+        f"SOLO device: {device_str} | epochs={max_epochs}, batch_size={batch_size}, "
+        f"accelerator={accelerator}, precision={precision}"
     )
 
-    # ---------------------------------------------------------
-    # Trainer (Lightning) — unchanged
-    # ---------------------------------------------------------
+    # ---------------------------
+    # SCVI SETUP
+    # ---------------------------
+    SOLO.setup_anndata(adata, layer=layer)
+
+    solo_model = SOLO(adata)
+
+    # ---------------------------
+    # LIGHTNING 2.x COMPAT FIX
+    # (Harmless on non-broken scvi-tools)
+    # ---------------------------
     trainer = pl.Trainer(
         max_epochs=max_epochs,
         accelerator=accelerator,
@@ -466,34 +408,33 @@ def doublets_detection(adata: AnnData, cfg: LoadAndQCConfig) -> AnnData:
         logger=False,
         enable_model_summary=False,
         deterministic=False,
-        gradient_clip_val=None,
-        inference_mode=True,
+        inference_mode=False,     # <- prevents Lightning from wrapping the model
         precision=precision,
     )
 
     LOGGER.info("Training SOLO model...")
+
     trainer.fit(solo_model)
+
     LOGGER.info("SOLO training complete. Predicting doublets...")
 
-    # ---------------------------------------------------------
-    # Predict
-    # ---------------------------------------------------------
-    # NOTE: this is where the _solo_doub_sim bug shows up; we’re *not*
-    # changing that logic yet, just instrumenting counts.
+    # ---------------------------
+    # CANONICAL PREDICTION CALL
+    # ---------------------------
     y_pred = solo_model.predict(soft=True, return_logits=False)
 
-    # y_pred: (n_cells, 2)
+    # y_pred shape: (cells, 2)
     doublet_scores = y_pred[:, 1]
+
     adata.obs["doublet_score"] = doublet_scores
     adata.obs["predicted_doublet"] = (
-        doublet_scores > cfg.doublet_score_threshold
+        adata.obs["doublet_score"].values > cfg.doublet_score_threshold
     )
 
     LOGGER.info(
-        "Doublets detected: %d / %d (%.2f%%)",
-        int(adata.obs["predicted_doublet"].sum()),
-        int(adata.n_obs),
-        float(adata.obs["predicted_doublet"].mean() * 100),
+        f"Doublets detected: "
+        f"{adata.obs['predicted_doublet'].sum()} / {adata.n_obs} "
+        f"({adata.obs['predicted_doublet'].mean()*100:.2f}%)"
     )
 
     return adata
