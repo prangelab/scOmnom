@@ -398,10 +398,10 @@ def doublets_detection(adata: AnnData, cfg: LoadAndQCConfig) -> AnnData:
     # ---------------------------
     # CANONICAL PREDICTION CALL
     # ---------------------------
-    y_pred = solo_model.predict(soft=True, return_logits=False)
+    y_pred = solo_model.predict(soft=True,)
 
-    # y_pred shape: (cells, 2)
-    doublet_scores = y_pred[:, 1]
+    doublet_col = [c for c in y_pred.columns if "doublet" in c.lower()][0]
+    doublet_scores = y_pred[doublet_col].to_numpy()
 
     adata.obs["doublet_score"] = doublet_scores
     adata.obs["predicted_doublet"] = (
