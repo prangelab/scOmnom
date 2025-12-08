@@ -2,7 +2,6 @@ from __future__ import annotations
 import logging
 import anndata as ad
 import scanpy as sc
-from joblib import Parallel, delayed
 from kneed import KneeLocator
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -10,6 +9,10 @@ from typing import Dict, List, Optional
 from .config import LoadAndQCConfig
 from . import io_utils
 from . import plot_utils
+import torch
+import lightning.pytorch as pl
+import warnings
+from scvi.external import SOLO
 
 LOGGER = logging.getLogger(__name__)
 
@@ -327,83 +330,141 @@ def sparse_filter_cells_and_genes(
 
 def doublets_detection(adata: ad.AnnData, cfg: LoadAndQCConfig) -> ad.AnnData:
     """
-    Memory-safe doublet detection using Scrublet in chunked mode.
-    Avoids OOM on very large datasets by processing cells in batches.
+    Multi-GPU–aware SOLO doublet detection.
 
-    Adds:
-        - adata.obs["doublet_score"]
-        - adata.obs["predicted_doublet"]
+    Supports:
+      - CPU
+      - GPU (single)
+      - Multi-GPU via DDP
+      - Apple MPS
     """
-    import numpy as np
-    import scrublet as scr
-    from scipy import sparse
 
-    LOGGER.info("Running Scrublet (chunked mode) for doublet detection...")
+    LOGGER.info("Running SOLO doublet detection...")
 
-    # Ensure sparse CSR for safe slicing
-    if not sparse.issparse(adata.X):
-        LOGGER.warning("Converting dense matrix to CSR sparse matrix for Scrublet.")
-        adata.X = sparse.csr_matrix(adata.X)
+    # ---------------------------
+    # SELECT COUNTS LAYER
+    # ---------------------------
+    layer = "counts_raw" if "counts_raw" in adata.layers else None
+    if layer is None:
+        LOGGER.warning("No counts_raw layer found; using adata.X.")
     else:
-        adata.X = adata.X.tocsr()
+        LOGGER.info(f"Using layer = {layer}")
 
-    X = adata.X
-    n_cells = adata.n_obs
+    # ---------------------------
+    # DEVICE + ACCELERATOR SELECTION
+    # ---------------------------
+    # Determine GPU count
+    gpu_count = torch.cuda.device_count()
 
-    # Choose chunk size (auto-tuned)
-    if n_cells < 80_000:
-        chunk_size = 40_000
-    elif n_cells < 200_000:
-        chunk_size = 50_000
-    elif n_cells < 400_000:
-        chunk_size = 60_000
+    if gpu_count > 1:
+        accelerator = "gpu"
+        devices = gpu_count
+        strategy = "ddp"
+        precision = "16-mixed"
+        LOGGER.info(f"SOLO using MULTI-GPU: {gpu_count} GPUs (DDP)")
+
+    elif gpu_count == 1:
+        accelerator = "gpu"
+        devices = 1
+        strategy = "auto"
+        precision = "16-mixed"
+        LOGGER.info("SOLO using single GPU")
+
+    elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        accelerator = "mps"
+        devices = 1
+        strategy = "auto"
+        precision = 32
+        LOGGER.info("SOLO using Apple MPS backend")
+
     else:
-        chunk_size = 80_000
+        accelerator = "cpu"
+        devices = 1
+        strategy = "auto"
+        precision = 32
+        LOGGER.info("SOLO using CPU")
+
+    # ---------------------------
+    # TRAIN HYPERPARAMS
+    # ---------------------------
+    n = adata.n_obs
+
+    if accelerator in ("gpu", "mps"):
+        max_epochs = 12
+        base_batch = 512
+    else:
+        if n < 20_000:
+            max_epochs = 5
+            base_batch = 128
+        elif n < 100_000:
+            max_epochs = 8
+            base_batch = 256
+        elif n < 300_000:
+            max_epochs = 10
+            base_batch = 256
+        else:
+            max_epochs = 2
+            base_batch = 256
+
+    # Scale batch size by number of GPUs
+    batch_size = base_batch * (gpu_count if gpu_count > 1 else 1)
 
     LOGGER.info(
-        f"Scrublet: {n_cells:,} cells will be processed in chunks of {chunk_size:,}."
+        f"SOLO config: accelerator={accelerator}, devices={devices}, strategy={strategy}, "
+        f"batch_size={batch_size}, epochs={max_epochs}, precision={precision}"
     )
 
-    all_scores = np.zeros(n_cells, dtype=np.float32)
-    all_preds = np.zeros(n_cells, dtype=bool)
+    # ---------------------------
+    # INIT SOLO
+    # ---------------------------
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="Prior to scvi-tools")
 
-    for start in range(0, n_cells, chunk_size):
-        end = min(start + chunk_size, n_cells)
-        LOGGER.info(f"  → processing chunk {start:,}–{end:,} ({end-start:,} cells)")
+    SOLO.setup_anndata(adata, layer=layer)
+    model = SOLO(adata)
 
-        X_chunk = X[start:end]
+    # ---------------------------
+    # TRAIN
+    # ---------------------------
+    trainer = pl.Trainer(
+        accelerator=accelerator,
+        devices=devices,
+        strategy=strategy,
+        max_epochs=max_epochs,
+        precision=precision,
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+    )
 
-        scrub = scr.Scrublet(
-            X_chunk,
-            expected_doublet_rate=getattr(cfg, "expected_doublet_rate", 0.06),
-        )
+    LOGGER.info("Training SOLO model...")
+    trainer.fit(model)
 
-        try:
-            scores, preds = scrub.scrub_doublets()
-        except Exception as e:
-            raise RuntimeError(
-                f"Scrublet failed on chunk {start:,}–{end:,}: {e}"
-            )
+    # ---------------------------
+    # PREDICT
+    # ---------------------------
+    LOGGER.info("Predicting doublets...")
 
-        all_scores[start:end] = scores
-        all_preds[start:end] = preds
+    # In DDP mode, prediction runs on each worker.
+    # Lightning 2.x automatically gathers outputs.
+    y_pred = model.predict(soft=True)
 
-    # Attach to AnnData
-    adata.obs["doublet_score"] = all_scores
-    adata.obs["predicted_doublet"] = all_preds
+    # y_pred shape: (cells, 2)
+    doublet_scores = y_pred[:, 1]
 
-    # Apply configured threshold (Scrublet uses auto-threshold normally)
-    thresh = getattr(cfg, "doublet_score_threshold", None)
-    if thresh is not None:
-        LOGGER.info(f"Applying manual doublet threshold: score > {thresh}")
-        adata.obs["predicted_doublet"] = adata.obs["doublet_score"].values > thresh
+    adata.obs["doublet_score"] = doublet_scores
+    adata.obs["predicted_doublet"] = (
+        doublet_scores > cfg.doublet_score_threshold
+    )
 
     LOGGER.info(
-        f"Doublets detected: {adata.obs['predicted_doublet'].sum():,} "
-        f"({adata.obs['predicted_doublet'].mean()*100:.2f}%)"
+        f"Doublets detected: "
+        f"{adata.obs['predicted_doublet'].sum()} / {adata.n_obs} "
+        f"({adata.obs['predicted_doublet'].mean() * 100:.2f}%)"
     )
 
     return adata
+
 
 
 
