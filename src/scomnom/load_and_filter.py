@@ -313,7 +313,6 @@ def sparse_filter_cells_and_genes(
 def doublets_detection(adata: AnnData, cfg: LoadAndQCConfig) -> AnnData:
     """
     Run SOLO doublet detection on the merged AnnData.
-    Version intended for a *non-broken* scvi-tools installation.
     """
 
     import numpy as np
@@ -380,7 +379,7 @@ def doublets_detection(adata: AnnData, cfg: LoadAndQCConfig) -> AnnData:
             max_epochs = 12
             batch_size = 256
         else:
-            max_epochs = 15
+            max_epochs = 2
             batch_size = 256
         precision = 32
 
@@ -396,10 +395,6 @@ def doublets_detection(adata: AnnData, cfg: LoadAndQCConfig) -> AnnData:
 
     solo_model = SOLO(adata)
 
-    # ---------------------------
-    # LIGHTNING 2.x COMPAT FIX
-    # (Harmless on non-broken scvi-tools)
-    # ---------------------------
     trainer = pl.Trainer(
         max_epochs=max_epochs,
         accelerator=accelerator,
@@ -408,7 +403,6 @@ def doublets_detection(adata: AnnData, cfg: LoadAndQCConfig) -> AnnData:
         logger=False,
         enable_model_summary=False,
         deterministic=False,
-        inference_mode=False,     # <- prevents Lightning from wrapping the model
         precision=precision,
     )
 
