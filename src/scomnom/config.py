@@ -217,71 +217,65 @@ class QCFilterConfig(BaseModel):
 # -------------------------------
 class LoadAndFilterConfig(BaseModel):
     """
-    Configuration for the combined load-and-filter module.
+    Unified configuration for the combined load-and-filter module.
 
-    Responsibilities:
-      - Load raw / filtered / CellBender per-sample matrices
-      - Per-sample QC + filtering (memory-safe)
-      - Merge filtered samples into a single Zarr
-      - Optionally write H5AD (not recommended for very large datasets)
-      - Produce pre/post QC figures
+    Performs:
+      - Load raw / filtered / CellBender matrices
+      - Per-sample QC and filtering (memory-safe)
+      - Merging filtered samples
+      - Metadata attachment
     """
 
     # ---------------------------------------------------------
     # Input sources (exactly one required)
     # ---------------------------------------------------------
-    raw_sample_dir: Optional[Path] = Field(
-        None,
-        description="Directory containing <sample>.raw_feature_bc_matrix folders."
-    )
-    filtered_sample_dir: Optional[Path] = Field(
-        None,
-        description="Directory containing <sample>.filtered_feature_bc_matrix folders."
-    )
-    cellbender_dir: Optional[Path] = Field(
-        None,
-        description="Directory containing <sample>.cellbender_filtered.output folders."
-    )
+    raw_sample_dir: Optional[Path] = None
+    filtered_sample_dir: Optional[Path] = None
+    cellbender_dir: Optional[Path] = None
 
     metadata_tsv: Path = Field(
         ...,
         description="TSV with per-sample metadata indexed by sample_id."
     )
 
+    # The batch/sample key used throughout the pipeline
+    batch_key: Optional[str] = Field(
+        None,
+        description="Column in metadata_tsv defining sample/batch. "
+                    "If None, inferred from metadata header."
+    )
+
+    # ---------------------------------------------------------
+    # Output
+    # ---------------------------------------------------------
     output_dir: Path = Field(
         ...,
-        description="Directory for merged outputs (Zarr, figures/)."
+        description="Directory for merged AnnData and figures."
     )
 
-    # Base filename (no suffix)
     output_name: str = Field(
         "adata.merged",
-        description="Base name for merged dataset ('.zarr' appended automatically)."
+        description="Base name for merged dataset ('.zarr' added automatically)."
     )
 
-    save_h5ad: bool = Field(
-        False,
-        description="Write an .h5ad copy (loads dense matrix into RAM)."
-    )
+    save_h5ad: bool = False
 
     # ---------------------------------------------------------
     # Compute
     # ---------------------------------------------------------
-    n_jobs: int = Field(
-        4,
-        ge=1,
-        description="Parallel workers for sample loading & Zarr writing."
-    )
+    n_jobs: int = Field(4, ge=1)
 
     # ---------------------------------------------------------
     # QC thresholds
     # ---------------------------------------------------------
-    min_cells: int = Field(3, description="Minimum cells per gene.")
-    min_genes: int = Field(500, description="Minimum genes per cell.")
-    min_cells_per_sample: int = Field(20, description="Minimum cells retained per sample.")
-    max_pct_mt: float = Field(5.0, description="Max mitochondrial percentage.")
+    min_cells: int = 3              # gene filter
+    min_genes: int = 500            # cell filter
+    min_cells_per_sample: int = 20  # sample filter
+    max_pct_mt: float = 5.0
 
-    # File patterns (10x / CellBender)
+    # ---------------------------------------------------------
+    # File patterns
+    # ---------------------------------------------------------
     raw_pattern: str = "*.raw_feature_bc_matrix"
     filtered_pattern: str = "*.filtered_feature_bc_matrix"
     cellbender_pattern: str = "*.cellbender_filtered.output"
@@ -295,26 +289,22 @@ class LoadAndFilterConfig(BaseModel):
 
     figure_formats: List[str] = Field(
         default_factory=lambda: ["png", "pdf"],
-        description="Output figure formats."
+        description="Figure formats to save."
     )
 
     @validator("figure_formats", each_item=True)
-    def _validate_formats(cls, fmt: str):
+    def validate_formats(cls, fmt):
         supported = Figure().canvas.get_supported_filetypes()
         fmt = fmt.lower()
         if fmt not in supported:
             raise ValueError(
-                f"Unsupported figure format '{fmt}'. "
-                f"Supported formats include: {', '.join(sorted(supported))}"
+                f"Unsupported figure format '{fmt}'. Supported: {sorted(supported)}"
             )
         return fmt
 
-    # ---------------------------------------------------------
-    # Defaults & outputs
-    # ---------------------------------------------------------
     @validator("output_name")
-    def _ensure_zarr_suffix(cls, v: str):
-        return v.rstrip(".zarr")
+    def strip_zarr_suffix(cls, v):
+        return v.replace(".zarr", "")
 
     @property
     def figdir(self) -> Path:
@@ -324,7 +314,7 @@ class LoadAndFilterConfig(BaseModel):
     # Validators
     # ---------------------------------------------------------
     @model_validator(mode="after")
-    def _check_exactly_one_input_source(self):
+    def check_input_sources(self):
         sources = [
             self.raw_sample_dir,
             self.filtered_sample_dir,
@@ -332,12 +322,13 @@ class LoadAndFilterConfig(BaseModel):
         ]
         if sum(x is not None for x in sources) != 1:
             raise ValueError(
-                "Exactly one of raw_sample_dir, filtered_sample_dir, or cellbender_dir must be provided."
+                "Exactly one of raw_sample_dir, filtered_sample_dir, or "
+                "cellbender_dir must be provided."
             )
         return self
 
     @model_validator(mode="after")
-    def _check_output_dir(self):
+    def prepare_output_dir(self):
         self.output_dir.mkdir(parents=True, exist_ok=True)
         return self
 
