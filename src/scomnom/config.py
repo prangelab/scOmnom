@@ -215,28 +215,139 @@ class QCFilterConfig(BaseModel):
 # -------------------------------
 # LoadAndFilterConfig
 # -------------------------------
-class LoadAndFilterConfig(LoadDataConfig, QCFilterConfig):
+from __future__ import annotations
+from pathlib import Path
+from typing import Optional, List
+from pydantic import BaseModel, Field, validator, model_validator
+from matplotlib.figure import Figure
+
+
+class LoadAndFilterConfig(BaseModel):
     """
-    Unified config for the load-and-filter stage:
-    - Inherits load-only fields from LoadDataConfig
-    - Inherits QC fields from QCFilterConfig
+    Configuration for the combined load-and-filter module.
+
+    Responsibilities:
+      - Load raw / filtered / CellBender per-sample matrices
+      - Per-sample QC + filtering (memory-safe)
+      - Merge filtered samples into a single Zarr
+      - Optionally write H5AD (not recommended for very large datasets)
+      - Produce pre/post QC figures
     """
 
-    # override input_path from QCFilterConfig: load-and-filter starts from raw/filter/cellbender, not a merged file
-    input_path: Optional[Path] = Field(
+    # ---------------------------------------------------------
+    # Input sources (exactly one required)
+    # ---------------------------------------------------------
+    raw_sample_dir: Optional[Path] = Field(
         None,
-        description="(Unused) load-and-filter does not accept a merged input_path."
+        description="Directory containing <sample>.raw_feature_bc_matrix folders."
+    )
+    filtered_sample_dir: Optional[Path] = Field(
+        None,
+        description="Directory containing <sample>.filtered_feature_bc_matrix folders."
+    )
+    cellbender_dir: Optional[Path] = Field(
+        None,
+        description="Directory containing <sample>.cellbender_filtered.output folders."
     )
 
-    @model_validator(mode="after")
-    def validate_no_input_path(self):
-        if self.input_path is not None:
-            raise ValueError("load-and-filter does not accept --input; provide raw/filtered/cellbender directories.")
-        return self
+    metadata_tsv: Path = Field(
+        ...,
+        description="TSV with per-sample metadata indexed by sample_id."
+    )
+
+    output_dir: Path = Field(
+        ...,
+        description="Directory for merged outputs (Zarr, figures/)."
+    )
+
+    # Base filename (no suffix)
+    output_name: str = Field(
+        "adata.merged",
+        description="Base name for merged dataset ('.zarr' appended automatically)."
+    )
+
+    save_h5ad: bool = Field(
+        False,
+        description="Write an .h5ad copy (loads dense matrix into RAM)."
+    )
+
+    # ---------------------------------------------------------
+    # Compute
+    # ---------------------------------------------------------
+    n_jobs: int = Field(
+        4,
+        ge=1,
+        description="Parallel workers for sample loading & Zarr writing."
+    )
+
+    # ---------------------------------------------------------
+    # QC thresholds
+    # ---------------------------------------------------------
+    min_cells: int = Field(3, description="Minimum cells per gene.")
+    min_genes: int = Field(500, description="Minimum genes per cell.")
+    min_cells_per_sample: int = Field(20, description="Minimum cells retained per sample.")
+    max_pct_mt: float = Field(5.0, description="Max mitochondrial percentage.")
+
+    # File patterns (10x / CellBender)
+    raw_pattern: str = "*.raw_feature_bc_matrix"
+    filtered_pattern: str = "*.filtered_feature_bc_matrix"
+    cellbender_pattern: str = "*.cellbender_filtered.output"
+    cellbender_h5_suffix: str = ".cellbender_out.h5"
+
+    # ---------------------------------------------------------
+    # Plotting
+    # ---------------------------------------------------------
+    make_figures: bool = True
+    figdir_name: str = "figures"
+
+    figure_formats: List[str] = Field(
+        default_factory=lambda: ["png", "pdf"],
+        description="Output figure formats."
+    )
+
+    @validator("figure_formats", each_item=True)
+    def _validate_formats(cls, fmt: str):
+        supported = Figure().canvas.get_supported_filetypes()
+        fmt = fmt.lower()
+        if fmt not in supported:
+            raise ValueError(
+                f"Unsupported figure format '{fmt}'. "
+                f"Supported formats include: {', '.join(sorted(supported))}"
+            )
+        return fmt
+
+    # ---------------------------------------------------------
+    # Defaults & outputs
+    # ---------------------------------------------------------
+    @validator("output_name")
+    def _ensure_zarr_suffix(cls, v: str):
+        return v.rstrip(".zarr")
 
     @property
     def figdir(self) -> Path:
         return self.output_dir / self.figdir_name
+
+    # ---------------------------------------------------------
+    # Validators
+    # ---------------------------------------------------------
+    @model_validator(mode="after")
+    def _check_exactly_one_input_source(self):
+        sources = [
+            self.raw_sample_dir,
+            self.filtered_sample_dir,
+            self.cellbender_dir,
+        ]
+        if sum(x is not None for x in sources) != 1:
+            raise ValueError(
+                "Exactly one of raw_sample_dir, filtered_sample_dir, or cellbender_dir must be provided."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_output_dir(self):
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        return self
+
 
 
 # -------------------------------
