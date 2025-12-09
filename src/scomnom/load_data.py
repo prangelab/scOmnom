@@ -10,7 +10,7 @@ import anndata as ad
 import pandas as pd
 
 from .config import LoadDataConfig
-from . import io_utils, plot_utils
+from . import io_utils
 
 LOGGER = logging.getLogger(__name__)
 
@@ -135,26 +135,22 @@ def _validate_metadata_samples(
 # ---------------------------------------------------------------------
 def run_load_data(cfg: LoadDataConfig, logfile: Optional[Path] = None) -> ad.AnnData:
     """
-    Load stage for the new pipeline:
+    Load stage for the new pipeline (load-only, no QC):
 
       1. Load input matrices (raw, filtered, or CellBender).
-         * For raw: perform CellRanger-like cell-calling (knee+GMM) via filter_raw_barcodes.
-      2. (If raw) Compute per-sample fraction of reads in cells and readcount comparison plot.
-      3. Infer batch_key from metadata TSV and validate sample set.
-      4. Merge all samples into a single AnnData using union gene space (io_utils.merge_samples).
-      5. Attach metadata to per-cell obs.
-      6. Save merged dataset as Zarr (always) and optional H5AD.
+         * For raw: perform CellRanger-like cell-calling (knee+GMM)
+           via io_utils.load_raw_data (as before).
+      2. Infer batch_key from metadata TSV and validate sample set.
+      3. Merge all samples into a single AnnData using union gene space
+         (io_utils.merge_samples; disk-backed padding).
+      4. Attach per-sample metadata to per-cell obs.
+      5. Save merged dataset as Zarr (always) and optional H5AD.
 
     No QC filtering, doublet detection, HVG, PCA, or clustering happens here.
     Those are handled in downstream qc-and-filter / integrate modules.
     """
     LOGGER.info("Starting load_data")
 
-    # ---------------------------------------------------------
-    # Figure root
-    # ---------------------------------------------------------
-    if cfg.make_figures:
-        plot_utils.setup_scanpy_figs(cfg.figdir, cfg.figure_formats)
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
 
     # ---------------------------------------------------------
@@ -174,67 +170,27 @@ def run_load_data(cfg: LoadDataConfig, logfile: Optional[Path] = None) -> ad.Ann
     # Load input data (exactly one source as enforced by config)
     # ---------------------------------------------------------
     sample_map: Dict[str, ad.AnnData] = {}
-    raw_unfiltered_reads: Optional[Dict[str, float]] = None
-    raw_filtered_reads: Optional[Dict[str, float]] = None
 
     if cfg.raw_sample_dir is not None:
         LOGGER.info("Loading RAW 10x matrices with CellRanger-like cell calling...")
-        # Returns: raw_map (filtered by knee+GMM), filtered_read_counts, unfiltered_read_counts
-        sample_map, raw_filtered_reads, raw_unfiltered_reads = io_utils.load_raw_data(
+        # Returns: sample_map, raw_filtered_reads, raw_unfiltered_reads
+        sample_map, _, _ = io_utils.load_raw_data(
             cfg,
-            record_pre_filter_counts=True,
+            record_pre_filter_counts=False,
         )
 
     elif cfg.filtered_sample_dir is not None:
         LOGGER.info("Loading CellRanger filtered matrices...")
-        sample_map, cr_filtered_reads = io_utils.load_filtered_data(cfg)
+        sample_map, _ = io_utils.load_filtered_data(cfg)
 
     else:
         LOGGER.info("Loading CellBender matrices...")
-        sample_map, cb_reads = io_utils.load_cellbender_data(cfg)
+        sample_map, _ = io_utils.load_cellbender_data(cfg)
 
     if not sample_map:
         raise RuntimeError("load_data: no samples were loaded.")
 
     LOGGER.info("Loaded %d samples.", len(sample_map))
-
-    # ---------------------------------------------------------
-    # Readcount QC: fraction of reads in cells (RAW case only)
-    # ---------------------------------------------------------
-    if (
-        cfg.make_figures
-        and raw_unfiltered_reads is not None
-        and raw_filtered_reads is not None
-    ):
-        figdir = cfg.figdir / "cell_qc"
-        figdir.mkdir(parents=True, exist_ok=True)
-
-        LOGGER.info(
-            "Plotting raw-unfiltered vs raw-filtered read counts "
-            "(proxy for 'fraction of reads in cells')."
-        )
-        plot_utils.plot_read_comparison(
-            ref_counts=raw_unfiltered_reads,
-            other_counts=raw_filtered_reads,
-            ref_label="raw-unfiltered",
-            other_label="raw-filtered",
-            figdir=figdir,
-            stem="reads_raw_unfiltered_vs_raw_filtered",
-        )
-
-        # Log per-sample fractions
-        LOGGER.info("Per-sample fraction of reads in cells (raw-filtered / raw-unfiltered):")
-        for sample in sorted(raw_unfiltered_reads.keys()):
-            total = float(raw_unfiltered_reads.get(sample, 0.0))
-            in_cells = float(raw_filtered_reads.get(sample, 0.0))
-            if total <= 0:
-                frac = 0.0
-            else:
-                frac = 100.0 * in_cells / total
-            LOGGER.info(
-                "  %s: %.2f%% (%0.2e / %0.2e)",
-                sample, frac, in_cells, total
-            )
 
     # ---------------------------------------------------------
     # Validate metadata ↔ sample consistency
@@ -267,12 +223,6 @@ def run_load_data(cfg: LoadDataConfig, logfile: Optional[Path] = None) -> ad.Ann
     LOGGER.info("Adding per-sample metadata from %s", cfg.metadata_tsv)
     adata = add_metadata(adata, cfg.metadata_tsv, sample_id_col=cfg.batch_key)
     adata.uns["batch_key"] = cfg.batch_key
-
-    # Optionally stash load-stage readcount metrics in .uns
-    if raw_unfiltered_reads is not None:
-        metrics = adata.uns.setdefault("load_data_metrics", {})
-        metrics["raw_unfiltered_reads"] = raw_unfiltered_reads
-        metrics["raw_filtered_reads"] = raw_filtered_reads
 
     # ---------------------------------------------------------
     # Save merged dataset

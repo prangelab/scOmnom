@@ -11,95 +11,81 @@ import multiprocessing
 # -------------------------------
 class LoadDataConfig(BaseModel):
     """
-    Configuration for the lightweight load_data module:
-    Load → Metadata → Merge → Optional readcount QC → Save.
-    No filtering, no QC thresholds, no dimensionality reduction.
+    Configuration for the *load-only* module:
+    - Load RAW OR filtered OR CellBender matrices
+    - Attach metadata
+    - Write per-sample Zarr stores
+    - Merge sequentially into final Zarr
     """
 
-    # I/O
+    # ---------------------------------------------------------
+    # I/O paths
+    # ---------------------------------------------------------
     raw_sample_dir: Optional[Path] = Field(
-        None, description="Directory with <sample>.raw_feature_bc_matrix folders"
+        None,
+        description="Directory containing <sample>.raw_feature_bc_matrix folders."
     )
     filtered_sample_dir: Optional[Path] = Field(
-        None, description="Directory with <sample>.filtered_feature_bc_matrix folders"
+        None,
+        description="Directory containing <sample>.filtered_feature_bc_matrix folders."
     )
     cellbender_dir: Optional[Path] = Field(
-        None, description="Directory with CellBender outputs"
-    )
-    metadata_tsv: Optional[Path] = Field(
-        None, description="TSV with per-sample metadata indexed by sample ID"
+        None,
+        description="Directory containing <sample>.cellbender_filtered.output folders."
     )
 
-    output_dir: Path = Field(..., description="Directory for outputs (zarr + figures)")
-    output_name: str = Field("adata.loaded", description="Output filename stem")
-    save_h5ad: bool = False
+    metadata_tsv: Path = Field(
+        ...,
+        description="TSV file with per-sample metadata indexed by sample ID."
+    )
 
-    n_jobs: int = Field(4, ge=1)
+    output_dir: Path = Field(
+        ..., description="Directory where merged Zarr will be written."
+    )
+    output_name: str = Field(
+        "adata.loaded",
+        description="Base name for merged output ('.zarr' will be appended)."
+    )
 
-    # 10x patterns
+    # ---------------------------------------------------------
+    # Compute settings
+    # ---------------------------------------------------------
+    n_jobs: int = Field(
+        4,
+        ge=1,
+        description="Parallel workers for reading individual samples & writing per-sample Zarrs."
+    )
+
+    # ---------------------------------------------------------
+    # File pattern overrides (rarely needed)
+    # ---------------------------------------------------------
     raw_pattern: str = "*.raw_feature_bc_matrix"
     filtered_pattern: str = "*.filtered_feature_bc_matrix"
     cellbender_pattern: str = "*.cellbender_filtered.output"
     cellbender_h5_suffix: str = ".cellbender_out.h5"
 
-    # Figures
-    make_figures: bool = True
-    figdir_name: str = "figures"
-    figure_formats: List[str] = Field(default_factory=lambda: ["png", "pdf"])
-
-    batch_key: Optional[str] = None  # determined from metadata
-
-    @property
-    def figdir(self) -> Path:
-        return self.output_dir / self.figdir_name
-
-    @validator("figure_formats", each_item=True)
-    def validate_formats(cls, fmt: str):
-        supported = Figure().canvas.get_supported_filetypes()
-        fmt = fmt.lower()
-        if fmt not in supported:
-            raise ValueError(
-                f"Unsupported figure format '{fmt}'. "
-                f"Supported: {', '.join(sorted(supported))}"
-            )
-        return fmt
-
-    from pydantic import model_validator
+    # ---------------------------------------------------------
+    # Validation
+    # ---------------------------------------------------------
+    @validator("output_name")
+    def ensure_suffix(cls, v: str):
+        return v if v.endswith(".zarr") else f"{v}.zarr"
 
     @model_validator(mode="after")
-    def validate_source_combinations(self):
-        raw = self.raw_sample_dir is not None
-        filt = self.filtered_sample_dir is not None
-        cb = self.cellbender_dir is not None
-
-        n = sum([raw, filt, cb])
-
-        # allowed:
-        # 1) raw only
-        # 2) filtered only
-        # 3) cellbender only
-        # 4) raw + filtered
-        # 5) raw + cellbender
-        if n == 1:
-            return self
-
-        if n == 2 and raw:
-            # raw + filtered OR raw + cellbender
-            return self
-
-        # everything else is invalid
-        raise ValueError(
-            "Invalid combination of inputs:\n"
-            "Allowed:\n"
-            "  • raw only\n"
-            "  • filtered only\n"
-            "  • cellbender only\n"
-            "  • raw + filtered\n"
-            "  • raw + cellbender\n"
-            "Not allowed:\n"
-            "  • filtered + cellbender\n"
-            "  • raw + filtered + cellbender"
-        )
+    def check_exactly_one_source(self):
+        """
+        For load_data: exactly ONE of raw / filtered / cellbender must be provided.
+        """
+        sources = [
+            self.raw_sample_dir,
+            self.filtered_sample_dir,
+            self.cellbender_dir,
+        ]
+        if sum(x is not None for x in sources) != 1:
+            raise ValueError(
+                "Exactly one of raw_sample_dir, filtered_sample_dir, or cellbender_dir must be set."
+            )
+        return self
 
 
 class LoadAndQCConfig(BaseModel):
