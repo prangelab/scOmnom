@@ -52,7 +52,10 @@ class LoadDataConfig(BaseModel):
         description="Column name in metadata_tsv to use as batch/sample ID. "
                     "If None, it is inferred automatically from metadata header."
     )
-    save_h5ad: bool = False
+    save_h5ad: Optional[bool] = Field(
+        False,
+        description="If set will save a h5ad file to <output_dir>.h5ad."
+    )
 
     # ---------------------------------------------------------
     # Compute settings
