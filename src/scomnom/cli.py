@@ -10,7 +10,7 @@ from .load_and_filter import run_load_and_filter
 from .integrate import run_integration
 from .cluster_and_annotate import run_clustering
 
-from .config import LoadDataConfig, QCFilterConfig, LoadAndQCConfig, IntegrationConfig, ClusterAnnotateConfig
+from .config import LoadDataConfig, QCFilterConfig, LoadAndFilterConfig, LoadAndQCConfig, IntegrationConfig, ClusterAnnotateConfig
 from .logging_utils import init_logging
 
 
@@ -394,7 +394,7 @@ def load_and_filter(
     logfile = output_dir / "load-and-filter.log"
     init_logging(logfile)
 
-    cfg = LoadAndQCConfig(
+    cfg = LoadAndFilterConfig(
         raw_sample_dir=raw_sample_dir,
         filtered_sample_dir=filtered_sample_dir,
         cellbender_dir=cellbender_dir,
