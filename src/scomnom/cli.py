@@ -149,25 +149,25 @@ def _gene_sets_completion(
 def load_data(
     # exactly one of these three
     raw_sample_dir: Path = typer.Option(
-        None, "--raw-sample-dir",
+        None, "--raw-sample-dir", "-r",
         help="Directory containing <sample>.raw_feature_bc_matrix folders."
     ),
     filtered_sample_dir: Path = typer.Option(
-        None, "--filtered-sample-dir",
+        None, "--filtered-sample-dir", "-f",
         help="Directory containing <sample>.filtered_feature_bc_matrix folders."
     ),
     cellbender_dir: Path = typer.Option(
-        None, "--cellbender-dir",
+        None, "--cellbender-dir", "-c",
         help="Directory containing <sample>.cellbender_filtered.output folders."
     ),
 
     # required
     metadata_tsv: Path = typer.Option(
-        ..., "--metadata-tsv",
+        ..., "--metadata-tsv", "-m",
         help="TSV with per-sample metadata indexed by sample_id."
     ),
     output_dir: Path = typer.Option(
-        ..., "--output-dir",
+        ..., "--output-dir", "-o",
         help="Directory for merged output Zarr."
     ),
 
@@ -180,6 +180,11 @@ def load_data(
         4, "--n-jobs",
         help="Parallel workers for loading samples & writing Zarrs."
     ),
+    save_h5ad: bool = typer.Option(
+            False,
+            "--save-h5ad/--no-save-h5ad",
+            help="Also write an .h5ad copy (requires loading matrix fully into RAM).",
+        ),
 ):
     """
     Load single-cell data from exactly one input source (RAW, filtered, or CellBender),
@@ -194,6 +199,7 @@ def load_data(
         output_dir=output_dir,
         output_name=output_name,
         n_jobs=n_jobs,
+        save_h5ad=save_h5ad,
     )
 
     run_load_data(cfg)
