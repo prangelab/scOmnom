@@ -316,12 +316,12 @@ def run_load_and_filter(
     # ---------------------------------------------------------
     # Save final filtered dataset
     # ---------------------------------------------------------
-    out_zarr = cfg.output_dir / adata.filtered
+    out_zarr = cfg.output_dir / "adata.filtered"
     LOGGER.info("Saving filtered dataset → %s", out_zarr)
     io_utils.save_dataset(adata, out_zarr, fmt="zarr")
 
     if cfg.save_h5ad:
-        out_h5ad = cfg.output_dir / adata.filtered
+        out_h5ad = cfg.output_dir / "adata.filtered"
         LOGGER.warning("Writing H5AD copy (loads data into RAM).")
         io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
 
