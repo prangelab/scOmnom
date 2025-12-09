@@ -64,18 +64,42 @@ class LoadDataConfig(BaseModel):
             )
         return fmt
 
+    from pydantic import model_validator
+
     @model_validator(mode="after")
-    def check_exactly_one_source(self):
-        sources = [
-            self.raw_sample_dir,
-            self.filtered_sample_dir,
-            self.cellbender_dir,
-        ]
-        if sum(x is not None for x in sources) != 1:
-            raise ValueError(
-                "Exactly one of raw_sample_dir, filtered_sample_dir, or cellbender_dir must be set."
-            )
-        return self
+    def validate_source_combinations(self):
+        raw = self.raw_sample_dir is not None
+        filt = self.filtered_sample_dir is not None
+        cb = self.cellbender_dir is not None
+
+        n = sum([raw, filt, cb])
+
+        # allowed:
+        # 1) raw only
+        # 2) filtered only
+        # 3) cellbender only
+        # 4) raw + filtered
+        # 5) raw + cellbender
+        if n == 1:
+            return self
+
+        if n == 2 and raw:
+            # raw + filtered OR raw + cellbender
+            return self
+
+        # everything else is invalid
+        raise ValueError(
+            "Invalid combination of inputs:\n"
+            "Allowed:\n"
+            "  • raw only\n"
+            "  • filtered only\n"
+            "  • cellbender only\n"
+            "  • raw + filtered\n"
+            "  • raw + cellbender\n"
+            "Not allowed:\n"
+            "  • filtered + cellbender\n"
+            "  • raw + filtered + cellbender"
+        )
 
 
 class LoadAndQCConfig(BaseModel):
