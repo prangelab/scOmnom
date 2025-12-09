@@ -11,7 +11,7 @@ import scanpy as sc
 import pandas as pd
 
 from .config import IntegrationConfig
-from .load_and_filter import setup_logging
+from .logging_utils import init_logging
 from . import io_utils,plot_utils
 import torch
 torch.set_float32_matmul_precision('high')
