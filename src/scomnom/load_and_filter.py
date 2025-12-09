@@ -264,7 +264,7 @@ def run_load_and_filter(
     # Per-sample QC + sparse filtering (OOM-safe)
     # ---------------------------------------------------------
     LOGGER.info("Running per-sample QC and filtering...")
-    filtered_sample_map, qc_df = qc_and_filter_samples(sample_map, cfg)
+    filtered_sample_map, qc_df = _per_sample_qc_and_filter(sample_map, cfg)
 
     # ---------------------------------------------------------
     # Pre-filter QC plots (lightweight, from qc_df only)
