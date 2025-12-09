@@ -43,7 +43,7 @@ class LoadDataConfig(BaseModel):
         ..., description="Directory where merged Zarr will be written."
     )
     output_name: str = Field(
-        "adata.loaded",
+        "adata.merged",
         description="Base name for merged output ('.zarr' will be appended)."
     )
 

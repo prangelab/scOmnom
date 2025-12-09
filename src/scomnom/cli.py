@@ -179,7 +179,7 @@ def load_data(
 
     # optional
     output_name: str = typer.Option(
-        "adata.loaded", "--output-name",
+        "adata.merged", "--output-name",
         help="Base name for merged Zarr ('.zarr' appended automatically)."
     ),
     n_jobs: int = typer.Option(
@@ -292,7 +292,7 @@ def qc_and_filter(
     """
 
     # Logfile in the output directory
-    logfile = cfg.output_dir / "qc-and-filter.log"
+    logfile = output_dir / "qc-and-filter.log"
     init_logging(logfile)
 
     # Build config (Pydantic will validate paths and defaults)
