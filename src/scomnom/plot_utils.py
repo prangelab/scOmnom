@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import scanpy as sc
+import anndata as ad
 from matplotlib.collections import LineCollection
 
 LOGGER = logging.getLogger(__name__)
