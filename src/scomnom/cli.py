@@ -167,7 +167,7 @@ def load_data(
         help="TSV with per-sample metadata indexed by sample_id."
     ),
 
-    batch_key: str = typer.Option(
+    batch_key: Optional[str] = typer.Option(
         None, "--batch-key", "-b",
         help="Column name in metadata_tsv to use as batch/sample ID. "
     ),
@@ -197,6 +197,9 @@ def load_data(
     attach metadata, write per-sample Zarrs, merge, and save final dataset.
     """
 
+    logfile = output_dir / "load-data.log"
+    init_logging(logfile)
+
     cfg = LoadDataConfig(
         raw_sample_dir=raw_sample_dir,
         filtered_sample_dir=filtered_sample_dir,
@@ -209,7 +212,7 @@ def load_data(
         save_h5ad=save_h5ad,
     )
 
-    run_load_data(cfg)
+    run_load_data(cfg, logfile)
 
 
 # ======================================================================
