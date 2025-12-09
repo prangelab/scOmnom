@@ -460,6 +460,8 @@ def run_qc_plots_pre_filter_df(qc_df: pd.DataFrame, cfg) -> None:
     qc_violin_panels(qc_adata, cfg, "prefilter")
     qc_scatter_panels(qc_adata, cfg, "prefilter")
     plot_mt_histogram(qc_adata, cfg, "prefilter")
+    plot_hist_n_genes(qc_adata, cfg, "prefilter")
+    plot_hist_total_counts(qc_adata, cfg, "prefilter")
 
 
 def run_qc_plots_postfilter(adata, cfg):
@@ -475,13 +477,70 @@ def run_qc_plots_postfilter(adata, cfg):
     qc_violin_panels(adata, cfg, "postfilter")
     qc_scatter_panels(adata, cfg, "postfilter")
     plot_mt_histogram(adata, cfg, "postfilter")
+    plot_hist_n_genes(adata, cfg, "postfilter")
+    plot_hist_total_counts(adata, cfg, "postfilter")
 
     sc_settings.figdir = old_figdir
 
 
-# ============================================================
-#   QC VIOLIN PANELS (pre- and post-filter)
-# ============================================================
+def plot_hist_total_counts(adata, cfg, stage: str):
+    """
+    Histogram of total_counts for prefilter / postfilter.
+    stage = 'prefilter' or 'postfilter'
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    if not cfg.make_figures:
+        return
+
+    figdir_qc = cfg.figdir / "QC_plots"
+    figdir_qc.mkdir(parents=True, exist_ok=True)
+
+    plt.figure(figsize=(6, 4))
+    sns.histplot(
+        adata.obs["total_counts"],
+        bins=60,
+        kde=False,
+        color="darkorange",
+    )
+    plt.xlabel("Total UMI counts")
+    plt.ylabel("Cell count")
+    plt.title(f"total_counts ({stage})")
+
+    save_multi(f"{stage}_QC_hist_total_counts", figdir_qc)
+    plt.close()
+
+
+def plot_hist_n_genes(adata, cfg, stage: str):
+    """
+    Histogram of n_genes_by_counts for prefilter / postfilter.
+    stage = 'prefilter' or 'postfilter'
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    if not cfg.make_figures:
+        return
+
+    figdir_qc = cfg.figdir / "QC_plots"
+    figdir_qc.mkdir(parents=True, exist_ok=True)
+
+    plt.figure(figsize=(6, 4))
+    sns.histplot(
+        adata.obs["n_genes_by_counts"],
+        bins=60,
+        kde=False,
+        color="steelblue",
+    )
+    plt.xlabel("Number of genes detected")
+    plt.ylabel("Cell count")
+    plt.title(f"n_genes_by_counts ({stage})")
+
+    save_multi(f"{stage}_QC_hist_n_genes", figdir_qc)
+    plt.close()
+
+
 def qc_violin_panels(adata, cfg, stage: str):
     """
     Three-panel QC violin summary:
@@ -547,9 +606,6 @@ def qc_violin_panels(adata, cfg, stage: str):
         sc_settings.figdir = old_figdir
 
 
-# ============================================================
-#   QC SCATTER PANELS (pre- and post-filter)
-# ============================================================
 def qc_scatter_panels(adata, cfg, stage: str):
     """
     Additional scatter QC plots:
