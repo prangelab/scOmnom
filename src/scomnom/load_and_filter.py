@@ -163,40 +163,33 @@ def _per_sample_qc_and_filter(
     return filtered_samples, qc_df
 
 
-def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) -> ad.AnnData:
-    """
-    New load-and-filter:
+def run_load_and_filter(
+    cfg: LoadAndFilterConfig,
+    logfile: Optional[Path] = None,  # kept for CLI compatibility; logging is already set up there
+) -> ad.AnnData:
 
-    - Load raw/filtered/CellBender per sample
-    - Per-sample sparse QC + filtering (min_genes, min_cells)
-    - Global QC filters (max_pct_mt, min_cells_per_sample) on merged dataset
-    - Pre/post QC plots via plot_utils
-    - Save adata.filtered.zarr (+ optional .h5ad)
-    """
     LOGGER.info("Starting load-and-filter")
-
-    cfg.output_dir.mkdir(parents=True, exist_ok=True)
+    # Configure Scanpy/Matplotlib figure behavior + formats
     plot_utils.setup_scanpy_figs(cfg.figdir, cfg.figure_formats)
 
     # ---------------------------------------------------------
-    # Infer batch key from metadata TSV
+    # Infer batch key from metadata if needed
     # ---------------------------------------------------------
-    if cfg.metadata_tsv is None:
-        raise RuntimeError("metadata_tsv is required for load-and-filter but was None")
-
     batch_key = io_utils.infer_batch_key_from_metadata_tsv(
-        cfg.metadata_tsv,
-        cfg.batch_key,
+        cfg.metadata_tsv, cfg.batch_key
     )
-    cfg.batch_key = batch_key
+    if cfg.batch_key is None:
+        LOGGER.warning(
+            "No batch_key provided. Inferred batch_key='%s' from metadata.tsv. "
+            "Please verify this is correct.",
+            batch_key,
+        )
     LOGGER.info("Using batch_key='%s'", batch_key)
+    cfg.batch_key = batch_key
 
     # ---------------------------------------------------------
-    # Load per-sample data
+    # Select input source and load samples
     # ---------------------------------------------------------
-    sample_map: Dict[str, ad.AnnData] = {}
-    read_counts = {}
-
     n_sources = sum(
         [
             cfg.raw_sample_dir is not None,
@@ -211,11 +204,10 @@ def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) ->
         )
 
     if cfg.raw_sample_dir is not None:
-        LOGGER.info("Loading RAW 10x matrices with CellRanger-like cell calling...")
-        qc_plot_dir = cfg.output_dir / "figures" / "QC_plots"
+        LOGGER.info("Loading raw 10x matrices with CellRanger-like cell calling...")
+        qc_plot_dir = cfg.figdir / "QC_plots"
         sample_map, read_counts, _ = io_utils.load_raw_data(
             cfg,
-            record_pre_filter_counts=False,
             plot_dir=qc_plot_dir,
         )
     elif cfg.filtered_sample_dir is not None:
@@ -225,30 +217,64 @@ def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) ->
         LOGGER.info("Loading CellBender matrices...")
         sample_map, read_counts = io_utils.load_cellbender_data(cfg)
 
-    if not sample_map:
-        raise RuntimeError("load-and-filter: no samples were loaded.")
+    # ---------------------------------------------------------
+    # Validate metadata vs loaded samples
+    # ---------------------------------------------------------
+    LOGGER.info("Validating samples and metadata...")
+
+    if cfg.metadata_tsv is None:
+        raise RuntimeError("metadata_tsv is required but was None")
+
+    df_meta = pd.read_csv(cfg.metadata_tsv, sep="\t")
+    if cfg.batch_key not in df_meta.columns:
+        raise KeyError(
+            f"Metadata TSV must contain the batch key column '{cfg.batch_key}'. "
+            f"Found columns: {list(df_meta.columns)}"
+        )
+
+    meta_samples = pd.Index(df_meta[cfg.batch_key].astype(str))
+    loaded_samples = pd.Index(sample_map.keys()).astype(str)
+
+    missing_rows = loaded_samples.difference(meta_samples)
+    extra_rows = meta_samples.difference(loaded_samples)
+
+    if len(missing_rows) > 0:
+        raise ValueError(
+            "The following samples were found in the input directories but "
+            "are missing from metadata_tsv:\n"
+            f"  {list(missing_rows)}"
+        )
+
+    if len(extra_rows) > 0:
+        raise ValueError(
+            "The following samples exist in metadata_tsv but were not found "
+            "in the input data folders:\n"
+            f"  {list(extra_rows)}"
+        )
+
+    if len(meta_samples) != len(loaded_samples):
+        raise ValueError(
+            f"metadata_tsv has {len(meta_samples)} rows for batch_key='{cfg.batch_key}', "
+            f"but {len(loaded_samples)} samples were loaded."
+        )
 
     LOGGER.info("Loaded %d samples.", len(sample_map))
 
     # ---------------------------------------------------------
-    # Validate metadata ↔ samples
+    # Per-sample QC + sparse filtering (OOM-safe)
     # ---------------------------------------------------------
-    LOGGER.info("Validating metadata vs loaded samples...")
-    _validate_metadata_samples(cfg.metadata_tsv, batch_key, sample_map)
+    LOGGER.info("Running per-sample QC and filtering...")
+    filtered_sample_map, qc_df = qc_and_filter_samples(sample_map, cfg)
 
     # ---------------------------------------------------------
-    # Per-sample QC + filtering
+    # Pre-filter QC plots (lightweight, from qc_df only)
     # ---------------------------------------------------------
-    LOGGER.info("Running per-sample QC + filtering...")
-    filtered_sample_map, qc_df = _per_sample_qc_and_filter(sample_map, cfg)
-
-    # Prefilter QC plots
     if cfg.make_figures:
         LOGGER.info("Plotting pre-filter QC...")
         plot_utils.run_qc_plots_pre_filter_df(qc_df, cfg)
 
     # ---------------------------------------------------------
-    # Merge filtered samples
+    # Merge filtered samples into a single AnnData
     # ---------------------------------------------------------
     tmp_dir = cfg.output_dir / "tmp_merge_load_and_filter"
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -266,51 +292,21 @@ def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) ->
         adata.n_vars,
     )
 
-    # Attach metadata
+    # ---------------------------------------------------------
+    # Attach per-sample metadata
+    # ---------------------------------------------------------
     LOGGER.info("Adding metadata...")
     adata = _add_metadata(adata, cfg.metadata_tsv, sample_id_col=cfg.batch_key)
     adata.uns["batch_key"] = cfg.batch_key
 
     # ---------------------------------------------------------
-    # Global post-merge QC + filters (mt%, min_cells_per_sample)
+    # Global QC on merged filtered data (for post-filter plots ONLY)
     # ---------------------------------------------------------
     LOGGER.info("Computing QC metrics on merged filtered data...")
     adata = compute_qc_metrics(adata, cfg)
 
-    # MT filter
-    if "pct_counts_mt" in adata.obs:
-        mask = adata.obs["pct_counts_mt"] <= cfg.max_pct_mt
-        n_before = adata.n_obs
-        adata = adata[mask].copy()
-        LOGGER.info(
-            "MT filter: kept %d / %d cells (<= %.1f%% mt).",
-            adata.n_obs,
-            n_before,
-            cfg.max_pct_mt,
-        )
-    else:
-        LOGGER.warning("Missing pct_counts_mt; skipping mitochondrial filtering.")
-
-    # Per-sample minimum cell count
-    if cfg.min_cells_per_sample > 0 and batch_key in adata.obs:
-        counts = adata.obs[batch_key].value_counts()
-        small = counts[counts < cfg.min_cells_per_sample].index
-        if len(small) > 0:
-            n_before = adata.n_obs
-            adata = adata[~adata.obs[batch_key].isin(small)].copy()
-            LOGGER.info(
-                "Dropped %d samples with < %d cells (cells kept: %d / %d).",
-                len(small),
-                cfg.min_cells_per_sample,
-                adata.n_obs,
-                n_before,
-            )
-
-    # Recompute QC metrics after global filters
-    adata = compute_qc_metrics(adata, cfg)
-
     # ---------------------------------------------------------
-    # Post-filter QC plots
+    # Post-filter QC plots (NO additional filtering here)
     # ---------------------------------------------------------
     if cfg.make_figures:
         LOGGER.info("Plotting post-filter QC...")
@@ -320,12 +316,12 @@ def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) ->
     # ---------------------------------------------------------
     # Save final filtered dataset
     # ---------------------------------------------------------
-    out_zarr = cfg.output_dir / "adata.filtered.zarr"
+    out_zarr = cfg.output_dir / adata.filtered
     LOGGER.info("Saving filtered dataset → %s", out_zarr)
     io_utils.save_dataset(adata, out_zarr, fmt="zarr")
 
     if cfg.save_h5ad:
-        out_h5ad = cfg.output_dir / "adata.filtered.h5ad"
+        out_h5ad = cfg.output_dir / adata.filtered
         LOGGER.warning("Writing H5AD copy (loads data into RAM).")
         io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
 

@@ -34,7 +34,7 @@ def compute_qc_metrics(adata: ad.AnnData, cfg: QCFilterConfig) -> ad.AnnData:
     # Gene categories
     mt_prefix = getattr(cfg, "mt_prefix", "MT-")
     ribo_prefixes = getattr(cfg, "ribo_prefixes", ["RPL", "RPS"])
-    hb_regex = getattr(cfg, "hb_regex", "^(HB[AB]|HBA|HBB)")
+    hb_regex = r"^(?:HB[AB]|HBA|HBB)"
 
     adata.var["mt"] = adata.var_names.str.startswith(mt_prefix)
     adata.var["ribo"] = adata.var_names.str.startswith(tuple(ribo_prefixes))
