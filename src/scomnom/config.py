@@ -98,6 +98,122 @@ class LoadDataConfig(BaseModel):
         return self
 
 
+# -------------------------------
+# QCFilterConfig
+# -------------------------------
+class QCFilterConfig(BaseModel):
+    """
+    Configuration for the qc-and-filter stage.
+
+    - Loads a merged dataset from .zarr or .h5ad
+    - Applies QC filters (min_genes, min_cells, max_pct_mt, min_cells_per_sample)
+    - Writes filtered dataset as adata.filtered.zarr (+ optional .h5ad)
+    """
+
+    # Input: merged data from load-data
+    input_path: Path = Field(
+        ...,
+        description="Path to merged dataset from load-data (.zarr directory or .h5ad file).",
+    )
+
+    # Output directory (directory, not file; must not end with .zarr)
+    output_dir: Optional[Path] = Field(
+        None,
+        description="Directory for filtered output. Defaults to parent of input_path.",
+    )
+
+    # Batch / sample key (optional override)
+    batch_key: Optional[str] = Field(
+        None,
+        description="Column in adata.obs to treat as batch/sample ID. "
+                    "If None, io_utils.infer_batch_key() will choose.",
+    )
+
+    # QC thresholds
+    min_cells: int = Field(
+        3,
+        description="[QC] Minimum cells per gene.",
+    )
+    min_genes: int = Field(
+        500,
+        description="[QC] Minimum genes per cell. Lower to ~200 for snRNA-seq.",
+    )
+    min_cells_per_sample: int = Field(
+        20,
+        description="[QC] Minimum cells per sample.",
+    )
+    max_pct_mt: float = Field(
+        5.0,
+        description="[QC] Max mitochondrial percentage. Increase to ~30–50% for snRNA-seq.",
+    )
+
+    # Plotting
+    make_figures: bool = Field(
+        True,
+        description="Whether to generate QC plots.",
+    )
+    figdir_name: str = Field(
+        "figures",
+        description="Subdirectory under output_dir for figures.",
+    )
+    figure_formats: List[str] = Field(
+        default_factory=lambda: ["png", "pdf"],
+        description="Figure formats for plots.",
+    )
+
+    # Optional H5AD
+    save_h5ad: bool = Field(
+        False,
+        description="Also write an .h5ad copy of the filtered dataset.",
+    )
+
+    # We keep the name fixed in practice, but expose as a constant-like field
+    output_name: str = Field(
+        "adata.filtered",
+        description="Base name for filtered dataset ('.zarr' appended automatically).",
+    )
+
+    @property
+    def figdir(self) -> Path:
+        return self.output_dir / self.figdir_name
+
+    @model_validator(mode="after")
+    def _validate_paths(self):
+        # ---- input_path: must exist and be .zarr dir OR .h5ad file ----
+        if not self.input_path.exists():
+            raise ValueError(f"input_path does not exist: {self.input_path}")
+
+        if self.input_path.is_dir():
+            # must be a .zarr directory
+            if self.input_path.suffix != ".zarr":
+                raise ValueError(
+                    f"input_path directory must end with '.zarr', got: {self.input_path}"
+                )
+        else:
+            # must be a file with .h5ad suffix
+            if self.input_path.suffix.lower() != ".h5ad":
+                raise ValueError(
+                    f"input_path file must be a '.h5ad', got: {self.input_path}"
+                )
+
+        # ---- output_dir: default and checks ----
+        if self.output_dir is None:
+            # Parent of the input (directory or file)
+            self.output_dir = self.input_path.parent
+
+        # Must not look like a .zarr directory name
+        if self.output_dir.suffix == ".zarr":
+            raise ValueError(
+                f"output_dir must be a plain directory, not a '.zarr' path: {self.output_dir}"
+            )
+
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        return self
+
+# -------------------------------
+# OLD
+# -------------------------------
 class LoadAndQCConfig(BaseModel):
     # I/O
     raw_sample_dir: Optional[Path] = Field(None, description="Directory with 10x raw_feature_bc_matrix folders")

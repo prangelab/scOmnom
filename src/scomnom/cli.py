@@ -214,6 +214,119 @@ def load_data(
 
     run_load_data(cfg, logfile)
 
+from typing import Optional, List
+from pathlib import Path
+import typer
+
+from .config import (
+    CellQCConfig,
+    LoadDataConfig,
+    IntegrationConfig,
+    ClusterAnnotateConfig,
+    QCFilterConfig,  # <-- add this import
+)
+from .qc_and_filter import run_qc_and_filter  # <-- new module
+from .logging_utils import init_logging
+
+# ... existing CLI commands ...
+
+
+# ======================================================================
+#  qc-and-filter
+# ======================================================================
+@app.command(
+    "qc-and-filter",
+    help=(
+        "QC and filter a merged dataset (.zarr or .h5ad) produced by load-data.\n\n"
+        "Applies min_genes/min_cells/max_pct_mt/min_cells_per_sample filters and "
+        "writes adata.filtered.zarr (+ optional .h5ad)."
+    ),
+)
+def qc_and_filter(
+    input_path: Path = typer.Option(
+        ...,
+        "--input",
+        "-i",
+        help="Path to merged dataset from load-data (.zarr directory or .h5ad file).",
+    ),
+    output_dir: Optional[Path] = typer.Option(
+        None,
+        "--output-dir",
+        "-o",
+        help=(
+            "Directory for filtered output. "
+            "Defaults to the parent directory of --input."
+        ),
+    ),
+    batch_key: Optional[str] = typer.Option(
+        None,
+        "--batch-key",
+        "-b",
+        help=(
+            "Column in adata.obs to treat as batch/sample ID. "
+            "If omitted, io_utils.infer_batch_key() chooses."
+        ),
+    ),
+    min_cells: int = typer.Option(
+        3,
+        "--min-cells",
+        help="[QC] Minimum cells per gene.",
+    ),
+    min_genes: int = typer.Option(
+        500,
+        "--min-genes",
+        help="[QC] Minimum genes per cell. Lower this to ~200 for snRNA-seq.",
+    ),
+    min_cells_per_sample: int = typer.Option(
+        20,
+        "--min-cells-per-sample",
+        help="[QC] Minimum cells per sample.",
+    ),
+    max_pct_mt: float = typer.Option(
+        5.0,
+        "--max-pct-mt",
+        help="[QC] Max mitochondrial percentage. Increase this to ~30–50 for snRNA-seq.",
+    ),
+    make_figures: bool = typer.Option(
+        True,
+        "--make-figures/--no-make-figures",
+        help="Generate QC plots.",
+    ),
+    figure_format: List[str] = typer.Option(
+        ["png", "pdf"],
+        "--figure-format",
+        help="Figure format(s) for plots (can be given multiple times).",
+    ),
+    save_h5ad: bool = typer.Option(
+        False,
+        "--save-h5ad/--no-save-h5ad",
+        help="Also write an .h5ad copy of the filtered dataset.",
+    ),
+):
+    """
+    QC-and-filter stage operating on the merged dataset produced by `load-data`.
+    """
+    # Build config (Pydantic will validate paths and defaults)
+    cfg = QCFilterConfig(
+        input_path=input_path,
+        output_dir=output_dir,
+        batch_key=batch_key,
+        min_cells=min_cells,
+        min_genes=min_genes,
+        min_cells_per_sample=min_cells_per_sample,
+        max_pct_mt=max_pct_mt,
+        make_figures=make_figures,
+        figure_formats=figure_format,
+        save_h5ad=save_h5ad,
+    )
+
+    # Logfile in the output directory
+    logfile = cfg.output_dir / "qc-and-filter.log"
+    init_logging(logfile)
+
+    run_qc_and_filter(cfg, logfile)
+
+
 
 # ======================================================================
 #  load-and-filter

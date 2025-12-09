@@ -509,6 +509,8 @@ def run_qc_plots_pre_filter_df(qc_df: pd.DataFrame, cfg) -> None:
 
 def run_qc_plots_postfilter(adata, cfg):
     from scanpy import settings as sc_settings
+    import scanpy as sc
+    import matplotlib.pyplot as plt
 
     if not cfg.make_figures:
         return
@@ -518,29 +520,42 @@ def run_qc_plots_postfilter(adata, cfg):
     sc_settings.figdir = figdir_qc
 
     try:
-        sc.pl.violin(
-            adata,
-            ["n_genes_by_counts", "total_counts", "pct_counts_mt"],
-            jitter=0.4,
-            groupby=cfg.batch_key,
-            show=False,
-        )
+        # 1) Violin plots for basic QC metrics, grouped by batch_key
+        if cfg.batch_key in adata.obs:
+            sc.pl.violin(
+                adata,
+                ["n_genes_by_counts", "total_counts", "pct_counts_mt"],
+                jitter=0.4,
+                groupby=cfg.batch_key,
+                show=False,
+            )
 
-        fig = plt.gcf()
-        axs = fig.get_axes()
+            fig = plt.gcf()
+            axs = fig.get_axes()
 
-        fig.subplots_adjust(left=0.08, right=0.98, bottom=0.22, top=0.90, wspace=0.25)
+            # Tighten layout so violins aren't squashed
+            fig.subplots_adjust(
+                left=0.08, right=0.98, bottom=0.22, top=0.90, wspace=0.25
+            )
 
-        first_width = axs[0].get_position().width
-        for ax in axs:
-            pos = ax.get_position()
-            ax.set_position([pos.x0, pos.y0, first_width, pos.height])
+            if axs:
+                first_width = axs[0].get_position().width
+                for ax in axs:
+                    pos = ax.get_position()
+                    ax.set_position([pos.x0, pos.y0, first_width, pos.height])
 
-        save_multi("QC_violin_mt_counts_postfilter", figdir_qc)
-        plt.close(fig)
+            save_multi("QC_violin_mt_counts_postfilter", figdir_qc)
+            plt.close(fig)
+        else:
+            LOGGER.warning(
+                "batch_key '%s' not in adata.obs; skipping grouped violin plot.",
+                cfg.batch_key,
+            )
 
+        # 2) Histogram of mitochondrial percentages (post-filter)
         plot_mt_histogram(adata, cfg, "postfilter")
 
+        # 3) Scatter: total_counts vs n_genes_by_counts, colored by pct_counts_mt
         sc.pl.scatter(
             adata,
             x="total_counts",
@@ -548,37 +563,18 @@ def run_qc_plots_postfilter(adata, cfg):
             color="pct_counts_mt",
             show=False,
         )
-        save_multi("QC_complexity_prefilter", figdir_qc)
+        save_multi("QC_complexity_postfilter", figdir_qc)
+        plt.close()
 
-        sc.pl.pca_variance_ratio(
-            adata,
-            log=True,
-            n_pcs=cfg.max_pcs_plot,
-            show=False,
-        )
-        save_multi("QC_pca_variance_ratio", figdir_qc)
-
-        sc.pl.umap(adata, color=[cfg.batch_key], show=False)
-        save_multi("QC_umap_sample", figdir_qc)
-
-        sc.pl.umap(adata, color=["leiden"], show=False)
-        save_multi("QC_umap_leiden", figdir_qc)
-
-        sc.pl.umap(
-            adata,
-            color=[cfg.batch_key, "leiden"],
-            legend_loc="on data",
-            show=False,
-        )
-        save_multi("QC_umap_per_sample_and_leiden", figdir_qc)
-
+        # 4) Scatter: total_counts vs pct_counts_mt
         sc.pl.scatter(
             adata,
             x="total_counts",
             y="pct_counts_mt",
             show=False,
         )
-        save_multi("QC_scatter_mt", figdir_qc)
+        save_multi("QC_scatter_mt_postfilter", figdir_qc)
+        plt.close()
 
     finally:
         sc_settings.figdir = old_figdir
