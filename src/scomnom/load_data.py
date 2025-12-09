@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 from typing import Dict, Optional
 
+import shutil
 import anndata as ad
 import pandas as pd
 
@@ -227,17 +228,26 @@ def run_load_data(cfg: LoadDataConfig, logfile: Optional[Path] = None) -> ad.Ann
     # ---------------------------------------------------------
     # Save merged dataset
     # ---------------------------------------------------------
-    out_zarr = cfg.output_dir / (cfg.output_name + ".zarr")
+    out_zarr = cfg.output_dir / cfg.output_name
     LOGGER.info("Saving merged dataset as Zarr → %s", out_zarr)
     io_utils.save_dataset(adata, out_zarr, fmt="zarr")
 
     if cfg.save_h5ad:
-        h5ad_out = cfg.output_dir / (cfg.output_name + ".h5ad")
+        h5ad_out = cfg.output_dir / cfg.output_name
         LOGGER.warning(
             "Writing H5AD copy of merged dataset (this loads the full matrix into RAM)."
         )
         io_utils.save_dataset(adata, h5ad_out, fmt="h5ad")
         LOGGER.info("Saved H5AD dataset → %s", h5ad_out)
+    import shutil
+
+    # Cleanup
+    try:
+        shutil.rmtree(temp_dir)
+        LOGGER.info("Removed temporary merge directory: %s", temp_dir)
+    except Exception as e:
+        LOGGER.warning("Could not remove temp merge directory %s: %s", temp_dir, e)
+
 
     LOGGER.info("Finished load_data")
     return adata

@@ -9,7 +9,7 @@ from .load_and_filter import run_load_and_filter
 from .integrate import run_integration
 from .cluster_and_annotate import run_clustering
 
-from .config import LoadDataConfig, LoadAndQCConfig, IntegrationConfig, ClusterAnnotateConfig
+from .config import LoadDataConfig, QCFilterConfig, LoadAndQCConfig, IntegrationConfig, ClusterAnnotateConfig
 from .logging_utils import init_logging
 
 
@@ -214,22 +214,6 @@ def load_data(
 
     run_load_data(cfg, logfile)
 
-from typing import Optional, List
-from pathlib import Path
-import typer
-
-from .config import (
-    CellQCConfig,
-    LoadDataConfig,
-    IntegrationConfig,
-    ClusterAnnotateConfig,
-    QCFilterConfig,  # <-- add this import
-)
-from .qc_and_filter import run_qc_and_filter  # <-- new module
-from .logging_utils import init_logging
-
-# ... existing CLI commands ...
-
 
 # ======================================================================
 #  qc-and-filter
@@ -306,6 +290,11 @@ def qc_and_filter(
     """
     QC-and-filter stage operating on the merged dataset produced by `load-data`.
     """
+
+    # Logfile in the output directory
+    logfile = cfg.output_dir / "qc-and-filter.log"
+    init_logging(logfile)
+
     # Build config (Pydantic will validate paths and defaults)
     cfg = QCFilterConfig(
         input_path=input_path,
@@ -319,10 +308,6 @@ def qc_and_filter(
         figure_formats=figure_format,
         save_h5ad=save_h5ad,
     )
-
-    # Logfile in the output directory
-    logfile = cfg.output_dir / "qc-and-filter.log"
-    init_logging(logfile)
 
     run_qc_and_filter(cfg, logfile)
 
