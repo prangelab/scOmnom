@@ -13,7 +13,7 @@ import scanpy as sc
 from sklearn.metrics import adjusted_rand_score, silhouette_samples
 
 from .config import ClusterAnnotateConfig
-from .load_and_filter import setup_logging
+from .logging_utils import init_logging
 from . import io_utils, plot_utils
 from .io_utils import get_celltypist_model, resolve_msigdb_gene_sets
 from .plot_utils import _extract_series, _normalize_array
