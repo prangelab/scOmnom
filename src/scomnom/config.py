@@ -215,13 +215,6 @@ class QCFilterConfig(BaseModel):
 # -------------------------------
 # LoadAndFilterConfig
 # -------------------------------
-from __future__ import annotations
-from pathlib import Path
-from typing import Optional, List
-from pydantic import BaseModel, Field, validator, model_validator
-from matplotlib.figure import Figure
-
-
 class LoadAndFilterConfig(BaseModel):
     """
     Configuration for the combined load-and-filter module.
