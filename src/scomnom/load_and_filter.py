@@ -316,18 +316,19 @@ def run_load_and_filter(
     # ---------------------------------------------------------
     # Save final filtered dataset
     # ---------------------------------------------------------
-    out_zarr = cfg.output_dir / "adata.filtered"
+    out_zarr = cfg.output_dir / "adata.filtered.zarr"
     LOGGER.info("Saving filtered dataset → %s", out_zarr)
     io_utils.save_dataset(adata, out_zarr, fmt="zarr")
 
     if cfg.save_h5ad:
-        out_h5ad = cfg.output_dir / "adata.filtered"
+        out_h5ad = cfg.output_dir / "adata.filtered.h5ad"
         LOGGER.warning("Writing H5AD copy (loads data into RAM).")
         io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
 
     # Cleanup tmp merge dir
     try:
         import shutil
+        LOGGER.info("Removing temp dir %s", tmp_dir)
         shutil.rmtree(tmp_dir)
     except Exception as e:
         LOGGER.warning("Could not remove temp merge directory %s: %s", tmp_dir, e)
