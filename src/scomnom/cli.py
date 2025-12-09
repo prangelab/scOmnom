@@ -167,10 +167,9 @@ def load_data(
         help="TSV with per-sample metadata indexed by sample_id."
     ),
 
-    batch_key: Optional[str] = Field(
-            None,
-            description="Column name in metadata_tsv to use as batch/sample ID. "
-                        "If None, it is inferred automatically from metadata header."
+    batch_key: str = typer.Option(
+        None, "--batch-key", "-b",
+        help="Column name in metadata_tsv to use as batch/sample ID. "
     ),
 
     output_dir: Path = typer.Option(
