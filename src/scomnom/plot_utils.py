@@ -459,7 +459,7 @@ def run_qc_plots_pre_filter_df(qc_df: pd.DataFrame, cfg) -> None:
 
     qc_violin_panels(qc_adata, cfg, "prefilter")
     qc_scatter_panels(qc_adata, cfg, "prefilter")
-    plot_mt_histogram(qc_adata, cfg, "postfilter")
+    plot_mt_histogram(qc_adata, cfg, "prefilter")
 
 
 def run_qc_plots_postfilter(adata, cfg):
