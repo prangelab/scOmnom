@@ -4,11 +4,12 @@ import typer
 from pathlib import Path
 import warnings
 
+from .load_data import run_load_data
 from .load_and_filter import run_load_and_filter
 from .integrate import run_integration
 from .cluster_and_annotate import run_clustering
 
-from .config import CellQCConfig, LoadAndQCConfig, IntegrationConfig, ClusterAnnotateConfig
+from .config import LoadDataConfig, LoadAndQCConfig, IntegrationConfig, ClusterAnnotateConfig
 from .logging_utils import init_logging
 
 
