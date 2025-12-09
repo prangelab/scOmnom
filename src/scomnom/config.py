@@ -47,6 +47,12 @@ class LoadDataConfig(BaseModel):
         description="Base name for merged output ('.zarr' will be appended)."
     )
 
+    batch_key: Optional[str] = Field(
+        None,
+        description="Column name in metadata_tsv to use as batch/sample ID. "
+                    "If None, it is inferred automatically from metadata header."
+    )
+
     # ---------------------------------------------------------
     # Compute settings
     # ---------------------------------------------------------

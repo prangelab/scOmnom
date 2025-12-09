@@ -166,6 +166,13 @@ def load_data(
         ..., "--metadata-tsv", "-m",
         help="TSV with per-sample metadata indexed by sample_id."
     ),
+
+    batch_key: Optional[str] = Field(
+            None,
+            description="Column name in metadata_tsv to use as batch/sample ID. "
+                        "If None, it is inferred automatically from metadata header."
+    ),
+
     output_dir: Path = typer.Option(
         ..., "--output-dir", "-o",
         help="Directory for merged output Zarr."
@@ -196,6 +203,7 @@ def load_data(
         filtered_sample_dir=filtered_sample_dir,
         cellbender_dir=cellbender_dir,
         metadata_tsv=metadata_tsv,
+        batch_key=batch_key,
         output_dir=output_dir,
         output_name=output_name,
         n_jobs=n_jobs,
