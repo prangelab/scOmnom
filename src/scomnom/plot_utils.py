@@ -450,6 +450,12 @@ def run_qc_plots_pre_filter_df(qc_df: pd.DataFrame, cfg) -> None:
     figdir_qc = cfg.figdir / "QC_plots"
     figdir_qc.mkdir(parents=True, exist_ok=True)
 
+    qc_adata = ad.AnnData(obs=qc_df)
+    qc_adata.obs[cfg.batch_key] = qc_df["sample"].values
+
+    qc_violin_panels(qc_adata, cfg, "postfilter")
+    qc_scatter_panels(qc_adata, cfg, "postfilter")
+
     # -----------------------------
     # 1) Histogram of pct_counts_mt
     # -----------------------------
@@ -519,6 +525,9 @@ def run_qc_plots_postfilter(adata, cfg):
     figdir_qc = cfg.figdir / "QC_plots"
     sc_settings.figdir = figdir_qc
 
+    qc_violin_panels(adata, cfg, "postfilter")
+    qc_scatter_panels(adata, cfg, "postfilter")
+
     try:
         # 1) Violin plots for basic QC metrics, grouped by batch_key
         if cfg.batch_key in adata.obs:
@@ -578,6 +587,99 @@ def run_qc_plots_postfilter(adata, cfg):
 
     finally:
         sc_settings.figdir = old_figdir
+
+
+# ============================================================
+#   QC VIOLIN PANELS (pre- and post-filter)
+# ============================================================
+def qc_violin_panels(adata, cfg, stage: str):
+    """
+    Create additional violin plots (combined + per metric) for QC.
+    stage = "prefilter" or "postfilter".
+    Does NOT replace existing QC plots — only adds more panels.
+    """
+
+    if not cfg.make_figures:
+        return
+
+    figdir = cfg.figdir / "QC_plots"
+    metrics = ["n_genes_by_counts", "total_counts", "pct_counts_mt"]
+
+    # ------------------------------------------------------------------
+    # Combined violin plot (3-panel)
+    # ------------------------------------------------------------------
+    if cfg.batch_key in adata.obs:
+        sc.pl.violin(
+            adata,
+            metrics,
+            jitter=0.4,
+            groupby=cfg.batch_key,
+            show=False,
+        )
+        save_multi(f"QC_violin_mt_counts_{stage}", figdir)
+        plt.close()
+
+        # ------------------------------------------------------------------
+        # Individual violin plots per metric
+        # ------------------------------------------------------------------
+        for m in metrics:
+            sc.pl.violin(
+                adata,
+                m,
+                jitter=0.4,
+                groupby=cfg.batch_key,
+                show=False,
+            )
+            save_multi(f"QC_violin_{m}_{stage}", figdir)
+            plt.close()
+
+    else:
+        LOGGER.warning(
+            "batch_key '%s' not in adata.obs; skipping violin panels.",
+            cfg.batch_key,
+        )
+
+
+# ============================================================
+#   QC SCATTER PANELS (pre- and post-filter)
+# ============================================================
+def qc_scatter_panels(adata, cfg, stage: str):
+    """
+    Additional scatter QC plots:
+      - total_counts vs n_genes_by_counts (colored by pct_counts_mt)
+      - total_counts vs pct_counts_mt
+    stage = 'prefilter' or 'postfilter'
+    """
+
+    if not cfg.make_figures:
+        return
+
+    figdir = cfg.figdir / "QC_plots"
+
+    # --------------------------------------------------------------
+    # Scatter 1: Complexity plot (colored by mt%)
+    # --------------------------------------------------------------
+    sc.pl.scatter(
+        adata,
+        x="total_counts",
+        y="n_genes_by_counts",
+        color="pct_counts_mt",
+        show=False,
+    )
+    save_multi(f"QC_complexity_{stage}", figdir)
+    plt.close()
+
+    # --------------------------------------------------------------
+    # Scatter 2: total_counts vs pct_counts_mt
+    # --------------------------------------------------------------
+    sc.pl.scatter(
+        adata,
+        x="total_counts",
+        y="pct_counts_mt",
+        show=False,
+    )
+    save_multi(f"QC_scatter_mt_{stage}", figdir)
+    plt.close()
 
 
 def barplot_before_after(df_counts: pd.DataFrame, figpath: Path, min_cells_per_sample: int):
