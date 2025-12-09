@@ -451,73 +451,19 @@ def run_qc_plots_pre_filter_df(qc_df: pd.DataFrame, cfg) -> None:
     figdir_qc = cfg.figdir / "QC_plots"
     figdir_qc.mkdir(parents=True, exist_ok=True)
 
+    qc_df = qc_df.copy()
+    qc_df.index = qc_df.index.astype(str)
+
     qc_adata = ad.AnnData(obs=qc_df)
     qc_adata.obs[cfg.batch_key] = qc_df["sample"].values
 
-    qc_violin_panels(qc_adata, cfg, "postfilter")
-    qc_scatter_panels(qc_adata, cfg, "postfilter")
-
-    # -----------------------------
-    # 1) Histogram of pct_counts_mt
-    # -----------------------------
-    fig, ax = plt.subplots(figsize=(5, 4))
-    _clean_axes(ax)
-
-    vals = qc_df["pct_counts_mt"].to_numpy()
-    ax.hist(vals, bins=50, color="steelblue", alpha=0.85)
-
-    ax.set_xlabel("Percent mitochondrial counts")
-    ax.set_ylabel("Number of cells")
-    ax.set_title("Distribution of mitochondrial content (prefilter)")
-
-    fig.tight_layout()
-    save_multi("prefilter_QC_hist_pct_mt", figdir_qc)
-
-    # -----------------------------
-    # 2) Global barcode rank vs UMI knee plot
-    #    based only on total_counts
-    # -----------------------------
-    from kneed import KneeLocator
-
-    total = qc_df["total_counts"].to_numpy()
-    total = total[np.isfinite(total) & (total > 0)]
-
-    if total.size == 0:
-        LOGGER.warning("run_qc_plots_pre_filter_df: no finite total_counts; skipping elbow/knee plot.")
-        plt.close(fig)
-        return
-
-    sorted_counts = np.sort(total)[::-1]
-    ranks = np.arange(1, len(sorted_counts) + 1)
-
-    kl = KneeLocator(ranks, sorted_counts, curve="convex", direction="decreasing")
-    knee_rank = kl.elbow
-
-    fig2, ax2 = plt.subplots(figsize=(6, 5))
-    ax2.plot(ranks, sorted_counts, lw=1, color="steelblue")
-
-    if knee_rank is not None:
-        knee_val = sorted_counts[knee_rank - 1]
-        ax2.axvline(knee_rank, color="red", linestyle="--", lw=0.8)
-        ax2.axhline(knee_val, color="red", linestyle="--", lw=0.8)
-
-    ax2.set_xscale("log")
-    ax2.set_yscale("log")
-    ax2.set_xlabel("Barcode rank (all samples)")
-    ax2.set_ylabel("Total UMI counts")
-    ax2.set_title("Barcode Rank UMI Knee Plot (prefilter)")
-
-    _clean_axes(ax2)
-    fig2.tight_layout()
-
-    save_multi("QC_elbow_knee_prefilter", figdir_qc)
-    plt.close(fig2)
+    qc_violin_panels(qc_adata, cfg, "prefilter")
+    qc_scatter_panels(qc_adata, cfg, "prefilter")
+    plot_mt_histogram(qc_adata, cfg, "postfilter")
 
 
 def run_qc_plots_postfilter(adata, cfg):
     from scanpy import settings as sc_settings
-    import scanpy as sc
-    import matplotlib.pyplot as plt
 
     if not cfg.make_figures:
         return
@@ -528,66 +474,9 @@ def run_qc_plots_postfilter(adata, cfg):
 
     qc_violin_panels(adata, cfg, "postfilter")
     qc_scatter_panels(adata, cfg, "postfilter")
+    plot_mt_histogram(adata, cfg, "postfilter")
 
-    try:
-        # 1) Violin plots for basic QC metrics, grouped by batch_key
-        if cfg.batch_key in adata.obs:
-            sc.pl.violin(
-                adata,
-                ["n_genes_by_counts", "total_counts", "pct_counts_mt"],
-                jitter=0.4,
-                groupby=cfg.batch_key,
-                show=False,
-            )
-
-            fig = plt.gcf()
-            axs = fig.get_axes()
-
-            # Tighten layout so violins aren't squashed
-            fig.subplots_adjust(
-                left=0.08, right=0.98, bottom=0.22, top=0.90, wspace=0.25
-            )
-
-            if axs:
-                first_width = axs[0].get_position().width
-                for ax in axs:
-                    pos = ax.get_position()
-                    ax.set_position([pos.x0, pos.y0, first_width, pos.height])
-
-            save_multi("QC_violin_mt_counts_postfilter", figdir_qc)
-            plt.close(fig)
-        else:
-            LOGGER.warning(
-                "batch_key '%s' not in adata.obs; skipping grouped violin plot.",
-                cfg.batch_key,
-            )
-
-        # 2) Histogram of mitochondrial percentages (post-filter)
-        plot_mt_histogram(adata, cfg, "postfilter")
-
-        # 3) Scatter: total_counts vs n_genes_by_counts, colored by pct_counts_mt
-        sc.pl.scatter(
-            adata,
-            x="total_counts",
-            y="n_genes_by_counts",
-            color="pct_counts_mt",
-            show=False,
-        )
-        save_multi("QC_complexity_postfilter", figdir_qc)
-        plt.close()
-
-        # 4) Scatter: total_counts vs pct_counts_mt
-        sc.pl.scatter(
-            adata,
-            x="total_counts",
-            y="pct_counts_mt",
-            show=False,
-        )
-        save_multi("QC_scatter_mt_postfilter", figdir_qc)
-        plt.close()
-
-    finally:
-        sc_settings.figdir = old_figdir
+    sc_settings.figdir = old_figdir
 
 
 # ============================================================
@@ -595,50 +484,67 @@ def run_qc_plots_postfilter(adata, cfg):
 # ============================================================
 def qc_violin_panels(adata, cfg, stage: str):
     """
-    Create additional violin plots (combined + per metric) for QC.
-    stage = "prefilter" or "postfilter".
-    Does NOT replace existing QC plots — only adds more panels.
+    Three-panel QC violin summary:
+      1) n_genes_by_counts
+      2) total_counts
+      3) pct_counts_mt
+
+    Layout automatically switches:
+      - <= 25 samples → violins on X-axis (samples as categories)
+      - > 25 samples → violins stacked on Y-axis for readability
     """
+    import matplotlib.pyplot as plt
+    import scanpy as sc
+    from scanpy import settings as sc_settings
 
     if not cfg.make_figures:
         return
 
-    figdir = cfg.figdir / "QC_plots"
-    metrics = ["n_genes_by_counts", "total_counts", "pct_counts_mt"]
+    batch_key = cfg.batch_key
+    if batch_key not in adata.obs:
+        LOGGER.warning("batch_key '%s' missing in adata.obs; skipping QC violin panels", batch_key)
+        return
 
-    # ------------------------------------------------------------------
-    # Combined violin plot (3-panel)
-    # ------------------------------------------------------------------
-    if cfg.batch_key in adata.obs:
-        sc.pl.violin(
-            adata,
-            metrics,
-            jitter=0.4,
-            groupby=cfg.batch_key,
-            show=False,
-        )
-        save_multi(f"QC_violin_mt_counts_{stage}", figdir)
-        plt.close()
+    figdir_qc = cfg.figdir / "QC_plots"
+    figdir_qc.mkdir(parents=True, exist_ok=True)
 
-        # ------------------------------------------------------------------
-        # Individual violin plots per metric
-        # ------------------------------------------------------------------
-        for m in metrics:
+    # Decide layout
+    n_samples = adata.obs[batch_key].nunique()
+    horizontal = n_samples <= 25  # True → normal violins on X; False → rotate
+
+    metrics = [
+        ("n_genes_by_counts", "QC_violin_genes"),
+        ("total_counts", "QC_violin_counts"),
+        ("pct_counts_mt", "QC_violin_mt"),
+    ]
+
+    old_figdir = sc_settings.figdir
+    sc_settings.figdir = figdir_qc
+
+    try:
+        for metric, stem in metrics:
+            if metric not in adata.obs:
+                LOGGER.warning("Metric '%s' missing in adata.obs; skipping", metric)
+                continue
+
+            # One panel at a time
+            plt.figure(figsize=(10, 6) if horizontal else (12, 10))
+
             sc.pl.violin(
                 adata,
-                m,
-                jitter=0.4,
-                groupby=cfg.batch_key,
+                metric,
+                groupby=batch_key,
+                rotation=90 if not horizontal else 0,
                 show=False,
+                stripplot=False,
             )
-            save_multi(f"QC_violin_{m}_{stage}", figdir)
+
+            plt.title(f"{metric} ({stage})")
+            save_multi(f"{stem}_{stage}", figdir_qc)
             plt.close()
 
-    else:
-        LOGGER.warning(
-            "batch_key '%s' not in adata.obs; skipping violin panels.",
-            cfg.batch_key,
-        )
+    finally:
+        sc_settings.figdir = old_figdir
 
 
 # ============================================================
