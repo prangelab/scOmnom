@@ -211,6 +211,34 @@ class QCFilterConfig(BaseModel):
 
         return self
 
+
+# -------------------------------
+# LoadAndFilterConfig
+# -------------------------------
+class LoadAndFilterConfig(LoadDataConfig, QCFilterConfig):
+    """
+    Unified config for the load-and-filter stage:
+    - Inherits load-only fields from LoadDataConfig
+    - Inherits QC fields from QCFilterConfig
+    """
+
+    # override input_path from QCFilterConfig: load-and-filter starts from raw/filter/cellbender, not a merged file
+    input_path: Optional[Path] = Field(
+        None,
+        description="(Unused) load-and-filter does not accept a merged input_path."
+    )
+
+    @model_validator(mode="after")
+    def validate_no_input_path(self):
+        if self.input_path is not None:
+            raise ValueError("load-and-filter does not accept --input; provide raw/filtered/cellbender directories.")
+        return self
+
+    @property
+    def figdir(self) -> Path:
+        return self.output_dir / self.figdir_name
+
+
 # -------------------------------
 # OLD
 # -------------------------------

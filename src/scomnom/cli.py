@@ -371,7 +371,7 @@ def load_and_filter(
     ),
 
     # -------------------------------------------------------------
-    # HVG / PCA / batch
+    #  Batch
     # -------------------------------------------------------------
     batch_key: Optional[str] = typer.Option(
         None, "--batch-key", "-b",
