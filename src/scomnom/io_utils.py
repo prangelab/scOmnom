@@ -5,7 +5,6 @@ from typing import Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import anndata as ad
 import scanpy as sc
-from .config import LoadAndQCConfig
 from pathlib import Path
 import shutil
 import os
