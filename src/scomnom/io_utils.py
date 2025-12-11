@@ -42,27 +42,18 @@ def filter_raw_barcodes(
     plot: bool = False,
     plot_path: Optional[Path] = None,
 ) -> ad.AnnData:
-    """
-    Cell Ranger–like cell calling for raw_feature_bc_matrix input.
-    Uses a Gaussian mixture model (log-space) and knee detection on
-    barcode rank vs UMI curve, and retains all barcodes above a
-    combined cutoff. Intended to be stable and conservative while
-    preserving genuine cells across a wide range of data qualities.
-    """
     import numpy as np
     import matplotlib.pyplot as plt
     from kneed import KneeLocator
     from sklearn.mixture import GaussianMixture
     from .plot_utils import save_multi
 
-    total_counts = np.asarray(adata.X.sum(axis=1)).ravel()
+    total_counts = np.array(adata.X.sum(axis=1)).flatten()
     sorted_idx = np.argsort(total_counts)[::-1]
     sorted_counts = total_counts[sorted_idx]
     ranks = np.arange(1, len(sorted_counts) + 1)
 
-    # -------------------------
-    # 1. GMM on log10 UMIs
-    # -------------------------
+    # --- 1. Fit GMM (log space) ---
     log_counts = np.log10(sorted_counts + 1).reshape(-1, 1)
     gm = GaussianMixture(n_components=2, random_state=0)
     gm.fit(log_counts)
@@ -73,10 +64,10 @@ def filter_raw_barcodes(
 
     w_bg, w_cell = gm.weights_[bg_comp], gm.weights_[cell_comp]
     mu_bg, mu_cell = means[bg_comp], means[cell_comp]
-    sd_bg = float(np.sqrt(gm.covariances_[bg_comp]))
-    sd_cell = float(np.sqrt(gm.covariances_[cell_comp]))
+    sd_bg = np.sqrt(gm.covariances_[bg_comp]).item()
+    sd_cell = np.sqrt(gm.covariances_[cell_comp]).item()
 
-    # Intersection of Gaussians
+    # --- 2. Intersection of Gaussians ---
     a = 1/(2*sd_bg**2) - 1/(2*sd_cell**2)
     b = mu_cell/(sd_cell**2) - mu_bg/(sd_bg**2)
     c = (mu_bg**2)/(2*sd_bg**2) - (mu_cell**2)/(2*sd_cell**2) - np.log((sd_cell*w_bg)/(sd_bg*w_cell))
@@ -89,36 +80,26 @@ def filter_raw_barcodes(
 
     umi_thresh = 10 ** log_thresh
 
-    # -------------------------
-    # 2. Knee point (Cell Ranger-like)
-    # -------------------------
+    # --- 3. Knee detection ---
     kl = KneeLocator(ranks, sorted_counts, curve="convex", direction="decreasing")
     knee_rank = kl.elbow or len(sorted_counts)
     knee_value = sorted_counts[knee_rank - 1]
 
-    # -------------------------
-    # 3. Combined cutoff
-    # -------------------------
-    min_umi_floor = 300  # a modest universal lower bound
-    geo_mean = np.sqrt(knee_value * umi_thresh)
-    cutoff_value = max(knee_value, geo_mean, min_umi_floor)
+    # --- 4. Choose cutoff (geometric mean of knee + GMM thresholds) + 20% to tighten it a little ---
+    cutoff_value = 1.2 * np.sqrt(umi_thresh * knee_value)
 
     keep_mask = total_counts >= cutoff_value
     adata_filtered = adata[keep_mask].copy()
 
-    # -------------------------
-    # 4. Plot
-    # -------------------------
+    # --- 5. Plot using save_multi ---
     if plot and plot_path is not None:
         stem = plot_path.stem
         figdir = plot_path.parent
 
         plt.figure(figsize=(5, 4))
         plt.plot(ranks, sorted_counts, lw=1, label="All barcodes")
-        plt.axhline(cutoff_value, color="red", linestyle="--",
-                    label=f"Cutoff = {cutoff_value:.0f}")
-        plt.axvline(knee_rank, color="orange", linestyle=":",
-                    label=f"Knee rank = {knee_rank}")
+        plt.axhline(cutoff_value, color="red", linestyle="--", label=f"Cutoff = {cutoff_value:.0f}")
+        plt.axvline(knee_rank, color="orange", linestyle=":", label=f"Knee rank = {knee_rank}")
         plt.xlabel("Barcode rank")
         plt.ylabel("Total UMI counts")
         plt.title("Barcode rank vs total UMIs")
@@ -128,9 +109,8 @@ def filter_raw_barcodes(
         save_multi(stem, figdir)
 
     LOGGER.info(
-        "Cell-calling (tightened): retained %d / %d barcodes (%.1f%%)",
-        adata_filtered.n_obs,
-        adata.n_obs,
+        "Cell-calling (Cell Ranger-like): retained %d / %d barcodes (%.1f%%)",
+        adata_filtered.n_obs, adata.n_obs,
         100 * adata_filtered.n_obs / len(total_counts)
     )
 
