@@ -448,6 +448,21 @@ def process_and_integrate(
         help="Optionally write an .h5ad copy.",
     ),
 
+    # -------------------------------------------------------------
+    # Figures
+    # -------------------------------------------------------------
+    figdir_name: Optional[str] = typer.Option(
+        "figures",
+        "--figdir-name",
+        help="[Figures] Name of figure directory inside output_dir.",
+    ),
+    figure_format: Optional[List[str]] = typer.Option(
+        ["png", "pdf"],
+        "--figure-format",
+        "-F",
+        help="[Figures] Output figure formats.",
+    ),
+
     # -----------------------------
     # Integration
     # -----------------------------
@@ -476,7 +491,7 @@ def process_and_integrate(
         help="Epochs for SCVI fine-tuning after SOLO cleanup.",
     ),
 
-        # -----------------------------
+    # -----------------------------
     # Benchmarking
     # -----------------------------
     benchmark_n_jobs: int = typer.Option(
@@ -500,6 +515,8 @@ def process_and_integrate(
         output_dir=output_dir,
         output_name=output_name,
         save_h5ad=save_h5ad,
+        figdir_name=figdir_name,
+        figure_format=figure_format,
         methods=methods,
         batch_key=batch_key,
         label_key=label_key,

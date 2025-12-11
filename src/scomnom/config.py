@@ -391,6 +391,18 @@ class ProcessAndIntegrateConfig(BaseModel):
         description="Number of epochs for SCVI fine-tuning after SOLO cleanup."
     )
 
+    # ---- Figures ----
+    figdir_name: str = Field(
+        "figures",
+        description="Name of figure output directory inside output_dir."
+    )
+
+    figure_formats: List[str] = Field(
+        default_factory=lambda: ["png", "pdf"],
+        description="Figure formats to save."
+    )
+    max_pcs_plot: int = 50
+
     # ---- Logging ----
     logfile: Optional[Path] = Field(
         None,
