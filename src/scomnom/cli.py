@@ -456,11 +456,41 @@ def process_and_integrate(
         "--figdir-name",
         help="[Figures] Name of figure directory inside output_dir.",
     ),
-    figure_format: Optional[List[str]] = typer.Option(
+    figure_formats: Optional[List[str]] = typer.Option(
         ["png", "pdf"],
         "--figure-format",
         "-F",
         help="[Figures] Output figure formats.",
+    ),
+
+    # -------------------------------------------------------------
+    # Post-SOLO cleanup thresholds
+    # -------------------------------------------------------------
+    doublet_score_threshold: float = typer.Option(
+        0.25,
+        "--doublet-score-threshold",
+        help="SOLO doublet score threshold (default 0.25). "
+             "Cells with score > threshold are removed."
+    ),
+
+    max_pct_mt: float = typer.Option(
+        5.0,
+        "--max-pct-mt",
+        help="Maximum mitochondrial percentage allowed AFTER SOLO cleanup "
+             "(cells above this are removed).",
+    ),
+
+    min_cells_per_sample: int = typer.Option(
+        20,
+        "--min-cells-per-sample",
+        help="Minimum number of cells required per sample AFTER SOLO cleanup "
+             "(default: 20).",
+    ),
+
+    n_top_genes: int = typer.Option(
+        3000,
+        "--n-top-genes",
+        help="Number of HVGs to select for normalisation + PCA (default 3000).",
     ),
 
     # -----------------------------
@@ -516,7 +546,11 @@ def process_and_integrate(
         output_name=output_name,
         save_h5ad=save_h5ad,
         figdir_name=figdir_name,
-        figure_format=figure_format,
+        figure_formats=figure_formats,
+        doublet_score_threshold=doublet_score_threshold,
+        max_pct_mt=max_pct_mt,
+        min_cells_per_sample=min_cells_per_sample,
+        n_top_genes=n_top_genes,
         methods=methods,
         batch_key=batch_key,
         label_key=label_key,

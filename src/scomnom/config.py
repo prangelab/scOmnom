@@ -356,11 +356,11 @@ class ProcessAndIntegrateConfig(BaseModel):
     )
 
     # ---- Metadata keys ----
-    batch_key: Optional[str] = Field(
+    batch_key: str = Field(
         "sample_id",
         description="Batch/sample key used for integration."
     )
-    label_key: Optional[str] = Field(
+    label_key: str = Field(
         "leiden",
         description="Cell-type/cluster labels used for scANVI + scIB metrics."
     )
@@ -372,23 +372,45 @@ class ProcessAndIntegrateConfig(BaseModel):
     )
 
     # ---- Benchmarking ----
-    benchmark_n_jobs: Optional[int] = Field(
+    benchmark_n_jobs: int = Field(
         16,
         description="Parallel jobs for scIB benchmarking."
     )
 
     # ---- Doublet reuse options ----
-    reuse_scvi_model: Optional[bool] = Field(
+    reuse_scvi_model: bool = Field(
         True,
         description="Reuse SCVI model trained for SOLO doublet detection."
     )
-    scvi_refine_after_solo: Optional[bool] = Field(
+    scvi_refine_after_solo: bool = Field(
         default=True,
         description="After SOLO cleanup, perform a short SCVI fine-tuning pass on the filtered dataset."
     )
-    scvi_refine_epochs: Optional[int] = Field(
+    scvi_refine_epochs: int = Field(
         default=15,
         description="Number of epochs for SCVI fine-tuning after SOLO cleanup."
+    )
+
+    # ---- QC / cleanup thresholds ----
+    doublet_score_threshold: float = Field(
+        0.25,
+        description="Threshold for SOLO doublet_score (> threshold = doublet).",
+    )
+
+    max_pct_mt: float = Field(
+        5.0,
+        description="Maximum pct_counts_mt allowed after SOLO cleanup.",
+    )
+
+    min_cells_per_sample: int = Field(
+        20,
+        description="Minimum cells per sample required after SOLO cleanup.",
+    )
+
+    # ---- HVG / PCA ----
+    n_top_genes: int = Field(
+        3000,
+        description="Number of highly variable genes for SC integration.",
     )
 
     # ---- Figures ----
