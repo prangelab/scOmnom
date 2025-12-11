@@ -134,7 +134,7 @@ def _validate_metadata_samples(
 # ---------------------------------------------------------------------
 # Main orchestrator
 # ---------------------------------------------------------------------
-def run_load_data(cfg: LoadDataConfig, logfile: Optional[Path] = None) -> ad.AnnData:
+def run_load_data(cfg: LoadDataConfig) -> ad.AnnData:
     """
     Load stage for the new pipeline (load-only, no QC):
 
@@ -150,6 +150,7 @@ def run_load_data(cfg: LoadDataConfig, logfile: Optional[Path] = None) -> ad.Ann
     No QC filtering, doublet detection, HVG, PCA, or clustering happens here.
     Those are handled in downstream qc-and-filter / integrate modules.
     """
+    setup_logging(cfg.logfile)
     LOGGER.info("Starting load_data")
 
     cfg.output_dir.mkdir(parents=True, exist_ok=True)

@@ -131,7 +131,8 @@ def sparse_filter_cells_and_genes(
 # ---------------------------------------------------------------------
 # Main orchestrator
 # ---------------------------------------------------------------------
-def run_qc_and_filter(cfg: QCFilterConfig, logfile: Optional[Path] = None) -> ad.AnnData:
+def run_qc_and_filter(cfg: QCFilterConfig) -> ad.AnnData:
+    setup_logging(cfg.logfile)
     LOGGER.info("Starting qc_and_filter")
 
     # Set up figure saving

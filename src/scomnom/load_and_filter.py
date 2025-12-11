@@ -163,10 +163,9 @@ def _per_sample_qc_and_filter(
 
 
 def run_load_and_filter(
-    cfg: LoadAndFilterConfig,
-    logfile: Optional[Path] = None,  # kept for CLI compatibility; logging is already set up there
-) -> ad.AnnData:
+    cfg: LoadAndFilterConfig) -> ad.AnnData:
 
+    setup_logging(cfg.logfile)
     LOGGER.info("Starting load-and-filter")
     # Configure Scanpy/Matplotlib figure behavior + formats
     plot_utils.setup_scanpy_figs(cfg.figdir, cfg.figure_formats)

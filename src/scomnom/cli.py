@@ -198,7 +198,11 @@ def load_data(
     attach metadata, write per-sample Zarrs, merge, and save final dataset.
     """
 
-    logfile = output_dir / "load-data.log"
+    # Determine output directory
+    if output_dir is None:
+        output_dir = "."
+
+    logfile = output_dir / "load-and-filter.log"
     init_logging(logfile)
 
     cfg = LoadDataConfig(
@@ -211,9 +215,10 @@ def load_data(
         output_name=output_name,
         n_jobs=n_jobs,
         save_h5ad=save_h5ad,
+        logfile=logfile,
     )
 
-    run_load_data(cfg, logfile)
+    run_load_data(cfg)
 
 
 # ======================================================================
@@ -292,7 +297,10 @@ def qc_and_filter(
     QC-and-filter stage operating on the merged dataset produced by `load-data`.
     """
 
-    # Logfile in the output directory
+    # Determine output directory
+    if output_dir is None:
+        output_dir = input_path.parent
+
     logfile = output_dir / "qc-and-filter.log"
     init_logging(logfile)
 
@@ -308,9 +316,10 @@ def qc_and_filter(
         make_figures=make_figures,
         figure_formats=figure_format,
         save_h5ad=save_h5ad,
+        logfile=logfile,
     )
 
-    run_qc_and_filter(cfg, logfile)
+    run_qc_and_filter(cfg)
 
 
 
@@ -391,6 +400,10 @@ def load_and_filter(
     if filtered_sample_dir and cellbender_dir:
         raise typer.BadParameter("CellBender outputs cannot be mixed with Cell Ranger filtered matrices.")
 
+    # Determine output directory
+    if output_dir is None:
+        output_dir = input_path.parent
+
     logfile = output_dir / "load-and-filter.log"
     init_logging(logfile)
 
@@ -413,12 +426,13 @@ def load_and_filter(
         filtered_pattern=filtered_pattern,
         cellbender_pattern=cellbender_pattern,
         cellbender_h5_suffix=cellbender_h5_suffix,
+        logfile=logfile,
     )
 
     if n_jobs is not None:
         cfg.n_jobs = n_jobs
 
-    run_load_and_filter(cfg, logfile)
+    run_load_and_filter(cfg)
 
 
 # ======================================================================
@@ -532,6 +546,10 @@ def process_and_integrate(
 ):
     # Normalize integration methods (Scanorama/Harmony removed)
     methods = _normalize_methods(methods)
+
+    # If user didn't specify --batch-key, apply default here
+    if batch_key is None:
+        batch_key = "sample_id"
 
     # Determine output directory
     if output_dir is None:
