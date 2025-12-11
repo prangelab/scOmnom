@@ -41,15 +41,11 @@ def filter_raw_barcodes(
     adata: ad.AnnData,
     plot: bool = False,
     plot_path: Optional[Path] = None,
+    min_umi_floor: int = 500,    # <-- tighten: enforce a gentle hard minimum
 ) -> ad.AnnData:
     """
-    Approximate Cell Ranger 'cell calling' on a raw_feature_bc_matrix.
-    Uses a hybrid of Gaussian mixture modeling and knee detection to
-    determine a permissive UMI cutoff separating background from cells.
-    Keeps all barcodes above the selected cutoff in total UMI counts.
-
-    If plot=True and plot_path is provided, the figure is passed through
-    save_multi() and ends up in <figdir>/<fmt>/subdirs consistently.
+    Cell Ranger–like cell calling with a tightened threshold.
+    Only minimal changes from the original implementation.
     """
     import numpy as np
     import matplotlib.pyplot as plt
@@ -76,7 +72,7 @@ def filter_raw_barcodes(
     sd_bg = np.sqrt(gm.covariances_[bg_comp]).item()
     sd_cell = np.sqrt(gm.covariances_[cell_comp]).item()
 
-    # --- 2. Intersection of Gaussians ---
+    # --- 2. Intersection of Gaussians (TIGHTENED) ---
     a = 1/(2*sd_bg**2) - 1/(2*sd_cell**2)
     b = mu_cell/(sd_cell**2) - mu_bg/(sd_bg**2)
     c = (mu_bg**2)/(2*sd_bg**2) - (mu_cell**2)/(2*sd_cell**2) - np.log((sd_cell*w_bg)/(sd_bg*w_cell))
@@ -87,15 +83,23 @@ def filter_raw_barcodes(
     else:
         log_thresh = (-b + np.sqrt(disc)) / (2*a)
 
+    # **Tightening step**:
+    # Shift threshold *towards the cell mean* (less permissive)
+    log_thresh = 0.5 * log_thresh + 0.5 * mu_cell
+
     umi_thresh = 10 ** log_thresh
 
-    # --- 3. Knee detection ---
+    # --- 3. Knee detection (unchanged) ---
     kl = KneeLocator(ranks, sorted_counts, curve="convex", direction="decreasing")
     knee_rank = kl.elbow or len(sorted_counts)
     knee_value = sorted_counts[knee_rank - 1]
 
-    # --- 4. Choose cutoff (geometric mean of knee + GMM thresholds) ---
-    cutoff_value = np.sqrt(umi_thresh * knee_value)
+    # --- 4. FINAL CUT (TIGHTENED) ---
+    # Replace geometric mean → take the MAX of:
+    #   - knee cutoff (CR-style)
+    #   - GMM cutoff (tightened)
+    #   - optional min_umi_floor (~500 UMIs)
+    cutoff_value = max(knee_value, umi_thresh, min_umi_floor)
 
     keep_mask = total_counts >= cutoff_value
     adata_filtered = adata[keep_mask].copy()
@@ -118,12 +122,13 @@ def filter_raw_barcodes(
         save_multi(stem, figdir)
 
     LOGGER.info(
-        "Cell-calling (Cell Ranger-like): retained %d / %d barcodes (%.1f%%)",
+        "Cell-calling (tightened): retained %d / %d barcodes (%.1f%%)",
         adata_filtered.n_obs, adata.n_obs,
         100 * adata_filtered.n_obs / len(total_counts)
     )
 
     return adata_filtered
+
 
 
 import logging
