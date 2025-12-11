@@ -363,27 +363,51 @@ def _run_scanvi_from_scvi(
     label_key: str,
     max_epochs: int = 400,
 ) -> np.ndarray:
-    """
-    Run scANVI starting from a fitted SCVI model.
-    """
     from scvi.model import SCANVI
+    import torch
 
-    LOGGER.info("Running scANVI (from pre-trained SCVI model)")
-    _ensure_label_key(adata, label_key)
+    LOGGER.info("Running scANVI (with multi-GPU support)")
 
+    # ------------------------
+    # Device detection (same as SOLO + scVI)
+    # ------------------------
+    if torch.cuda.is_available():
+        accelerator = "gpu"
+        devices = "auto"
+        LOGGER.info("scANVI accelerator: GPU")
+    elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        accelerator = "mps"
+        devices = 1
+        LOGGER.info("scANVI accelerator: Apple MPS")
+    else:
+        accelerator = "cpu"
+        devices = "auto"
+        LOGGER.info("scANVI accelerator: CPU")
+
+    # ------------------------
+    # Build SCANVI from the trained scVI model
+    # ------------------------
     lvae = SCANVI.from_scvi_model(
         scvi_model,
         adata=adata,
         labels_key=label_key,
         unlabeled_category="Unknown",
     )
+
+    # ------------------------
+    # Train SCANVI with multi-GPU acceleration
+    # ------------------------
     lvae.train(
         max_epochs=max_epochs,
         n_samples_per_label=100,
         early_stopping=True,
         enable_progress_bar=False,
+        accelerator=accelerator,
+        devices=devices,
     )
+
     return lvae.get_latent_representation()
+
 
 
 def _run_integrations_with_existing_scvi(
@@ -580,6 +604,48 @@ def run_process_and_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
         adata.n_obs,
         adata.n_vars,
     )
+
+    # ---------------------------------------------------------
+    # OPTIONAL: SCVI fine-tuning on the cleaned dataset
+    # ---------------------------------------------------------
+    if cfg.scvi_refine_after_solo:
+        LOGGER.info(
+            "Fine-tuning SCVI on cleaned dataset for %d epochs...",
+            cfg.scvi_refine_epochs,
+        )
+
+        # Device detection (same as SCANVI/SOLO)
+        if torch.cuda.is_available():
+            accelerator = "gpu"
+            devices = "auto"
+        elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            accelerator = "mps"
+            devices = 1
+        else:
+            accelerator = "cpu"
+            devices = "auto"
+
+        # Attach new AnnDataManager for the filtered dataset
+        from scvi.model import SCVI
+        SCVI.setup_anndata(
+            adata,
+            layer="counts" if "counts" in adata.layers else None,
+            batch_key=batch_key,
+        )
+        scvi_model._adata_manager = SCVI._get_adata_manager(adata)  # swap managers safely
+
+        # Fine-tune SCVI in place
+        scvi_model.train(
+            max_epochs=cfg.scvi_refine_epochs,
+            accelerator=accelerator,
+            devices=devices,
+            enable_progress_bar=False,
+            early_stopping=True,
+        )
+
+        LOGGER.info("SCVI fine-tune completed.")
+    else:
+        LOGGER.info("Skipping SCVI fine-tuning (cfg.scvi_refine_after_solo=False).")
 
     # ---------------------------------------------------------
     # 3) Normalisation + HVG + PCA/UMAP + Leiden (unintegrated)

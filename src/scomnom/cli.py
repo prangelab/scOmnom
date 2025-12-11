@@ -465,8 +465,18 @@ def process_and_integrate(
         "leiden", "--label-key", "-l",
         help="[scIB] Label key for benchmarking and scANVI.",
     ),
+    scvi_refine_after_solo: bool = typer.Option(
+        True,
+        "--scvi-refine-after-solo/--no-scvi-refine-after-solo",
+        help="After SOLO cleanup, fine-tune the SCVI model on the filtered dataset.",
+    ),
+    scvi_refine_epochs: int = typer.Option(
+        15,
+        "--scvi-refine-epochs",
+        help="Epochs for SCVI fine-tuning after SOLO cleanup.",
+    ),
 
-    # -----------------------------
+        # -----------------------------
     # Benchmarking
     # -----------------------------
     benchmark_n_jobs: int = typer.Option(
@@ -493,6 +503,8 @@ def process_and_integrate(
         methods=methods,
         batch_key=batch_key,
         label_key=label_key,
+        scvi_refine_after_solo=scvi_refine_after_solo,
+        scvi_refine_epochs=scvi_refine_epochs,
         benchmark_n_jobs=benchmark_n_jobs,
     )
 

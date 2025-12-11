@@ -343,44 +343,52 @@ class ProcessAndIntegrateConfig(BaseModel):
         ...,
         description="Path to input dataset (Zarr or H5AD) produced by load-and-filter."
     )
-    output_dir: Path = Field(
+    output_dir: Optional[Path] = Field(
         "results",
         description="Directory to store integration output + figures.",
     )
-    output_name: str = Field(
+    output_name: Optional[str] = Field(
         "adata.integrated",
         description="Stem for integrated output (e.g. adata.integrated.zarr)."
     )
-    save_h5ad: bool = Field(
+    save_h5ad: Optional[bool] = Field(
         False, description="Optional additional H5AD output."
     )
 
     # ---- Metadata keys ----
-    batch_key: str = Field(
+    batch_key: Optional[str] = Field(
         "sample_id",
         description="Batch/sample key used for integration."
     )
-    label_key: str = Field(
+    label_key: Optional[str] = Field(
         "leiden",
         description="Cell-type/cluster labels used for scANVI + scIB metrics."
     )
 
     # ---- Integration method selection ----
-    methods: List[str] = Field(
+    methods: Optional[List[str]] = Field(
         ["BBKNN", "scVI", "scANVI"],
         description="Integration methods to run and benchmark."
     )
 
     # ---- Benchmarking ----
-    benchmark_n_jobs: int = Field(
+    benchmark_n_jobs: Optional[int] = Field(
         16,
         description="Parallel jobs for scIB benchmarking."
     )
 
     # ---- Doublet reuse options ----
-    reuse_scvi_model: bool = Field(
+    reuse_scvi_model: Optional[bool] = Field(
         True,
         description="Reuse SCVI model trained for SOLO doublet detection."
+    )
+    scvi_refine_after_solo: Optional[bool] = Field(
+        default=True,
+        description="After SOLO cleanup, perform a short SCVI fine-tuning pass on the filtered dataset."
+    )
+    scvi_refine_epochs: Optional[int] = Field(
+        default=15,
+        description="Number of epochs for SCVI fine-tuning after SOLO cleanup."
     )
 
     # ---- Logging ----
