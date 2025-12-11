@@ -9,7 +9,6 @@ from typing import Dict, Optional
 import anndata as ad
 import pandas as pd
 
-from .config import LoadAndQCConfig
 from . import io_utils
 from . import plot_utils
 from .qc_and_filter import compute_qc_metrics, sparse_filter_cells_and_genes
