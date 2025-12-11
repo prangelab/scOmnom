@@ -36,15 +36,15 @@ dependencies:
   - bbknn
 
   # PyTorch / Lightning
-  - pytorch
-  - torchvision
-  - torchaudio
+  - pytorch::pytorch
+  - pytorch::torchvision
+  - pytorch::torchaudio
   - pytorch-lightning
 
   # GPU acceleration:
   # On macOS: Metal/MPS enabled automatically.
   # On Linux (NVIDIA GPU) uncomment the next line.
-  # - pytorch-cuda=12.1
+  # - nvidia::pytorch-cuda=12.1
 
   # Testing
   - pytest
