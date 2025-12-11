@@ -506,9 +506,10 @@ def process_and_integrate(
         scvi_refine_after_solo=scvi_refine_after_solo,
         scvi_refine_epochs=scvi_refine_epochs,
         benchmark_n_jobs=benchmark_n_jobs,
+        logfile=logfile,
     )
 
-    run_process_and_integrate(cfg, logfile)
+    run_process_and_integrate(cfg)
 
 
 # ======================================================================
