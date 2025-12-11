@@ -9,12 +9,13 @@ from .qc_and_filter import run_qc_and_filter
 from .load_and_filter import run_load_and_filter
 from .integrate import run_integration
 from .cluster_and_annotate import run_clustering
+from .process_and_integrate import run_process_and_integrate
 
-from .config import LoadDataConfig, QCFilterConfig, LoadAndFilterConfig, IntegrationConfig, ClusterAnnotateConfig
+from .config import LoadDataConfig, QCFilterConfig, LoadAndFilterConfig, ProcessAndIntegrateConfig, IntegrationConfig, ClusterAnnotateConfig
 from .logging_utils import init_logging
 
 
-ALLOWED_METHODS = {"scVI", "scANVI", "Scanorama", "Harmony", "BBKNN"}
+ALLOWED_METHODS = {"scVI", "scANVI", "BBKNN"}
 app = typer.Typer(help="scOmnom CLI — high-throughput scRNA-seq preprocessing and analysis pipeline.")
 
 # Globally suppress noisy warnings
@@ -419,6 +420,84 @@ def load_and_filter(
         cfg.n_jobs = n_jobs
 
     run_load_and_filter(cfg, logfile)
+
+
+# ======================================================================
+#  process-and-integrate
+# ======================================================================
+@app.command("process-and-integrate", help="Run doublet detection, normalization, PCA/UMAP, integration, and scIB benchmarking.")
+def process_and_integrate(
+    # -----------------------------
+    # I/O
+    # -----------------------------
+    input_path: Path = typer.Option(
+        ..., "--input-path", "-i",
+        help="[I/O] Filtered dataset (.zarr or .h5ad) from load-and-filter."
+    ),
+    output_dir: Optional[Path] = typer.Option(
+        None, "--output-dir", "-o",
+        help="[I/O] Directory for integrated output (default = input parent).",
+    ),
+    output_name: str = typer.Option(
+        "adata.integrated",
+        "--output-name",
+        help="[I/O] Base name for integrated dataset ('.zarr' appended automatically).",
+    ),
+    save_h5ad: bool = typer.Option(
+        False,
+        "--save-h5ad/--no-save-h5ad",
+        help="Optionally write an .h5ad copy.",
+    ),
+
+    # -----------------------------
+    # Integration
+    # -----------------------------
+    methods: Optional[List[str]] = typer.Option(
+        None, "--methods", "-m",
+        help="[Integration] Methods: BBKNN, scVI, scANVI.",
+        autocompletion=_methods_completion,
+        case_sensitive=False,
+    ),
+    batch_key: Optional[str] = typer.Option(
+        None, "--batch-key", "-b",
+        help="[Integration] Batch/sample column in .obs.",
+    ),
+    label_key: str = typer.Option(
+        "leiden", "--label-key", "-l",
+        help="[scIB] Label key for benchmarking and scANVI.",
+    ),
+
+    # -----------------------------
+    # Benchmarking
+    # -----------------------------
+    benchmark_n_jobs: int = typer.Option(
+        16,
+        "--benchmark-n-jobs",
+        help="[scIB] Parallel workers.",
+    ),
+):
+    # Normalize integration methods (Scanorama/Harmony removed)
+    methods = _normalize_methods(methods)
+
+    # Determine output directory
+    if output_dir is None:
+        output_dir = input_path.parent
+
+    logfile = output_dir / "process-and-integrate.log"
+    init_logging(logfile)
+
+    cfg = ProcessAndIntegrateConfig(
+        input_path=input_path,
+        output_dir=output_dir,
+        output_name=output_name,
+        save_h5ad=save_h5ad,
+        methods=methods,
+        batch_key=batch_key,
+        label_key=label_key,
+        benchmark_n_jobs=benchmark_n_jobs,
+    )
+
+    run_process_and_integrate(cfg, logfile)
 
 
 # ======================================================================

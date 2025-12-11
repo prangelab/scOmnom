@@ -413,40 +413,60 @@ class LoadAndQCConfig(BaseModel):
         return self
 
 
-class IntegrationConfig(BaseModel):
-    # I/O
-    input_path: Path = Field(..., description="Preprocessed h5ad from load_and_filter")
-    output_path: Optional[Path] = Field(
-        None,
-        description="Output integrated h5ad. Defaults to <input_stem>.integrated.h5ad",
+# ---------------------------------------------------------------------
+# PROCESS + INTEGRATE CONFIG
+# ---------------------------------------------------------------------
+class ProcessAndIntegrateConfig(BaseModel):
+
+    # ---- Input + output ----
+    input_path: Path = Field(
+        ...,
+        description="Path to input dataset (Zarr or H5AD) produced by load-and-filter."
+    )
+    output_dir: Path = Field(
+        "results",
+        description="Directory to store integration output + figures.",
+    )
+    output_name: str = Field(
+        "adata.integrated",
+        description="Stem for integrated output (e.g. adata.integrated.zarr)."
+    )
+    save_h5ad: bool = Field(
+        False, description="Optional additional H5AD output."
     )
 
-    # Integration method control
-    methods: Optional[List[str]] = Field(
-        None,
-        description=(
-            "Integration methods to run. "
-            "Supported: Scanorama, Harmony, scVI, scANVI. "
-            "Default: all except scANVI."
-        ),
-    )
-
-    # Keys
-    batch_key: Optional[str] = Field(
-        None, description="Batch/sample key in adata.obs (default: auto-detect)"
+    # ---- Metadata keys ----
+    batch_key: str = Field(
+        "sample_id",
+        description="Batch/sample key used for integration."
     )
     label_key: str = Field(
         "leiden",
-        description="Label/cluster key in adata.obs used for scib-metrics & scANVI",
+        description="Cell-type/cluster labels used for scANVI + scIB metrics."
     )
 
-    # Compute
-    benchmark_n_jobs: int = Field(1, ge=1, description="Parallel workers for scib-metrics")
+    # ---- Integration method selection ----
+    methods: List[str] = Field(
+        ["BBKNN", "scVI", "scANVI"],
+        description="Integration methods to run and benchmark."
+    )
 
-    # Logging
+    # ---- Benchmarking ----
+    benchmark_n_jobs: int = Field(
+        16,
+        description="Parallel jobs for scIB benchmarking."
+    )
+
+    # ---- Doublet reuse options ----
+    reuse_scvi_model: bool = Field(
+        True,
+        description="Reuse SCVI model trained for SOLO doublet detection."
+    )
+
+    # ---- Logging ----
     logfile: Optional[Path] = Field(
         None,
-        description="Optional log file path; defaults to <input_dir>/integration.log",
+        description="Write log to file instead of stdout only."
     )
 
     @validator("methods")
