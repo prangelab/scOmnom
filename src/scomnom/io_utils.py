@@ -41,11 +41,13 @@ def filter_raw_barcodes(
     adata: ad.AnnData,
     plot: bool = False,
     plot_path: Optional[Path] = None,
-    min_umi_floor: int = 500,    # <-- tighten: enforce a gentle hard minimum
 ) -> ad.AnnData:
     """
-    Cell Ranger–like cell calling with a tightened threshold.
-    Only minimal changes from the original implementation.
+    Cell Ranger–like cell calling for raw_feature_bc_matrix input.
+    Uses a Gaussian mixture model (log-space) and knee detection on
+    barcode rank vs UMI curve, and retains all barcodes above a
+    combined cutoff. Intended to be stable and conservative while
+    preserving genuine cells across a wide range of data qualities.
     """
     import numpy as np
     import matplotlib.pyplot as plt
@@ -53,12 +55,14 @@ def filter_raw_barcodes(
     from sklearn.mixture import GaussianMixture
     from .plot_utils import save_multi
 
-    total_counts = np.array(adata.X.sum(axis=1)).flatten()
+    total_counts = np.asarray(adata.X.sum(axis=1)).ravel()
     sorted_idx = np.argsort(total_counts)[::-1]
     sorted_counts = total_counts[sorted_idx]
     ranks = np.arange(1, len(sorted_counts) + 1)
 
-    # --- 1. Fit GMM (log space) ---
+    # -------------------------
+    # 1. GMM on log10 UMIs
+    # -------------------------
     log_counts = np.log10(sorted_counts + 1).reshape(-1, 1)
     gm = GaussianMixture(n_components=2, random_state=0)
     gm.fit(log_counts)
@@ -69,10 +73,10 @@ def filter_raw_barcodes(
 
     w_bg, w_cell = gm.weights_[bg_comp], gm.weights_[cell_comp]
     mu_bg, mu_cell = means[bg_comp], means[cell_comp]
-    sd_bg = np.sqrt(gm.covariances_[bg_comp]).item()
-    sd_cell = np.sqrt(gm.covariances_[cell_comp]).item()
+    sd_bg = float(np.sqrt(gm.covariances_[bg_comp]))
+    sd_cell = float(np.sqrt(gm.covariances_[cell_comp]))
 
-    # --- 2. Intersection of Gaussians (TIGHTENED) ---
+    # Intersection of Gaussians
     a = 1/(2*sd_bg**2) - 1/(2*sd_cell**2)
     b = mu_cell/(sd_cell**2) - mu_bg/(sd_bg**2)
     c = (mu_bg**2)/(2*sd_bg**2) - (mu_cell**2)/(2*sd_cell**2) - np.log((sd_cell*w_bg)/(sd_bg*w_cell))
@@ -83,36 +87,38 @@ def filter_raw_barcodes(
     else:
         log_thresh = (-b + np.sqrt(disc)) / (2*a)
 
-    # **Tightening step**:
-    # Shift threshold *towards the cell mean* (less permissive)
-    log_thresh = 0.5 * log_thresh + 0.5 * mu_cell
-
     umi_thresh = 10 ** log_thresh
 
-    # --- 3. Knee detection (unchanged) ---
+    # -------------------------
+    # 2. Knee point (Cell Ranger-like)
+    # -------------------------
     kl = KneeLocator(ranks, sorted_counts, curve="convex", direction="decreasing")
     knee_rank = kl.elbow or len(sorted_counts)
     knee_value = sorted_counts[knee_rank - 1]
 
-    # --- 4. FINAL CUT (TIGHTENED) ---
-    # Replace geometric mean → take the MAX of:
-    #   - knee cutoff (CR-style)
-    #   - GMM cutoff (tightened)
-    #   - optional min_umi_floor (~500 UMIs)
-    cutoff_value = max(knee_value, umi_thresh, min_umi_floor)
+    # -------------------------
+    # 3. Combined cutoff
+    # -------------------------
+    min_umi_floor = 300  # a modest universal lower bound
+    geo_mean = np.sqrt(knee_value * umi_thresh)
+    cutoff_value = max(knee_value, geo_mean, min_umi_floor)
 
     keep_mask = total_counts >= cutoff_value
     adata_filtered = adata[keep_mask].copy()
 
-    # --- 5. Plot using save_multi ---
+    # -------------------------
+    # 4. Plot
+    # -------------------------
     if plot and plot_path is not None:
         stem = plot_path.stem
         figdir = plot_path.parent
 
         plt.figure(figsize=(5, 4))
         plt.plot(ranks, sorted_counts, lw=1, label="All barcodes")
-        plt.axhline(cutoff_value, color="red", linestyle="--", label=f"Cutoff = {cutoff_value:.0f}")
-        plt.axvline(knee_rank, color="orange", linestyle=":", label=f"Knee rank = {knee_rank}")
+        plt.axhline(cutoff_value, color="red", linestyle="--",
+                    label=f"Cutoff = {cutoff_value:.0f}")
+        plt.axvline(knee_rank, color="orange", linestyle=":",
+                    label=f"Knee rank = {knee_rank}")
         plt.xlabel("Barcode rank")
         plt.ylabel("Total UMI counts")
         plt.title("Barcode rank vs total UMIs")
@@ -123,12 +129,12 @@ def filter_raw_barcodes(
 
     LOGGER.info(
         "Cell-calling (tightened): retained %d / %d barcodes (%.1f%%)",
-        adata_filtered.n_obs, adata.n_obs,
+        adata_filtered.n_obs,
+        adata.n_obs,
         100 * adata_filtered.n_obs / len(total_counts)
     )
 
     return adata_filtered
-
 
 
 import logging
