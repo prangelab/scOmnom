@@ -11,7 +11,7 @@ from .integrate import run_integration
 from .cluster_and_annotate import run_clustering
 from .process_and_integrate import run_process_and_integrate
 
-from .config import LoadDataConfig, QCFilterConfig, LoadAndFilterConfig, ProcessAndIntegrateConfig, IntegrationConfig, ClusterAnnotateConfig
+from .config import LoadDataConfig, QCFilterConfig, LoadAndFilterConfig, ProcessAndIntegrateConfig, ClusterAnnotateConfig
 from .logging_utils import init_logging
 
 
