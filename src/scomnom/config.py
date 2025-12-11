@@ -333,86 +333,6 @@ class LoadAndFilterConfig(BaseModel):
         return self
 
 
-
-# -------------------------------
-# OLD
-# -------------------------------
-class LoadAndQCConfig(BaseModel):
-    # I/O
-    raw_sample_dir: Optional[Path] = Field(None, description="Directory with 10x raw_feature_bc_matrix folders")
-    filtered_sample_dir: Optional[Path] = Field(None,description="Directory with 10x filtered_feature_bc_matrix folders")
-    cellbender_dir: Optional[Path] = Field(None, description="Directory with CellBender outputs")
-    metadata_tsv: Optional[Path] = Field(None, description="TSV with per-sample metadata indexed by sample ID")
-    output_dir: Path = Field(..., description="Directory for outputs (anndata + figures)")
-    output_name: str = Field("adata.preprocessed", description="Output filename")
-    save_h5ad: bool = False
-    n_jobs: int = Field(4, ge=1)
-
-    # QC thresholds
-    min_cells: int = Field(3, ge=1, description="Minimum cells per gene")
-    min_genes: int = Field(500, ge=1, description="Minimum genes per cell")
-    min_cells_per_sample: int = Field(20, ge=0)
-    max_pct_mt: float = Field(5.0, ge=0.0, description="Mitochondrial % threshold after CB + filters")
-    doublet_score_threshold: float = 0.25
-
-    # Gene flags
-    mt_prefix: str = Field("MT-", description="Prefix for mitochondrial genes")
-    ribo_prefixes: List[str] = Field(default_factory=lambda: ["RPS", "RPL"])
-    hb_regex: str = Field("^HB[^(P)]", description="Regex for hemoglobin genes")
-
-    # HVG / PCA / neighbors
-    n_top_genes: int = 2000
-    max_pcs_plot: int = 50
-    # Batch key
-    batch_key: Optional[str] = None
-
-    # Plots
-    make_figures: bool = True
-    figdir_name: str = "figures"
-    figure_formats: List[str] = Field(
-        default_factory=lambda: ["png", "pdf"],
-        description="Figure formats to save (e.g. ['png','pdf'])."
-    )
-
-    # File patterns
-    raw_pattern: str = "*.raw_feature_bc_matrix"
-    filtered_pattern: str = "*.filtered_feature_bc_matrix"
-    cellbender_pattern: str = "*.cellbender_filtered.output"
-    cellbender_h5_suffix: str = ".cellbender_out.h5"
-
-    @property
-    def figdir(self) -> Path:
-        return self.output_dir / self.figdir_name
-
-    @validator("output_name")
-    def ensure_h5ad(cls, v: str) -> str:
-        return v if v.endswith(".h5ad") else f"{v}.h5ad"
-
-    @validator("figure_formats", each_item=True)
-    def validate_formats(cls, fmt: str):
-        supported = Figure().canvas.get_supported_filetypes()
-        if fmt.lower() not in supported:
-            raise ValueError(
-                f"Unsupported figure format '{fmt}'. "
-                f"Supported formats include: {', '.join(sorted(supported))}"
-            )
-        return fmt.lower()
-
-    from pydantic import model_validator
-    @model_validator(mode="after")
-    def check_exactly_one_source(self):
-        sources = [
-            self.raw_sample_dir,
-            self.filtered_sample_dir,
-            self.cellbender_dir,
-        ]
-        if sum(x is not None for x in sources) != 1:
-            raise ValueError(
-                "Exactly one of raw_sample_dir, filtered_sample_dir, cellbender_dir must be set."
-            )
-        return self
-
-
 # ---------------------------------------------------------------------
 # PROCESS + INTEGRATE CONFIG
 # ---------------------------------------------------------------------
@@ -476,6 +396,9 @@ class ProcessAndIntegrateConfig(BaseModel):
         return [m.strip() for m in v]
 
 
+# ---------------------------------------------------------------------
+# CLUSTER AND ANNOTATE CONFIG
+# ---------------------------------------------------------------------
 class ClusterAnnotateConfig(BaseModel):
     # I/O
     input_path: Path = Field(..., description="Integrated h5ad from the integration step")

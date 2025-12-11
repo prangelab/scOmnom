@@ -7,9 +7,8 @@ import warnings
 from .load_data import run_load_data
 from .qc_and_filter import run_qc_and_filter
 from .load_and_filter import run_load_and_filter
-from .integrate import run_integration
-from .cluster_and_annotate import run_clustering
 from .process_and_integrate import run_process_and_integrate
+from .cluster_and_annotate import run_clustering
 
 from .config import LoadDataConfig, QCFilterConfig, LoadAndFilterConfig, ProcessAndIntegrateConfig, ClusterAnnotateConfig
 from .logging_utils import init_logging
@@ -498,62 +497,6 @@ def process_and_integrate(
     )
 
     run_process_and_integrate(cfg, logfile)
-
-
-# ======================================================================
-#  integrate
-# ======================================================================
-@app.command("integrate", help="Run integration and scIB benchmarking.")
-def integrate(
-    # -------------------------------------------------------------
-    # I/O
-    # -------------------------------------------------------------
-    input_path: Path = typer.Option(
-        ..., "--input-path", "-i",
-        help="[I/O] Preprocessed h5ad from load-and-filter.",
-    ),
-    output_path: Optional[Path] = typer.Option(
-        None, "--output-path", "-o",
-        help="[I/O] Output integrated h5ad.",
-    ),
-
-    # -------------------------------------------------------------
-    # Integration
-    # -------------------------------------------------------------
-    methods: Optional[List[str]] = typer.Option(
-        None, "--methods", "-m",
-        help="[Integration] Methods to run (Scanorama, Harmony, scVI, scANVI, BBKNN).",
-        case_sensitive=False,
-        autocompletion=_methods_completion,
-    ),
-    batch_key: Optional[str] = typer.Option(
-        None, "--batch-key", "-b",
-        help="[Integration] Batch column in .obs.",
-    ),
-
-    # -------------------------------------------------------------
-    # Benchmarking
-    # -------------------------------------------------------------
-    label_key: str = typer.Option(
-        "leiden", "--label-key", "-l",
-        help="[scIB] Cluster label for benchmarking.",
-    ),
-    benchmark_n_jobs: int = typer.Option(4, help="[scIB] Parallel workers."),
-):
-    methods = _normalize_methods(methods)
-
-    logfile = input_path.parent / "integrate.log"
-    init_logging(logfile)
-
-    cfg = IntegrationConfig(
-        input_path=input_path,
-        output_path=output_path,
-        methods=methods,
-        batch_key=batch_key,
-        label_key=label_key,
-        benchmark_n_jobs=benchmark_n_jobs,
-    )
-    run_integration(cfg, logfile)
 
 
 # ======================================================================
