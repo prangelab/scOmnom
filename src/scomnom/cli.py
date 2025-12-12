@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Optional, List
+from typing import Optional, List, Literal
 import typer
 from pathlib import Path
 import warnings
