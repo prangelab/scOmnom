@@ -476,8 +476,19 @@ def process_and_integrate(
         "-F",
         help="[Figures] Output figure formats.",
     ),
-
     # -------------------------------------------------------------
+    # SOLO mode
+    #--------------------------------------------------------------
+    solo_restrict_to_batch: bool = typer.Option(
+        False,
+        "--solo-restrict-to-batch/--solo-global",
+        help=(
+                "Restrict SOLO doublet detection per batch (uses --batch-key). "
+                "Default is global SOLO."
+        ),
+    ),
+
+        # -------------------------------------------------------------
     # Post-SOLO cleanup thresholds
     # -------------------------------------------------------------
     doublet_score_threshold: float = typer.Option(
@@ -565,6 +576,7 @@ def process_and_integrate(
         save_h5ad=save_h5ad,
         figdir_name=figdir_name,
         figure_formats=figure_formats,
+        solo_restrict_to_batch=solo_restrict_to_batch,
         doublet_score_threshold=doublet_score_threshold,
         max_pct_mt=max_pct_mt,
         min_cells_per_sample=min_cells_per_sample,

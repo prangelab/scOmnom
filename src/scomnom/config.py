@@ -391,6 +391,15 @@ class ProcessAndIntegrateConfig(BaseModel):
         description="Number of epochs for SCVI fine-tuning after SOLO cleanup."
     )
 
+    # ---- SOLO / doublet detection ----
+    solo_restrict_to_batch: bool = Field(
+        default=False,
+        description=(
+            "If True, restrict SOLO doublet detection to the batch defined by batch_key. "
+            "If False, run SOLO globally across all batches."
+        ),
+    )
+
     # ---- QC / cleanup thresholds ----
     doublet_score_threshold: float = Field(
         0.25,

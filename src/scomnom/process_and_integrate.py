@@ -61,7 +61,9 @@ def run_solo_with_scvi(
     adata: ad.AnnData,
     batch_key: Optional[str],
     doublet_score_threshold: float,
+    restrict_to_batch: bool = False,
 ) -> tuple[ad.AnnData, "scvi.model.SCVI"]:
+
     """
     Run SCVI + SOLO on the given AnnData.
 
@@ -168,7 +170,24 @@ def run_solo_with_scvi(
 
     # Train SOLO with the same batch size
     LOGGER.info("Training SOLO with batch_size=%d (epochs=%d)", chosen_batch, solo_epochs)
-    solo = SOLO.from_scvi_model(scvi_model)
+    if restrict_to_batch:
+        if batch_key is None:
+            raise ValueError(
+                "solo_restrict_to_batch=True requires batch_key to be set."
+            )
+
+        LOGGER.info(
+            "Running SOLO per batch using batch_key='%s'",
+            batch_key,
+        )
+
+        solo = SOLO.from_scvi_model(
+            scvi_model,
+            restrict_to_batch=batch_key,
+        )
+    else:
+        LOGGER.info("Running SOLO globally across all batches.")
+        solo = SOLO.from_scvi_model(scvi_model)
 
     try:
         solo.train(
@@ -188,7 +207,17 @@ def run_solo_with_scvi(
 
     LOGGER.info("Predicting doublet probabilities via SOLO...")
     probs = solo.predict(soft=True)
-    doublet_scores = probs[:, 1]
+
+    # scvi-tools >= 1.1 returns a DataFrame; older versions return ndarray
+    if isinstance(probs, pd.DataFrame):
+        if "doublet" not in probs.columns:
+            raise KeyError(
+                f"Expected 'doublet' column in SOLO predictions, got: {list(probs.columns)}"
+            )
+        doublet_scores = probs["doublet"].to_numpy()
+    else:
+        # legacy ndarray behavior
+        doublet_scores = probs[:, 1]
 
     adata.obs["doublet_score"] = doublet_scores
     adata.obs["predicted_doublet"] = doublet_scores > doublet_score_threshold
@@ -532,7 +561,67 @@ def _select_best_embedding(
     LOGGER.info("Selected best embedding: '%s'", best)
     return str(best)
 
+def _save_solo_checkpoint_clean(
+    *,
+    outdir: Path,
+    adata_cleaned: ad.AnnData,
+) -> None:
+    ckpt_dir = outdir / "checkpoints" / "solo_scvi"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
 
+    LOGGER.info("Saving SOLO/SCVI checkpoint → %s", ckpt_dir)
+
+    io_utils.save_dataset(
+        adata_cleaned,
+        ckpt_dir / "adata_cleaned.zarr",
+        fmt="zarr",
+    )
+
+    LOGGER.info("SOLO/SCVI checkpoint clean saved successfully.")
+
+def _save_solo_checkpoint_no_clean(
+    *,
+    outdir: Path,
+    scvi_model,
+    adata_full: ad.AnnData,
+) -> None:
+    ckpt_dir = outdir / "checkpoints" / "solo_scvi"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    LOGGER.info("Saving SOLO/SCVI checkpoint → %s", ckpt_dir)
+
+    # Save SCVI model
+    scvi_model.save(
+        ckpt_dir / "scvi_model",
+        overwrite=True,
+    )
+
+    # Save AnnData objects
+    io_utils.save_dataset(
+        adata_full,
+        ckpt_dir / "adata_full.zarr",
+        fmt="zarr",
+    )
+
+    LOGGER.info("SOLO/SCVI checkpoint no clean saved successfully.")
+
+def _save_solo_checkpoint_finetuned(
+    *,
+    outdir: Path,
+    scvi_model,
+) -> None:
+    ckpt_dir = outdir / "checkpoints" / "solo_scvi"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    LOGGER.info("Saving SOLO/SCVI checkpoint → %s", ckpt_dir)
+
+    # Save SCVI model
+    scvi_model.save(
+        ckpt_dir / "scvi_model_finetuned",
+        overwrite=True,
+    )
+
+    LOGGER.info("SOLO/SCVI checkpoint finetuned saved successfully.")
 # ---------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------
@@ -586,6 +675,16 @@ def run_process_and_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
         adata_full,
         batch_key=batch_key,
         doublet_score_threshold=cfg.doublet_score_threshold,
+        restrict_to_batch=cfg.solo_restrict_to_batch,
+    )
+
+    # ---------------------------------------------------------
+    # CHECKPOINT (critical safety net)
+    # ---------------------------------------------------------
+    _save_solo_checkpoint(
+        outdir=cfg.output_dir,
+        scvi_model=scvi_model,
+        adata_full=adata_full,
     )
 
     # ---------------------------------------------------------
@@ -597,6 +696,14 @@ def run_process_and_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
         batch_key=batch_key,
         max_pct_mt=cfg.max_pct_mt,
         min_cells_per_sample=cfg.min_cells_per_sample,
+    )
+
+    # ---------------------------------------------------------
+    # CHECKPOINT (critical safety net)
+    # ---------------------------------------------------------
+    _save_solo_checkpoint_clean(
+        outdir=cfg.output_dir,
+        adata_cleaned=adata,
     )
 
     LOGGER.info(
@@ -647,6 +754,13 @@ def run_process_and_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
     else:
         LOGGER.info("Skipping SCVI fine-tuning (cfg.scvi_refine_after_solo=False).")
 
+    # ---------------------------------------------------------
+    # CHECKPOINT (critical safety net)
+    # ---------------------------------------------------------
+    _save_solo_checkpoint_finetuned(
+        outdir=cfg.output_dir,
+        scvi_model=scvi_model,
+    )
     # ---------------------------------------------------------
     # 3) Normalisation + HVG + PCA/UMAP + Leiden (unintegrated)
     # ---------------------------------------------------------
