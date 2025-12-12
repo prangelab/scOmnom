@@ -12,6 +12,7 @@ import pandas as pd
 
 from .config import LoadDataConfig
 from . import io_utils
+from .logging_utils import init_logging
 
 LOGGER = logging.getLogger(__name__)
 
@@ -150,7 +151,7 @@ def run_load_data(cfg: LoadDataConfig) -> ad.AnnData:
     No QC filtering, doublet detection, HVG, PCA, or clustering happens here.
     Those are handled in downstream qc-and-filter / integrate modules.
     """
-    setup_logging(cfg.logfile)
+    init_logging(cfg.logfile)
     LOGGER.info("Starting load_data")
 
     cfg.output_dir.mkdir(parents=True, exist_ok=True)

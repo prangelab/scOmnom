@@ -11,6 +11,8 @@ import pandas as pd
 
 from . import io_utils
 from . import plot_utils
+from .logging_utils import init_logging
+
 from .qc_and_filter import compute_qc_metrics, sparse_filter_cells_and_genes
 
 LOGGER = logging.getLogger(__name__)
@@ -165,7 +167,7 @@ def _per_sample_qc_and_filter(
 def run_load_and_filter(
     cfg: LoadAndFilterConfig) -> ad.AnnData:
 
-    setup_logging(cfg.logfile)
+    init_logging(cfg.logfile)
     LOGGER.info("Starting load-and-filter")
     # Configure Scanpy/Matplotlib figure behavior + formats
     plot_utils.setup_scanpy_figs(cfg.figdir, cfg.figure_formats)

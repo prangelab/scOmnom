@@ -14,6 +14,7 @@ import torch
 
 from .config import ProcessAndIntegrateConfig  # or IntegrationConfig / whatever you call it
 from . import io_utils, plot_utils
+from .logging_utils import init_logging
 
 torch.set_float32_matmul_precision("high")
 
@@ -642,7 +643,7 @@ def run_process_and_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
     # ---------------------------------------------------------
     # Logging & figures
     # ---------------------------------------------------------
-    setup_logging(cfg.logfile)
+    init_logging(cfg.logfile)
     LOGGER.info("Starting process-and-integrate")
 
     # Figure root + Scanpy figdir

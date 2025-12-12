@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-from typing import Optional
 
 import anndata as ad
 import numpy as np
@@ -13,6 +11,8 @@ import pandas as pd
 from .config import QCFilterConfig
 from . import io_utils
 from . import plot_utils
+from .logging_utils import init_logging
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -132,7 +132,7 @@ def sparse_filter_cells_and_genes(
 # Main orchestrator
 # ---------------------------------------------------------------------
 def run_qc_and_filter(cfg: QCFilterConfig) -> ad.AnnData:
-    setup_logging(cfg.logfile)
+    init_logging(cfg.logfile)
     LOGGER.info("Starting qc_and_filter")
 
     # Set up figure saving
