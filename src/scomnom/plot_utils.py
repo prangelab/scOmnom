@@ -207,6 +207,73 @@ def _plateau_spans(plateaus: Sequence[Mapping[str, object]]) -> list[tuple[float
 # -------------------------------------------------------------------------
 # SCANPY WRAPPERS (QC)
 # -------------------------------------------------------------------------
+def _violin_with_points(
+    adata: ad.AnnData,
+    metric: str,
+    *,
+    groupby: str,
+    horizontal: bool,
+    ax=None,
+    point_alpha: float = 0.08,
+    point_size: float = 3.0,
+    max_points: int | None = None,
+):
+    """
+    Draw per-cell scatter points BEHIND a Scanpy violin plot.
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    if ax is None:
+        ax = plt.gca()
+
+    obs = adata.obs
+    groups = obs[groupby].astype("category")
+    y = obs[metric].to_numpy()
+
+    # Optional downsampling (very large datasets)
+    idx = np.arange(len(y))
+    if max_points is not None and len(idx) > max_points:
+        idx = np.random.choice(idx, max_points, replace=False)
+
+    groups = groups.iloc[idx]
+    y = y[idx]
+
+    cats = groups.cat.categories
+
+    # --- scatter FIRST (behind violin) ---
+    for i, cat in enumerate(cats):
+        mask = groups == cat
+        y_cat = y[mask]
+
+        jitter = np.random.normal(0, 0.04, size=len(y_cat))
+
+        if horizontal:
+            # X = category, Y = metric
+            x = i + jitter
+            ax.scatter(
+                x,
+                y_cat,
+                s=point_size,
+                alpha=point_alpha,
+                color="black",
+                rasterized=True,
+                zorder=1,
+            )
+        else:
+            # Rotated: X = metric, Y = category
+            y_pos = i + jitter
+            ax.scatter(
+                y_cat,
+                y_pos,
+                s=point_size,
+                alpha=point_alpha,
+                color="black",
+                rasterized=True,
+                zorder=1,
+            )
+
+
 def qc_scatter(adata, groupby: str):
     sc.pl.scatter(
         adata,
@@ -586,9 +653,22 @@ def qc_violin_panels(adata, cfg, stage: str):
                 LOGGER.warning("Metric '%s' missing in adata.obs; skipping", metric)
                 continue
 
-            # One panel at a time
             plt.figure(figsize=(10, 6) if horizontal else (12, 10))
+            ax = plt.gca()
 
+            # ---- scatter points FIRST (behind violins) ----
+            _violin_with_points(
+                adata,
+                metric,
+                groupby=batch_key,
+                horizontal=horizontal,
+                ax=ax,
+                point_alpha=0.08,
+                point_size=3.0,
+                max_points=200_000,  # safety for huge datasets
+            )
+
+            # ---- violin on top ----
             sc.pl.violin(
                 adata,
                 metric,
@@ -596,9 +676,10 @@ def qc_violin_panels(adata, cfg, stage: str):
                 rotation=90 if not horizontal else 0,
                 show=False,
                 stripplot=False,
+                ax=ax,
             )
 
-            plt.title(f"{metric} ({stage})")
+            ax.set_title(f"{metric} ({stage})")
             save_multi(f"{stem}_{stage}", figdir_qc)
             plt.close()
 
