@@ -771,8 +771,9 @@ def doublet_plots(
     # 2. Per-sample doublet fraction
     # --------------------------------------------------
     frac = (
-        adata.obs
-        .groupby(batch_key)["predicted_doublet"]
+        adata.obs["predicted_doublet"]
+        .astype(int)
+        .groupby(adata.obs[batch_key], observed=True)
         .mean()
         .sort_values(ascending=False)
     )
