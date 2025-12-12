@@ -238,7 +238,7 @@ def _train_scvi(
                 accelerator=accelerator,
                 devices=devices,
                 batch_size=bsz,
-                enable_progress_bar=False,
+                enable_progress_bar=True,
             )
 
             LOGGER.info("SCVI trained successfully (batch_size=%d)", bsz)
@@ -372,8 +372,11 @@ def sparse_filter_cells_and_genes(
 # ---------------------------------------------------------------------
 def run_solo_with_scvi(
     adata: ad.AnnData,
+    *,
     batch_key: Optional[str],
+    doublet_mode: Literal["fixed", "rate", "gmm"],
     doublet_score_threshold: float,
+    expected_doublet_rate: float,
 ) -> ad.AnnData:
     from scvi.external import SOLO
 
@@ -394,18 +397,19 @@ def run_solo_with_scvi(
         max_epochs=10,
         accelerator=accelerator,
         devices=devices,
-        enable_progress_bar=False,
+        enable_progress_bar=True,
     )
 
     probs = solo.predict(soft=True)
     scores = probs["doublet"].to_numpy()
 
     adata.obs["doublet_score"] = scores
+
     mask = _call_doublets(
         scores,
-        mode=cfg.doublet_threshold_mode,
-        fixed_threshold=cfg.doublet_score_threshold,
-        expected_rate=cfg.expected_doublet_rate,
+        mode=doublet_mode,
+        fixed_threshold=doublet_score_threshold,
+        expected_rate=expected_doublet_rate,
     )
 
     adata.obs["predicted_doublet"] = pd.Categorical(
@@ -416,7 +420,7 @@ def run_solo_with_scvi(
 
     LOGGER.info(
         "Doublet calling: mode=%s, detected=%d / %d (%.2f%%)",
-        cfg.doublet_threshold_mode,
+        doublet_mode,
         mask.sum(),
         adata.n_obs,
         100 * mask.mean(),
@@ -587,12 +591,6 @@ def run_load_and_filter(
     batch_key = io_utils.infer_batch_key_from_metadata_tsv(
         cfg.metadata_tsv, cfg.batch_key
     )
-    if cfg.batch_key is None:
-        LOGGER.warning(
-            "No batch_key provided. Inferred batch_key='%s' from metadata.tsv. "
-            "Please verify this is correct.",
-            batch_key,
-        )
     LOGGER.info("Using batch_key='%s'", batch_key)
     cfg.batch_key = batch_key
 
@@ -712,7 +710,9 @@ def run_load_and_filter(
     adata = run_solo_with_scvi(
         adata,
         batch_key=cfg.batch_key,
+        doublet_mode=cfg.doublet_mode,
         doublet_score_threshold=cfg.doublet_score_threshold,
+        expected_doublet_rate=cfg.expected_doublet_rate,
     )
 
     if cfg.make_figures:
