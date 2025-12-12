@@ -1479,7 +1479,6 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
     - CellTypist annotation using precomputed labels
     - Plots + save outputs
     """
-    init_logging(cfg.logfile)
     LOGGER.info("Starting cluster_and_annotate")
 
     in_path: Path = cfg.input_path

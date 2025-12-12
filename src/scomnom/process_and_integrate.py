@@ -20,32 +20,6 @@ torch.set_float32_matmul_precision("high")
 
 LOGGER = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------
-# Logging helper (same pattern as load_and_filter)
-# ---------------------------------------------------------------------
-def setup_logging(logfile: Optional[Path]) -> None:
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
-
-    # Clear existing handlers (avoid double formatting / Rich interception)
-    for h in list(logger.handlers):
-        logger.removeHandler(h)
-
-    fmt = logging.Formatter(fmt="%(asctime)s [%(levelname)s] %(message)s")
-
-    # Console
-    ch = logging.StreamHandler()
-    ch.setFormatter(fmt)
-    logger.addHandler(ch)
-
-    # File
-    if logfile is not None:
-        logfile.parent.mkdir(parents=True, exist_ok=True)
-        fh = logging.FileHandler(str(logfile), mode="w")
-        fh.setFormatter(fmt)
-        logger.addHandler(fh)
-
 # Helper function
 def _ensure_label_key(adata: ad.AnnData, label_key: str) -> None:
     if label_key not in adata.obs:
