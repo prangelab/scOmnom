@@ -220,9 +220,11 @@ def run_solo_with_scvi(
     scores = probs["doublet"].to_numpy()
 
     adata.obs["doublet_score"] = scores
-    adata.obs["predicted_doublet"] = (
-        scores > doublet_score_threshold
-    ).astype("category")
+    adata.obs["predicted_doublet"] = pd.Categorical(
+        scores > doublet_score_threshold,
+        categories=[False, True],
+        ordered=False,
+    )
 
     LOGGER.info(
         "Doublets detected: %d / %d (%.2f%%)",
