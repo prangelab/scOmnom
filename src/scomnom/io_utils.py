@@ -494,8 +494,20 @@ def load_cellbender_filtered_layer(
     if not np.array_equal(cb_all.obs_names, key.values):
         raise RuntimeError("Cell order mismatch after CellBender alignment.")
 
+    # ---- align genes to adata (post-QC gene space) ----
+    missing_genes = adata.var_names.difference(cb_all.var_names)
+    if len(missing_genes) > 0:
+        raise RuntimeError(
+            f"CellBender output missing {len(missing_genes)} genes present in adata"
+        )
+
+    cb_all = cb_all[:, adata.var_names].copy()
+
+    # ---- final sanity check ----
     if not np.array_equal(cb_all.var_names, adata.var_names):
-        raise RuntimeError("Gene order mismatch between CellBender and adata.")
+        raise RuntimeError("Gene order mismatch after CellBender gene alignment")
+
+    adata.layers["counts_cb"] = cb_all.X
 
     # Attach layer
     adata.layers["counts_cb"] = cb_all.X.copy()

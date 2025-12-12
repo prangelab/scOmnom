@@ -743,6 +743,8 @@ def run_load_and_filter(
         LOGGER.info("Using raw counts for downstream analysis")
         adata.X = adata.layers["counts_raw"].copy()
 
+    adata.obs_names_make_unique()
+
     # ---------------------------------------------------------
     # Global QC on merged filtered data (for post-filter plots ONLY)
     # ---------------------------------------------------------
