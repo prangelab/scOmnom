@@ -458,6 +458,14 @@ def load_cellbender_filtered_layer(
     # Concatenate all CellBender outputs
     cb_all = ad.concat(cb_layers, axis=0, join="outer", merge="same")
 
+    # CellBender uses gene_ids; we need gene_symbols
+    if "gene_symbols" in cb_all.var.columns:
+        cb_all.var_names = cb_all.var["gene_symbols"].astype(str)
+    else:
+        raise RuntimeError(
+            "CellBender output does not contain 'gene_symbols' in var"
+        )
+
     # ------------------------------------------------------------------
     # Build composite keys
     # ------------------------------------------------------------------
