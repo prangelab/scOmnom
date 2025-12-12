@@ -602,9 +602,6 @@ def run_process_and_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
     adata = pca_neighbors_umap(adata, cfg.max_pcs_plot)
     adata = cluster_unintegrated(adata)
 
-    methods = cfg.methods or ["bbknn", "scvi", "scanvi"]
-    if "scanvi" in {methods}:
-        _ensure_label_key(adata, cfg.label_key)
     adata, emb_keys = _run_integrations(
         adata,
         methods=methods,

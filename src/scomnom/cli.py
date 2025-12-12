@@ -143,187 +143,6 @@ def _gene_sets_completion(
 
 
 # ======================================================================
-#  load-data
-# ======================================================================
-@app.command("load-data", help="Load data, attach metadata, merge samples, and save merged .zarr (+ optional .h5ad)")
-
-def load_data(
-    # exactly one of these three
-    raw_sample_dir: Path = typer.Option(
-        None, "--raw-sample-dir", "-r",
-        help="Directory containing <sample>.raw_feature_bc_matrix folders."
-    ),
-    filtered_sample_dir: Path = typer.Option(
-        None, "--filtered-sample-dir", "-f",
-        help="Directory containing <sample>.filtered_feature_bc_matrix folders."
-    ),
-    cellbender_dir: Path = typer.Option(
-        None, "--cellbender-dir", "-c",
-        help="Directory containing <sample>.cellbender_filtered.output folders."
-    ),
-
-    # required
-    metadata_tsv: Path = typer.Option(
-        ..., "--metadata-tsv", "-m",
-        help="TSV with per-sample metadata indexed by sample_id."
-    ),
-
-    batch_key: Optional[str] = typer.Option(
-        None, "--batch-key", "-b",
-        help="Column name in metadata_tsv to use as batch/sample ID. "
-    ),
-
-    output_dir: Path = typer.Option(
-        ..., "--output-dir", "-o",
-        help="Directory for merged output Zarr."
-    ),
-
-    # optional
-    output_name: str = typer.Option(
-        "adata.merged", "--output-name",
-        help="Base name for merged Zarr ('.zarr' appended automatically)."
-    ),
-    n_jobs: int = typer.Option(
-        4, "--n-jobs",
-        help="Parallel workers for loading samples & writing Zarrs."
-    ),
-    save_h5ad: bool = typer.Option(
-            False,
-            "--save-h5ad/--no-save-h5ad",
-            help="Also write an .h5ad copy (requires loading matrix fully into RAM).",
-        ),
-):
-    """
-    Load single-cell data from exactly one input source (RAW, filtered, or CellBender),
-    attach metadata, write per-sample Zarrs, merge, and save final dataset.
-    """
-
-    # Determine output directory
-    if output_dir is None:
-        output_dir = "."
-
-    logfile = output_dir / "load-and-filter.log"
-    init_logging(logfile)
-
-    cfg = LoadDataConfig(
-        raw_sample_dir=raw_sample_dir,
-        filtered_sample_dir=filtered_sample_dir,
-        cellbender_dir=cellbender_dir,
-        metadata_tsv=metadata_tsv,
-        batch_key=batch_key,
-        output_dir=output_dir,
-        output_name=output_name,
-        n_jobs=n_jobs,
-        save_h5ad=save_h5ad,
-        logfile=logfile,
-    )
-
-    run_load_data(cfg)
-
-
-# ======================================================================
-#  qc-and-filter
-# ======================================================================
-@app.command(
-    "qc-and-filter",
-    help=(
-        "QC and filter a merged dataset (.zarr or .h5ad) produced by load-data.\n\n"
-        "Applies min_genes/min_cells/max_pct_mt/min_cells_per_sample filters and "
-        "writes adata.filtered.zarr (+ optional .h5ad)."
-    ),
-)
-def qc_and_filter(
-    input_path: Path = typer.Option(
-        ...,
-        "--input",
-        "-i",
-        help="Path to merged dataset from load-data (.zarr directory or .h5ad file).",
-    ),
-    output_dir: Optional[Path] = typer.Option(
-        None,
-        "--output-dir",
-        "-o",
-        help=(
-            "Directory for filtered output. "
-            "Defaults to the parent directory of --input."
-        ),
-    ),
-    batch_key: Optional[str] = typer.Option(
-        None,
-        "--batch-key",
-        "-b",
-        help=(
-            "Column in adata.obs to treat as batch/sample ID. "
-            "If omitted, io_utils.infer_batch_key() chooses."
-        ),
-    ),
-    min_cells: int = typer.Option(
-        3,
-        "--min-cells",
-        help="[QC] Minimum cells per gene.",
-    ),
-    min_genes: int = typer.Option(
-        500,
-        "--min-genes",
-        help="[QC] Minimum genes per cell. Lower this to ~200 for snRNA-seq.",
-    ),
-    min_cells_per_sample: int = typer.Option(
-        20,
-        "--min-cells-per-sample",
-        help="[QC] Minimum cells per sample.",
-    ),
-    max_pct_mt: float = typer.Option(
-        5.0,
-        "--max-pct-mt",
-        help="[QC] Max mitochondrial percentage. Increase this to ~30–50 for snRNA-seq.",
-    ),
-    make_figures: bool = typer.Option(
-        True,
-        "--make-figures/--no-make-figures",
-        help="Generate QC plots.",
-    ),
-    figure_format: List[str] = typer.Option(
-        ["png", "pdf"],
-        "--figure-formats",
-        help="Figure format(s) for plots (can be given multiple times).",
-    ),
-    save_h5ad: bool = typer.Option(
-        False,
-        "--save-h5ad/--no-save-h5ad",
-        help="Also write an .h5ad copy of the filtered dataset.",
-    ),
-):
-    """
-    QC-and-filter stage operating on the merged dataset produced by `load-data`.
-    """
-
-    # Determine output directory
-    if output_dir is None:
-        output_dir = input_path.parent
-
-    logfile = output_dir / "qc-and-filter.log"
-    init_logging(logfile)
-
-    # Build config (Pydantic will validate paths and defaults)
-    cfg = QCFilterConfig(
-        input_path=input_path,
-        output_dir=output_dir,
-        batch_key=batch_key,
-        min_cells=min_cells,
-        min_genes=min_genes,
-        min_cells_per_sample=min_cells_per_sample,
-        max_pct_mt=max_pct_mt,
-        make_figures=make_figures,
-        figure_formats=figure_format,
-        save_h5ad=save_h5ad,
-        logfile=logfile,
-    )
-
-    run_qc_and_filter(cfg)
-
-
-
-# ======================================================================
 #  load-and-filter
 # ======================================================================
 @app.command("load-and-filter", help="Full scOmnom preprocessing pipeline.")
@@ -395,10 +214,14 @@ def load_and_filter(
     cellbender_pattern: str = typer.Option("*.cellbender_filtered.output"),
     cellbender_h5_suffix: str = typer.Option(".cellbender_out.h5"),
 ):
-    if raw_sample_dir and filtered_sample_dir:
-        raise typer.BadParameter("Cannot specify both --raw-sample-dir and --filtered-sample-dir")
-    if filtered_sample_dir and cellbender_dir:
-        raise typer.BadParameter("CellBender outputs cannot be mixed with Cell Ranger filtered matrices.")
+    if cellbender_dir is not None and raw_sample_dir is None:
+        raise typer.BadParameter("--cellbender-dir requires --raw-sample-dir (raw counts needed).")
+
+    if cellbender_dir is not None and filtered_sample_dir is not None:
+        raise typer.BadParameter("Cannot combine --cellbender-dir with --filtered-sample-dir. Use raw+cellbender only.")
+
+    if raw_sample_dir is not None and filtered_sample_dir is not None:
+        raise typer.BadParameter("Cannot specify both --raw-sample-dir and --filtered-sample-dir.")
 
     # Determine output directory
     if output_dir is None:

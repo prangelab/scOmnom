@@ -726,6 +726,288 @@ def qc_scatter_panels(adata, cfg, stage: str):
     plt.close()
 
 
+def doublet_plots(
+    adata: ad.AnnData,
+    *,
+    batch_key: str,
+    score_threshold: float,
+    figdir: Path,
+) -> None:
+    """
+    SOLO doublet QC plots.
+    Must be called AFTER SOLO prediction but BEFORE cleanup.
+    Does NOT assume UMAP or post-filter QC metrics.
+    """
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+
+    figdir = Path(figdir)
+    figdir.mkdir(parents=True, exist_ok=True)
+
+    required = {"doublet_score", "predicted_doublet", batch_key}
+    if not required.issubset(adata.obs.columns):
+        LOGGER.warning("Skipping doublet plots; missing required columns.")
+        return
+
+    scores = adata.obs["doublet_score"].to_numpy()
+    is_doublet = adata.obs["predicted_doublet"].astype(bool)
+
+    # --------------------------------------------------
+    # 1. Doublet score histogram
+    # --------------------------------------------------
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.hist(scores, bins=50, color="steelblue", alpha=0.85)
+    ax.axvline(score_threshold, color="red", linestyle="--", label="threshold")
+    ax.set_xlabel("Doublet score")
+    ax.set_ylabel("Cells")
+    ax.set_title("SOLO doublet score distribution")
+    ax.legend(frameon=False)
+    fig.tight_layout()
+    save_multi("doublet_score_hist", figdir, fig)
+    plt.close(fig)
+
+    # --------------------------------------------------
+    # 2. Per-sample doublet fraction
+    # --------------------------------------------------
+    frac = (
+        adata.obs
+        .groupby(batch_key)["predicted_doublet"]
+        .mean()
+        .sort_values(ascending=False)
+    )
+
+    fig, ax = plt.subplots(figsize=(max(6, 0.5 * len(frac)), 4))
+    frac.plot.bar(ax=ax, color="firebrick", edgecolor="black")
+    ax.set_ylabel("Fraction doublets")
+    ax.set_title("Doublet fraction per sample")
+    ax.set_ylim(0, max(0.05, frac.max() * 1.2))
+    plt.xticks(rotation=45, ha="right")
+    fig.tight_layout()
+    save_multi("doublet_fraction_per_sample", figdir, fig)
+    plt.close(fig)
+
+    # --------------------------------------------------
+    # 3. Doublet score vs total raw counts
+    # --------------------------------------------------
+    X = adata.layers.get("counts_raw", adata.X)
+    total_counts = np.asarray(X.sum(axis=1)).ravel()
+
+    fig, ax = plt.subplots(figsize=(5, 4))
+    ax.scatter(
+        total_counts,
+        scores,
+        s=5,
+        alpha=0.3,
+        rasterized=True,
+    )
+    ax.axhline(score_threshold, color="red", linestyle="--")
+    ax.set_xlabel("Total UMI counts (raw)")
+    ax.set_ylabel("Doublet score")
+    ax.set_title("Doublet score vs library size")
+    fig.tight_layout()
+    save_multi("doublet_score_vs_total_counts", figdir, fig)
+    plt.close(fig)
+
+    # --------------------------------------------------
+    # 4. Violin: doublet score per sample
+    # --------------------------------------------------
+    fig, ax = plt.subplots(figsize=(max(6, 0.5 * len(frac)), 4))
+    data = [
+        adata.obs.loc[adata.obs[batch_key] == s, "doublet_score"]
+        for s in frac.index
+    ]
+    ax.violinplot(data, showmeans=False, showextrema=False)
+    ax.axhline(score_threshold, color="red", linestyle="--")
+    ax.set_xticks(range(1, len(frac) + 1))
+    ax.set_xticklabels(frac.index, rotation=45, ha="right")
+    ax.set_ylabel("Doublet score")
+    ax.set_title("Doublet score distribution per sample")
+    fig.tight_layout()
+    save_multi("doublet_score_violin_per_sample", figdir, fig)
+    plt.close(fig)
+
+    # --------------------------------------------------
+    # 5. ECDF of doublet score
+    # --------------------------------------------------
+    xs = np.sort(scores)
+    ys = np.arange(1, len(xs) + 1) / len(xs)
+
+    fig, ax = plt.subplots(figsize=(5, 4))
+    ax.plot(xs, ys, lw=1.5)
+    ax.axvline(score_threshold, color="red", linestyle="--")
+    ax.set_xlabel("Doublet score")
+    ax.set_ylabel("Cumulative fraction")
+    ax.set_title("ECDF of doublet scores")
+    fig.tight_layout()
+    save_multi("doublet_score_ecdf", figdir, fig)
+    plt.close(fig)
+
+    LOGGER.info("Generated SOLO doublet QC plots (pre-cleanup)")
+
+
+def doublet_umap_plots(
+    adata: ad.AnnData,
+    *,
+    batch_key: str,
+    figdir: Path,
+    cluster_key: str = "leiden",
+    max_panels: int = 12,
+) -> None:
+    """
+    UMAP-based doublet diagnostics.
+    Must be called AFTER UMAP computation.
+
+    Parameters
+    ----------
+    adata
+        AnnData with X_umap present.
+    batch_key
+        Sample/batch column in adata.obs.
+    figdir
+        Output directory.
+    cluster_key
+        Cluster key for optional overlay (default: 'leiden').
+    max_panels
+        Max number of samples for faceted UMAPs.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from pathlib import Path
+
+    figdir = Path(figdir)
+    figdir.mkdir(parents=True, exist_ok=True)
+
+    if "X_umap" not in adata.obsm:
+        LOGGER.warning("Skipping doublet UMAP plots: X_umap not found.")
+        return
+
+    required = {"doublet_score", "predicted_doublet", batch_key}
+    if not required.issubset(adata.obs.columns):
+        LOGGER.warning("Skipping doublet UMAP plots: required obs columns missing.")
+        return
+
+    # --------------------------------------------------
+    # 1. UMAP colored by predicted_doublet
+    # --------------------------------------------------
+    fig = sc.pl.umap(
+        adata,
+        color="predicted_doublet",
+        palette=["steelblue", "firebrick"],
+        show=False,
+        return_fig=True,
+    )
+    save_multi("umap_predicted_doublet", figdir, fig)
+    plt.close(fig)
+
+    # --------------------------------------------------
+    # 2. UMAP colored by doublet_score
+    # --------------------------------------------------
+    fig = sc.pl.umap(
+        adata,
+        color="doublet_score",
+        cmap="viridis",
+        show=False,
+        return_fig=True,
+    )
+    save_multi("umap_doublet_score", figdir, fig)
+    plt.close(fig)
+
+    # --------------------------------------------------
+    # 3. Faceted UMAP by sample (optional, capped)
+    # --------------------------------------------------
+    samples = adata.obs[batch_key].astype(str).unique()
+    if len(samples) <= max_panels:
+        fig = sc.pl.umap(
+            adata,
+            color="predicted_doublet",
+            palette=["steelblue", "firebrick"],
+            groups=[False, True],
+            facet=batch_key,
+            show=False,
+            return_fig=True,
+        )
+        save_multi("umap_predicted_doublet_by_sample", figdir, fig)
+        plt.close(fig)
+    else:
+        LOGGER.info(
+            "Skipping faceted UMAP by sample (%d samples > max_panels=%d)",
+            len(samples),
+            max_panels,
+        )
+
+    # --------------------------------------------------
+    # 4. Cluster context: cluster labels + doublet overlay
+    # --------------------------------------------------
+    if cluster_key in adata.obs:
+        # Base: clusters
+        fig = sc.pl.umap(
+            adata,
+            color=cluster_key,
+            legend_loc="on data",
+            show=False,
+            return_fig=True,
+        )
+        save_multi("umap_clusters", figdir, fig)
+        plt.close(fig)
+
+        # Overlay doublets on top of clusters
+        mask = adata.obs["predicted_doublet"].astype(bool)
+
+        fig, ax = plt.subplots(figsize=(5, 4))
+        ax.scatter(
+            adata.obsm["X_umap"][:, 0],
+            adata.obsm["X_umap"][:, 1],
+            s=3,
+            c="lightgrey",
+            alpha=0.4,
+            rasterized=True,
+        )
+        ax.scatter(
+            adata.obsm["X_umap"][mask, 0],
+            adata.obsm["X_umap"][mask, 1],
+            s=5,
+            c="firebrick",
+            alpha=0.8,
+            rasterized=True,
+        )
+        ax.set_title("Doublets overlaid on UMAP")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        fig.tight_layout()
+        save_multi("umap_doublet_overlay", figdir, fig)
+        plt.close(fig)
+
+    # --------------------------------------------------
+    # 5. UMAP colored by batch
+    # --------------------------------------------------
+    fig = sc.pl.umap(
+        adata,
+        color=batch_key,
+        show=False,
+        return_fig=True,
+    )
+    save_multi("umap_batch", figdir, fig)
+    plt.close(fig)
+
+    # --------------------------------------------------
+    # 6. UMAP colored by Leiden (or cluster_key)
+    # --------------------------------------------------
+    if cluster_key in adata.obs:
+        fig = sc.pl.umap(
+            adata,
+            color=cluster_key,
+            legend_loc="on data",
+            show=False,
+            return_fig=True,
+        )
+        save_multi("umap_leiden", figdir, fig)
+        plt.close(fig)
+
+    LOGGER.info("Generated UMAP-based doublet plots")
+
+
+
 def barplot_before_after(df_counts: pd.DataFrame, figpath: Path, min_cells_per_sample: int):
     x = np.arange(len(df_counts))
     width = 0.40

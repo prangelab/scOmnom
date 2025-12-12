@@ -337,101 +337,166 @@ def load_filtered_data(cfg: LoadAndQCConfig):
     return out, read_counts
 
 
-def load_cellbender_data(cfg: LoadAndQCConfig):
+def load_raw_with_cellbender_barcodes(
+    cfg: LoadAndQCConfig,
+    plot_dir: Path | None = None,
+) -> tuple[Dict[str, ad.AnnData], Dict[str, float]]:
     """
-    Stable CellBender loader using Scanpy’s read_10x_h5.
+    Load RAW 10x matrices and immediately restrict to CellBender-called barcodes.
+    Counts remain raw integers.
 
-    Why this works:
-      • Scanpy automatically fixes malformed CSR matrices.
-      • We reorder rows using the provided cell barcode CSV.
-      • We avoid all low-level sparse reconstruction (which caused earlier failures).
+    Returns
+    -------
+    sample_map : Dict[sample_id, AnnData]
+    read_counts : Dict[sample_id, total_UMIs_after_barcode_filter]
     """
-
-    import concurrent.futures
     import pandas as pd
     import scanpy as sc
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    cb_dirs = sorted(
-        [p for p in cfg.cellbender_dir.glob(cfg.cellbender_pattern) if p.is_dir()]
-    )
+    raw_dirs = find_raw_dirs(cfg.raw_sample_dir, cfg.raw_pattern)
+    cb_dirs = find_cellbender_dirs(cfg.cellbender_dir, cfg.cellbender_pattern)
 
-    LOGGER.info(f"Found {len(cb_dirs)} CellBender output dirs")
+    cb_map = {
+        p.name.replace(".cellbender_filtered.output", ""): p
+        for p in cb_dirs
+    }
 
-    out = {}
-    read_counts = {}
-    failed = {}
-
-    def _load_one(cb_path: Path):
-        sample = cb_path.name.replace(".cellbender_filtered.output", "")
-        try:
-            # --- Locate H5 ---
-            h5_files = list(cb_path.glob("*_out_filtered.h5"))
-            if not h5_files:
-                return ("fail", sample, "No *_out_filtered.h5 found")
-            h5_path = h5_files[0]
-
-            LOGGER.info(f"[{sample}] Loading filtered CellBender H5: {h5_path}")
-
-            # --- Locate barcodes CSV ---
-            bc_files = list(cb_path.glob("*_out_cell_barcodes.csv"))
-            if not bc_files:
-                return ("fail", sample, "No *_out_cell_barcodes.csv found")
-
-            barcodes = pd.read_csv(bc_files[0], header=None)[0].astype(str).tolist()
-
-            # --- Load via Scanpy (robust) ---
-            adata = sc.read_10x_h5(str(h5_path))
-            adata.var_names_make_unique()
-
-            # --- Select rows according to barcode CSV order ---
-            try:
-                adata = adata[barcodes, :].copy()
-            except Exception:
-                # Fallback: intersect but preserve CSV ordering
-                LOGGER.warning(f"[{sample}] Barcode mismatch; falling back to intersection.")
-                obs_index = set(adata.obs_names)
-                keep = [bc for bc in barcodes if bc in obs_index]
-                if not keep:
-                    return ("fail", sample, "No barcodes overlap between H5 and CSV")
-                adata = adata[keep, :].copy()
-
-            # --- Add metadata ---
-            adata.obs["barcode"] = adata.obs_names
-            adata.obs["sample_id"] = sample
-
-            # --- Compute UMI counts ---
-            reads = int(adata.X.sum())
-
-            return ("ok", sample, adata, reads)
-
-        except Exception as e:
-            return ("fail", sample, str(e))
-
-    n_workers = min(cfg.n_jobs or 8, 8)
-    LOGGER.info(f"Parallel CellBender loading with {n_workers} threads")
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
-        futures = {pool.submit(_load_one, p): p for p in cb_dirs}
-
-        for fut in concurrent.futures.as_completed(futures):
-            status, sample, *rest = fut.result()
-
-            if status == "ok":
-                adata, reads = rest
-                out[sample] = adata
-                read_counts[sample] = reads
-            else:
-                errmsg = rest[0]
-                LOGGER.error(f"[FAIL] {sample}: {errmsg}")
-                failed[sample] = errmsg
-
-    if failed:
+    missing = set(d.name.split(".raw_feature_bc_matrix")[0] for d in raw_dirs) - cb_map.keys()
+    if missing:
         raise RuntimeError(
-            f"CellBender loading failed for {len(failed)} samples: "
-            f"{', '.join(failed.keys())}"
+            "Missing CellBender outputs for samples:\n"
+            + "\n".join(sorted(missing))
         )
 
+    out: Dict[str, ad.AnnData] = {}
+    read_counts: Dict[str, float] = {}
+
+    def _load_one(raw_path: Path):
+        sample = raw_path.name.split(".raw_feature_bc_matrix")[0]
+        cb_path = cb_map[sample]
+
+        # ---- load raw counts ----
+        adata = read_raw_10x(raw_path)   # integer counts
+        adata.obs_names = adata.obs_names.astype(str)
+
+        # ---- read CellBender barcodes ----
+        bc_file = next(cb_path.glob("*_out_Cell_Barcodes.tsv"))
+        barcodes = pd.read_csv(bc_file, header=None)[0].astype(str).tolist()
+
+        # ---- restrict immediately ----
+        keep = adata.obs_names.isin(barcodes)
+        adata = adata[keep].copy()
+
+        adata.obs["barcode"] = adata.obs_names
+        adata.obs["sample_id"] = sample
+
+        reads = float(adata.X.sum())
+        return sample, adata, reads
+
+    n_workers = min(cfg.n_jobs or 8, 8)
+    LOGGER.info("Loading raw + CellBender barcodes with %d threads", n_workers)
+
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = [pool.submit(_load_one, p) for p in raw_dirs]
+        for fut in as_completed(futures):
+            sample, adata, reads = fut.result()
+            out[sample] = adata
+            read_counts[sample] = reads
+            LOGGER.info(
+                "[CB+RAW] %s: %d cells, %.2e UMIs",
+                sample, adata.n_obs, reads
+            )
+
     return out, read_counts
+
+
+def load_cellbender_filtered_layer(
+    cfg,
+    adata: ad.AnnData,
+) -> ad.AnnData:
+    """
+    Load CellBender *_out_filtered.h5 files and attach as adata.layers["counts_cb"].
+    Matches cells by (sample_id, barcode) and enforces exact ordering.
+    """
+    import scanpy as sc
+    import numpy as np
+    import anndata as ad
+
+    cb_dirs = {
+        p.name.replace(".cellbender_filtered.output", ""): p
+        for p in cfg.cellbender_dir.glob(cfg.cellbender_pattern)
+    }
+
+    cb_layers = []
+
+    for sample, cb_path in cb_dirs.items():
+        h5 = next(cb_path.glob("*_out_filtered.h5"))
+        a = sc.read_10x_h5(str(h5))
+        a.var_names_make_unique()
+
+        a.obs["barcode"] = a.obs_names.astype(str)
+        a.obs["sample_id"] = sample
+
+        cb_layers.append(a)
+
+    if not cb_layers:
+        raise RuntimeError("No CellBender filtered H5 files were loaded.")
+
+    # Concatenate all CellBender outputs
+    cb_all = ad.concat(cb_layers, axis=0, join="outer", merge="same")
+
+    # ------------------------------------------------------------------
+    # Build composite keys
+    # ------------------------------------------------------------------
+    key = (
+        adata.obs["sample_id"].astype(str)
+        + "::"
+        + adata.obs["barcode"].astype(str)
+    )
+
+    cb_key = (
+        cb_all.obs["sample_id"].astype(str)
+        + "::"
+        + cb_all.obs["barcode"].astype(str)
+    )
+
+    # Set composite key as index on CB AnnData
+    cb_all = cb_all.copy()
+    cb_all.obs_names = cb_key.values
+
+    # ------------------------------------------------------------------
+    # Hard safety checks
+    # ------------------------------------------------------------------
+    missing = set(key) - set(cb_all.obs_names)
+    if missing:
+        raise RuntimeError(
+            f"CellBender counts missing {len(missing)} cells present after SOLO. "
+            f"Example: {next(iter(missing))}"
+        )
+
+    # Subset + reorder EXACTLY to match adata
+    cb_all = cb_all[key.values, :].copy()
+
+    # Final alignment sanity checks
+    if not np.array_equal(cb_all.obs_names, key.values):
+        raise RuntimeError("Cell order mismatch after CellBender alignment.")
+
+    if not np.array_equal(cb_all.var_names, adata.var_names):
+        raise RuntimeError("Gene order mismatch between CellBender and adata.")
+
+    # Attach layer
+    adata.layers["counts_cb"] = cb_all.X.copy()
+
+    LOGGER.info(
+        "Attached CellBender counts to adata.layers['counts_cb'] "
+        "(%d cells × %d genes)",
+        adata.n_obs,
+        adata.n_vars,
+    )
+
+    return adata
+
 
 
 def _prepare_sample_for_merge(

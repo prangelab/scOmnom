@@ -5,15 +5,15 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Dict, Optional
+import numpy as np
+import torch
 
 import anndata as ad
 import pandas as pd
+import scanpy as sc
 
 from . import io_utils
 from . import plot_utils
-from .logging_utils import init_logging
-
-from .qc_and_filter import compute_qc_metrics, sparse_filter_cells_and_genes
 
 LOGGER = logging.getLogger(__name__)
 
@@ -164,6 +164,324 @@ def _per_sample_qc_and_filter(
     return filtered_samples, qc_df
 
 
+def _select_device():
+    if torch.cuda.is_available():
+        return "gpu", "auto"
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return "mps", 1
+    return "cpu", "auto"
+
+
+def _is_oom_error(e: Exception) -> bool:
+    txt = str(e).lower()
+    return (
+        "out of memory" in txt
+        or "cuda error" in txt
+        or "cublas_status_alloc_failed" in txt
+        or ("mps" in txt and "oom" in txt)
+    )
+
+
+def _auto_scvi_epochs(n_cells: int) -> int:
+    if n_cells < 50_000:
+        return 80
+    if n_cells < 200_000:
+        return 60
+    return 40
+
+
+# ---------------------------------------------------------------------
+# Generic SCVI trainer (used everywhere)
+# ---------------------------------------------------------------------
+def _train_scvi(
+    adata: ad.AnnData,
+    *,
+    batch_key: Optional[str],
+    layer: Optional[str],
+    purpose: str,
+):
+    """
+    Train an SCVI model with auto batch-size + auto epochs.
+
+    purpose: "solo" | "integration" (logging only)
+    """
+    from scvi.model import SCVI
+
+    accelerator, devices = _select_device()
+    epochs = _auto_scvi_epochs(adata.n_obs)
+
+    batch_ladder = [1024, 512, 256, 128, 64, 32]
+    last_err = None
+
+    LOGGER.info(
+        "Training SCVI for %s (n_cells=%d, epochs=%d)",
+        purpose,
+        adata.n_obs,
+        epochs,
+    )
+
+    for bsz in batch_ladder:
+        try:
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=".*setup_anndata is overwriting.*")
+                SCVI.setup_anndata(
+                    adata,
+                    layer=layer,
+                    batch_key=batch_key,
+                )
+
+            model = SCVI(adata)
+            model.train(
+                max_epochs=epochs,
+                accelerator=accelerator,
+                devices=devices,
+                batch_size=bsz,
+                enable_progress_bar=False,
+            )
+
+            LOGGER.info("SCVI trained successfully (batch_size=%d)", bsz)
+            return model
+
+        except RuntimeError as e:
+            if _is_oom_error(e):
+                LOGGER.warning("OOM at batch_size=%d, retrying smaller...", bsz)
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                last_err = e
+                continue
+            raise
+
+    raise RuntimeError("SCVI training failed") from last_err
+
+
+# ---------------------------------------------------------------------
+# QC metric computation (sparse-safe)
+# ---------------------------------------------------------------------
+def compute_qc_metrics(adata: ad.AnnData, cfg: QCFilterConfig) -> ad.AnnData:
+    from scipy import sparse
+
+    X = adata.X
+    if sparse.issparse(X):
+        X = X.tocsr()
+    else:
+        LOGGER.warning("X is dense — QC may be slow and memory intensive.")
+
+    n_cells, n_genes = X.shape
+
+    # Gene categories
+    mt_prefix = getattr(cfg, "mt_prefix", "MT-")
+    ribo_prefixes = getattr(cfg, "ribo_prefixes", ["RPL", "RPS"])
+    hb_regex = r"^(?:HB[AB]|HBA|HBB)"
+
+    adata.var["mt"] = adata.var_names.str.startswith(mt_prefix)
+    adata.var["ribo"] = adata.var_names.str.startswith(tuple(ribo_prefixes))
+    adata.var["hb"] = adata.var_names.str.contains(hb_regex, regex=True)
+
+    mt_idx = np.where(adata.var["mt"].values)[0]
+    ribo_idx = np.where(adata.var["ribo"].values)[0]
+    hb_idx = np.where(adata.var["hb"].values)[0]
+
+    LOGGER.info("Computing sparse per-cell QC metrics...")
+
+    total_counts = np.asarray(X.sum(axis=1)).ravel()
+    n_genes_by_counts = np.diff(X.indptr)
+
+    def pct_from_idx(idx):
+        if len(idx) == 0:
+            return np.zeros(n_cells)
+        vals = np.asarray(X[:, idx].sum(axis=1)).ravel()
+        return vals / np.maximum(total_counts, 1)
+
+    adata.obs["total_counts"] = total_counts
+    adata.obs["n_genes_by_counts"] = n_genes_by_counts
+    adata.obs["pct_counts_mt"] = pct_from_idx(mt_idx) * 100
+    adata.obs["pct_counts_ribo"] = pct_from_idx(ribo_idx) * 100
+    adata.obs["pct_counts_hb"] = pct_from_idx(hb_idx) * 100
+
+    LOGGER.info("Computing sparse per-gene QC metrics...")
+
+    n_cells_by_counts = np.diff(X.tocsc().indptr)
+    total_counts_gene = np.asarray(X.sum(axis=0)).ravel()
+    mean_counts = total_counts_gene / max(n_cells, 1)
+    pct_dropout = 100 * (1 - (n_cells_by_counts / max(n_cells, 1)))
+
+    adata.var["n_cells_by_counts"] = n_cells_by_counts
+    adata.var["mean_counts"] = mean_counts
+    adata.var["total_counts"] = total_counts_gene
+    adata.var["pct_dropout_by_counts"] = pct_dropout
+
+    adata.uns["qc_metrics"] = {
+        "qc_vars": ["mt", "ribo", "hb"],
+        "percent_top": {},
+        "log1p": False,
+        "raw_qc_metrics": {},
+        "n_cells": int(n_cells),
+        "n_genes": int(n_genes),
+    }
+
+    return adata
+
+
+# ---------------------------------------------------------------------
+# Sparse filtering
+# ---------------------------------------------------------------------
+def sparse_filter_cells_and_genes(
+    adata: ad.AnnData,
+    min_genes: int = 200,
+    min_cells: int = 3,
+) -> ad.AnnData:
+    import psutil
+    import scipy.sparse as sp
+
+    LOGGER.info(
+        "[Filtering] Start: %d cells × %d genes (RSS=%.2f GB)",
+        adata.n_obs,
+        adata.n_vars,
+        psutil.Process().memory_info().rss / 1024**3,
+    )
+
+    if not sp.issparse(adata.X):
+        adata.X = sp.csr_matrix(adata.X)
+    else:
+        adata.X = adata.X.tocsr()
+
+    X = adata.X
+
+    # Cell filtering
+    gene_counts = np.diff(X.indptr)
+    cell_mask = gene_counts >= min_genes
+    if cell_mask.sum() == 0:
+        raise ValueError(f"All cells removed by min_genes={min_genes}.")
+    adata = adata[cell_mask].copy()
+    X = adata.X
+
+    # Gene filtering
+    gene_nnz = np.bincount(X.indices, minlength=adata.n_vars)
+    gene_mask = gene_nnz >= min_cells
+    if gene_mask.sum() == 0:
+        raise ValueError(f"All genes removed by min_cells={min_cells}.")
+    adata = adata[:, gene_mask].copy()
+
+    return adata
+
+
+# ---------------------------------------------------------------------
+# SOLO (always global)
+# ---------------------------------------------------------------------
+def run_solo_with_scvi(
+    adata: ad.AnnData,
+    batch_key: Optional[str],
+    doublet_score_threshold: float,
+) -> ad.AnnData:
+    from scvi.external import SOLO
+
+    LOGGER.info("Running SOLO doublet detection (global)")
+
+    layer = "counts_raw" if "counts_raw" in adata.layers else None
+    scvi_model = _train_scvi(
+        adata,
+        batch_key=batch_key,
+        layer=layer,
+        purpose="solo",
+    )
+
+    accelerator, devices = _select_device()
+
+    solo = SOLO.from_scvi_model(scvi_model)
+    solo.train(
+        max_epochs=10,
+        accelerator=accelerator,
+        devices=devices,
+        enable_progress_bar=False,
+    )
+
+    probs = solo.predict(soft=True)
+    scores = probs["doublet"].to_numpy()
+
+    adata.obs["doublet_score"] = scores
+    adata.obs["predicted_doublet"] = pd.Categorical(
+        scores > doublet_score_threshold,
+        categories=[False, True],
+        ordered=False,
+    )
+
+    LOGGER.info(
+        "Doublets detected: %d / %d (%.2f%%)",
+        int((scores > doublet_score_threshold).sum()),
+        adata.n_obs,
+        float((scores > doublet_score_threshold).mean() * 100),
+    )
+
+    del scvi_model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    return adata
+
+
+# ---------------------------------------------------------------------
+# Cleanup after SOLO
+# ---------------------------------------------------------------------
+def cleanup_after_solo(
+    adata: ad.AnnData,
+    batch_key: str,
+    min_cells_per_sample: int,
+) -> ad.AnnData:
+    if "predicted_doublet" in adata.obs:
+        n0 = adata.n_obs
+        adata = adata[~adata.obs["predicted_doublet"].astype(bool)].copy()
+        LOGGER.info("Removed doublets: kept %d / %d", adata.n_obs, n0)
+
+    if min_cells_per_sample > 0:
+        vc = adata.obs[batch_key].value_counts()
+        small = vc[vc < min_cells_per_sample].index
+        if len(small):
+            n0 = adata.n_obs
+            adata = adata[~adata.obs[batch_key].isin(small)].copy()
+            LOGGER.info(
+                "Dropped %d small samples (<%d cells); kept %d / %d",
+                len(small),
+                min_cells_per_sample,
+                adata.n_obs,
+                n0,
+            )
+    return adata
+
+
+# ---------------------------------------------------------------------
+# Normalization + PCA
+# ---------------------------------------------------------------------
+def normalize_and_hvg(adata: ad.AnnData, n_top_genes: int, batch_key: str) -> ad.AnnData:
+    adata.layers["counts"] = adata.X.copy()
+    sc.pp.normalize_total(adata)
+    sc.pp.log1p(adata)
+    sc.pp.highly_variable_genes(
+        adata,
+        n_top_genes=n_top_genes,
+        batch_key=batch_key,
+    )
+    return adata
+
+
+def pca_neighbors_umap(adata: ad.AnnData, max_pcs_plot: int) -> ad.AnnData:
+    from kneed import KneeLocator
+
+    sc.tl.pca(adata)
+    vr = adata.uns["pca"]["variance_ratio"]
+    kl = KneeLocator(range(1, len(vr) + 1), vr, curve="convex", direction="decreasing")
+    n_pcs = int(kl.elbow or max_pcs_plot)
+
+    sc.pp.neighbors(adata, n_pcs=n_pcs)
+    sc.tl.umap(adata)
+    adata.uns["n_pcs_elbow"] = n_pcs
+    return adata
+
+
+def cluster_unintegrated(adata: ad.AnnData) -> ad.AnnData:
+    sc.tl.leiden(adata, resolution=1.0, key_added="leiden")
+    return adata
+
+
 def run_load_and_filter(
     cfg: LoadAndFilterConfig) -> ad.AnnData:
 
@@ -189,32 +507,43 @@ def run_load_and_filter(
     # ---------------------------------------------------------
     # Select input source and load samples
     # ---------------------------------------------------------
-    n_sources = sum(
-        [
-            cfg.raw_sample_dir is not None,
-            cfg.filtered_sample_dir is not None,
-            cfg.cellbender_dir is not None,
-        ]
-    )
-    if n_sources != 1:
+    # raw only
+    # filtered only
+    # raw + cellbender
+
+    if cfg.filtered_sample_dir is not None:
+        if cfg.raw_sample_dir or cfg.cellbender_dir:
+            raise RuntimeError("--filtered-sample-dir cannot be combined with other inputs")
+
+    elif cfg.cellbender_dir is not None:
+        if cfg.raw_sample_dir is None:
+            raise RuntimeError("--cellbender-dir requires --raw-sample-dir")
+
+    elif cfg.raw_sample_dir is None:
         raise RuntimeError(
-            "Exactly one input source must be provided: "
-            "--raw-sample-dir OR --filtered-sample-dir OR --cellbender-dir"
+            "You must provide one of:\n"
+            "  --raw-sample-dir\n"
+            "  --filtered-sample-dir\n"
+            "  --raw-sample-dir + --cellbender-dir"
         )
 
-    if cfg.raw_sample_dir is not None:
-        LOGGER.info("Loading raw 10x matrices with CellRanger-like cell calling...")
-        qc_plot_dir = cfg.figdir / "QC_plots"
-        sample_map, read_counts, _ = io_utils.load_raw_data(
-            cfg,
-            plot_dir=qc_plot_dir,
-        )
-    elif cfg.filtered_sample_dir is not None:
+    if cfg.filtered_sample_dir is not None:
         LOGGER.info("Loading CellRanger filtered matrices...")
         sample_map, read_counts = io_utils.load_filtered_data(cfg)
+
+    elif cfg.cellbender_dir is not None:
+        LOGGER.info("Loading RAW matrices restricted to CellBender barcodes...")
+        sample_map, read_counts = io_utils.load_raw_with_cellbender_barcodes(
+            cfg,
+            plot_dir=cfg.figdir / "cell_qc",
+        )
+
     else:
-        LOGGER.info("Loading CellBender matrices...")
-        sample_map, read_counts = io_utils.load_cellbender_data(cfg)
+        LOGGER.info("Loading RAW matrices with CellRanger-like cell calling...")
+        sample_map, read_counts, _ = io_utils.load_raw_data(
+            cfg,
+            plot_dir=cfg.figdir / "cell_qc",
+        )
 
     # ---------------------------------------------------------
     # Validate metadata vs loaded samples
@@ -224,38 +553,11 @@ def run_load_and_filter(
     if cfg.metadata_tsv is None:
         raise RuntimeError("metadata_tsv is required but was None")
 
-    df_meta = pd.read_csv(cfg.metadata_tsv, sep="\t")
-    if cfg.batch_key not in df_meta.columns:
-        raise KeyError(
-            f"Metadata TSV must contain the batch key column '{cfg.batch_key}'. "
-            f"Found columns: {list(df_meta.columns)}"
-        )
-
-    meta_samples = pd.Index(df_meta[cfg.batch_key].astype(str))
-    loaded_samples = pd.Index(sample_map.keys()).astype(str)
-
-    missing_rows = loaded_samples.difference(meta_samples)
-    extra_rows = meta_samples.difference(loaded_samples)
-
-    if len(missing_rows) > 0:
-        raise ValueError(
-            "The following samples were found in the input directories but "
-            "are missing from metadata_tsv:\n"
-            f"  {list(missing_rows)}"
-        )
-
-    if len(extra_rows) > 0:
-        raise ValueError(
-            "The following samples exist in metadata_tsv but were not found "
-            "in the input data folders:\n"
-            f"  {list(extra_rows)}"
-        )
-
-    if len(meta_samples) != len(loaded_samples):
-        raise ValueError(
-            f"metadata_tsv has {len(meta_samples)} rows for batch_key='{cfg.batch_key}', "
-            f"but {len(loaded_samples)} samples were loaded."
-        )
+    _validate_metadata_samples(
+        metadata_tsv=cfg.metadata_tsv,
+        batch_key=cfg.batch_key,
+        loaded_samples=sample_map,
+    )
 
     LOGGER.info("Loaded %d samples.", len(sample_map))
 
@@ -292,6 +594,13 @@ def run_load_and_filter(
     )
 
     # ---------------------------------------------------------
+    # Preserve raw counts explicitly for SOLO
+    # ---------------------------------------------------------
+    if "counts_raw" not in adata.layers:
+        LOGGER.info("Storing raw counts in adata.layers['counts_raw']")
+        adata.layers["counts_raw"] = adata.X.copy()
+
+    # ---------------------------------------------------------
     # Attach per-sample metadata
     # ---------------------------------------------------------
     LOGGER.info("Adding metadata...")
@@ -299,8 +608,50 @@ def run_load_and_filter(
     adata.uns["batch_key"] = cfg.batch_key
 
     # ---------------------------------------------------------
+    # SOLO doublet detection (GLOBAL, RAW COUNTS)
+    # ---------------------------------------------------------
+    LOGGER.info("Running SOLO doublet detection")
+    adata = run_solo_with_scvi(
+        adata,
+        batch_key=cfg.batch_key,
+        doublet_score_threshold=cfg.doublet_score_threshold,
+    )
+
+    if cfg.make_figures:
+        plot_utils.doublet_plots(
+            adata,
+            batch_key=cfg.batch_key,
+            score_threshold=cfg.doublet_score_threshold,
+            figdir=cfg.figdir / "QC_plots" / "doublets",
+        )
+
+    adata = cleanup_after_solo(
+        adata,
+        batch_key=cfg.batch_key,
+        min_cells_per_sample=cfg.min_cells_per_sample,
+    )
+
+    # ---------------------------------------------------------
+    # Attach CellBender-denoised counts (POST-SOLO ONLY)
+    # ---------------------------------------------------------
+    if cfg.cellbender_dir is not None:
+        LOGGER.info("Loading CellBender-denoised counts")
+        adata = io_utils.load_cellbender_filtered_layer(cfg, adata)
+
+    if "counts_cb" in adata.layers:
+        LOGGER.info("Using CellBender counts for downstream analysis")
+        adata.X = adata.layers["counts_cb"].copy()
+    else:
+        LOGGER.info("Using raw counts for downstream analysis")
+        adata.X = adata.layers["counts_raw"].copy()
+
+    # ---------------------------------------------------------
     # Global QC on merged filtered data (for post-filter plots ONLY)
     # ---------------------------------------------------------
+    # NOTE:
+    # QC metrics below are recomputed on the expression matrix
+    # actually used for downstream analysis (CB if available).
+    # These are for visualization only; no further filtering is applied.
     LOGGER.info("Computing QC metrics on merged filtered data...")
     adata = compute_qc_metrics(adata, cfg)
 
@@ -311,6 +662,20 @@ def run_load_and_filter(
         LOGGER.info("Plotting post-filter QC...")
         plot_utils.run_qc_plots_postfilter(adata, cfg)
         plot_utils.plot_final_cell_counts(adata, cfg)
+
+    # ---------------------------------------------------------
+    # Normalize
+    # ---------------------------------------------------------
+    adata = normalize_and_hvg(adata, cfg.n_top_genes, batch_key)
+    adata = pca_neighbors_umap(adata, cfg.max_pcs_plot)
+    adata = cluster_unintegrated(adata)
+
+    if cfg.make_figures:
+        plot_utils.doublet_umap_plots(
+            adata,
+            batch_key=cfg.batch_key,
+            figdir=cfg.figdir / "QC_plots" / "doublets_umap",
+        )
 
     # ---------------------------------------------------------
     # Save final filtered dataset
