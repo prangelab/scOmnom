@@ -52,7 +52,7 @@ class LoadDataConfig(BaseModel):
         description="Column name in metadata_tsv to use as batch/sample ID. "
                     "If None, it is inferred automatically from metadata header."
     )
-    save_h5ad: Optional[bool] = Field(
+    save_h5ad: bool = Field(
         False,
         description="If set will save a h5ad file to <output_dir>.h5ad."
     )
@@ -176,6 +176,10 @@ class QCFilterConfig(BaseModel):
     @property
     def figdir(self) -> Path:
         return self.output_dir / self.figdir_name
+
+    @validator("output_name")
+    def strip_zarr_suffix(cls, v):
+        return v.replace(".zarr", "")
 
     @model_validator(mode="after")
     def _validate_paths(self):
@@ -351,12 +355,12 @@ class ProcessAndIntegrateConfig(BaseModel):
         "adata.integrated",
         description="Stem for integrated output (e.g. adata.integrated.zarr)."
     )
-    save_h5ad: Optional[bool] = Field(
+    save_h5ad: bool = Field(
         False, description="Optional additional H5AD output."
     )
 
     # ---- Metadata keys ----
-    batch_key: str = Field(
+    batch_key: Optional[str]= Field(
         "sample_id",
         description="Batch/sample key used for integration."
     )
@@ -378,10 +382,6 @@ class ProcessAndIntegrateConfig(BaseModel):
     )
 
     # ---- Doublet reuse options ----
-    reuse_scvi_model: bool = Field(
-        True,
-        description="Reuse SCVI model trained for SOLO doublet detection."
-    )
     scvi_refine_after_solo: bool = Field(
         default=True,
         description="After SOLO cleanup, perform a short SCVI fine-tuning pass on the filtered dataset."
@@ -444,7 +444,7 @@ class ProcessAndIntegrateConfig(BaseModel):
     def normalize_methods(cls, v):
         if v is None:
             return None
-        return [m.strip() for m in v]
+        return [m.strip().lower() for m in v]
 
 
 # ---------------------------------------------------------------------
@@ -572,6 +572,12 @@ class ClusterAnnotateConfig(BaseModel):
     def figdir(self) -> Path:
         base = self.output_path.parent if self.output_path is not None else self.input_path.parent
         return base / self.figdir_name
+
+    @model_validator(mode="after")
+    def check_resolution_range(self):
+        if self.res_min >= self.res_max:
+            raise ValueError("res_min must be < res_max")
+        return self
 
     @validator("figure_formats", each_item=True)
     def validate_formats(cls, fmt: str):

@@ -681,7 +681,7 @@ def run_process_and_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
     # ---------------------------------------------------------
     # CHECKPOINT (critical safety net)
     # ---------------------------------------------------------
-    _save_solo_checkpoint(
+    _save_solo_checkpoint_no_clean(
         outdir=cfg.output_dir,
         scvi_model=scvi_model,
         adata_full=adata_full,

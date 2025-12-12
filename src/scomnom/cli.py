@@ -284,7 +284,7 @@ def qc_and_filter(
     ),
     figure_format: List[str] = typer.Option(
         ["png", "pdf"],
-        "--figure-format",
+        "--figure-formats",
         help="Figure format(s) for plots (can be given multiple times).",
     ),
     save_h5ad: bool = typer.Option(
@@ -375,7 +375,7 @@ def load_and_filter(
     # -------------------------------------------------------------
     make_figures: bool = typer.Option(True, help="[Figures] Whether to create QC plots."),
     figure_format: List[str] = typer.Option(
-        ["png", "pdf"], "--figure-format", "-F",
+        ["png", "pdf"], "--figure-formats", "-F",
         help="[Figures] Formats to save."
     ),
 
@@ -472,7 +472,7 @@ def process_and_integrate(
     ),
     figure_formats: Optional[List[str]] = typer.Option(
         ["png", "pdf"],
-        "--figure-format",
+        "--figure-formats",
         "-F",
         help="[Figures] Output figure formats.",
     ),
@@ -557,10 +557,6 @@ def process_and_integrate(
 ):
     # Normalize integration methods (Scanorama/Harmony removed)
     methods = _normalize_methods(methods)
-
-    # If user didn't specify --batch-key, apply default here
-    if batch_key is None:
-        batch_key = "sample_id"
 
     # Determine output directory
     if output_dir is None:
