@@ -231,7 +231,7 @@ def load_and_filter(
     cellbender_pattern: str = typer.Option("*.cellbender_filtered.output"),
     cellbender_h5_suffix: str = typer.Option(".cellbender_out.h5"),
     cellbender_barcode_suffix: str = typer.Option(
-        "_cellbender_out_cell_barcodes.csv",
+        ".cellbender_out_cell_barcodes.csv",
         "--cellbender-barcode-suffix",
         help="[I/O] Suffix for CellBender barcode file "
              "(e.g. '_cellbender_out_cell_barcodes.csv').",
