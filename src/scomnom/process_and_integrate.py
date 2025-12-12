@@ -237,8 +237,6 @@ def cluster_unintegrated(adata: ad.AnnData) -> ad.AnnData:
 # ---------------------------------------------------------------------
 def _run_integrations(
     adata: ad.AnnData,
-    *,
-    scvi_model,
     methods: Sequence[str],
     batch_key: str,
     label_key: str,
@@ -258,18 +256,41 @@ def _run_integrations(
 
     method_set = {m.lower() for m in (methods or [])}
 
+    scvi_model = None  # local to this integration run
+
     # scVI
     if "scvi" in method_set:
-        LOGGER.info("Computing scVI latent representation from SCVI model.")
-        adata.obsm["scVI"] = np.asarray(scvi_model.get_latent_representation(adata))
+        LOGGER.info("Training SCVI for integration")
+        scvi_model = _train_scvi(
+            adata,
+            batch_key=batch_key,
+            layer="counts" if "counts" in adata.layers else None,
+            purpose="integration",
+        )
+        adata.obsm["scVI"] = np.asarray(
+            scvi_model.get_latent_representation(adata)
+        )
         created.append("scVI")
 
     # scANVI
     if "scanvi" in method_set:
         try:
+            # Train SCVI only if it does not already exist
+            if scvi_model is None:
+                LOGGER.info(
+                    "scANVI requested without prior scVI; training SCVI backbone first"
+                )
+                scvi_model = _train_scvi(
+                    adata,
+                    batch_key=batch_key,
+                    layer="counts" if "counts" in adata.layers else None,
+                    purpose="integration",
+                )
+
             emb = _run_scanvi_from_scvi(scvi_model, adata, label_key)
             adata.obsm["scANVI"] = np.asarray(emb)
             created.append("scANVI")
+
         except Exception as e:
             LOGGER.warning("scANVI failed: %s", e)
 
@@ -495,9 +516,10 @@ def run_process_and_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
     adata = cluster_unintegrated(adata)
 
     methods = cfg.methods or ["bbknn", "scvi", "scanvi"]
+    if "scanvi" in {methods}:
+        _ensure_label_key(adata, cfg.label_key)
     adata, emb_keys = _run_integrations(
         adata,
-        scvi_model=scvi_model,
         methods=methods,
         batch_key=batch_key,
         label_key=label_key,
@@ -528,7 +550,7 @@ def run_process_and_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
     io_utils.save_dataset(adata, out_zarr, fmt="zarr")
 
     if getattr(cfg, "save_h5ad", False):
-        out_h5ad = out_stem.with_suffix(".h5ad")
+        out_h5ad = cfg.output_dir / (cfg.output_name + ".integrated.h5ad")
         LOGGER.warning(
             "Writing additional H5AD output (loads full matrix into RAM): %s",
             out_h5ad,
