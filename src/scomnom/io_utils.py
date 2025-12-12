@@ -381,8 +381,20 @@ def load_raw_with_cellbender_barcodes(
         adata.obs_names = adata.obs_names.astype(str)
 
         # ---- read CellBender barcodes ----
-        bc_file = next(cb_path.glob("*_out_Cell_Barcodes.tsv"))
+        bc_file = cb_path / f"{sample}{cfg.cellbender_barcode_suffix}"
+        if not bc_file.exists():
+            raise FileNotFoundError(
+                f"Expected CellBender barcode file not found:\n"
+                f"  {bc_file}\n"
+                f"Check --cellbender-barcode-suffix."
+            )
+
         barcodes = pd.read_csv(bc_file, header=None)[0].astype(str).tolist()
+        LOGGER.info(
+            "[%s] Using CellBender barcode file: %s",
+            sample,
+            bc_file.name,
+        )
 
         # ---- restrict immediately ----
         keep = adata.obs_names.isin(barcodes)
