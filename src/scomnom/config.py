@@ -381,34 +381,10 @@ class ProcessAndIntegrateConfig(BaseModel):
         description="Parallel jobs for scIB benchmarking."
     )
 
-    # ---- Doublet reuse options ----
-    scvi_refine_after_solo: bool = Field(
-        default=True,
-        description="After SOLO cleanup, perform a short SCVI fine-tuning pass on the filtered dataset."
-    )
-    scvi_refine_epochs: int = Field(
-        default=15,
-        description="Number of epochs for SCVI fine-tuning after SOLO cleanup."
-    )
-
-    # ---- SOLO / doublet detection ----
-    solo_restrict_to_batch: bool = Field(
-        default=False,
-        description=(
-            "If True, restrict SOLO doublet detection to the batch defined by batch_key. "
-            "If False, run SOLO globally across all batches."
-        ),
-    )
-
     # ---- QC / cleanup thresholds ----
     doublet_score_threshold: float = Field(
         0.25,
         description="Threshold for SOLO doublet_score (> threshold = doublet).",
-    )
-
-    max_pct_mt: float = Field(
-        5.0,
-        description="Maximum pct_counts_mt allowed after SOLO cleanup.",
     )
 
     min_cells_per_sample: int = Field(

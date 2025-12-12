@@ -12,15 +12,17 @@ import scanpy as sc
 import pandas as pd
 import torch
 
-from .config import ProcessAndIntegrateConfig  # or IntegrationConfig / whatever you call it
+from .config import ProcessAndIntegrateConfig
 from . import io_utils, plot_utils
 from .logging_utils import init_logging
 
 torch.set_float32_matmul_precision("high")
-
 LOGGER = logging.getLogger(__name__)
 
-# Helper function
+
+# ---------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------
 def _ensure_label_key(adata: ad.AnnData, label_key: str) -> None:
     if label_key not in adata.obs:
         raise KeyError(
@@ -29,79 +31,63 @@ def _ensure_label_key(adata: ad.AnnData, label_key: str) -> None:
         )
 
 
-# ---------------------------------------------------------------------
-# SOLO + SCVI (copied from old load_and_filter, slightly wrapped)
-# ---------------------------------------------------------------------
-def run_solo_with_scvi(
-    adata: ad.AnnData,
-    batch_key: Optional[str],
-    doublet_score_threshold: float,
-    restrict_to_batch: bool = False,
-) -> tuple[ad.AnnData, "scvi.model.SCVI"]:
-
-    """
-    Run SCVI + SOLO on the given AnnData.
-
-    Returns:
-      - adata with 'doublet_score' and 'predicted_doublet' in .obs
-      - trained SCVI model (for later reuse in integration)
-    """
-    import scvi
-    from scvi.model import SCVI
-    from scvi.external import SOLO
-
-    LOGGER.info("Running SOLO doublet detection (SCVI → SOLO) with auto batch-size scaling...")
-
-    # Choose layer for counts
-    layer = "counts_raw" if "counts_raw" in adata.layers else None
-    if layer is None:
-        LOGGER.warning("No counts_raw layer found; using adata.X for SCVI + SOLO.")
-    else:
-        LOGGER.info("Using layer '%s' for SCVI + SOLO.", layer)
-
-    # Device selection
+def _select_device():
     if torch.cuda.is_available():
-        accelerator = "gpu"
-        devices = "auto"
-        LOGGER.info("SCVI/SOLO accelerator: GPU")
-    elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-        accelerator = "mps"
-        devices = 1
-        LOGGER.info("SCVI/SOLO accelerator: Apple MPS (M1/M2/M3)")
-    else:
-        accelerator = "cpu"
-        devices = "auto"
-        LOGGER.info("SCVI/SOLO accelerator: CPU")
+        return "gpu", "auto"
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return "mps", 1
+    return "cpu", "auto"
 
-    n_cells = adata.n_obs
 
-    # Heuristic epochs for SCVI
+def _is_oom_error(e: Exception) -> bool:
+    txt = str(e).lower()
+    return (
+        "out of memory" in txt
+        or "cuda error" in txt
+        or "cublas_status_alloc_failed" in txt
+        or ("mps" in txt and "oom" in txt)
+    )
+
+
+def _auto_scvi_epochs(n_cells: int) -> int:
     if n_cells < 50_000:
-        scvi_epochs = 80
-    elif n_cells < 200_000:
-        scvi_epochs = 60
-    else:
-        scvi_epochs = 40
+        return 80
+    if n_cells < 200_000:
+        return 60
+    return 40
 
-    solo_epochs = 10
+
+# ---------------------------------------------------------------------
+# Generic SCVI trainer (used everywhere)
+# ---------------------------------------------------------------------
+def _train_scvi(
+    adata: ad.AnnData,
+    *,
+    batch_key: Optional[str],
+    layer: Optional[str],
+    purpose: str,
+):
+    """
+    Train an SCVI model with auto batch-size + auto epochs.
+
+    purpose: "solo" | "integration" (logging only)
+    """
+    from scvi.model import SCVI
+
+    accelerator, devices = _select_device()
+    epochs = _auto_scvi_epochs(adata.n_obs)
+
     batch_ladder = [1024, 512, 256, 128, 64, 32]
+    last_err = None
 
-    def _is_oom_error(e: Exception) -> bool:
-        txt = str(e).lower()
-        return (
-            "out of memory" in txt
-            or "cuda error" in txt
-            or "cublas_status_alloc_failed" in txt
-            or ("mps" in txt and "oom" in txt)
-        )
+    LOGGER.info(
+        "Training SCVI for %s (n_cells=%d, epochs=%d)",
+        purpose,
+        adata.n_obs,
+        epochs,
+    )
 
-    chosen_batch = None
-    last_exception: Optional[Exception] = None
-
-    # Try SCVI with decreasing batch sizes
-    LOGGER.info("Training SCVI backbone for SOLO...")
-    for b in batch_ladder:
-        LOGGER.info("Trying SCVI batch_size=%d ...", b)
+    for bsz in batch_ladder:
         try:
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", message=".*setup_anndata is overwriting.*")
@@ -111,176 +97,111 @@ def run_solo_with_scvi(
                     batch_key=batch_key,
                 )
 
-            vae = SCVI(adata)
-
-            vae.train(
-                max_epochs=scvi_epochs,
+            model = SCVI(adata)
+            model.train(
+                max_epochs=epochs,
                 accelerator=accelerator,
                 devices=devices,
-                batch_size=b,
+                batch_size=bsz,
+                enable_progress_bar=False,
             )
 
-            LOGGER.info("SCVI successfully trained with batch_size=%d", b)
-            chosen_batch = b
-            scvi_model = vae
-            break
+            LOGGER.info("SCVI trained successfully (batch_size=%d)", bsz)
+            return model
 
         except RuntimeError as e:
             if _is_oom_error(e):
-                LOGGER.warning(
-                    "OOM while training SCVI at batch_size=%d; retrying with smaller batch...",
-                    b,
-                )
-                last_exception = e
+                LOGGER.warning("OOM at batch_size=%d, retrying smaller...", bsz)
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+                last_err = e
                 continue
             raise
-        except Exception as e:
-            raise
 
-    if chosen_batch is None:
-        LOGGER.error("All batch sizes failed for SCVI; last error: %s", last_exception)
-        raise last_exception or RuntimeError("SCVI training failed for unknown reasons")
+    raise RuntimeError("SCVI training failed") from last_err
 
-    # Train SOLO with the same batch size
-    LOGGER.info("Training SOLO with batch_size=%d (epochs=%d)", chosen_batch, solo_epochs)
-    if restrict_to_batch:
-        if batch_key is None:
-            raise ValueError(
-                "solo_restrict_to_batch=True requires batch_key to be set."
-            )
 
-        LOGGER.info(
-            "Running SOLO per batch using batch_key='%s'",
-            batch_key,
-        )
+# ---------------------------------------------------------------------
+# SOLO (always global)
+# ---------------------------------------------------------------------
+def run_solo_with_scvi(
+    adata: ad.AnnData,
+    batch_key: Optional[str],
+    doublet_score_threshold: float,
+) -> ad.AnnData:
+    from scvi.external import SOLO
 
-        solo = SOLO.from_scvi_model(
-            scvi_model,
-            restrict_to_batch=batch_key,
-        )
-    else:
-        LOGGER.info("Running SOLO globally across all batches.")
-        solo = SOLO.from_scvi_model(scvi_model)
+    LOGGER.info("Running SOLO doublet detection (global)")
 
-    try:
-        solo.train(
-            max_epochs=solo_epochs,
-            accelerator=accelerator,
-            devices=devices,
-            batch_size=chosen_batch,
-        )
-    except RuntimeError as e:
-        if _is_oom_error(e):
-            LOGGER.error(
-                "Unexpected OOM while training SOLO with batch_size=%d "
-                "after SCVI had succeeded.",
-                chosen_batch,
-            )
-        raise
+    layer = "counts_raw" if "counts_raw" in adata.layers else None
+    scvi_model = _train_scvi(
+        adata,
+        batch_key=batch_key,
+        layer=layer,
+        purpose="solo",
+    )
 
-    LOGGER.info("Predicting doublet probabilities via SOLO...")
+    accelerator, devices = _select_device()
+
+    solo = SOLO.from_scvi_model(scvi_model)
+    solo.train(
+        max_epochs=10,
+        accelerator=accelerator,
+        devices=devices,
+        enable_progress_bar=False,
+    )
+
     probs = solo.predict(soft=True)
+    scores = probs["doublet"].to_numpy()
 
-    # scvi-tools >= 1.1 returns a DataFrame; older versions return ndarray
-    if isinstance(probs, pd.DataFrame):
-        if "doublet" not in probs.columns:
-            raise KeyError(
-                f"Expected 'doublet' column in SOLO predictions, got: {list(probs.columns)}"
-            )
-        doublet_scores = probs["doublet"].to_numpy()
-    else:
-        # legacy ndarray behavior
-        doublet_scores = probs[:, 1]
-
-    adata.obs["doublet_score"] = doublet_scores
-    adata.obs["predicted_doublet"] = doublet_scores > doublet_score_threshold
+    adata.obs["doublet_score"] = scores
+    adata.obs["predicted_doublet"] = (
+        scores > doublet_score_threshold
+    ).astype("category")
 
     LOGGER.info(
         "Doublets detected: %d / %d (%.2f%%)",
-        int(adata.obs["predicted_doublet"].sum()),
+        int((scores > doublet_score_threshold).sum()),
         adata.n_obs,
-        float(adata.obs["predicted_doublet"].mean() * 100.0),
+        float((scores > doublet_score_threshold).mean() * 100),
     )
-
-    # Cast boolean to categorical for convenience
-    adata.obs["predicted_doublet"] = adata.obs["predicted_doublet"].astype("category")
-
-    return adata, scvi_model
-
-
-# ---------------------------------------------------------------------
-# Cleanup after SOLO: remove doublets / high-mt / tiny samples
-# ---------------------------------------------------------------------
-def cleanup_after_solo(
-    adata: ad.AnnData,
-    batch_key: str,
-    max_pct_mt: float,
-    min_cells_per_sample: int,
-) -> ad.AnnData:
-    """
-    Remove predicted doublets, high-mt cells and samples with too few cells.
-    """
-
-    # Remove doublets
-    if "predicted_doublet" in adata.obs:
-        n_before = adata.n_obs
-        mask = ~adata.obs["predicted_doublet"].astype(bool).to_numpy()
-        adata = adata[mask].copy()
-        LOGGER.info(
-            "Removed predicted doublets: kept %d / %d cells.",
-            adata.n_obs,
-            n_before,
-        )
-
-    # Remove high-mt cells
-    if "pct_counts_mt" in adata.obs:
-        n_before = adata.n_obs
-        mask = adata.obs["pct_counts_mt"] < max_pct_mt
-        adata = adata[mask].copy()
-        LOGGER.info(
-            "MT filter: kept %d / %d cells (pct_counts_mt < %.1f).",
-            adata.n_obs,
-            n_before,
-            max_pct_mt,
-        )
-    else:
-        LOGGER.warning("pct_counts_mt not found in adata.obs; skipping mitochondrial filter.")
-
-    # Drop tiny samples
-    if min_cells_per_sample > 0 and batch_key in adata.obs:
-        vc = adata.obs[batch_key].value_counts()
-        small = vc[vc < min_cells_per_sample].index.tolist()
-        if small:
-            n_before = adata.n_obs
-            mask = ~adata.obs[batch_key].isin(small)
-            adata = adata[mask].copy()
-            LOGGER.info(
-                "Dropped %d samples with < %d cells; kept %d / %d cells.",
-                len(small),
-                min_cells_per_sample,
-                adata.n_obs,
-                n_before,
-            )
-    else:
-        LOGGER.warning(
-            "Either min_cells_per_sample == 0 or batch_key '%s' not in adata.obs; "
-            "skipping per-sample cell-count filtering.",
-            batch_key,
-        )
 
     return adata
 
 
 # ---------------------------------------------------------------------
-# Normalisation, HVGs, PCA/UMAP, clustering (unintegrated)
+# Cleanup after SOLO
+# ---------------------------------------------------------------------
+def cleanup_after_solo(
+    adata: ad.AnnData,
+    batch_key: str,
+    min_cells_per_sample: int,
+) -> ad.AnnData:
+    if "predicted_doublet" in adata.obs:
+        n0 = adata.n_obs
+        adata = adata[~adata.obs["predicted_doublet"].astype(bool)].copy()
+        LOGGER.info("Removed doublets: kept %d / %d", adata.n_obs, n0)
+
+    if min_cells_per_sample > 0:
+        vc = adata.obs[batch_key].value_counts()
+        small = vc[vc < min_cells_per_sample].index
+        if len(small):
+            n0 = adata.n_obs
+            adata = adata[~adata.obs[batch_key].isin(small)].copy()
+            LOGGER.info(
+                "Dropped %d small samples (<%d cells); kept %d / %d",
+                len(small),
+                min_cells_per_sample,
+                adata.n_obs,
+                n0,
+            )
+    return adata
+
+
+# ---------------------------------------------------------------------
+# Normalization + PCA
 # ---------------------------------------------------------------------
 def normalize_and_hvg(adata: ad.AnnData, n_top_genes: int, batch_key: str) -> ad.AnnData:
-    """
-    Library-size normalisation, log1p and HVG selection.
-    Stores raw counts in .layers['counts'].
-    """
     adata.layers["counts"] = adata.X.copy()
     sc.pp.normalize_total(adata)
     sc.pp.log1p(adata)
@@ -292,179 +213,84 @@ def normalize_and_hvg(adata: ad.AnnData, n_top_genes: int, batch_key: str) -> ad
     return adata
 
 
-def pca_neighbors_umap(
-    adata: ad.AnnData,
-    max_pcs_plot: int,
-) -> ad.AnnData:
-    """
-    Run PCA, select number of PCs via elbow, construct neighbors and UMAP.
-    """
+def pca_neighbors_umap(adata: ad.AnnData, max_pcs_plot: int) -> ad.AnnData:
     from kneed import KneeLocator
 
     sc.tl.pca(adata)
-    pvar = adata.uns["pca"]["variance_ratio"]
-    kl = KneeLocator(
-        range(1, len(pvar) + 1),
-        pvar,
-        curve="convex",
-        direction="decreasing",
-    )
-    n_pcs_elbow = kl.elbow or max_pcs_plot
-    n_pcs_elbow = int(n_pcs_elbow)
+    vr = adata.uns["pca"]["variance_ratio"]
+    kl = KneeLocator(range(1, len(vr) + 1), vr, curve="convex", direction="decreasing")
+    n_pcs = int(kl.elbow or max_pcs_plot)
 
-    LOGGER.info("Using n_pcs=%d for neighbors/UMAP (elbow or max_pcs_plot).", n_pcs_elbow)
-    sc.pp.neighbors(adata, n_pcs=n_pcs_elbow)
+    sc.pp.neighbors(adata, n_pcs=n_pcs)
     sc.tl.umap(adata)
-    adata.uns["n_pcs_elbow"] = n_pcs_elbow
+    adata.uns["n_pcs_elbow"] = n_pcs
     return adata
 
 
-def cluster_unintegrated(
-    adata: ad.AnnData,
-    resolution: float = 1.0,
-    random_state: int = 42,
-) -> ad.AnnData:
-    """
-    Single Leiden clustering on the unintegrated UMAP/neighbors graph.
-    """
-    sc.tl.leiden(
-        adata,
-        resolution=resolution,
-        flavor="igraph",
-        random_state=random_state,
-        key_added="leiden",
-    )
-    LOGGER.info(
-        "Leiden clustering complete (resolution=%.2f). Found %d clusters.",
-        resolution,
-        adata.obs["leiden"].nunique(),
-    )
+def cluster_unintegrated(adata: ad.AnnData) -> ad.AnnData:
+    sc.tl.leiden(adata, resolution=1.0, key_added="leiden")
     return adata
 
 
 # ---------------------------------------------------------------------
-# Integration methods: BBKNN, scVI, scANVI (reusing SCVI model)
+# Integration
 # ---------------------------------------------------------------------
-def _run_bbknn_embedding(adata: ad.AnnData, batch_key: str) -> np.ndarray:
-    """
-    Run BBKNN in an isolated copy so original neighbors graph is untouched.
-    Returns a UMAP embedding (n_cells × 2) as a NumPy array.
-    """
-    LOGGER.info("Running BBKNN")
-
-    import bbknn
-
-    tmp = adata.copy()
-    bbknn.bbknn(tmp, batch_key=batch_key)
-    sc.tl.umap(tmp)
-    emb = tmp.obsm["X_umap"].copy()
-    return emb
-
-
-def _run_scanvi_from_scvi(
-    scvi_model,
+def _run_integrations(
     adata: ad.AnnData,
-    label_key: str,
-    max_epochs: int = 400,
-) -> np.ndarray:
-    from scvi.model import SCANVI
-    import torch
-
-    LOGGER.info("Running scANVI (with multi-GPU support)")
-
-    # ------------------------
-    # Device detection (same as SOLO + scVI)
-    # ------------------------
-    if torch.cuda.is_available():
-        accelerator = "gpu"
-        devices = "auto"
-        LOGGER.info("scANVI accelerator: GPU")
-    elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-        accelerator = "mps"
-        devices = 1
-        LOGGER.info("scANVI accelerator: Apple MPS")
-    else:
-        accelerator = "cpu"
-        devices = "auto"
-        LOGGER.info("scANVI accelerator: CPU")
-
-    # ------------------------
-    # Build SCANVI from the trained scVI model
-    # ------------------------
-    lvae = SCANVI.from_scvi_model(
-        scvi_model,
-        adata=adata,
-        labels_key=label_key,
-        unlabeled_category="Unknown",
-    )
-
-    # ------------------------
-    # Train SCANVI with multi-GPU acceleration
-    # ------------------------
-    lvae.train(
-        max_epochs=max_epochs,
-        n_samples_per_label=100,
-        early_stopping=True,
-        enable_progress_bar=False,
-        accelerator=accelerator,
-        devices=devices,
-    )
-
-    return lvae.get_latent_representation()
-
-
-
-def _run_integrations_with_existing_scvi(
-    adata: ad.AnnData,
+    *,
     scvi_model,
     methods: Sequence[str],
     batch_key: str,
     label_key: str,
-) -> List[str]:
+) -> tuple[ad.AnnData, List[str]]:
     """
-    Run requested integration methods, reusing an existing SCVI model.
-    Returns list of embedding keys created in .obsm.
-    """
+    Run requested integration methods and write embeddings into adata.obsm.
 
+    Returns
+    -------
+    (adata, created_keys)
+    """
     # Ensure PCA exists and store as "Unintegrated"
     if "X_pca" not in adata.obsm:
         sc.tl.pca(adata)
-    adata.obsm["Unintegrated"] = adata.obsm["X_pca"]
-    created = ["Unintegrated"]
+    adata.obsm["Unintegrated"] = np.asarray(adata.obsm["X_pca"])
+    created: List[str] = ["Unintegrated"]
 
-    method_set = {m.lower() for m in methods}
+    method_set = {m.lower() for m in (methods or [])}
 
-    # scVI (latent representation)
+    # scVI
     if "scvi" in method_set:
-        LOGGER.info("Computing scVI latent representation from pre-trained SCVI model.")
-        emb = scvi_model.get_latent_representation(adata)
-        adata.obsm["scVI"] = emb
+        LOGGER.info("Computing scVI latent representation from SCVI model.")
+        adata.obsm["scVI"] = np.asarray(scvi_model.get_latent_representation(adata))
         created.append("scVI")
 
     # scANVI
     if "scanvi" in method_set:
         try:
             emb = _run_scanvi_from_scvi(scvi_model, adata, label_key)
-            adata.obsm["scANVI"] = emb
+            adata.obsm["scANVI"] = np.asarray(emb)
             created.append("scANVI")
         except Exception as e:
             LOGGER.warning("scANVI failed: %s", e)
 
-    # BBKNN
+    # BBKNN (UMAP is 2D, but that’s fine for benchmarking if you want; many prefer PCA/latent)
     if "bbknn" in method_set:
         try:
             emb = _run_bbknn_embedding(adata, batch_key=batch_key)
-            adata.obsm["BBKNN"] = emb
+            adata.obsm["BBKNN"] = np.asarray(emb)
             created.append("BBKNN")
         except Exception as e:
             LOGGER.warning("BBKNN failed: %s", e)
 
-    return created
+    # Safety: verify keys exist
+    missing = [k for k in created if k not in adata.obsm]
+    if missing:
+        raise RuntimeError(f"Integration embeddings missing from adata.obsm: {missing}")
+
+    return adata, created
 
 
-# ---------------------------------------------------------------------
-# scIB benchmarking (mostly copied from old integrate)
-# ---------------------------------------------------------------------
+
 def _select_best_embedding(
     adata: ad.AnnData,
     embedding_keys: Sequence[str],
@@ -473,6 +299,14 @@ def _select_best_embedding(
     n_jobs: int,
     figdir: Path,
 ) -> str:
+    """
+    Run scIB benchmarking and select the best integration embedding.
+
+    Returns
+    -------
+    str
+        Name of the best embedding key.
+    """
     from scib_metrics.benchmark import Benchmarker, BioConservation, BatchCorrection
 
     _ensure_label_key(adata, label_key)
@@ -488,24 +322,30 @@ def _select_best_embedding(
         batch_correction_metrics=BatchCorrection(),
         n_jobs=n_jobs,
     )
+
     bm.benchmark()
 
+    # ------------------------------------------------------------------
+    # Retrieve results
+    # ------------------------------------------------------------------
     raw = bm.get_results(min_max_scale=False)
     scaled = bm.get_results(min_max_scale=True)
 
-    plot_utils.plot_scib_results_table(scaled, figdir)
-
-    # Save results
+    # Save tables
     raw_path = figdir.parent / "integration_metrics_raw.tsv"
     scaled_path = figdir.parent / "integration_metrics_scaled.tsv"
     raw.to_csv(raw_path, sep="\t")
     scaled.to_csv(scaled_path, sep="\t")
 
-    # Convert to numeric for summary
+    plot_utils.plot_scib_results_table(scaled, figdir)
+
+    # ------------------------------------------------------------------
+    # Clean + score
+    # ------------------------------------------------------------------
     scaled_str = scaled.astype(str)
     numeric = scaled_str.apply(pd.to_numeric, errors="coerce")
 
-    # Drop Metadata row if present
+    # Drop metadata rows if present
     numeric = numeric.drop(index=["Metric Type"], errors="ignore")
     numeric = numeric.dropna(axis=1, how="all")
 
@@ -530,253 +370,128 @@ def _select_best_embedding(
 
     scores = numeric.loc[valid_embeddings].mean(axis=1)
     best = scores.idxmax()
+
     if isinstance(best, tuple):
         best = best[0]
 
     LOGGER.info("Selected best embedding: '%s'", best)
     return str(best)
 
-def _save_solo_checkpoint_clean(
+
+def _plot_umaps_for_embeddings(
+    adata: ad.AnnData,
+    embedding_keys: Sequence[str],
     *,
-    outdir: Path,
-    adata_cleaned: ad.AnnData,
+    color: str,
+    figdir: Path,
 ) -> None:
-    ckpt_dir = outdir / "checkpoints" / "solo_scvi"
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    """
+    For each embedding in adata.obsm, compute neighbors/UMAP in a temp copy and save plots.
+    Also saves side-by-side UMAP comparison vs Unintegrated.
+    """
+    import matplotlib.pyplot as plt
 
-    LOGGER.info("Saving SOLO/SCVI checkpoint → %s", ckpt_dir)
+    figdir.mkdir(parents=True, exist_ok=True)
 
-    io_utils.save_dataset(
-        adata_cleaned,
-        ckpt_dir / "adata_cleaned.zarr",
-        fmt="zarr",
-    )
+    for method in embedding_keys:
+        if method not in adata.obsm:
+            LOGGER.warning("Skipping UMAP plot: embedding '%s' not found in adata.obsm", method)
+            continue
 
-    LOGGER.info("SOLO/SCVI checkpoint clean saved successfully.")
+        try:
+            LOGGER.info("Plotting UMAPs for method: %s", method)
 
-def _save_solo_checkpoint_no_clean(
-    *,
-    outdir: Path,
-    scvi_model,
-    adata_full: ad.AnnData,
-) -> None:
-    ckpt_dir = outdir / "checkpoints" / "solo_scvi"
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
+            # Single UMAP for this embedding
+            tmp = adata.copy()
+            sc.pp.neighbors(tmp, use_rep=method)
+            sc.tl.umap(tmp)
 
-    LOGGER.info("Saving SOLO/SCVI checkpoint → %s", ckpt_dir)
+            fig = sc.pl.umap(
+                tmp,
+                color=color,
+                show=False,
+                return_fig=True,
+            )
+            plot_utils.save_multi(f"{method}_umap", figdir, fig=fig)
+            plt.close(fig)
 
-    # Save SCVI model
-    scvi_model.save(
-        ckpt_dir / "scvi_model",
-        overwrite=True,
-    )
+            # Two-panel comparison vs Unintegrated (if available and not itself)
+            if method != "Unintegrated" and "Unintegrated" in adata.obsm:
+                tmp2 = adata.copy()
 
-    # Save AnnData objects
-    io_utils.save_dataset(
-        adata_full,
-        ckpt_dir / "adata_full.zarr",
-        fmt="zarr",
-    )
+                sc.pp.neighbors(tmp2, use_rep=method)
+                sc.tl.umap(tmp2)
+                umap_integrated = tmp2.obsm["X_umap"].copy()
 
-    LOGGER.info("SOLO/SCVI checkpoint no clean saved successfully.")
+                sc.pp.neighbors(tmp2, use_rep="Unintegrated")
+                sc.tl.umap(tmp2)
+                umap_unintegrated = tmp2.obsm["X_umap"].copy()
 
-def _save_solo_checkpoint_finetuned(
-    *,
-    outdir: Path,
-    scvi_model,
-) -> None:
-    ckpt_dir = outdir / "checkpoints" / "solo_scvi"
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
+                fig, axs = plt.subplots(1, 2, figsize=(10, 4))
 
-    LOGGER.info("Saving SOLO/SCVI checkpoint → %s", ckpt_dir)
+                tmp2.obsm["X_umap"] = umap_integrated
+                sc.pl.umap(
+                    tmp2,
+                    color=color,
+                    ax=axs[0],
+                    show=False,
+                    title=f"{method}",
+                )
 
-    # Save SCVI model
-    scvi_model.save(
-        ckpt_dir / "scvi_model_finetuned",
-        overwrite=True,
-    )
+                tmp2.obsm["X_umap"] = umap_unintegrated
+                sc.pl.umap(
+                    tmp2,
+                    color=color,
+                    ax=axs[1],
+                    show=False,
+                    title="Unintegrated",
+                )
 
-    LOGGER.info("SOLO/SCVI checkpoint finetuned saved successfully.")
+                plot_utils.save_multi(f"{method}_vs_Unintegrated_umap", figdir, fig=fig)
+                plt.close(fig)
+
+        except Exception as e:
+            LOGGER.warning("UMAP plotting for %s failed: %s", method, e)
+
+
 # ---------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------
 def run_process_and_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
-    """
-    Full module:
-      1. Load filtered dataset
-      2. Run SCVI + SOLO (doublet detection)
-      3. Cleanup (doublets, mt, tiny samples)
-      4. Normalise + HVGs
-      5. PCA / neighbors / UMAP (unintegrated) + Leiden clustering
-      6. Run integration methods (BBKNN, scVI, scANVI) using pre-trained SCVI
-      7. Benchmark with scIB and choose best embedding
-      8. Compute final integrated neighbors + UMAP
-      9. Save dataset (Zarr by default, optional H5AD)
-    """
-
-    # ---------------------------------------------------------
-    # Logging & figures
-    # ---------------------------------------------------------
     init_logging(cfg.logfile)
     LOGGER.info("Starting process-and-integrate")
 
-    # Figure root + Scanpy figdir
     figroot = cfg.output_dir / cfg.figdir_name
     plot_utils.setup_scanpy_figs(figroot, cfg.figure_formats)
-
     figdir_integration = figroot / "integration"
     figdir_integration.mkdir(parents=True, exist_ok=True)
 
-    # ---------------------------------------------------------
-    # Load input
-    # ---------------------------------------------------------
-    in_path = Path(cfg.input_path)
-    adata_full = io_utils.load_dataset(in_path)
+    adata_full = io_utils.load_dataset(cfg.input_path)
 
-    # Batch key
-    batch_key = cfg.batch_key or adata_full.uns.get("batch_key", None)
+    batch_key = cfg.batch_key or adata_full.uns.get("batch_key")
     if batch_key is None:
-        raise RuntimeError(
-            "batch_key not provided in config and not found in adata.uns['batch_key']."
-        )
-    cfg.batch_key = batch_key  # keep in config for downstream calls
+        raise RuntimeError("batch_key missing")
+
     LOGGER.info("Using batch_key='%s'", batch_key)
 
-    # ---------------------------------------------------------
-    # 1) SCVI + SOLO doublet detection
-    # ---------------------------------------------------------
-    LOGGER.info("Running SOLO + SCVI on full filtered dataset...")
-    adata_full, scvi_model = run_solo_with_scvi(
+    adata_full = run_solo_with_scvi(
         adata_full,
         batch_key=batch_key,
         doublet_score_threshold=cfg.doublet_score_threshold,
-        restrict_to_batch=cfg.solo_restrict_to_batch,
     )
 
-    # ---------------------------------------------------------
-    # CHECKPOINT (critical safety net)
-    # ---------------------------------------------------------
-    _save_solo_checkpoint_no_clean(
-        outdir=cfg.output_dir,
-        scvi_model=scvi_model,
-        adata_full=adata_full,
-    )
-
-    # ---------------------------------------------------------
-    # 2) Cleanup after SOLO
-    # ---------------------------------------------------------
-    LOGGER.info("Running cleanup after SOLO (doublets, mt, tiny samples)...")
     adata = cleanup_after_solo(
         adata_full,
         batch_key=batch_key,
-        max_pct_mt=cfg.max_pct_mt,
         min_cells_per_sample=cfg.min_cells_per_sample,
     )
 
-    # ---------------------------------------------------------
-    # CHECKPOINT (critical safety net)
-    # ---------------------------------------------------------
-    _save_solo_checkpoint_clean(
-        outdir=cfg.output_dir,
-        adata_cleaned=adata,
-    )
+    adata = normalize_and_hvg(adata, cfg.n_top_genes, batch_key)
+    adata = pca_neighbors_umap(adata, cfg.max_pcs_plot)
+    adata = cluster_unintegrated(adata)
 
-    LOGGER.info(
-        "Post-SOLO cleanup dataset: %d cells × %d genes",
-        adata.n_obs,
-        adata.n_vars,
-    )
-
-    # ---------------------------------------------------------
-    # OPTIONAL: SCVI fine-tuning on the cleaned dataset
-    # ---------------------------------------------------------
-    if cfg.scvi_refine_after_solo:
-        LOGGER.info(
-            "Fine-tuning SCVI on cleaned dataset for %d epochs...",
-            cfg.scvi_refine_epochs,
-        )
-
-        # Device detection (same as SCANVI/SOLO)
-        if torch.cuda.is_available():
-            accelerator = "gpu"
-            devices = "auto"
-        elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-            accelerator = "mps"
-            devices = 1
-        else:
-            accelerator = "cpu"
-            devices = "auto"
-
-        # Attach new AnnDataManager for the filtered dataset
-        from scvi.model import SCVI
-        SCVI.setup_anndata(
-            adata,
-            layer="counts" if "counts" in adata.layers else None,
-            batch_key=batch_key,
-        )
-        scvi_model._adata_manager = SCVI._get_adata_manager(adata)  # swap managers safely
-
-        # Fine-tune SCVI in place
-        scvi_model.train(
-            max_epochs=cfg.scvi_refine_epochs,
-            accelerator=accelerator,
-            devices=devices,
-            enable_progress_bar=False,
-            early_stopping=True,
-        )
-
-        LOGGER.info("SCVI fine-tune completed.")
-    else:
-        LOGGER.info("Skipping SCVI fine-tuning (cfg.scvi_refine_after_solo=False).")
-
-    # ---------------------------------------------------------
-    # CHECKPOINT (critical safety net)
-    # ---------------------------------------------------------
-    _save_solo_checkpoint_finetuned(
-        outdir=cfg.output_dir,
-        scvi_model=scvi_model,
-    )
-    # ---------------------------------------------------------
-    # 3) Normalisation + HVG + PCA/UMAP + Leiden (unintegrated)
-    # ---------------------------------------------------------
-    LOGGER.info("Normalising and selecting HVGs...")
-    adata = normalize_and_hvg(
-        adata,
-        n_top_genes=cfg.n_top_genes,
-        batch_key=batch_key,
-    )
-
-    LOGGER.info("Running PCA / neighbors / UMAP (unintegrated)...")
-    adata = pca_neighbors_umap(
-        adata,
-        max_pcs_plot=cfg.max_pcs_plot,
-    )
-
-    LOGGER.info("Running Leiden clustering on unintegrated space...")
-    adata = cluster_unintegrated(
-        adata,
-        resolution=1.0,
-        random_state=42,
-    )
-
-    # Ensure label_key for scANVI / scIB
-    label_key = cfg.label_key
-    if label_key not in adata.obs:
-        LOGGER.warning(
-            "label_key='%s' not found in adata.obs. "
-            "scANVI and some scIB metrics may fail.",
-            label_key,
-        )
-    else:
-        LOGGER.info("Using label_key='%s' for scANVI + scIB.", label_key)
-
-    # ---------------------------------------------------------
-    # 4) Integration methods using pre-trained SCVI
-    # ---------------------------------------------------------
     methods = cfg.methods or ["bbknn", "scvi", "scanvi"]
-    LOGGER.info("Running integration methods: %s", methods)
-
-    emb_keys = _run_integrations_with_existing_scvi(
+    adata, emb_keys = _run_integrations(
         adata,
         scvi_model=scvi_model,
         methods=methods,
@@ -784,121 +499,39 @@ def run_process_and_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
         label_key=label_key,
     )
 
-    LOGGER.info("Created integration embeddings: %s", emb_keys)
-
-    # ---------------------------------------------------------
-    # 5) Benchmark and choose best embedding
-    # ---------------------------------------------------------
     best = _select_best_embedding(
         adata,
         embedding_keys=emb_keys,
         batch_key=batch_key,
-        label_key=label_key,
+        label_key=cfg.label_key,
         n_jobs=cfg.benchmark_n_jobs,
         figdir=figdir_integration,
     )
 
-    # ---------------------------------------------------------
-    # 6) Final integrated neighbors + UMAP
-    # ---------------------------------------------------------
-    LOGGER.info("Computing final integrated neighbors + UMAP using '%s' embedding.", best)
+    _plot_umaps_for_embeddings(
+        adata,
+        embedding_keys=emb_keys,
+        color=batch_key,
+        figdir=figdir_integration,
+    )
 
     adata.obsm["X_integrated"] = adata.obsm[best]
     sc.pp.neighbors(adata, use_rep="X_integrated")
     sc.tl.umap(adata)
 
-    # Store metadata
-    adata.uns.setdefault("integration", {})
-    adata.uns["integration"].update(
-        {
-            "methods": emb_keys,
-            "best_embedding": best,
-            "batch_key": batch_key,
-            "label_key": label_key,
-            "input_path": str(in_path),
-            "metrics_raw_tsv": str(figdir_integration.parent / "integration_metrics_raw.tsv"),
-            "metrics_scaled_tsv": str(figdir_integration.parent / "integration_metrics_scaled.tsv"),
-        }
-    )
-
-    # ---------------------------------------------------------
-    # 7) Plot per-method UMAPs (same pattern as old integrate)
-    # ---------------------------------------------------------
-    import matplotlib.pyplot as plt
-
-    for method in emb_keys:
-        try:
-            LOGGER.info("Plotting UMAPs for method: %s", method)
-
-            # Single-panel integrated UMAP
-            tmp = adata.copy()
-            sc.pp.neighbors(tmp, use_rep=method)
-            sc.tl.umap(tmp)
-
-            fig = sc.pl.umap(
-                tmp,
-                color=batch_key,
-                show=False,
-                return_fig=True,
-            )
-            plot_utils.save_multi(f"{method}_umap", figdir_integration)
-            plt.close(fig)
-
-            # Two-panel: method vs Unintegrated
-            if method == "Unintegrated":
-                continue
-
-            tmp2 = adata.copy()
-            sc.pp.neighbors(tmp2, use_rep=method)
-            sc.tl.umap(tmp2)
-            umap_integrated = tmp2.obsm["X_umap"].copy()
-
-            sc.pp.neighbors(tmp2, use_rep="Unintegrated")
-            sc.tl.umap(tmp2)
-            umap_unintegrated = tmp2.obsm["X_umap"].copy()
-
-            fig, axs = plt.subplots(1, 2, figsize=(10, 4))
-
-            tmp2.obsm["X_umap"] = umap_integrated
-            sc.pl.umap(
-                tmp2,
-                color=batch_key,
-                ax=axs[0],
-                show=False,
-                title=f"{method}",
-            )
-
-            tmp2.obsm["X_umap"] = umap_unintegrated
-            sc.pl.umap(
-                tmp2,
-                color=batch_key,
-                ax=axs[1],
-                show=False,
-                title="Unintegrated",
-            )
-
-            plot_utils.save_multi(f"{method}_vs_Unintegrated_umap", figdir_integration)
-            plt.close(fig)
-        except Exception as e:
-            LOGGER.warning("UMAP plotting for %s failed: %s", method, e)
-
-    # ---------------------------------------------------------
-    # 8) Save integrated dataset
-    # ---------------------------------------------------------
-    out_stem = cfg.output_dir / (cfg.output_name + ".integrated")
-    out_zarr = out_stem.with_suffix(".zarr")
-
+    out_zarr = cfg.output_dir / (cfg.output_name + ".integrated.zarr")
     LOGGER.info("Saving integrated dataset as Zarr → %s", out_zarr)
     io_utils.save_dataset(adata, out_zarr, fmt="zarr")
 
     if getattr(cfg, "save_h5ad", False):
         out_h5ad = out_stem.with_suffix(".h5ad")
         LOGGER.warning(
-            "User requested H5AD output in addition to Zarr. "
-            "This may be large for big datasets."
+            "Writing additional H5AD output (loads full matrix into RAM): %s",
+            out_h5ad,
         )
         io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
         LOGGER.info("Saved integrated H5AD → %s", out_h5ad)
 
     LOGGER.info("Finished process-and-integrate")
     return adata
+

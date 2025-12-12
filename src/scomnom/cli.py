@@ -476,19 +476,8 @@ def process_and_integrate(
         "-F",
         help="[Figures] Output figure formats.",
     ),
-    # -------------------------------------------------------------
-    # SOLO mode
-    #--------------------------------------------------------------
-    solo_restrict_to_batch: bool = typer.Option(
-        False,
-        "--solo-restrict-to-batch/--solo-global",
-        help=(
-                "Restrict SOLO doublet detection per batch (uses --batch-key). "
-                "Default is global SOLO."
-        ),
-    ),
 
-        # -------------------------------------------------------------
+    # -------------------------------------------------------------
     # Post-SOLO cleanup thresholds
     # -------------------------------------------------------------
     doublet_score_threshold: float = typer.Option(
@@ -496,13 +485,6 @@ def process_and_integrate(
         "--doublet-score-threshold",
         help="SOLO doublet score threshold (default 0.25). "
              "Cells with score > threshold are removed."
-    ),
-
-    max_pct_mt: float = typer.Option(
-        5.0,
-        "--max-pct-mt",
-        help="Maximum mitochondrial percentage allowed AFTER SOLO cleanup "
-             "(cells above this are removed).",
     ),
 
     min_cells_per_sample: int = typer.Option(
@@ -535,16 +517,6 @@ def process_and_integrate(
         "leiden", "--label-key", "-l",
         help="[scIB] Label key for benchmarking and scANVI.",
     ),
-    scvi_refine_after_solo: bool = typer.Option(
-        True,
-        "--scvi-refine-after-solo/--no-scvi-refine-after-solo",
-        help="After SOLO cleanup, fine-tune the SCVI model on the filtered dataset.",
-    ),
-    scvi_refine_epochs: int = typer.Option(
-        15,
-        "--scvi-refine-epochs",
-        help="Epochs for SCVI fine-tuning after SOLO cleanup.",
-    ),
 
     # -----------------------------
     # Benchmarking
@@ -572,16 +544,12 @@ def process_and_integrate(
         save_h5ad=save_h5ad,
         figdir_name=figdir_name,
         figure_formats=figure_formats,
-        solo_restrict_to_batch=solo_restrict_to_batch,
         doublet_score_threshold=doublet_score_threshold,
-        max_pct_mt=max_pct_mt,
         min_cells_per_sample=min_cells_per_sample,
         n_top_genes=n_top_genes,
         methods=methods,
         batch_key=batch_key,
         label_key=label_key,
-        scvi_refine_after_solo=scvi_refine_after_solo,
-        scvi_refine_epochs=scvi_refine_epochs,
         benchmark_n_jobs=benchmark_n_jobs,
         logfile=logfile,
     )
