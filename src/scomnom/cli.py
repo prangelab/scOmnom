@@ -4,13 +4,11 @@ import typer
 from pathlib import Path
 import warnings
 
-from .load_data import run_load_data
-from .qc_and_filter import run_qc_and_filter
 from .load_and_filter import run_load_and_filter
 from .process_and_integrate import run_process_and_integrate
 from .cluster_and_annotate import run_clustering
 
-from .config import LoadDataConfig, QCFilterConfig, LoadAndFilterConfig, ProcessAndIntegrateConfig, ClusterAnnotateConfig
+from .config import LoadAndFilterConfig, ProcessAndIntegrateConfig, ClusterAnnotateConfig
 from .logging_utils import init_logging
 
 
@@ -173,60 +171,66 @@ def load_and_filter(
     n_jobs: int = typer.Option(
         None,
         "--n-jobs",
-        help="Number of CPU cores to use (default: value from config, typically 4).",
+        help="Number of CPU cores to use.",
     ),
     save_h5ad: bool = typer.Option(
-            False,
-            "--save-h5ad/--no-save-h5ad",
-            help="Also write a .h5ad copy of the merged dataset (WARNING: loads full matrix into RAM).",
+        False,
+        "--save-h5ad/--no-save-h5ad",
+        help="Also write a .h5ad copy (WARNING: loads full matrix into RAM).",
     ),
 
     # -------------------------------------------------------------
     # QC thresholds
     # -------------------------------------------------------------
     min_cells: int = typer.Option(3, help="[QC] Minimum cells per gene."),
-    min_genes: int = typer.Option(500, help="[QC] Minimum genes per cell. Lower this to ~200 for snRNA-seq"),
+    min_genes: int = typer.Option(500, help="[QC] Minimum genes per cell."),
     min_cells_per_sample: int = typer.Option(20, help="[QC] Minimum cells per sample."),
-    max_pct_mt: float = typer.Option(5.0, help="[QC] Max mitochondrial percentage. Increase this to ~30-50% for snRNA-seq"),
+    max_pct_mt: float = typer.Option(5.0, help="[QC] Max mitochondrial percentage."),
+
+    # -------------------------------------------------------------
+    # Doublet detection (SOLO)
+    # -------------------------------------------------------------
+    doublet_mode: str = typer.Option(
+        "fixed",
+        "--doublet-mode",
+        help="Doublet thresholding mode: fixed | rate | gmm",
+    ),
+    doublet_score_threshold: float = typer.Option(
+        0.25,
+        "--doublet-score-threshold",
+        help="Used when doublet-mode=fixed.",
+    ),
+    expected_doublet_rate: float = typer.Option(
+        0.05,
+        "--expected-doublet-rate",
+        help="Used when doublet-mode=rate.",
+    ),
 
     # -------------------------------------------------------------
     # Figures
     # -------------------------------------------------------------
     make_figures: bool = typer.Option(True, help="[Figures] Whether to create QC plots."),
-    figure_format: List[str] = typer.Option(
+    figure_formats: List[str] = typer.Option(
         ["png", "pdf"], "--figure-formats", "-F",
         help="[Figures] Formats to save."
     ),
 
     # -------------------------------------------------------------
-    #  Batch
+    # Batch
     # -------------------------------------------------------------
     batch_key: Optional[str] = typer.Option(
         None, "--batch-key", "-b",
-        help="[PCA/Batch] Batch column in .obs.",
+        help="Batch/sample column in metadata.",
     ),
 
     # -------------------------------------------------------------
-    # Input pattern overrides (advanced)
+    # Input patterns
     # -------------------------------------------------------------
     raw_pattern: str = typer.Option("*.raw_feature_bc_matrix"),
     filtered_pattern: str = typer.Option("*.filtered_feature_bc_matrix"),
     cellbender_pattern: str = typer.Option("*.cellbender_filtered.output"),
     cellbender_h5_suffix: str = typer.Option(".cellbender_out.h5"),
 ):
-    if cellbender_dir is not None and raw_sample_dir is None:
-        raise typer.BadParameter("--cellbender-dir requires --raw-sample-dir (raw counts needed).")
-
-    if cellbender_dir is not None and filtered_sample_dir is not None:
-        raise typer.BadParameter("Cannot combine --cellbender-dir with --filtered-sample-dir. Use raw+cellbender only.")
-
-    if raw_sample_dir is not None and filtered_sample_dir is not None:
-        raise typer.BadParameter("Cannot specify both --raw-sample-dir and --filtered-sample-dir.")
-
-    # Determine output directory
-    if output_dir is None:
-        output_dir = input_path.parent
-
     logfile = output_dir / "load-and-filter.log"
     init_logging(logfile)
 
@@ -237,13 +241,16 @@ def load_and_filter(
         metadata_tsv=metadata_tsv,
         output_dir=output_dir,
         save_h5ad=save_h5ad,
-        n_jobs=4,
+        n_jobs=n_jobs or 4,
         min_cells=min_cells,
         min_genes=min_genes,
         min_cells_per_sample=min_cells_per_sample,
         max_pct_mt=max_pct_mt,
+        doublet_mode=doublet_mode,
+        doublet_score_threshold=doublet_score_threshold,
+        expected_doublet_rate=expected_doublet_rate,
         make_figures=make_figures,
-        figure_formats=figure_format,
+        figure_formats=figure_formats,
         batch_key=batch_key,
         raw_pattern=raw_pattern,
         filtered_pattern=filtered_pattern,
@@ -252,32 +259,29 @@ def load_and_filter(
         logfile=logfile,
     )
 
-    if n_jobs is not None:
-        cfg.n_jobs = n_jobs
-
     run_load_and_filter(cfg)
 
 
 # ======================================================================
 #  process-and-integrate
 # ======================================================================
-@app.command("process-and-integrate", help="Run doublet detection, normalization, PCA/UMAP, integration, and scIB benchmarking.")
+@app.command("process-and-integrate", help="Integration + benchmarking only.")
 def process_and_integrate(
     # -----------------------------
     # I/O
     # -----------------------------
     input_path: Path = typer.Option(
         ..., "--input-path", "-i",
-        help="[I/O] Filtered dataset (.zarr or .h5ad) from load-and-filter."
+        help="[I/O] Dataset produced by load-and-filter (.zarr or .h5ad)."
     ),
     output_dir: Optional[Path] = typer.Option(
         None, "--output-dir", "-o",
-        help="[I/O] Directory for integrated output (default = input parent).",
+        help="[I/O] Output directory (default = input parent).",
     ),
     output_name: str = typer.Option(
         "adata.integrated",
         "--output-name",
-        help="[I/O] Base name for integrated dataset ('.zarr' appended automatically).",
+        help="[I/O] Base name for integrated dataset.",
     ),
     save_h5ad: bool = typer.Option(
         False,
@@ -288,39 +292,16 @@ def process_and_integrate(
     # -------------------------------------------------------------
     # Figures
     # -------------------------------------------------------------
-    figdir_name: Optional[str] = typer.Option(
+    figdir_name: str = typer.Option(
         "figures",
         "--figdir-name",
-        help="[Figures] Name of figure directory inside output_dir.",
+        help="[Figures] Name of figure directory.",
     ),
-    figure_formats: Optional[List[str]] = typer.Option(
+    figure_formats: List[str] = typer.Option(
         ["png", "pdf"],
         "--figure-formats",
         "-F",
         help="[Figures] Output figure formats.",
-    ),
-
-    # -------------------------------------------------------------
-    # Post-SOLO cleanup thresholds
-    # -------------------------------------------------------------
-    doublet_score_threshold: float = typer.Option(
-        0.25,
-        "--doublet-score-threshold",
-        help="SOLO doublet score threshold (default 0.25). "
-             "Cells with score > threshold are removed."
-    ),
-
-    min_cells_per_sample: int = typer.Option(
-        20,
-        "--min-cells-per-sample",
-        help="Minimum number of cells required per sample AFTER SOLO cleanup "
-             "(default: 20).",
-    ),
-
-    n_top_genes: int = typer.Option(
-        3000,
-        "--n-top-genes",
-        help="Number of HVGs to select for normalisation + PCA (default 3000).",
     ),
 
     # -----------------------------
@@ -329,7 +310,6 @@ def process_and_integrate(
     methods: Optional[List[str]] = typer.Option(
         None, "--methods", "-m",
         help="[Integration] Methods: BBKNN, scVI, scANVI.",
-        autocompletion=_methods_completion,
         case_sensitive=False,
     ),
     batch_key: Optional[str] = typer.Option(
@@ -350,26 +330,16 @@ def process_and_integrate(
         help="[scIB] Parallel workers.",
     ),
 ):
-    # Normalize integration methods (Scanorama/Harmony removed)
-    methods = _normalize_methods(methods)
-
-    # Determine output directory
-    if output_dir is None:
-        output_dir = input_path.parent
-
-    logfile = output_dir / "process-and-integrate.log"
+    logfile = (output_dir or input_path.parent) / "process-and-integrate.log"
     init_logging(logfile)
 
     cfg = ProcessAndIntegrateConfig(
         input_path=input_path,
-        output_dir=output_dir,
+        output_dir=output_dir or input_path.parent,
         output_name=output_name,
         save_h5ad=save_h5ad,
         figdir_name=figdir_name,
         figure_formats=figure_formats,
-        doublet_score_threshold=doublet_score_threshold,
-        min_cells_per_sample=min_cells_per_sample,
-        n_top_genes=n_top_genes,
         methods=methods,
         batch_key=batch_key,
         label_key=label_key,

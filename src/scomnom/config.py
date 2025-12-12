@@ -6,421 +6,102 @@ from matplotlib.figure import Figure
 import multiprocessing
 
 
-# -------------------------------
-# LoadDataConfig
-# -------------------------------
-class LoadDataConfig(BaseModel):
-    """
-    Configuration for the *load-only* module:
-    - Load RAW OR filtered OR CellBender matrices
-    - Attach metadata
-    - Write per-sample Zarr stores
-    - Merge sequentially into final Zarr
-    """
-
-    # ---------------------------------------------------------
-    # I/O paths
-    # ---------------------------------------------------------
-    raw_sample_dir: Optional[Path] = Field(
-        None,
-        description="Directory containing <sample>.raw_feature_bc_matrix folders."
-    )
-    filtered_sample_dir: Optional[Path] = Field(
-        None,
-        description="Directory containing <sample>.filtered_feature_bc_matrix folders."
-    )
-    cellbender_dir: Optional[Path] = Field(
-        None,
-        description="Directory containing <sample>.cellbender_filtered.output folders."
-    )
-
-    metadata_tsv: Path = Field(
-        ...,
-        description="TSV file with per-sample metadata indexed by sample ID."
-    )
-
-    output_dir: Path = Field(
-        ..., description="Directory where merged Zarr will be written."
-    )
-    output_name: str = Field(
-        "adata.merged",
-        description="Base name for merged output ('.zarr' will be appended)."
-    )
-
-    batch_key: Optional[str] = Field(
-        None,
-        description="Column name in metadata_tsv to use as batch/sample ID. "
-                    "If None, it is inferred automatically from metadata header."
-    )
-    save_h5ad: bool = Field(
-        False,
-        description="If set will save a h5ad file to <output_dir>.h5ad."
-    )
-
-    # ---------------------------------------------------------
-    # Compute settings
-    # ---------------------------------------------------------
-    n_jobs: int = Field(
-        4,
-        ge=1,
-        description="Parallel workers for reading individual samples & writing per-sample Zarrs."
-    )
-
-    # ---------------------------------------------------------
-    # File pattern overrides (rarely needed)
-    # ---------------------------------------------------------
-    raw_pattern: str = "*.raw_feature_bc_matrix"
-    filtered_pattern: str = "*.filtered_feature_bc_matrix"
-    cellbender_pattern: str = "*.cellbender_filtered.output"
-    cellbender_h5_suffix: str = ".cellbender_out.h5"
-
-    # ---------------------------------------------------------
-    # Validation
-    # ---------------------------------------------------------
-    @validator("output_name")
-    def ensure_suffix(cls, v: str):
-        return v if v.endswith(".zarr") else f"{v}.zarr"
-
-    @model_validator(mode="after")
-    def check_exactly_one_source(self):
-        """
-        For load_data: exactly ONE of raw / filtered / cellbender must be provided.
-        """
-        sources = [
-            self.raw_sample_dir,
-            self.filtered_sample_dir,
-            self.cellbender_dir,
-        ]
-        if sum(x is not None for x in sources) != 1:
-            raise ValueError(
-                "Exactly one of raw_sample_dir, filtered_sample_dir, or cellbender_dir must be set."
-            )
-        return self
-
-
-# -------------------------------
-# QCFilterConfig
-# -------------------------------
-class QCFilterConfig(BaseModel):
-    """
-    Configuration for the qc-and-filter stage.
-
-    - Loads a merged dataset from .zarr or .h5ad
-    - Applies QC filters (min_genes, min_cells, max_pct_mt, min_cells_per_sample)
-    - Writes filtered dataset as adata.filtered.zarr (+ optional .h5ad)
-    """
-
-    # Input: merged data from load-data
-    input_path: Path = Field(
-        ...,
-        description="Path to merged dataset from load-data (.zarr directory or .h5ad file).",
-    )
-
-    # Output directory (directory, not file; must not end with .zarr)
-    output_dir: Optional[Path] = Field(
-        None,
-        description="Directory for filtered output. Defaults to parent of input_path.",
-    )
-
-    # Batch / sample key (optional override)
-    batch_key: Optional[str] = Field(
-        None,
-        description="Column in adata.obs to treat as batch/sample ID. "
-                    "If None, io_utils.infer_batch_key() will choose.",
-    )
-
-    # QC thresholds
-    min_cells: int = Field(
-        3,
-        description="[QC] Minimum cells per gene.",
-    )
-    min_genes: int = Field(
-        500,
-        description="[QC] Minimum genes per cell. Lower to ~200 for snRNA-seq.",
-    )
-    min_cells_per_sample: int = Field(
-        20,
-        description="[QC] Minimum cells per sample.",
-    )
-    max_pct_mt: float = Field(
-        5.0,
-        description="[QC] Max mitochondrial percentage. Increase to ~30–50% for snRNA-seq.",
-    )
-
-    # Plotting
-    make_figures: bool = Field(
-        True,
-        description="Whether to generate QC plots.",
-    )
-    figdir_name: str = Field(
-        "figures",
-        description="Subdirectory under output_dir for figures.",
-    )
-    figure_formats: List[str] = Field(
-        default_factory=lambda: ["png", "pdf"],
-        description="Figure formats for plots.",
-    )
-
-    # Optional H5AD
-    save_h5ad: bool = Field(
-        False,
-        description="Also write an .h5ad copy of the filtered dataset.",
-    )
-
-    # We keep the name fixed in practice, but expose as a constant-like field
-    output_name: str = Field(
-        "adata.filtered",
-        description="Base name for filtered dataset ('.zarr' appended automatically).",
-    )
-
-    @property
-    def figdir(self) -> Path:
-        return self.output_dir / self.figdir_name
-
-    @validator("output_name")
-    def strip_zarr_suffix(cls, v):
-        return v.replace(".zarr", "")
-
-    @model_validator(mode="after")
-    def _validate_paths(self):
-        # ---- input_path: must exist and be .zarr dir OR .h5ad file ----
-        if not self.input_path.exists():
-            raise ValueError(f"input_path does not exist: {self.input_path}")
-
-        if self.input_path.is_dir():
-            # must be a .zarr directory
-            if self.input_path.suffix != ".zarr":
-                raise ValueError(
-                    f"input_path directory must end with '.zarr', got: {self.input_path}"
-                )
-        else:
-            # must be a file with .h5ad suffix
-            if self.input_path.suffix.lower() != ".h5ad":
-                raise ValueError(
-                    f"input_path file must be a '.h5ad', got: {self.input_path}"
-                )
-
-        # ---- output_dir: default and checks ----
-        if self.output_dir is None:
-            # Parent of the input (directory or file)
-            self.output_dir = self.input_path.parent
-
-        # Must not look like a .zarr directory name
-        if self.output_dir.suffix == ".zarr":
-            raise ValueError(
-                f"output_dir must be a plain directory, not a '.zarr' path: {self.output_dir}"
-            )
-
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-
-        return self
-
-
-# -------------------------------
-# LoadAndFilterConfig
-# -------------------------------
 class LoadAndFilterConfig(BaseModel):
-    """
-    Unified configuration for the combined load-and-filter module.
 
-    Performs:
-      - Load raw / filtered / CellBender matrices
-      - Per-sample QC and filtering (memory-safe)
-      - Merging filtered samples
-      - Metadata attachment
-    """
-
-    # ---------------------------------------------------------
-    # Input sources (exactly one required)
-    # ---------------------------------------------------------
+    # ---- Input ----
     raw_sample_dir: Optional[Path] = None
     filtered_sample_dir: Optional[Path] = None
     cellbender_dir: Optional[Path] = None
 
-    metadata_tsv: Path = Field(
-        ...,
-        description="TSV with per-sample metadata indexed by sample_id."
-    )
+    metadata_tsv: Path
+    batch_key: Optional[str] = None
 
-    # The batch/sample key used throughout the pipeline
-    batch_key: Optional[str] = Field(
-        None,
-        description="Column in metadata_tsv defining sample/batch. "
-                    "If None, inferred from metadata header."
-    )
-
-    # ---------------------------------------------------------
-    # Output
-    # ---------------------------------------------------------
-    output_dir: Path = Field(
-        ...,
-        description="Directory for merged AnnData and figures."
-    )
-
-    output_name: str = Field(
-        "adata.merged",
-        description="Base name for merged dataset ('.zarr' added automatically)."
-    )
-
+    # ---- Output ----
+    output_dir: Path
+    output_name: str = "adata.filtered"
     save_h5ad: bool = False
 
-    # ---------------------------------------------------------
-    # Compute
-    # ---------------------------------------------------------
-    n_jobs: int = Field(4, ge=1)
+    # ---- Compute ----
+    n_jobs: int = 4
 
-    # ---------------------------------------------------------
-    # QC thresholds
-    # ---------------------------------------------------------
-    min_cells: int = 3              # gene filter
-    min_genes: int = 500            # cell filter
-    min_cells_per_sample: int = 20  # sample filter
+    # ---- QC ----
+    min_cells: int = 3
+    min_genes: int = 500
+    min_cells_per_sample: int = 20
     max_pct_mt: float = 5.0
 
-    # ---------------------------------------------------------
-    # File patterns
-    # ---------------------------------------------------------
+    # ---- Doublets (SOLO) ----
+    doublet_mode: Literal["fixed", "rate", "gmm"] = "fixed"
+    doublet_score_threshold: float = 0.25
+    expected_doublet_rate: float = 0.05
+
+    # ---- Patterns ----
     raw_pattern: str = "*.raw_feature_bc_matrix"
     filtered_pattern: str = "*.filtered_feature_bc_matrix"
     cellbender_pattern: str = "*.cellbender_filtered.output"
     cellbender_h5_suffix: str = ".cellbender_out.h5"
 
-    # ---------------------------------------------------------
-    # Plotting
-    # ---------------------------------------------------------
+    # ---- Figures ----
     make_figures: bool = True
     figdir_name: str = "figures"
+    figure_formats: List[str] = Field(default_factory=lambda: ["png", "pdf"])
 
-    figure_formats: List[str] = Field(
-        default_factory=lambda: ["png", "pdf"],
-        description="Figure formats to save."
-    )
-
-    @validator("figure_formats", each_item=True)
-    def validate_formats(cls, fmt):
-        supported = Figure().canvas.get_supported_filetypes()
-        fmt = fmt.lower()
-        if fmt not in supported:
-            raise ValueError(
-                f"Unsupported figure format '{fmt}'. Supported: {sorted(supported)}"
-            )
-        return fmt
-
-    @validator("output_name")
-    def strip_zarr_suffix(cls, v):
-        return v.replace(".zarr", "")
+    # ---- Logging ----
+    logfile: Optional[Path] = None
 
     @property
     def figdir(self) -> Path:
         return self.output_dir / self.figdir_name
 
-    # ---------------------------------------------------------
-    # Validators
-    # ---------------------------------------------------------
+    # ---- Validators ----
     @model_validator(mode="after")
-    def check_input_sources(self):
-        sources = [
-            self.raw_sample_dir,
-            self.filtered_sample_dir,
-            self.cellbender_dir,
-        ]
-        if sum(x is not None for x in sources) != 1:
-            raise ValueError(
-                "Exactly one of raw_sample_dir, filtered_sample_dir, or "
-                "cellbender_dir must be provided."
-            )
+    def check_inputs(self):
+        if self.filtered_sample_dir is not None:
+            if self.raw_sample_dir or self.cellbender_dir:
+                raise ValueError("filtered cannot be combined with raw or cellbender")
+
+        if self.cellbender_dir is not None and self.raw_sample_dir is None:
+            raise ValueError("cellbender requires raw_sample_dir")
+
+        if self.raw_sample_dir is None and self.filtered_sample_dir is None:
+            raise ValueError("Must provide raw_sample_dir or filtered_sample_dir")
+
         return self
 
     @model_validator(mode="after")
-    def prepare_output_dir(self):
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+    def validate_doublet_mode(self):
+        if self.doublet_mode == "fixed" and self.doublet_score_threshold is None:
+            raise ValueError("doublet_score_threshold required for fixed mode")
+
+        if self.doublet_mode == "rate" and self.expected_doublet_rate is None:
+            raise ValueError("expected_doublet_rate required for rate mode")
+
         return self
 
 
-# ---------------------------------------------------------------------
-# PROCESS + INTEGRATE CONFIG
-# ---------------------------------------------------------------------
 class ProcessAndIntegrateConfig(BaseModel):
 
-    # ---- Input + output ----
-    input_path: Path = Field(
-        ...,
-        description="Path to input dataset (Zarr or H5AD) produced by load-and-filter."
-    )
-    output_dir: Optional[Path] = Field(
-        "results",
-        description="Directory to store integration output + figures.",
-    )
-    output_name: Optional[str] = Field(
-        "adata.integrated",
-        description="Stem for integrated output (e.g. adata.integrated.zarr)."
-    )
-    save_h5ad: bool = Field(
-        False, description="Optional additional H5AD output."
-    )
+    input_path: Path
+    output_dir: Path
+    output_name: str = "adata.integrated"
+    save_h5ad: bool = False
 
-    # ---- Metadata keys ----
-    batch_key: Optional[str]= Field(
-        "sample_id",
-        description="Batch/sample key used for integration."
-    )
-    label_key: str = Field(
-        "leiden",
-        description="Cell-type/cluster labels used for scANVI + scIB metrics."
-    )
+    batch_key: Optional[str] = None
+    label_key: str = "leiden"
 
-    # ---- Integration method selection ----
-    methods: Optional[List[str]] = Field(
-        ["BBKNN", "scVI", "scANVI"],
-        description="Integration methods to run and benchmark."
-    )
+    methods: Optional[List[str]] = None
+    benchmark_n_jobs: int = 16
 
-    # ---- Benchmarking ----
-    benchmark_n_jobs: int = Field(
-        16,
-        description="Parallel jobs for scIB benchmarking."
-    )
+    figdir_name: str = "figures"
+    figure_formats: List[str] = Field(default_factory=lambda: ["png", "pdf"])
 
-    # ---- QC / cleanup thresholds ----
-    doublet_score_threshold: float = Field(
-        0.25,
-        description="Threshold for SOLO doublet_score (> threshold = doublet).",
-    )
-
-    min_cells_per_sample: int = Field(
-        20,
-        description="Minimum cells per sample required after SOLO cleanup.",
-    )
-
-    # ---- HVG / PCA ----
-    n_top_genes: int = Field(
-        3000,
-        description="Number of highly variable genes for SC integration.",
-    )
-
-    # ---- Figures ----
-    figdir_name: str = Field(
-        "figures",
-        description="Name of figure output directory inside output_dir."
-    )
-
-    figure_formats: List[str] = Field(
-        default_factory=lambda: ["png", "pdf"],
-        description="Figure formats to save."
-    )
-    max_pcs_plot: int = 50
-
-    # ---- Logging ----
-    logfile: Optional[Path] = Field(
-        None,
-        description="Write log to file instead of stdout only."
-    )
+    logfile: Optional[Path] = None
 
     @validator("methods")
     def normalize_methods(cls, v):
         if v is None:
             return None
-        return [m.strip().lower() for m in v]
+        return [m.lower() for m in v]
 
 
 # ---------------------------------------------------------------------

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import warnings
+
 from pathlib import Path
 from typing import Dict, Optional
 import numpy as np
@@ -169,7 +171,7 @@ def _select_device():
         return "gpu", "auto"
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
         return "mps", 1
-    return "cpu", "auto"
+    return "cpu", 1
 
 
 def _is_oom_error(e: Exception) -> bool:
@@ -399,17 +401,25 @@ def run_solo_with_scvi(
     scores = probs["doublet"].to_numpy()
 
     adata.obs["doublet_score"] = scores
+    mask = _call_doublets(
+        scores,
+        mode=cfg.doublet_threshold_mode,
+        fixed_threshold=cfg.doublet_score_threshold,
+        expected_rate=cfg.expected_doublet_rate,
+    )
+
     adata.obs["predicted_doublet"] = pd.Categorical(
-        scores > doublet_score_threshold,
+        mask,
         categories=[False, True],
         ordered=False,
     )
 
     LOGGER.info(
-        "Doublets detected: %d / %d (%.2f%%)",
-        int((scores > doublet_score_threshold).sum()),
+        "Doublet calling: mode=%s, detected=%d / %d (%.2f%%)",
+        cfg.doublet_threshold_mode,
+        mask.sum(),
         adata.n_obs,
-        float((scores > doublet_score_threshold).mean() * 100),
+        100 * mask.mean(),
     )
 
     del scvi_model
@@ -447,12 +457,76 @@ def cleanup_after_solo(
             )
     return adata
 
+def _call_doublets(
+    scores: np.ndarray,
+    mode: str,
+    *,
+    fixed_threshold: float,
+    expected_rate: float,
+) -> np.ndarray:
+    n = scores.size
+
+    if mode == "fixed":
+        return scores > fixed_threshold
+
+    if mode == "rate":
+        k = int(np.ceil(expected_rate * n))
+        if k <= 0:
+            return np.zeros(n, dtype=bool)
+        idx = np.argsort(scores)[::-1][:k]
+        mask = np.zeros(n, dtype=bool)
+        mask[idx] = True
+        return mask
+
+    if mode == "gmm":
+        from sklearn.mixture import GaussianMixture
+        from scipy.special import logit
+
+        x = logit(np.clip(scores, 1e-6, 1 - 1e-6)).reshape(-1, 1)
+
+        try:
+            gm = GaussianMixture(n_components=2, random_state=0)
+            gm.fit(x)
+
+            means = gm.means_.flatten()
+            hi = np.argmax(means)
+            lo = 1 - hi
+
+            # intersection in logit space
+            mu1, mu2 = means[lo], means[hi]
+            sd1 = np.sqrt(gm.covariances_[lo]).item()
+            sd2 = np.sqrt(gm.covariances_[hi]).item()
+            w1, w2 = gm.weights_[lo], gm.weights_[hi]
+
+            a = 1/(2*sd1**2) - 1/(2*sd2**2)
+            b = mu2/(sd2**2) - mu1/(sd1**2)
+            c = (mu1**2)/(2*sd1**2) - (mu2**2)/(2*sd2**2) - np.log((sd2*w1)/(sd1*w2))
+            disc = b*b - 4*a*c
+
+            if disc <= 0:
+                raise RuntimeError("No GMM intersection")
+
+            thr_logit = (-b + np.sqrt(disc)) / (2*a)
+            thr = 1 / (1 + np.exp(-thr_logit))
+
+            return scores > thr
+
+        except Exception:
+            LOGGER.warning("GMM doublet thresholding failed; falling back to rate mode")
+            return _call_doublets(
+                scores,
+                mode="rate",
+                fixed_threshold=fixed_threshold,
+                expected_rate=expected_rate,
+            )
+
+    raise ValueError(f"Unknown doublet threshold mode: {mode}")
+
 
 # ---------------------------------------------------------------------
 # Normalization + PCA
 # ---------------------------------------------------------------------
 def normalize_and_hvg(adata: ad.AnnData, n_top_genes: int, batch_key: str) -> ad.AnnData:
-    adata.layers["counts"] = adata.X.copy()
     sc.pp.normalize_total(adata)
     sc.pp.log1p(adata)
     sc.pp.highly_variable_genes(
@@ -463,18 +537,36 @@ def normalize_and_hvg(adata: ad.AnnData, n_top_genes: int, batch_key: str) -> ad
     return adata
 
 
-def pca_neighbors_umap(adata: ad.AnnData, max_pcs_plot: int) -> ad.AnnData:
-    from kneed import KneeLocator
+def pca_neighbors_umap(
+    adata: ad.AnnData,
+    *,
+    var_explained: float = 0.85,
+    min_pcs: int = 20,
+    max_pcs: int = 50,
+) -> ad.AnnData:
 
     sc.tl.pca(adata)
+
     vr = adata.uns["pca"]["variance_ratio"]
-    kl = KneeLocator(range(1, len(vr) + 1), vr, curve="convex", direction="decreasing")
-    n_pcs = int(kl.elbow or max_pcs_plot)
+    cum = np.cumsum(vr)
+
+    n_pcs = int(np.searchsorted(cum, var_explained) + 1)
+    n_pcs = max(min_pcs, min(n_pcs, max_pcs))
+
+    LOGGER.info(
+        "Using n_pcs=%d (%.1f%% variance explained)",
+        n_pcs,
+        100 * cum[n_pcs - 1],
+    )
 
     sc.pp.neighbors(adata, n_pcs=n_pcs)
     sc.tl.umap(adata)
-    adata.uns["n_pcs_elbow"] = n_pcs
+
+    adata.uns["n_pcs"] = n_pcs
+    adata.uns["variance_explained"] = float(cum[n_pcs - 1])
+
     return adata
+
 
 
 def cluster_unintegrated(adata: ad.AnnData) -> ad.AnnData:
@@ -607,6 +699,12 @@ def run_load_and_filter(
     adata = _add_metadata(adata, cfg.metadata_tsv, sample_id_col=cfg.batch_key)
     adata.uns["batch_key"] = cfg.batch_key
 
+    # canonical identifiers for downstream matching
+    if "sample_id" not in adata.obs:
+        adata.obs["sample_id"] = adata.obs[cfg.batch_key].astype(str)
+    if "barcode" not in adata.obs:
+        adata.obs["barcode"] = adata.obs_names.astype(str)
+
     # ---------------------------------------------------------
     # SOLO doublet detection (GLOBAL, RAW COUNTS)
     # ---------------------------------------------------------
@@ -667,7 +765,7 @@ def run_load_and_filter(
     # Normalize
     # ---------------------------------------------------------
     adata = normalize_and_hvg(adata, cfg.n_top_genes, batch_key)
-    adata = pca_neighbors_umap(adata, cfg.max_pcs_plot)
+    adata = pca_neighbors_umap(adata, var_explained=-.85, min_pcs= 20, max_pcs=.max_pcs_plot)
     adata = cluster_unintegrated(adata)
 
     if cfg.make_figures:
