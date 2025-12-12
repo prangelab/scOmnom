@@ -19,7 +19,6 @@ from .logging_utils import init_logging
 torch.set_float32_matmul_precision("high")
 LOGGER = logging.getLogger(__name__)
 
-
 # ---------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------
@@ -55,6 +54,13 @@ def _auto_scvi_epochs(n_cells: int) -> int:
     if n_cells < 200_000:
         return 60
     return 40
+
+def _auto_scanvi_epochs(n_cells: int) -> int:
+    if n_cells < 50_000:
+        return 100
+    if n_cells < 200_000:
+        return 150
+    return 200
 
 
 # ---------------------------------------------------------------------
@@ -122,6 +128,65 @@ def _train_scvi(
 
 
 # ---------------------------------------------------------------------
+# scANVI (reuses integration SCVI model)
+# ---------------------------------------------------------------------
+def _run_scanvi_from_scvi(
+    scvi_model,
+    adata: ad.AnnData,
+    label_key: str,
+):
+    """
+    Run scANVI using an existing, already-trained SCVI model.
+
+    Parameters
+    ----------
+    scvi_model
+        Trained SCVI model from the integration stage
+    adata
+        AnnData object used for integration
+    label_key
+        Key in adata.obs with cluster / cell-type labels
+
+    Returns
+    -------
+    np.ndarray
+        Latent representation (n_cells × n_latent)
+    """
+    from scvi.model import SCANVI
+
+    _ensure_label_key(adata, label_key)
+
+    accelerator, devices = _select_device()
+    max_epochs = _auto_scanvi_epochs(adata.n_obs)
+
+    LOGGER.info(
+        "Running scANVI (reuse SCVI, n_cells=%d, max_epochs=%d)",
+        adata.n_obs,
+        max_epochs,
+    )
+
+    # Build SCANVI on top of trained SCVI
+    lvae = SCANVI.from_scvi_model(
+        scvi_model,
+        adata=adata,
+        labels_key=label_key,
+        unlabeled_category="Unknown",
+    )
+
+    # Train scANVI
+    lvae.train(
+        max_epochs=max_epochs,
+        n_samples_per_label=100,
+        early_stopping=True,
+        enable_progress_bar=False,
+        accelerator=accelerator,
+        devices=devices,
+    )
+
+    return np.asarray(lvae.get_latent_representation())
+
+
+# ---------------------------------------------------------------------
 # SOLO (always global)
 # ---------------------------------------------------------------------
 def run_solo_with_scvi(
@@ -165,6 +230,10 @@ def run_solo_with_scvi(
         adata.n_obs,
         float((scores > doublet_score_threshold).mean() * 100),
     )
+
+    del scvi_model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     return adata
 
@@ -308,7 +377,23 @@ def _run_integrations(
     if missing:
         raise RuntimeError(f"Integration embeddings missing from adata.obsm: {missing}")
 
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     return adata, created
+
+def _run_bbknn_embedding(adata: ad.AnnData, batch_key: str) -> np.ndarray:
+    import bbknn
+
+    tmp = adata.copy()
+
+    if "X_pca" not in tmp.obsm:
+        sc.tl.pca(tmp)
+
+    bbknn.bbknn(tmp, batch_key=batch_key)
+
+    # IMPORTANT: embedding = PCA, graph = BBKNN
+    return np.asarray(tmp.obsm["X_pca"])
 
 
 
@@ -522,7 +607,7 @@ def run_process_and_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
         adata,
         methods=methods,
         batch_key=batch_key,
-        label_key=label_key,
+        label_key=cfg.label_key,
     )
 
     best = _select_best_embedding(
