@@ -486,6 +486,10 @@ def run_process_and_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
         min_cells_per_sample=cfg.min_cells_per_sample,
     )
 
+    out_zarr = cfg.output_dir / (cfg.output_name + ".CHECKPOINT.zarr")
+    LOGGER.info("Saving CHECKPOINT dataset as Zarr → %s", out_zarr)
+    io_utils.save_dataset(adata, out_zarr, fmt="zarr")
+
     adata = normalize_and_hvg(adata, cfg.n_top_genes, batch_key)
     adata = pca_neighbors_umap(adata, cfg.max_pcs_plot)
     adata = cluster_unintegrated(adata)
