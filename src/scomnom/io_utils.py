@@ -439,9 +439,10 @@ def load_cellbender_filtered_layer(
     """
     Load CellBender-denoised counts and attach as `adata.layers["counts_cb"]`.
 
-    Alignment rules:
-    - Cells are aligned by sample-prefixed barcode: {sample}::{barcode}
-    - Genes are aligned strictly by Ensembl gene_ids
+    Alignment rules (FINAL):
+    - Cells: aligned by sample-prefixed barcode: {sample}::{barcode}
+    - Genes: aligned STRICTLY by gene symbols (adata.var_names)
+    - gene_ids are preserved in adata.var but NEVER used for alignment
     """
 
     import scanpy as sc
@@ -458,16 +459,16 @@ def load_cellbender_filtered_layer(
             f"adata.obs must contain {required_obs}, found {list(adata.obs.columns)}"
         )
 
+    if not adata.var_names.is_unique:
+        raise RuntimeError("adata.var_names must be unique for CellBender alignment")
+
     if "gene_ids" not in adata.var.columns:
         raise RuntimeError(
             "adata.var is missing 'gene_ids'. "
-            "You must preserve gene_ids through load + merge."
+            "They must be preserved from raw input, but are not used for alignment."
         )
 
-    adata_gene_ids = adata.var["gene_ids"].astype(str)
-    adata_gene_ids_index = pd.Index(adata_gene_ids)
-
-    # Build global cell key used everywhere
+    # Build global cell key
     adata_cell_key = (
         adata.obs[cfg.batch_key].astype(str)
         + "::"
@@ -482,7 +483,9 @@ def load_cellbender_filtered_layer(
     for sample in adata.obs[cfg.batch_key].unique():
         cb_path = cfg.cellbender_dir / f"{sample}{cfg.cellbender_pattern.lstrip('*')}"
         if not cb_path.exists():
-            raise RuntimeError(f"Missing CellBender output for sample {sample}: {cb_path}")
+            raise RuntimeError(
+                f"Missing CellBender output for sample {sample}: {cb_path}"
+            )
         cb_dirs[sample] = cb_path
 
     cb_layers = []
@@ -496,14 +499,10 @@ def load_cellbender_filtered_layer(
             raise RuntimeError(f"Missing CellBender H5 file: {h5}")
 
         cb = sc.read_10x_h5(h5)
+
+        # We align by gene SYMBOLS → var_names
         cb.var_names_make_unique()
-
-        if "gene_ids" not in cb.var.columns:
-            raise RuntimeError(
-                f"CellBender output for {sample} lacks 'gene_ids' in var"
-            )
-
-        cb.var["gene_ids"] = cb.var["gene_ids"].astype(str)
+        cb.var_names = cb.var_names.astype(str)
 
         # Attach sample + barcode metadata
         cb.obs["barcode"] = cb.obs_names.astype(str)
@@ -524,40 +523,6 @@ def load_cellbender_filtered_layer(
     )
 
     # ------------------------------------------------------------------
-    # Ensure cb_all has gene_ids
-    # ------------------------------------------------------------------
-    if "gene_ids" not in cb_all.var.columns:
-        LOGGER.warning(
-            "CellBender var['gene_ids'] missing; inferring from var_names"
-        )
-
-        # Case 1: var_names already look like Ensembl IDs
-        if cb_all.var_names.str.startswith("ENS").all():
-            cb_all.var["gene_ids"] = cb_all.var_names.astype(str)
-
-        # Case 2: var_names are gene symbols; align via adata.var
-        elif "gene_ids" in adata.var.columns:
-            gene_map = (
-                adata.var.reset_index()
-                .set_index(adata.var_names)["gene_ids"]
-            )
-
-            cb_all.var["gene_ids"] = (
-                pd.Series(cb_all.var_names, index=cb_all.var_names)
-                .map(gene_map)
-                .astype(str)
-            )
-
-        else:
-            raise RuntimeError(
-                "CellBender genes cannot be aligned: "
-                "no gene_ids in CB output and no usable mapping."
-            )
-
-    cb_all.var["gene_ids"] = cb_all.var["gene_ids"].astype(str)
-    cb_gene_ids = pd.Index(cb_all.var["gene_ids"])
-
-    # ------------------------------------------------------------------
     # Cell alignment
     # ------------------------------------------------------------------
     cb_all.obs["_cb_key"] = cb_all.obs["_cb_key"].astype(str)
@@ -573,17 +538,20 @@ def load_cellbender_filtered_layer(
     cb_all = cb_all[cb_cell_key.get_indexer(adata_cell_key), :]
 
     # ------------------------------------------------------------------
-    # Gene alignment (STRICT)
+    # Gene alignment (BY SYMBOLS ONLY)
     # ------------------------------------------------------------------
-    missing_genes = adata_gene_ids_index.difference(cb_gene_ids)
+    cb_genes = cb_all.var_names
+    adata_genes = adata.var_names
+
+    missing_genes = adata_genes.difference(cb_genes)
     if len(missing_genes) > 0:
         raise RuntimeError(
-            f"CellBender output missing {len(missing_genes)} genes present in adata"
+            f"CellBender output missing {len(missing_genes)} genes present in adata "
+            f"(example: {missing_genes[:5].tolist()})"
         )
 
-    # Reindex CB genes to adata gene order
-    gene_indexer = cb_gene_ids.get_indexer(adata_gene_ids_index)
-    cb_all = cb_all[:, gene_indexer]
+    # Reorder CB genes to adata gene order
+    cb_all = cb_all[:, adata_genes]
 
     # ------------------------------------------------------------------
     # Final safety checks
@@ -591,8 +559,8 @@ def load_cellbender_filtered_layer(
     if cb_all.n_obs != adata.n_obs:
         raise RuntimeError("Cell count mismatch after CellBender alignment")
 
-    if not np.array_equal(cb_all.var["gene_ids"].values, adata_gene_ids.values):
-        raise RuntimeError("Gene ID order mismatch after CellBender alignment")
+    if not np.array_equal(cb_all.var_names.values, adata.var_names.values):
+        raise RuntimeError("Gene symbol order mismatch after CellBender alignment")
 
     # ------------------------------------------------------------------
     # Attach layer
@@ -600,7 +568,6 @@ def load_cellbender_filtered_layer(
     adata.layers["counts_cb"] = cb_all.X.copy()
 
     return adata
-
 
 
 def _prepare_sample_for_merge(
