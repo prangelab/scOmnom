@@ -186,6 +186,15 @@ def find_cellbender_dirs(cb_dir: Path, pattern: str) -> List[Path]:
 
 def read_raw_10x(raw_dir: Path) -> ad.AnnData:
     adata = sc.read_10x_mtx(str(raw_dir), var_names="gene_symbols", cache=True)
+
+    if "gene_ids" not in adata.var.columns:
+        if "gene_ids" in adata.var_names:
+            adata.var["gene_ids"] = adata.var_names.astype(str)
+        elif "gene_ids" in adata.var.columns:
+            adata.var["gene_ids"] = adata.var["gene_ids"].astype(str)
+        else:
+            raise RuntimeError("Cannot determine gene_ids from 10x input")
+
     adata.var_names_make_unique()
     return adata
 
@@ -566,51 +575,70 @@ def load_cellbender_filtered_layer(
 def _prepare_sample_for_merge(
     sample_name: str,
     adata: ad.AnnData,
-    union_genes: List[str],
+    union_genes: list[str],
     out_dir: Path,
     batch_key: str,
 ) -> Path:
-    """
-    Pad sample to union gene space, ensure consistent gene ordering,
-    and write a .padded.zarr store.
-
-    Returns
-    -------
-    Path : path to padded .zarr directory
-    """
     import numpy as np
     import scipy.sparse as sp
+    import pandas as pd
+    import anndata as ad
 
-    # Ensure sparse CSR
+    # ------------------------------------------------------------------
+    # Preconditions
+    # ------------------------------------------------------------------
+    if adata.var_names.is_unique is False:
+        raise RuntimeError(f"[{sample_name}] adata.var_names are not unique")
+
+    if adata.obs_names.is_unique is False:
+        raise RuntimeError(f"[{sample_name}] adata.obs_names are not unique")
+
+    # ------------------------------------------------------------------
+    # Pad X to union gene space
+    # ------------------------------------------------------------------
     X = adata.X.tocsr()
 
-    # Map old genes to new indices in the union
     old_to_new = np.searchsorted(union_genes, adata.var_names)
 
-    # Build padded matrix in union gene space
     X_padded = sp.csr_matrix(
         (X.data, old_to_new[X.indices], X.indptr),
         shape=(adata.n_obs, len(union_genes)),
     )
 
-    # Build new AnnData in union gene space
+    # ------------------------------------------------------------------
+    # Pad var dataframe
+    # ------------------------------------------------------------------
+    var = pd.DataFrame(index=union_genes)
+
+    for col in adata.var.columns:
+        s = pd.Series(adata.var[col].values, index=adata.var_names)
+        var[col] = var.index.map(s)
+
+    # Sanity: gene_ids must survive if they existed
+    if "gene_ids" in adata.var.columns and "gene_ids" not in var.columns:
+        raise RuntimeError(f"[{sample_name}] gene_ids lost during merge padding")
+
+    # ------------------------------------------------------------------
+    # Build padded AnnData
+    # ------------------------------------------------------------------
     a = ad.AnnData(
         X=X_padded,
         obs=adata.obs.copy(),
-        var={"gene_symbols": union_genes},
+        var=var,
         layers={"counts_raw": X_padded.copy()},
     )
 
     a.obs[batch_key] = sample_name
     a.obs_names = [f"{sample_name}_{x}" for x in adata.obs_names]
 
+    # ------------------------------------------------------------------
+    # Write padded Zarr
+    # ------------------------------------------------------------------
     out_path = out_dir / f"{sample_name}.padded.zarr"
     LOGGER.info("[Pad] %s → %s", sample_name, out_path)
-    out_path.mkdir(parents=True, exist_ok=True)
     a.write_zarr(str(out_path), chunks=None)
 
     return out_path
-
 
 
 def _compute_union_genes(sample_map: Dict[str, ad.AnnData]) -> List[str]:

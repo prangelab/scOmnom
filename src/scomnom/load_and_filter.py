@@ -702,6 +702,12 @@ def run_load_and_filter(
         adata.obs["sample_id"] = adata.obs[cfg.batch_key].astype(str)
     if "barcode" not in adata.obs:
         adata.obs["barcode"] = adata.obs_names.astype(str)
+    if cfg.cellbender_dir is not None:
+        if "gene_ids" not in adata.var.columns:
+            raise RuntimeError(
+                "BUG: gene_ids lost during merge. "
+                "CellBender alignment will be impossible."
+            )
 
     # ---------------------------------------------------------
     # SOLO doublet detection (GLOBAL, RAW COUNTS)
