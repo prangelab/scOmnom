@@ -29,6 +29,7 @@ class LoadAndFilterConfig(BaseModel):
     min_genes: int = 500
     min_cells_per_sample: int = 20
     max_pct_mt: float = 5.0
+    n_top_genes: int = 2000
 
     # ---- Doublets (SOLO) ----
     doublet_mode: Literal["fixed", "rate", "gmm"] = "fixed"

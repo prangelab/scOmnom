@@ -187,6 +187,11 @@ def load_and_filter(
     min_cells_per_sample: int = typer.Option(20, help="[QC] Minimum cells per sample."),
     max_pct_mt: float = typer.Option(5.0, help="[QC] Max mitochondrial percentage."),
 
+    n_top_genes: int = Option(
+            2000,
+            help="Number of highly variable genes to select"
+        ),
+
     # -------------------------------------------------------------
     # Doublet detection (SOLO)
     # -------------------------------------------------------------
@@ -253,6 +258,7 @@ def load_and_filter(
         min_genes=min_genes,
         min_cells_per_sample=min_cells_per_sample,
         max_pct_mt=max_pct_mt,
+        n_top_genes=n_top_genes,
         doublet_mode=doublet_mode,
         doublet_score_threshold=doublet_score_threshold,
         expected_doublet_rate=expected_doublet_rate,
