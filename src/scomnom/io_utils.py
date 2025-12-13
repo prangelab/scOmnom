@@ -667,7 +667,7 @@ def _merge_filtered_zarr_simple(padded_dirs: List[Path]) -> ad.AnnData:
             [merged, a],
             axis=0,
             join="outer",
-            merge="same",
+            merge="first",
         )
 
         # Free memory aggressively
