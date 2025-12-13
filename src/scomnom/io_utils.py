@@ -523,6 +523,37 @@ def load_cellbender_filtered_layer(
         fill_value=0,
     )
 
+    # ------------------------------------------------------------------
+    # Ensure cb_all has gene_ids
+    # ------------------------------------------------------------------
+    if "gene_ids" not in cb_all.var.columns:
+        LOGGER.warning(
+            "CellBender var['gene_ids'] missing; inferring from var_names"
+        )
+
+        # Case 1: var_names already look like Ensembl IDs
+        if cb_all.var_names.str.startswith("ENS").all():
+            cb_all.var["gene_ids"] = cb_all.var_names.astype(str)
+
+        # Case 2: var_names are gene symbols; align via adata.var
+        elif "gene_ids" in adata.var.columns:
+            gene_map = (
+                adata.var.reset_index()
+                .set_index(adata.var_names)["gene_ids"]
+            )
+
+            cb_all.var["gene_ids"] = (
+                pd.Series(cb_all.var_names, index=cb_all.var_names)
+                .map(gene_map)
+                .astype(str)
+            )
+
+        else:
+            raise RuntimeError(
+                "CellBender genes cannot be aligned: "
+                "no gene_ids in CB output and no usable mapping."
+            )
+
     cb_all.var["gene_ids"] = cb_all.var["gene_ids"].astype(str)
     cb_gene_ids = pd.Index(cb_all.var["gene_ids"])
 
