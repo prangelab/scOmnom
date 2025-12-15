@@ -9,10 +9,6 @@ def init_logging(logfile: Optional[Path] = None, level: int = logging.INFO) -> N
     All existing handlers are removed to avoid duplicates.
     """
 
-    # Remove any pre-configured handlers (important for Typer)
-    for h in logging.root.handlers[:]:
-        logging.root.removeHandler(h)
-
     handlers = [logging.StreamHandler()]
 
     if logfile is not None:
@@ -23,4 +19,5 @@ def init_logging(logfile: Optional[Path] = None, level: int = logging.INFO) -> N
         level=level,
         format="%(asctime)s [%(levelname)s] %(message)s",
         handlers=handlers,
+        force=True,
     )

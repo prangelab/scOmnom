@@ -9,6 +9,7 @@ from .process_and_integrate import run_process_and_integrate
 from .cluster_and_annotate import run_clustering
 
 from .config import LoadAndFilterConfig, ProcessAndIntegrateConfig, ClusterAnnotateConfig
+import logging
 from .logging_utils import init_logging
 
 
@@ -242,6 +243,8 @@ def load_and_filter(
 ):
     logfile = output_dir / "load-and-filter.log"
     init_logging(logfile)
+    logging.getLogger(__name__).info("Logging initialized")
+    logging.getLogger("scomnom.load_and_filter").info("load_and_filter logger active")
 
     cfg = LoadAndFilterConfig(
         raw_sample_dir=raw_sample_dir,

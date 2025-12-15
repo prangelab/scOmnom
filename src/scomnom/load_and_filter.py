@@ -548,7 +548,12 @@ def pca_neighbors_umap(
     min_pcs: int = 20,
     max_pcs: int = 50,
 ) -> ad.AnnData:
-
+    # Insert this check just before calling pca_neighbors_umap (Line 789 in your script)
+    LOGGER.warning(
+        "ENTER pca_neighbors_umap | id=%s | obsm keys=%s",
+        id(adata),
+        list(adata.obsm.keys()),
+    )
     if not (0 < var_explained <= 1):
         raise ValueError("var_explained must be in (0, 1]")
 
@@ -558,7 +563,12 @@ def pca_neighbors_umap(
         use_highly_variable=True,
         svd_solver="arpack",
     )
-    # Insert this check just before calling pca_neighbors_umap (Line 789 in your script)
+
+    LOGGER.warning(
+        "AFTER PCA | id=%s | obsm keys=%s",
+        id(adata),
+        list(adata.obsm.keys()),
+    )
 
     n_hvg = adata.var.highly_variable.sum()
     if n_hvg == 0:
@@ -581,16 +591,32 @@ def pca_neighbors_umap(
         n_pcs,
         100 * cum[n_pcs - 1],
     )
+    LOGGER.warning(
+        "BEFORE neighbors | id=%s | obsm keys=%s",
+        id(adata),
+        list(adata.obsm.keys()),
+    )
 
     sc.pp.neighbors(
         adata,
         n_pcs=n_pcs,
         use_rep="X_pca",
     )
+    LOGGER.warning(
+        "AFTER neighbors | id=%s | obsm keys=%s",
+        id(adata),
+        list(adata.obsm.keys()),
+    )
+
     sc.tl.umap(adata)
 
     adata.uns["n_pcs"] = n_pcs
     adata.uns["variance_explained"] = float(cum[n_pcs - 1])
+    LOGGER.warning(
+        "EXIT pca_neighbors_umap | id=%s | obsm keys=%s",
+        id(adata),
+        list(adata.obsm.keys()),
+    )
 
     return adata
 
@@ -803,7 +829,19 @@ def run_load_and_filter(
             "FATAL ERROR: ZERO Highly Variable Genes were selected. Check your n_top_genes and batch_key settings.")
     if n_hvg != 0:
         LOGGER.info("Variable Genes: %d", n_hvg)
+    LOGGER.warning(
+        "BEFORE pca_neighbors_umap CALL | id=%s | obsm keys=%s",
+        id(adata),
+        list(adata.obsm.keys()),
+    )
+
     adata = pca_neighbors_umap(adata, var_explained=0.85, min_pcs= 20, max_pcs=min(50, adata.obsm["X_pca"].shape[1]))
+    LOGGER.warning(
+        "AFTER pca_neighbors_umap CALL | id=%s | obsm keys=%s",
+        id(adata),
+        list(adata.obsm.keys()),
+    )
+
     adata = cluster_unintegrated(adata)
 
     if cfg.make_figures:
