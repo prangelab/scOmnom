@@ -459,7 +459,30 @@ def cleanup_after_solo(
                 adata.n_obs,
                 n0,
             )
+
+    adata.uns["doublet_threshold"] = infer_doublet_threshold(adata)
+    adata.uns["doublet_mode"] = cfg.doublet_mode
+
     return adata
+
+
+def infer_doublet_threshold(adata: ad.AnnData) -> float | None:
+    """
+    Infer the effective doublet score threshold from predictions.
+
+    Returns the minimum doublet_score among predicted doublets.
+    Returns None if no doublets are present or required columns missing.
+    """
+    required = {"doublet_score", "predicted_doublet"}
+    if not required.issubset(adata.obs.columns):
+        return None
+
+    mask = adata.obs["predicted_doublet"].astype(bool)
+    if mask.sum() == 0:
+        return None
+
+    return float(adata.obs.loc[mask, "doublet_score"].min())
+
 
 def _call_doublets(
     scores: np.ndarray,
@@ -744,7 +767,6 @@ def run_load_and_filter(
         plot_utils.doublet_plots(
             adata,
             batch_key=cfg.batch_key,
-            score_threshold=cfg.doublet_score_threshold,
             figdir=cfg.figdir / "QC_plots" / "doublets",
         )
 

@@ -787,7 +787,6 @@ def doublet_plots(
     adata: ad.AnnData,
     *,
     batch_key: str,
-    score_threshold: float,
     figdir: Path,
 ) -> None:
     """
@@ -796,8 +795,8 @@ def doublet_plots(
     Does NOT assume UMAP or post-filter QC metrics.
     """
     import numpy as np
-    import pandas as pd
     import matplotlib.pyplot as plt
+    from pathlib import Path
 
     figdir = Path(figdir)
     figdir.mkdir(parents=True, exist_ok=True)
@@ -811,15 +810,43 @@ def doublet_plots(
     is_doublet = adata.obs["predicted_doublet"].astype(bool)
 
     # --------------------------------------------------
+    # Read effective threshold + mode from adata.uns
+    # --------------------------------------------------
+    threshold = adata.uns.get("doublet_threshold")
+    mode = adata.uns.get("doublet_mode", "unknown")
+
+    def _draw_threshold(ax, *, vertical: bool = True):
+        if threshold is None:
+            return
+        if vertical:
+            ax.axvline(
+                threshold,
+                color="firebrick",
+                linestyle="--",
+                linewidth=1,
+                label=f"threshold ({mode}) = {threshold:.3f}",
+            )
+        else:
+            ax.axhline(
+                threshold,
+                color="firebrick",
+                linestyle="--",
+                linewidth=1,
+            )
+
+    # --------------------------------------------------
     # 1. Doublet score histogram
     # --------------------------------------------------
     fig, ax = plt.subplots(figsize=(6, 4))
     ax.hist(scores, bins=50, color="steelblue", alpha=0.85)
-    ax.axvline(score_threshold, color="red", linestyle="--", label="threshold")
+    _draw_threshold(ax, vertical=True)
+
+    if threshold is not None:
+        ax.legend(frameon=False)
+
     ax.set_xlabel("Doublet score")
     ax.set_ylabel("Cells")
     ax.set_title("SOLO doublet score distribution")
-    ax.legend(frameon=False)
     fig.tight_layout()
     save_multi("doublet_score_hist", figdir, fig)
     plt.close(fig)
@@ -828,8 +855,7 @@ def doublet_plots(
     # 2. Per-sample doublet fraction
     # --------------------------------------------------
     frac = (
-        adata.obs["predicted_doublet"]
-        .astype(int)
+        is_doublet.astype(int)
         .groupby(adata.obs[batch_key], observed=True)
         .mean()
         .sort_values(ascending=False)
@@ -859,7 +885,8 @@ def doublet_plots(
         alpha=0.3,
         rasterized=True,
     )
-    ax.axhline(score_threshold, color="red", linestyle="--")
+    _draw_threshold(ax, vertical=False)
+
     ax.set_xlabel("Total UMI counts (raw)")
     ax.set_ylabel("Doublet score")
     ax.set_title("Doublet score vs library size")
@@ -876,7 +903,8 @@ def doublet_plots(
         for s in frac.index
     ]
     ax.violinplot(data, showmeans=False, showextrema=False)
-    ax.axhline(score_threshold, color="red", linestyle="--")
+    _draw_threshold(ax, vertical=False)
+
     ax.set_xticks(range(1, len(frac) + 1))
     ax.set_xticklabels(frac.index, rotation=45, ha="right")
     ax.set_ylabel("Doublet score")
@@ -893,7 +921,8 @@ def doublet_plots(
 
     fig, ax = plt.subplots(figsize=(5, 4))
     ax.plot(xs, ys, lw=1.5)
-    ax.axvline(score_threshold, color="red", linestyle="--")
+    _draw_threshold(ax, vertical=True)
+
     ax.set_xlabel("Doublet score")
     ax.set_ylabel("Cumulative fraction")
     ax.set_title("ECDF of doublet scores")
@@ -901,7 +930,12 @@ def doublet_plots(
     save_multi("doublet_score_ecdf", figdir, fig)
     plt.close(fig)
 
-    LOGGER.info("Generated SOLO doublet QC plots (pre-cleanup)")
+    LOGGER.info(
+        "Generated SOLO doublet QC plots (mode=%s, threshold=%s)",
+        mode,
+        "none" if threshold is None else f"{threshold:.3f}",
+    )
+
 
 
 def umap_plots(
@@ -910,24 +944,14 @@ def umap_plots(
     batch_key: str,
     figdir: Path,
     cluster_key: str = "leiden",
-    max_panels: int = 12,
 ) -> None:
     """
-    Standard UMAP plots (batch + clustering).
-    Must be called AFTER UMAP computation.
+    Minimal UMAP plots.
+    Generates:
+      1) UMAP colored by batch
+      2) UMAP colored by clusters (e.g. Leiden)
 
-    Parameters
-    ----------
-    adata
-        AnnData with X_umap present.
-    batch_key
-        Sample/batch column in adata.obs.
-    figdir
-        Output directory.
-    cluster_key
-        Cluster key for coloring (default: 'leiden').
-    max_panels
-        Max number of samples for faceted/per-sample UMAPs.
+    Must be called AFTER UMAP computation.
     """
     import matplotlib.pyplot as plt
     from pathlib import Path
@@ -939,68 +963,23 @@ def umap_plots(
         LOGGER.warning("Skipping UMAP plots: X_umap not found.")
         return
 
-    if batch_key not in adata.obs:
-        LOGGER.warning("Skipping UMAP plots: batch_key '%s' not found.", batch_key)
-        return
-
     # --------------------------------------------------
-    # 1. Global UMAP colored by batch
+    # 1. UMAP colored by batch
     # --------------------------------------------------
-    fig = sc.pl.umap(
-        adata,
-        color=batch_key,
-        show=False,
-        return_fig=True,
-    )
-    save_multi("umap_batch", figdir, fig)
-    plt.close(fig)
-
-    # --------------------------------------------------
-    # 2. Faceted / per-sample UMAPs (optional, capped)
-    # --------------------------------------------------
-    samples = adata.obs[batch_key].astype(str).unique()
-
-    if len(samples) <= max_panels:
-        # --------------------------------------------------
-        # UMAP colored by batch (per-sample, no facet)
-        # --------------------------------------------------
-        samples = adata.obs[batch_key].astype(str).unique()
-
-        if len(samples) <= max_panels:
-            outdir = figdir / "by_sample"
-            outdir.mkdir(exist_ok=True)
-
-            for sample in samples:
-                mask = adata.obs[batch_key].astype(str) == sample
-                if mask.sum() == 0:
-                    continue
-
-                fig = sc.pl.umap(
-                    adata[mask],
-                    color=batch_key,
-                    show=False,
-                    return_fig=True,
-                    title=str(sample),
-                )
-                save_multi(f"umap_{batch_key}_{sample}", outdir, fig)
-                plt.close(fig)
-        else:
-            LOGGER.info(
-                "Skipping per-sample UMAPs (%d samples > max_panels=%d)",
-                len(samples),
-                max_panels,
-            )
-
+    if batch_key in adata.obs:
+        fig = sc.pl.umap(
+            adata,
+            color=batch_key,
+            show=False,
+            return_fig=True,
+        )
+        save_multi("umap_batch", figdir, fig)
         plt.close(fig)
     else:
-        LOGGER.info(
-            "Skipping faceted UMAP by sample (%d samples > max_panels=%d)",
-            len(samples),
-            max_panels,
-        )
+        LOGGER.warning("Batch key '%s' not found in adata.obs", batch_key)
 
     # --------------------------------------------------
-    # 3. Global UMAP colored by clusters
+    # 2. UMAP colored by clusters
     # --------------------------------------------------
     if cluster_key in adata.obs:
         fig = sc.pl.umap(
@@ -1013,12 +992,9 @@ def umap_plots(
         save_multi(f"umap_{cluster_key}", figdir, fig)
         plt.close(fig)
     else:
-        LOGGER.info(
-            "Cluster key '%s' not found in adata.obs – skipping cluster UMAP",
-            cluster_key,
-        )
+        LOGGER.warning("Cluster key '%s' not found in adata.obs", cluster_key)
 
-    LOGGER.info("Generated standard UMAP plots")
+    LOGGER.info("Generated UMAP plots (batch + %s)", cluster_key)
 
 
 def barplot_before_after(df_counts: pd.DataFrame, figpath: Path, min_cells_per_sample: int):
