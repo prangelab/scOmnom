@@ -797,6 +797,12 @@ def run_load_and_filter(
     # Normalize
     # ---------------------------------------------------------
     adata = normalize_and_hvg(adata, cfg.n_top_genes, batch_key)
+    n_hvg = adata.var.highly_variable.sum()
+    if n_hvg == 0:
+        LOGGER.info(
+            "FATAL ERROR: ZERO Highly Variable Genes were selected. Check your n_top_genes and batch_key settings.")
+    if n_hvg != 0:
+        LOGGER.info("Variable Genes: %d", n_hvg)
     adata = pca_neighbors_umap(adata, var_explained=0.85, min_pcs= 20, max_pcs=min(50, adata.obsm["X_pca"].shape[1]))
     adata = cluster_unintegrated(adata)
 
