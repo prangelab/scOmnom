@@ -532,22 +532,79 @@ def run_qc_plots_pre_filter_df(qc_df: pd.DataFrame, cfg) -> None:
 
 
 def run_qc_plots_postfilter(adata, cfg):
+    """
+    Run post-filter QC plots on:
+      1) raw counts  (layers["counts_raw"])
+      2) CellBender counts (layers["counts_cb"], if present)
+
+    QC metrics are computed transiently per pass to avoid overwriting.
+    """
     from scanpy import settings as sc_settings
+    import copy
 
     if not cfg.make_figures:
         return
 
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    def _run_qc_pass(adata, X, label):
+        """
+        Run QC plots with X temporarily set to given matrix.
+        """
+        # Deep copy obs/var only (cheap, safe)
+        obs_backup = adata.obs.copy()
+        var_backup = adata.var.copy()
+        X_backup = adata.X
+
+        try:
+            adata.X = X
+
+            qc_violin_panels(adata, cfg, f"postfilter_{label}")
+            qc_scatter_panels(adata, cfg, f"postfilter_{label}")
+            plot_mt_histogram(adata, cfg, f"postfilter_{label}")
+            plot_hist_n_genes(adata, cfg, f"postfilter_{label}")
+            plot_hist_total_counts(adata, cfg, f"postfilter_{label}")
+
+        finally:
+            # Restore state exactly
+            adata.X = X_backup
+            adata.obs = obs_backup
+            adata.var = var_backup
+
+    # ------------------------------------------------------------------
+    # Setup figure directory
+    # ------------------------------------------------------------------
     old_figdir = sc_settings.figdir
     figdir_qc = cfg.figdir / "QC_plots"
     sc_settings.figdir = figdir_qc
 
-    qc_violin_panels(adata, cfg, "postfilter")
-    qc_scatter_panels(adata, cfg, "postfilter")
-    plot_mt_histogram(adata, cfg, "postfilter")
-    plot_hist_n_genes(adata, cfg, "postfilter")
-    plot_hist_total_counts(adata, cfg, "postfilter")
+    try:
+        # --------------------------------------------------------------
+        # 1. Raw counts QC (canonical)
+        # --------------------------------------------------------------
+        if "counts_raw" not in adata.layers:
+            raise RuntimeError("counts_raw layer missing; cannot run raw QC")
 
-    sc_settings.figdir = old_figdir
+        _run_qc_pass(
+            adata,
+            adata.layers["counts_raw"],
+            label="raw",
+        )
+
+        # --------------------------------------------------------------
+        # 2. CellBender QC (diagnostic)
+        # --------------------------------------------------------------
+        if "counts_cb" in adata.layers:
+            _run_qc_pass(
+                adata,
+                adata.layers["counts_cb"],
+                label="cb",
+            )
+
+    finally:
+        sc_settings.figdir = old_figdir
+
 
 
 def plot_hist_total_counts(adata, cfg, stage: str):
