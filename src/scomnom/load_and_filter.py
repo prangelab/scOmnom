@@ -562,9 +562,9 @@ def pca_neighbors_umap(
 
     n_hvg = adata.var.highly_variable.sum()
     if n_hvg == 0:
-        LOGGER.info(msg="FATAL ERROR: ZERO Highly Variable Genes were selected. Check your n_top_genes and batch_key settings.")
+        LOGGER.info("FATAL ERROR: ZERO Highly Variable Genes were selected. Check your n_top_genes and batch_key settings.")
     if n_hvg != 0:
-        LOGGER.info(msg="Variable Genes: %d", n_hvg)
+        LOGGER.info("Variable Genes: %d", n_hvg)
 
 
     if "X_pca" not in adata.obsm:
