@@ -549,7 +549,7 @@ def pca_neighbors_umap(
     max_pcs: int = 50,
 ) -> ad.AnnData:
 
-    sc.tl.pca(adata)
+    sc.tl.pca(adata, use_highly_variable=True)
 
     vr = adata.uns["pca"]["variance_ratio"]
     cum = np.cumsum(vr)
