@@ -786,7 +786,7 @@ def run_load_and_filter(
     # Normalize
     # ---------------------------------------------------------
     adata = normalize_and_hvg(adata, cfg.n_top_genes, batch_key)
-    adata = pca_neighbors_umap(adata, var_explained=.85, min_pcs= 20, max_pcs=min(50, adata.obsm["X_pca"].shape[1]))
+    adata = pca_neighbors_umap(adata, var_explained=0.85, min_pcs= 20, max_pcs=min(50, adata.obsm["X_pca"].shape[1]))
     adata = cluster_unintegrated(adata)
 
     if cfg.make_figures:
