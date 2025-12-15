@@ -904,7 +904,7 @@ def doublet_plots(
     LOGGER.info("Generated SOLO doublet QC plots (pre-cleanup)")
 
 
-def doublet_umap_plots(
+def umap_plots(
     adata: ad.AnnData,
     *,
     batch_key: str,
@@ -913,127 +913,38 @@ def doublet_umap_plots(
     max_panels: int = 12,
 ) -> None:
     """
-    UMAP-based doublet diagnostics.
+    Standard UMAP plots (batch + clustering).
     Must be called AFTER UMAP computation.
+
+    Parameters
+    ----------
+    adata
+        AnnData with X_umap present.
+    batch_key
+        Sample/batch column in adata.obs.
+    figdir
+        Output directory.
+    cluster_key
+        Cluster key for coloring (default: 'leiden').
+    max_panels
+        Max number of samples for faceted/per-sample UMAPs.
     """
     import matplotlib.pyplot as plt
-    import numpy as np
     from pathlib import Path
 
     figdir = Path(figdir)
     figdir.mkdir(parents=True, exist_ok=True)
 
     if "X_umap" not in adata.obsm:
-        LOGGER.warning("Skipping doublet UMAP plots: X_umap not found.")
+        LOGGER.warning("Skipping UMAP plots: X_umap not found.")
         return
 
-    required = {"doublet_score", "predicted_doublet", batch_key}
-    if not required.issubset(adata.obs.columns):
-        LOGGER.warning("Skipping doublet UMAP plots: required obs columns missing.")
+    if batch_key not in adata.obs:
+        LOGGER.warning("Skipping UMAP plots: batch_key '%s' not found.", batch_key)
         return
 
     # --------------------------------------------------
-    # 1. Global UMAP: predicted_doublet
-    # --------------------------------------------------
-    fig = sc.pl.umap(
-        adata,
-        color="predicted_doublet",
-        palette=["steelblue", "firebrick"],
-        show=False,
-        return_fig=True,
-    )
-    save_multi("umap_predicted_doublet", figdir, fig)
-    plt.close(fig)
-
-    # --------------------------------------------------
-    # 2. Global UMAP: doublet_score
-    # --------------------------------------------------
-    fig = sc.pl.umap(
-        adata,
-        color="doublet_score",
-        cmap="viridis",
-        show=False,
-        return_fig=True,
-    )
-    save_multi("umap_doublet_score", figdir, fig)
-    plt.close(fig)
-
-    # --------------------------------------------------
-    # 3. Per-sample UMAPs (explicit loop, capped)
-    # --------------------------------------------------
-    samples = adata.obs[batch_key].astype(str).unique()
-
-    if len(samples) <= max_panels:
-        outdir = figdir / "by_sample"
-        outdir.mkdir(exist_ok=True)
-
-        for sample in samples:
-            mask = adata.obs[batch_key].astype(str) == sample
-            if mask.sum() == 0:
-                continue
-
-            fig = sc.pl.umap(
-                adata[mask],
-                color="predicted_doublet",
-                palette=["steelblue", "firebrick"],
-                groups=[False, True],
-                show=False,
-                return_fig=True,
-                title=str(sample),
-            )
-            save_multi(f"umap_predicted_doublet_{sample}", outdir, fig)
-            plt.close(fig)
-    else:
-        LOGGER.info(
-            "Skipping per-sample UMAPs (%d samples > max_panels=%d)",
-            len(samples),
-            max_panels,
-        )
-
-    # --------------------------------------------------
-    # 4. Cluster context
-    # --------------------------------------------------
-    if cluster_key in adata.obs:
-        # Base clusters
-        fig = sc.pl.umap(
-            adata,
-            color=cluster_key,
-            legend_loc="on data",
-            show=False,
-            return_fig=True,
-        )
-        save_multi("umap_clusters", figdir, fig)
-        plt.close(fig)
-
-        # Doublet overlay
-        mask = adata.obs["predicted_doublet"].astype(bool)
-
-        fig, ax = plt.subplots(figsize=(5, 4))
-        ax.scatter(
-            adata.obsm["X_umap"][:, 0],
-            adata.obsm["X_umap"][:, 1],
-            s=3,
-            c="lightgrey",
-            alpha=0.4,
-            rasterized=True,
-        )
-        ax.scatter(
-            adata.obsm["X_umap"][mask, 0],
-            adata.obsm["X_umap"][mask, 1],
-            s=5,
-            c="firebrick",
-            alpha=0.8,
-            rasterized=True,
-        )
-        ax.set_title("Doublets overlaid on UMAP")
-        ax.set_xticks([])
-        ax.set_yticks([])
-        fig.tight_layout()
-        save_multi("umap_doublet_overlay", figdir, fig)
-        plt.close(fig)
-
-    # --------------------------------------------------
-    # 5. UMAP colored by batch
+    # 1. Global UMAP colored by batch
     # --------------------------------------------------
     fig = sc.pl.umap(
         adata,
@@ -1045,7 +956,29 @@ def doublet_umap_plots(
     plt.close(fig)
 
     # --------------------------------------------------
-    # 6. UMAP colored by clusters
+    # 2. Faceted / per-sample UMAPs (optional, capped)
+    # --------------------------------------------------
+    samples = adata.obs[batch_key].astype(str).unique()
+
+    if len(samples) <= max_panels:
+        fig = sc.pl.umap(
+            adata,
+            color=batch_key,
+            facet=batch_key,
+            show=False,
+            return_fig=True,
+        )
+        save_multi("umap_by_sample", figdir, fig)
+        plt.close(fig)
+    else:
+        LOGGER.info(
+            "Skipping faceted UMAP by sample (%d samples > max_panels=%d)",
+            len(samples),
+            max_panels,
+        )
+
+    # --------------------------------------------------
+    # 3. Global UMAP colored by clusters
     # --------------------------------------------------
     if cluster_key in adata.obs:
         fig = sc.pl.umap(
@@ -1055,12 +988,15 @@ def doublet_umap_plots(
             show=False,
             return_fig=True,
         )
-        save_multi("umap_leiden", figdir, fig)
+        save_multi(f"umap_{cluster_key}", figdir, fig)
         plt.close(fig)
+    else:
+        LOGGER.info(
+            "Cluster key '%s' not found in adata.obs – skipping cluster UMAP",
+            cluster_key,
+        )
 
-    LOGGER.info("Generated UMAP-based doublet plots")
-
-
+    LOGGER.info("Generated standard UMAP plots")
 
 
 def barplot_before_after(df_counts: pd.DataFrame, figpath: Path, min_cells_per_sample: int):

@@ -727,12 +727,6 @@ def run_load_and_filter(
         adata.obs["sample_id"] = adata.obs[cfg.batch_key].astype(str)
     if "barcode" not in adata.obs:
         adata.obs["barcode"] = adata.obs_names.astype(str)
-    if cfg.cellbender_dir is not None:
-        if "gene_ids" not in adata.var.columns:
-            raise RuntimeError(
-                "BUG: gene_ids lost during merge. "
-                "CellBender alignment will be impossible."
-            )
 
     # ---------------------------------------------------------
     # SOLO doublet detection (GLOBAL, RAW COUNTS)
@@ -802,10 +796,10 @@ def run_load_and_filter(
     adata = cluster_unintegrated(adata)
 
     if cfg.make_figures:
-        plot_utils.doublet_umap_plots(
+        plot_utils.umap_plots(
             adata,
             batch_key=cfg.batch_key,
-            figdir=cfg.figdir / "QC_plots" / "doublets_umap",
+            figdir=cfg.figdir / "QC_plots",
         )
 
     # ---------------------------------------------------------
