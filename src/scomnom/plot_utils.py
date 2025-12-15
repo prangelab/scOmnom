@@ -961,14 +961,36 @@ def umap_plots(
     samples = adata.obs[batch_key].astype(str).unique()
 
     if len(samples) <= max_panels:
-        fig = sc.pl.umap(
-            adata,
-            color=batch_key,
-            facet=batch_key,
-            show=False,
-            return_fig=True,
-        )
-        save_multi("umap_by_sample", figdir, fig)
+        # --------------------------------------------------
+        # UMAP colored by batch (per-sample, no facet)
+        # --------------------------------------------------
+        samples = adata.obs[batch_key].astype(str).unique()
+
+        if len(samples) <= max_panels:
+            outdir = figdir / "by_sample"
+            outdir.mkdir(exist_ok=True)
+
+            for sample in samples:
+                mask = adata.obs[batch_key].astype(str) == sample
+                if mask.sum() == 0:
+                    continue
+
+                fig = sc.pl.umap(
+                    adata[mask],
+                    color=batch_key,
+                    show=False,
+                    return_fig=True,
+                    title=str(sample),
+                )
+                save_multi(f"umap_{batch_key}_{sample}", outdir, fig)
+                plt.close(fig)
+        else:
+            LOGGER.info(
+                "Skipping per-sample UMAPs (%d samples > max_panels=%d)",
+                len(samples),
+                max_panels,
+            )
+
         plt.close(fig)
     else:
         LOGGER.info(
