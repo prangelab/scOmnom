@@ -835,7 +835,7 @@ def run_load_and_filter(
         list(adata.obsm.keys()),
     )
 
-    adata = pca_neighbors_umap(adata, var_explained=0.85, min_pcs= 20, max_pcs=min(50, adata.obsm["X_pca"].shape[1]))
+    adata = pca_neighbors_umap(adata, var_explained=0.85, min_pcs=20, max_pcs=50)
     LOGGER.warning(
         "AFTER pca_neighbors_umap CALL | id=%s | obsm keys=%s",
         id(adata),
