@@ -548,34 +548,16 @@ def pca_neighbors_umap(
     min_pcs: int = 20,
     max_pcs: int = 50,
 ) -> ad.AnnData:
-    # Insert this check just before calling pca_neighbors_umap (Line 789 in your script)
-    LOGGER.warning(
-        "ENTER pca_neighbors_umap | id=%s | obsm keys=%s",
-        id(adata),
-        list(adata.obsm.keys()),
-    )
+
     if not (0 < var_explained <= 1):
         raise ValueError("var_explained must be in (0, 1]")
 
     sc.tl.pca(
         adata,
         n_comps=max_pcs,
-        use_highly_variable=True,
+        mask_var="highly_variable",
         svd_solver="arpack",
     )
-
-    LOGGER.warning(
-        "AFTER PCA | id=%s | obsm keys=%s",
-        id(adata),
-        list(adata.obsm.keys()),
-    )
-
-    n_hvg = adata.var.highly_variable.sum()
-    if n_hvg == 0:
-        LOGGER.info("FATAL ERROR: ZERO Highly Variable Genes were selected. Check your n_top_genes and batch_key settings.")
-    if n_hvg != 0:
-        LOGGER.info("Variable Genes: %d", n_hvg)
-
 
     if "X_pca" not in adata.obsm:
         raise RuntimeError("PCA failed: adata.obsm['X_pca'] missing")
@@ -591,32 +573,17 @@ def pca_neighbors_umap(
         n_pcs,
         100 * cum[n_pcs - 1],
     )
-    LOGGER.warning(
-        "BEFORE neighbors | id=%s | obsm keys=%s",
-        id(adata),
-        list(adata.obsm.keys()),
-    )
 
     sc.pp.neighbors(
         adata,
         n_pcs=n_pcs,
         use_rep="X_pca",
     )
-    LOGGER.warning(
-        "AFTER neighbors | id=%s | obsm keys=%s",
-        id(adata),
-        list(adata.obsm.keys()),
-    )
 
     sc.tl.umap(adata)
 
     adata.uns["n_pcs"] = n_pcs
     adata.uns["variance_explained"] = float(cum[n_pcs - 1])
-    LOGGER.warning(
-        "EXIT pca_neighbors_umap | id=%s | obsm keys=%s",
-        id(adata),
-        list(adata.obsm.keys()),
-    )
 
     return adata
 
@@ -624,7 +591,15 @@ def pca_neighbors_umap(
 
 
 def cluster_unintegrated(adata: ad.AnnData) -> ad.AnnData:
-    sc.tl.leiden(adata, resolution=1.0, key_added="leiden")
+    sc.tl.leiden(
+        adata,
+        resolution=1.0,
+        key_added="leiden",
+        flavor="igraph",
+        directed=False,
+        n_iterations=2,
+    )
+
     return adata
 
 
@@ -762,28 +737,28 @@ def run_load_and_filter(
     # ---------------------------------------------------------
     # SOLO doublet detection (GLOBAL, RAW COUNTS)
     # ---------------------------------------------------------
-    # LOGGER.info("Running SOLO doublet detection")
-    # adata = run_solo_with_scvi(
-    #     adata,
-    #     batch_key=cfg.batch_key,
-    #     doublet_mode=cfg.doublet_mode,
-    #     doublet_score_threshold=cfg.doublet_score_threshold,
-    #     expected_doublet_rate=cfg.expected_doublet_rate,
-    # )
-    #
-    # if cfg.make_figures:
-    #     plot_utils.doublet_plots(
-    #         adata,
-    #         batch_key=cfg.batch_key,
-    #         score_threshold=cfg.doublet_score_threshold,
-    #         figdir=cfg.figdir / "QC_plots" / "doublets",
-    #     )
-    #
-    # adata = cleanup_after_solo(
-    #     adata,
-    #     batch_key=cfg.batch_key,
-    #     min_cells_per_sample=cfg.min_cells_per_sample,
-    # )
+    LOGGER.info("Running SOLO doublet detection")
+    adata = run_solo_with_scvi(
+        adata,
+        batch_key=cfg.batch_key,
+        doublet_mode=cfg.doublet_mode,
+        doublet_score_threshold=cfg.doublet_score_threshold,
+        expected_doublet_rate=cfg.expected_doublet_rate,
+    )
+
+    if cfg.make_figures:
+        plot_utils.doublet_plots(
+            adata,
+            batch_key=cfg.batch_key,
+            score_threshold=cfg.doublet_score_threshold,
+            figdir=cfg.figdir / "QC_plots" / "doublets",
+        )
+
+    adata = cleanup_after_solo(
+        adata,
+        batch_key=cfg.batch_key,
+        min_cells_per_sample=cfg.min_cells_per_sample,
+    )
 
     # ---------------------------------------------------------
     # Attach CellBender-denoised counts (POST-SOLO ONLY)
@@ -823,25 +798,7 @@ def run_load_and_filter(
     # Normalize
     # ---------------------------------------------------------
     adata = normalize_and_hvg(adata, cfg.n_top_genes, batch_key)
-    n_hvg = adata.var.highly_variable.sum()
-    if n_hvg == 0:
-        LOGGER.info(
-            "FATAL ERROR: ZERO Highly Variable Genes were selected. Check your n_top_genes and batch_key settings.")
-    if n_hvg != 0:
-        LOGGER.info("Variable Genes: %d", n_hvg)
-    LOGGER.warning(
-        "BEFORE pca_neighbors_umap CALL | id=%s | obsm keys=%s",
-        id(adata),
-        list(adata.obsm.keys()),
-    )
-
     adata = pca_neighbors_umap(adata, var_explained=0.85, min_pcs=20, max_pcs=50)
-    LOGGER.warning(
-        "AFTER pca_neighbors_umap CALL | id=%s | obsm keys=%s",
-        id(adata),
-        list(adata.obsm.keys()),
-    )
-
     adata = cluster_unintegrated(adata)
 
     if cfg.make_figures:
