@@ -6,7 +6,7 @@ import logging
 import warnings
 
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Literal
 import numpy as np
 import torch
 
@@ -440,6 +440,7 @@ def cleanup_after_solo(
     adata: ad.AnnData,
     batch_key: str,
     min_cells_per_sample: int,
+    doublet_mode: Literal["fixed", "rate", "gmm"],
 ) -> ad.AnnData:
     if "predicted_doublet" in adata.obs:
         n0 = adata.n_obs
@@ -461,7 +462,7 @@ def cleanup_after_solo(
             )
 
     adata.uns["doublet_threshold"] = infer_doublet_threshold(adata)
-    adata.uns["doublet_mode"] = cfg.doublet_mode
+    adata.uns["doublet_mode"] = doublet_mode
 
     return adata
 
@@ -774,6 +775,7 @@ def run_load_and_filter(
         adata,
         batch_key=cfg.batch_key,
         min_cells_per_sample=cfg.min_cells_per_sample,
+        doublet_mode=cfg.doublet_mode
     )
 
     # ---------------------------------------------------------
