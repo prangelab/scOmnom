@@ -549,12 +549,23 @@ def pca_neighbors_umap(
     max_pcs: int = 50,
 ) -> ad.AnnData:
 
+    if not (0 < var_explained <= 1):
+        raise ValueError("var_explained must be in (0, 1]")
+
     sc.tl.pca(
         adata,
         n_comps=max_pcs,
         use_highly_variable=True,
         svd_solver="arpack",
     )
+    # Insert this check just before calling pca_neighbors_umap (Line 789 in your script)
+
+    n_hvg = adata.var.highly_variable.sum()
+    if n_hvg == 0:
+        LOGGER.info(msg="FATAL ERROR: ZERO Highly Variable Genes were selected. Check your n_top_genes and batch_key settings.")
+    if n_hvg != 0:
+        LOGGER.info(msg="Variable Genes: %d", n_hvg)
+
 
     if "X_pca" not in adata.obsm:
         raise RuntimeError("PCA failed: adata.obsm['X_pca'] missing")
@@ -725,28 +736,28 @@ def run_load_and_filter(
     # ---------------------------------------------------------
     # SOLO doublet detection (GLOBAL, RAW COUNTS)
     # ---------------------------------------------------------
-    LOGGER.info("Running SOLO doublet detection")
-    adata = run_solo_with_scvi(
-        adata,
-        batch_key=cfg.batch_key,
-        doublet_mode=cfg.doublet_mode,
-        doublet_score_threshold=cfg.doublet_score_threshold,
-        expected_doublet_rate=cfg.expected_doublet_rate,
-    )
-
-    if cfg.make_figures:
-        plot_utils.doublet_plots(
-            adata,
-            batch_key=cfg.batch_key,
-            score_threshold=cfg.doublet_score_threshold,
-            figdir=cfg.figdir / "QC_plots" / "doublets",
-        )
-
-    adata = cleanup_after_solo(
-        adata,
-        batch_key=cfg.batch_key,
-        min_cells_per_sample=cfg.min_cells_per_sample,
-    )
+    # LOGGER.info("Running SOLO doublet detection")
+    # adata = run_solo_with_scvi(
+    #     adata,
+    #     batch_key=cfg.batch_key,
+    #     doublet_mode=cfg.doublet_mode,
+    #     doublet_score_threshold=cfg.doublet_score_threshold,
+    #     expected_doublet_rate=cfg.expected_doublet_rate,
+    # )
+    #
+    # if cfg.make_figures:
+    #     plot_utils.doublet_plots(
+    #         adata,
+    #         batch_key=cfg.batch_key,
+    #         score_threshold=cfg.doublet_score_threshold,
+    #         figdir=cfg.figdir / "QC_plots" / "doublets",
+    #     )
+    #
+    # adata = cleanup_after_solo(
+    #     adata,
+    #     batch_key=cfg.batch_key,
+    #     min_cells_per_sample=cfg.min_cells_per_sample,
+    # )
 
     # ---------------------------------------------------------
     # Attach CellBender-denoised counts (POST-SOLO ONLY)
