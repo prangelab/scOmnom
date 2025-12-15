@@ -549,7 +549,15 @@ def pca_neighbors_umap(
     max_pcs: int = 50,
 ) -> ad.AnnData:
 
-    sc.tl.pca(adata, use_highly_variable=True)
+    sc.tl.pca(
+        adata,
+        n_comps=max_pcs,
+        use_highly_variable=True,
+        svd_solver="arpack",
+    )
+
+    if "X_pca" not in adata.obsm:
+        raise RuntimeError("PCA failed: adata.obsm['X_pca'] missing")
 
     vr = adata.uns["pca"]["variance_ratio"]
     cum = np.cumsum(vr)
@@ -563,13 +571,18 @@ def pca_neighbors_umap(
         100 * cum[n_pcs - 1],
     )
 
-    sc.pp.neighbors(adata, n_pcs=n_pcs)
+    sc.pp.neighbors(
+        adata,
+        n_pcs=n_pcs,
+        use_rep="X_pca",
+    )
     sc.tl.umap(adata)
 
     adata.uns["n_pcs"] = n_pcs
     adata.uns["variance_explained"] = float(cum[n_pcs - 1])
 
     return adata
+
 
 
 
