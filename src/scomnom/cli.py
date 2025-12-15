@@ -194,7 +194,7 @@ def load_and_filter(
     # Doublet detection (SOLO)
     # -------------------------------------------------------------
     doublet_mode: str = typer.Option(
-        "fixed",
+        "rate",
         "--doublet-mode",
         help="Doublet thresholding mode: fixed | rate | gmm",
     ),
@@ -204,7 +204,7 @@ def load_and_filter(
         help="Used when doublet-mode=fixed.",
     ),
     expected_doublet_rate: float = typer.Option(
-        0.05,
+        0.1,
         "--expected-doublet-rate",
         help="Used when doublet-mode=rate.",
     ),

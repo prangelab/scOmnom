@@ -32,9 +32,9 @@ class LoadAndFilterConfig(BaseModel):
     n_top_genes: int = 2000
 
     # ---- Doublets (SOLO) ----
-    doublet_mode: Literal["fixed", "rate", "gmm"] = "fixed"
+    doublet_mode: Literal["fixed", "rate", "gmm"] = "rate"
     doublet_score_threshold: float = 0.25
-    expected_doublet_rate: float = 0.05
+    expected_doublet_rate: float = 0.1
 
     # ---- Patterns ----
     raw_pattern: str = "*.raw_feature_bc_matrix"
