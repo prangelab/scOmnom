@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+from numba.core.types import Boolean
 from pydantic import BaseModel, Field, validator, model_validator
 from pathlib import Path
 from typing import Optional, Dict, List, Literal
@@ -35,7 +37,8 @@ class LoadAndFilterConfig(BaseModel):
     doublet_mode: Literal["fixed", "rate"] = "rate"
     doublet_score_threshold: float = 0.25
     expected_doublet_rate: float = 0.1
-    apply_doublet_score: Optional[Path] = None
+    apply_doublet_score: Optional[bool] = None
+    apply_doublet_score_path: Optional[Path] = "adata.merged.zarr"
 
     # ---- Patterns ----
     raw_pattern: str = "*.raw_feature_bc_matrix"
