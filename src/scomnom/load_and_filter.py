@@ -135,6 +135,8 @@ def _per_sample_qc_and_filter(
                     "total_counts": a.obs["total_counts"].to_numpy(),
                     "n_genes_by_counts": a.obs["n_genes_by_counts"].to_numpy(),
                     "pct_counts_mt": a.obs["pct_counts_mt"].to_numpy(),
+                    "pct_counts_ribo": a.obs["pct_counts_ribo"].to_numpy(),
+                    "pct_counts_hb": a.obs["pct_counts_hb"].to_numpy(),
                 }
             )
         )
@@ -144,8 +146,17 @@ def _per_sample_qc_and_filter(
             a,
             min_genes=cfg.min_genes,
             min_cells=cfg.min_cells,
+            max_pct_mt=cfg.max_pct_mt,
         )
 
+        if a.n_obs < cfg.min_cells_per_sample:
+            LOGGER.warning(
+                "[Per-sample QC] Dropping sample %s: %d cells < min_cells_per_sample=%d",
+                sample,
+                a.n_obs,
+                cfg.min_cells_per_sample,
+            )
+            continue
         LOGGER.info(
             "[Per-sample QC] %s: %d cells × %d genes after filtering",
             sample,
@@ -159,7 +170,14 @@ def _per_sample_qc_and_filter(
         pd.concat(qc_rows, axis=0, ignore_index=True)
         if qc_rows
         else pd.DataFrame(
-            columns=["sample", "total_counts", "n_genes_by_counts", "pct_counts_mt"]
+            columns=[
+                "sample",
+                "total_counts",
+                "n_genes_by_counts",
+                "pct_counts_mt",
+                "pct_counts_ribo",
+                "pct_counts_hb",
+            ]
         )
     )
 
@@ -329,27 +347,18 @@ def compute_qc_metrics(adata: ad.AnnData, cfg: QCFilterConfig) -> ad.AnnData:
 # ---------------------------------------------------------------------
 def sparse_filter_cells_and_genes(
     adata: ad.AnnData,
-    min_genes: int = 200,
-    min_cells: int = 3,
+    *,
+    min_genes: int,
+    min_cells: int,
+    max_pct_mt: float | None = None,
 ) -> ad.AnnData:
-    import psutil
-    import scipy.sparse as sp
-
-    LOGGER.info(
-        "[Filtering] Start: %d cells × %d genes (RSS=%.2f GB)",
-        adata.n_obs,
-        adata.n_vars,
-        psutil.Process().memory_info().rss / 1024**3,
-    )
-
-    if not sp.issparse(adata.X):
-        adata.X = sp.csr_matrix(adata.X)
-    else:
-        adata.X = adata.X.tocsr()
+    import numpy as np
 
     X = adata.X
 
-    # Cell filtering
+    # --------------------------------------------------
+    # Cell filtering: min_genes
+    # --------------------------------------------------
     gene_counts = np.diff(X.indptr)
     cell_mask = gene_counts >= min_genes
     if cell_mask.sum() == 0:
@@ -357,7 +366,28 @@ def sparse_filter_cells_and_genes(
     adata = adata[cell_mask].copy()
     X = adata.X
 
-    # Gene filtering
+    # --------------------------------------------------
+    # Cell filtering: max_pct_mt
+    # --------------------------------------------------
+    if max_pct_mt is not None:
+        if "pct_counts_mt" not in adata.obs:
+            raise KeyError(
+                "pct_counts_mt not found in adata.obs. "
+                "Run compute_qc_metrics() before sparse filtering."
+            )
+
+        mt_mask = adata.obs["pct_counts_mt"].to_numpy() <= max_pct_mt
+        if mt_mask.sum() == 0:
+            raise ValueError(
+                f"All cells removed by max_pct_mt={max_pct_mt}."
+            )
+
+        adata = adata[mt_mask].copy()
+        X = adata.X
+
+    # --------------------------------------------------
+    # Gene filtering: min_cells
+    # --------------------------------------------------
     gene_nnz = np.bincount(X.indices, minlength=adata.n_vars)
     gene_mask = gene_nnz >= min_cells
     if gene_mask.sum() == 0:
@@ -778,6 +808,12 @@ def run_load_and_filter(
     if cfg.make_figures:
         LOGGER.info("Plotting post-filter QC...")
         plot_utils.run_qc_plots_postfilter(adata, cfg)
+        plot_utils.plot_cellbender_effects(
+            adata,
+            batch_key=cfg.batch_key,
+            figdir=cfg.figdir / "QC_plots",
+        )
+
         plot_utils.plot_final_cell_counts(adata, cfg)
 
     # ---------------------------------------------------------
@@ -805,6 +841,8 @@ def run_load_and_filter(
         out_h5ad = cfg.output_dir / "adata.filtered.h5ad"
         LOGGER.warning("Writing H5AD copy (loads data into RAM).")
         io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
+
+    plot_utils.cleanup_scanpy_tmp()
 
     LOGGER.info("Finished load-and-filter")
     return adata

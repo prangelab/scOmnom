@@ -59,7 +59,10 @@ def setup_scanpy_figs(figdir: Path, formats: Sequence[str] | None = None) -> Non
     if formats is not None:
         set_figure_formats(formats)
 
-    sc.settings.figdir = str(figdir)
+    tmp = figdir / "_scanpy_tmp"
+    tmp.mkdir(parents=True, exist_ok=True)
+    sc.settings.figdir = str(tmp)
+
     sc.settings.autoshow = False
     sc.settings.autosave = False
 
@@ -75,6 +78,21 @@ def setup_scanpy_figs(figdir: Path, formats: Sequence[str] | None = None) -> Non
     )
 
     figdir.mkdir(parents=True, exist_ok=True)
+
+
+def cleanup_scanpy_tmp() -> None:
+    """
+    Remove the temporary Scanpy figure directory if it exists.
+    Safe to call multiple times.
+    """
+    global ROOT_FIGDIR
+    if ROOT_FIGDIR is None:
+        return
+
+    tmp = ROOT_FIGDIR / "_scanpy_tmp"
+    if tmp.exists():
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def save_multi(stem: str, figdir: Path, fig=None) -> None:
@@ -274,7 +292,9 @@ def _violin_with_points(
             )
 
 
-def qc_scatter(adata, groupby: str):
+def qc_scatter(adata, groupby: str, cfg):
+    figdir = cfg.figdir / "QC_plots" / "qc_scatter"
+
     sc.pl.scatter(
         adata,
         x="total_counts",
@@ -282,15 +302,17 @@ def qc_scatter(adata, groupby: str):
         color="pct_counts_mt",
         show=False,
     )
-    save_multi("QC_scatter_mt", Path(sc.settings.figdir))
+    save_multi("QC_scatter_mt", figdir)
 
 
-def hvgs_and_pca_plots(adata, max_pcs_plot: int):
+def hvgs_and_pca_plots(adata, max_pcs_plot: int, cfg):
+    figdir = cfg.figdir / "QC_plots" / "overview"
+
     sc.pl.highly_variable_genes(adata, show=False)
-    save_multi("QC_highly_variable_genes", Path(sc.settings.figdir))
+    save_multi("QC_highly_variable_genes", figdir)
 
     sc.pl.pca_variance_ratio(adata, n_pcs=max_pcs_plot, log=True, show=False)
-    save_multi("QC_pca_variance_ratio", Path(sc.settings.figdir))
+    save_multi("QC_pca_variance_ratio", figdir)
 
 
 def umap_by(adata, keys, figdir: Path | None = None, stem: str | None = None):
@@ -474,7 +496,7 @@ def plot_final_cell_counts(adata, cfg) -> None:
     plt.xticks(rotation=45, ha="right")
     fig.tight_layout()
 
-    figdir_qc = cfg.figdir / "QC_plots"
+    figdir_qc = cfg.figdir / "QC_plots" / "overview"
     save_multi(stem="final_cell_counts", figdir=figdir_qc)
 
     plt.close(fig)
@@ -484,7 +506,7 @@ def plot_final_cell_counts(adata, cfg) -> None:
 # MT histogram
 # -------------------------------------------------------------------------
 def plot_mt_histogram(adata, cfg, suffix: str):
-    figdir_qc = cfg.figdir / "QC_plots"
+    figdir_qc = cfg.figdir / "QC_plots" / "qc_metrics"
 
     fig, ax = plt.subplots(figsize=(5, 4))
     _clean_axes(ax)
@@ -627,7 +649,7 @@ def plot_hist_total_counts(adata, cfg, stage: str):
     if not cfg.make_figures:
         return
 
-    figdir_qc = cfg.figdir / "QC_plots"
+    figdir_qc = cfg.figdir / "QC_plots" / "qc_metrics"
     figdir_qc.mkdir(parents=True, exist_ok=True)
 
     plt.figure(figsize=(6, 4))
@@ -656,7 +678,7 @@ def plot_hist_n_genes(adata, cfg, stage: str):
     if not cfg.make_figures:
         return
 
-    figdir_qc = cfg.figdir / "QC_plots"
+    figdir_qc = cfg.figdir / "QC_plots" / "qc_metrics"
     figdir_qc.mkdir(parents=True, exist_ok=True)
 
     plt.figure(figsize=(6, 4))
@@ -697,7 +719,7 @@ def qc_violin_panels(adata, cfg, stage: str):
         LOGGER.warning("batch_key '%s' missing in adata.obs; skipping QC violin panels", batch_key)
         return
 
-    figdir_qc = cfg.figdir / "QC_plots"
+    figdir_qc = cfg.figdir / "QC_plots" / "qc_metrics"
     figdir_qc.mkdir(parents=True, exist_ok=True)
 
     # Decide layout
@@ -708,6 +730,8 @@ def qc_violin_panels(adata, cfg, stage: str):
         ("n_genes_by_counts", "QC_violin_genes"),
         ("total_counts", "QC_violin_counts"),
         ("pct_counts_mt", "QC_violin_mt"),
+        ("pct_counts_ribo", "QC_violin_ribo"),
+        ("pct_counts_hb", "QC_violin_hb"),
     ]
 
     old_figdir = sc_settings.figdir
@@ -764,7 +788,7 @@ def qc_scatter_panels(adata, cfg, stage: str):
     if not cfg.make_figures:
         return
 
-    figdir = cfg.figdir / "QC_plots"
+    figdir = cfg.figdir / "QC_plots" / "qc_scatter"
 
     # --------------------------------------------------------------
     # Scatter 1: Complexity plot (colored by mt%)
@@ -790,6 +814,164 @@ def qc_scatter_panels(adata, cfg, stage: str):
     )
     save_multi(f"QC_scatter_mt_{stage}", figdir)
     plt.close()
+
+def plot_cellbender_effects(
+    adata: ad.AnnData,
+    *,
+    batch_key: str | None,
+    figdir: Path,
+) -> None:
+    """
+    Diagnostic plots comparing raw vs CellBender counts
+    for the same retained cells.
+
+    Requires:
+      - adata.layers["counts_raw"]
+      - adata.layers["counts_cb"]
+
+    Outputs to:
+      figures/<FMT>/QC_plots/cellbender/
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    if "counts_raw" not in adata.layers or "counts_cb" not in adata.layers:
+        LOGGER.info("Skipping CellBender effect plots (raw or cb counts missing).")
+        return
+
+    figdir = figdir / "cellbender"
+    figdir.mkdir(parents=True, exist_ok=True)
+
+    X_raw = adata.layers["counts_raw"]
+    X_cb = adata.layers["counts_cb"]
+
+    # ------------------------------------------------------------------
+    # Per-cell aggregates (OOM-safe)
+    # ------------------------------------------------------------------
+    raw_cell = np.asarray(X_raw.sum(axis=1)).ravel()
+    cb_cell = np.asarray(X_cb.sum(axis=1)).ravel()
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        removed_frac_cell = (raw_cell - cb_cell) / raw_cell
+        removed_frac_cell[~np.isfinite(removed_frac_cell)] = 0.0
+
+    # ------------------------------------------------------------------
+    # 1. Histogram: per-cell removed fraction
+    # ------------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=(5, 4))
+    ax.hist(removed_frac_cell, bins=50, color="steelblue", alpha=0.85)
+    ax.set_xlabel("Fraction of counts removed by CellBender")
+    ax.set_ylabel("Cells")
+    ax.set_title("CellBender background removal (per cell)")
+    _clean_axes(ax)
+    fig.tight_layout()
+    save_multi("cellbender_removed_fraction_hist", figdir, fig)
+    plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # 2. Per-sample removed fraction (if batch_key present)
+    # ------------------------------------------------------------------
+    if batch_key is not None and batch_key in adata.obs:
+        groups = adata.obs[batch_key].astype("category")
+        data = [
+            removed_frac_cell[groups == g]
+            for g in groups.cat.categories
+        ]
+
+        fig, ax = plt.subplots(figsize=(max(6, 0.5 * len(data)), 4))
+        ax.violinplot(data, showmeans=False, showextrema=False)
+        ax.set_xticks(range(1, len(data) + 1))
+        ax.set_xticklabels(groups.cat.categories, rotation=45, ha="right")
+        ax.set_ylabel("Fraction removed")
+        ax.set_title("CellBender background removal per sample")
+        _clean_axes(ax)
+        fig.tight_layout()
+        save_multi("cellbender_removed_fraction_per_sample", figdir, fig)
+        plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # Per-gene aggregates (OOM-safe)
+    # ------------------------------------------------------------------
+    raw_gene = np.asarray(X_raw.sum(axis=0)).ravel()
+    cb_gene = np.asarray(X_cb.sum(axis=0)).ravel()
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        removed_frac_gene = (raw_gene - cb_gene) / raw_gene
+        removed_frac_gene[~np.isfinite(removed_frac_gene)] = 0.0
+
+    # ------------------------------------------------------------------
+    # 3. Per-gene raw vs CB scatter (log–log)
+    # ------------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=(5, 5))
+    ax.scatter(
+        np.log10(raw_gene + 1),
+        np.log10(cb_gene + 1),
+        s=4,
+        alpha=0.3,
+        rasterized=True,
+    )
+
+    lims = [
+        min(ax.get_xlim()[0], ax.get_ylim()[0]),
+        max(ax.get_xlim()[1], ax.get_ylim()[1]),
+    ]
+    ax.plot(lims, lims, "--", color="black", lw=1)
+    ax.set_xlim(lims)
+    ax.set_ylim(lims)
+
+    ax.set_xlabel("log10(raw gene counts + 1)")
+    ax.set_ylabel("log10(CellBender gene counts + 1)")
+    ax.set_title("Gene-level counts: raw vs CellBender")
+    _clean_axes(ax)
+    fig.tight_layout()
+    save_multi("cellbender_gene_raw_vs_cb", figdir, fig)
+    plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # 4. Per-gene removed fraction vs expression
+    # ------------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=(5, 4))
+    ax.scatter(
+        np.log10(raw_gene + 1),
+        removed_frac_gene,
+        s=4,
+        alpha=0.3,
+        rasterized=True,
+    )
+    ax.set_xlabel("log10(raw gene counts + 1)")
+    ax.set_ylabel("Fraction removed")
+    ax.set_title("Gene-level background removal")
+    _clean_axes(ax)
+    fig.tight_layout()
+    save_multi("cellbender_gene_removed_fraction", figdir, fig)
+    plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # 5. Per-cell removed fraction vs library size, colored by %mt
+    # ------------------------------------------------------------------
+    if "pct_counts_mt" in adata.obs:
+        fig, ax = plt.subplots(figsize=(5, 4))
+        sc = ax.scatter(
+            np.log10(raw_cell + 1),
+            removed_frac_cell,
+            c=adata.obs["pct_counts_mt"],
+            cmap="viridis",
+            s=6,
+            alpha=0.4,
+            rasterized=True,
+        )
+        cbar = fig.colorbar(sc, ax=ax)
+        cbar.set_label("% mitochondrial counts")
+
+        ax.set_xlabel("log10(total raw counts + 1)")
+        ax.set_ylabel("Fraction removed")
+        ax.set_title("CellBender effect vs library size")
+        _clean_axes(ax)
+        fig.tight_layout()
+        save_multi("cellbender_removed_fraction_vs_library_mt", figdir, fig)
+        plt.close(fig)
+
+    LOGGER.info("Generated CellBender effect QC plots.")
 
 
 def doublet_plots(
@@ -1004,65 +1186,6 @@ def umap_plots(
         LOGGER.warning("Cluster key '%s' not found in adata.obs", cluster_key)
 
     LOGGER.info("Generated UMAP plots (batch + %s)", cluster_key)
-
-
-def barplot_before_after(df_counts: pd.DataFrame, figpath: Path, min_cells_per_sample: int):
-    x = np.arange(len(df_counts))
-    width = 0.40
-
-    fig, ax = plt.subplots(figsize=(max(6, len(df_counts) * 0.65), 4))
-
-    ax.grid(False)
-    for spine in ["left", "bottom"]:
-        ax.spines[spine].set_visible(True)
-        ax.spines[spine].set_alpha(0.5)
-    ax.spines["right"].set_visible(False)
-    ax.spines["top"].set_visible(False)
-
-    colors_before = ["#cccccc"] * len(df_counts)
-    colors_after = [
-        "red" if c < min_cells_per_sample else "steelblue" for c in df_counts["after"]
-    ]
-
-    bars_before = ax.bar(
-        x - width / 2,
-        df_counts["before"],
-        width,
-        label="Before filtering",
-        alpha=0.8,
-        color=colors_before,
-    )
-    bars_after = ax.bar(
-        x + width / 2,
-        df_counts["after"],
-        width,
-        label="After filtering",
-        alpha=0.85,
-        color=colors_after,
-    )
-
-    ax.set_xticks(x)
-    ax.set_xticklabels(df_counts["sample"], rotation=45, ha="right")
-    ax.set_ylabel("Number of cells")
-    ax.set_title("Cell counts before vs after filtering")
-    ax.legend(frameon=False)
-
-    for i, bar in enumerate(bars_after):
-        height = bar.get_height()
-        pct = df_counts.loc[i, "retained_pct"]
-        if height > 0:
-            ax.text(
-                bar.get_x() + bar.get_width() / 2,
-                height,
-                f"{pct:.1f}%",
-                ha="center",
-                va="bottom",
-                fontsize=7,
-                rotation=60,
-            )
-
-    fig.tight_layout()
-    save_multi(figpath.stem, figpath.parent)
 
 
 # -------------------------------------------------------------------------

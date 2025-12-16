@@ -247,22 +247,6 @@ def test_run_qc_plots_postfilter(tmp_path, reset_root_figdir, mock_scanpy_plots,
     assert "QC_umap_sample" in stems or "QC_umap_leiden" in stems
 
 
-def test_barplot_before_after(tmp_path, reset_root_figdir, mock_save_multi):
-    figdir = tmp_path / "figs"
-    pu.setup_scanpy_figs(figdir)
-
-    df = pd.DataFrame({
-        "sample": ["A", "B"],
-        "before": [100, 200],
-        "after": [80, 50],
-        "retained_pct": [80.0, 25.0],
-    })
-    figpath = figdir / "QC_plots" / "before_after.png"
-    pu.barplot_before_after(df, figpath, min_cells_per_sample=60)
-
-    assert any(stem == figpath.stem for stem, _ in mock_save_multi)
-
-
 # ---------------------------------------------------------------------
 # scIB results table
 # ---------------------------------------------------------------------
