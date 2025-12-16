@@ -13,7 +13,7 @@ class LoadAndFilterConfig(BaseModel):
     filtered_sample_dir: Optional[Path] = None
     cellbender_dir: Optional[Path] = None
 
-    metadata_tsv: Path
+    metadata_tsv: Optional[Path] = None
     batch_key: Optional[str] = None
 
     # ---- Output ----
@@ -63,8 +63,16 @@ class LoadAndFilterConfig(BaseModel):
     # ---- Validators ----
     @model_validator(mode="after")
     def check_inputs(self):
+        # --apply-doublet-score mode
         if self.apply_doublet_score is not None:
+            # metadata not required
             return self
+
+        # Normal modes require metadata
+        if self.metadata_tsv is None:
+            raise ValueError(
+                "metadata_tsv is required unless --apply-doublet-score is used"
+            )
 
         if self.filtered_sample_dir is not None:
             if self.raw_sample_dir or self.cellbender_dir:

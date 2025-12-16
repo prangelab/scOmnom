@@ -170,9 +170,9 @@ def load_and_filter(
         ..., "--out", "-o",
         help="[I/O] Output directory for anndata and figures/",
     ),
-    metadata_tsv: Path = typer.Option(
-        ..., "--metadata-tsv", "-m", exists=True,
-        help="[I/O] TSV with sample metadata.",
+    metadata_tsv: Optional[Path] = typer.Option(
+        None, "--metadata-tsv", "-m", exists=True,
+        help="[I/O] TSV with sample metadata (not required with --apply-doublet-score).",
     ),
     n_jobs: int = typer.Option(
         None,
