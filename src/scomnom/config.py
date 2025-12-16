@@ -32,9 +32,10 @@ class LoadAndFilterConfig(BaseModel):
     n_top_genes: int = 2000
 
     # ---- Doublets (SOLO) ----
-    doublet_mode: Literal["fixed", "rate", "gmm"] = "rate"
+    doublet_mode: Literal["fixed", "rate"] = "rate"
     doublet_score_threshold: float = 0.25
     expected_doublet_rate: float = 0.1
+    apply_doublet_score: Optional[Path] = None
 
     # ---- Patterns ----
     raw_pattern: str = "*.raw_feature_bc_matrix"
@@ -61,13 +62,14 @@ class LoadAndFilterConfig(BaseModel):
 
     # ---- Validators ----
     @model_validator(mode="after")
+    @model_validator(mode="after")
     def check_inputs(self):
+        if self.apply_doublet_score is not None:
+            return self
+
         if self.filtered_sample_dir is not None:
             if self.raw_sample_dir or self.cellbender_dir:
                 raise ValueError("filtered cannot be combined with raw or cellbender")
-
-        if self.cellbender_dir is not None and self.raw_sample_dir is None:
-            raise ValueError("cellbender requires raw_sample_dir")
 
         if self.raw_sample_dir is None and self.filtered_sample_dir is None:
             raise ValueError("Must provide raw_sample_dir or filtered_sample_dir")
@@ -75,13 +77,15 @@ class LoadAndFilterConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_doublet_mode(self):
-        if self.doublet_mode == "fixed" and self.doublet_score_threshold is None:
-            raise ValueError("doublet_score_threshold required for fixed mode")
-
-        if self.doublet_mode == "rate" and self.expected_doublet_rate is None:
-            raise ValueError("expected_doublet_rate required for rate mode")
-
+    def check_doublet_config(self):
+        if self.doublet_mode == "fixed":
+            if not (0 < self.doublet_score_threshold < 1):
+                raise ValueError("doublet_score_threshold must be in (0, 1)")
+        elif self.doublet_mode == "rate":
+            if not (0 < self.expected_doublet_rate < 0.5):
+                raise ValueError("expected_doublet_rate must be in (0, 0.5)")
+        else:
+            raise ValueError("doublet_mode must be 'fixed' or 'rate'")
         return self
 
 

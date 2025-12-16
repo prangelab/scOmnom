@@ -506,48 +506,6 @@ def _call_doublets(
         mask[idx] = True
         return mask
 
-    if mode == "gmm":
-        from sklearn.mixture import GaussianMixture
-        from scipy.special import logit
-
-        x = logit(np.clip(scores, 1e-6, 1 - 1e-6)).reshape(-1, 1)
-
-        try:
-            gm = GaussianMixture(n_components=2, random_state=0)
-            gm.fit(x)
-
-            means = gm.means_.flatten()
-            hi = np.argmax(means)
-            lo = 1 - hi
-
-            # intersection in logit space
-            mu1, mu2 = means[lo], means[hi]
-            sd1 = np.sqrt(gm.covariances_[lo]).item()
-            sd2 = np.sqrt(gm.covariances_[hi]).item()
-            w1, w2 = gm.weights_[lo], gm.weights_[hi]
-
-            a = 1/(2*sd1**2) - 1/(2*sd2**2)
-            b = mu2/(sd2**2) - mu1/(sd1**2)
-            c = (mu1**2)/(2*sd1**2) - (mu2**2)/(2*sd2**2) - np.log((sd2*w1)/(sd1*w2))
-            disc = b*b - 4*a*c
-
-            if disc <= 0:
-                raise RuntimeError("No GMM intersection")
-
-            thr_logit = (-b + np.sqrt(disc)) / (2*a)
-            thr = 1 / (1 + np.exp(-thr_logit))
-
-            return scores > thr
-
-        except Exception:
-            LOGGER.warning("GMM doublet thresholding failed; falling back to rate mode")
-            return _call_doublets(
-                scores,
-                mode="rate",
-                fixed_threshold=fixed_threshold,
-                expected_rate=expected_rate,
-            )
-
     raise ValueError(f"Unknown doublet threshold mode: {mode}")
 
 
@@ -634,136 +592,161 @@ def run_load_and_filter(
     # Configure Scanpy/Matplotlib figure behavior + formats
     plot_utils.setup_scanpy_figs(cfg.figdir, cfg.figure_formats)
 
-    # ---------------------------------------------------------
-    # Infer batch key from metadata if needed
-    # ---------------------------------------------------------
-    batch_key = io_utils.infer_batch_key_from_metadata_tsv(
-        cfg.metadata_tsv, cfg.batch_key
-    )
-    LOGGER.info("Using batch_key='%s'", batch_key)
-    cfg.batch_key = batch_key
-
-    # ---------------------------------------------------------
-    # Select input source and load samples
-    # ---------------------------------------------------------
-    # raw only
-    # filtered only
-    # raw + cellbender
-
-    if cfg.filtered_sample_dir is not None:
-        if cfg.raw_sample_dir or cfg.cellbender_dir:
-            raise RuntimeError("--filtered-sample-dir cannot be combined with other inputs")
-
-    elif cfg.cellbender_dir is not None:
-        if cfg.raw_sample_dir is None:
-            raise RuntimeError("--cellbender-dir requires --raw-sample-dir")
-
-    elif cfg.raw_sample_dir is None:
-        raise RuntimeError(
-            "You must provide one of:\n"
-            "  --raw-sample-dir\n"
-            "  --filtered-sample-dir\n"
-            "  --raw-sample-dir + --cellbender-dir"
+    # If we are only applying a different doublet filter:
+    if cfg.apply_doublet_score is not None:
+        LOGGER.info(
+            "Resuming from pre-doublet AnnData: %s",
+            cfg.apply_doublet_score,
         )
+        adata = ad.read(cfg.apply_doublet_score)
 
-    if cfg.filtered_sample_dir is not None:
-        LOGGER.info("Loading CellRanger filtered matrices...")
-        sample_map, read_counts = io_utils.load_filtered_data(cfg)
-
-    elif cfg.cellbender_dir is not None:
-        LOGGER.info("Loading RAW matrices restricted to CellBender barcodes...")
-        sample_map, read_counts = io_utils.load_raw_with_cellbender_barcodes(
-            cfg,
-            plot_dir=cfg.figdir / "cell_qc",
-        )
-
+        # sanity
+        required = {"doublet_score", "predicted_doublet"}
+        if not required.issubset(adata.obs.columns):
+            raise RuntimeError(
+                "apply-doublet-score input is missing SOLO results"
+            )
+    # If we are running normally:
     else:
-        LOGGER.info("Loading RAW matrices with CellRanger-like cell calling...")
-        sample_map, read_counts, _ = io_utils.load_raw_data(
-            cfg,
-            plot_dir=cfg.figdir / "cell_qc",
+        # Infer batch key from metadata if needed
+        batch_key = io_utils.infer_batch_key_from_metadata_tsv(
+            cfg.metadata_tsv, cfg.batch_key
+        )
+        LOGGER.info("Using batch_key='%s'", batch_key)
+        cfg.batch_key = batch_key
+
+        # ---------------------------------------------------------
+        # Select input source and load samples
+        # ---------------------------------------------------------
+        # raw only
+        # filtered only
+        # cellbender
+        # raw + cellbender
+
+        if cfg.filtered_sample_dir is not None:
+            if cfg.raw_sample_dir or cfg.cellbender_dir:
+                raise RuntimeError("--filtered-sample-dir cannot be combined with other inputs")
+
+        elif cfg.cellbender_dir is not None:
+            if cfg.raw_sample_dir is None:
+                raise RuntimeError("--cellbender-dir requires --raw-sample-dir")
+
+        elif cfg.raw_sample_dir is None:
+            raise RuntimeError(
+                "You must provide one of:\n"
+                "  --raw-sample-dir\n"
+                "  --filtered-sample-dir\n"
+                "  --raw-sample-dir + --cellbender-dir"
+            )
+
+        if cfg.filtered_sample_dir is not None:
+            LOGGER.info("Loading CellRanger filtered matrices...")
+            sample_map, read_counts = io_utils.load_filtered_data(cfg)
+
+        elif cfg.cellbender_dir is not None:
+            LOGGER.info("Loading Cellbender filtered matrices...")
+            sample_map, read_counts = io_utils.load_cellbender_filtered_data(cfg)
+
+        else:
+            LOGGER.info("Loading RAW matrices...")
+            sample_map, read_counts, _ = io_utils.load_raw_data(
+                cfg,
+                plot_dir=cfg.figdir / "cell_qc",
+            )
+
+        # ---------------------------------------------------------
+        # Validate metadata vs loaded samples
+        # ---------------------------------------------------------
+        LOGGER.info("Validating samples and metadata...")
+
+        if cfg.metadata_tsv is None:
+            raise RuntimeError("metadata_tsv is required but was None")
+
+        _validate_metadata_samples(
+            metadata_tsv=cfg.metadata_tsv,
+            batch_key=cfg.batch_key,
+            loaded_samples=sample_map,
         )
 
-    # ---------------------------------------------------------
-    # Validate metadata vs loaded samples
-    # ---------------------------------------------------------
-    LOGGER.info("Validating samples and metadata...")
+        LOGGER.info("Loaded %d samples.", len(sample_map))
 
-    if cfg.metadata_tsv is None:
-        raise RuntimeError("metadata_tsv is required but was None")
+        # ---------------------------------------------------------
+        # Per-sample QC + sparse filtering (OOM-safe)
+        # ---------------------------------------------------------
+        LOGGER.info("Running per-sample QC and filtering...")
+        filtered_sample_map, qc_df = _per_sample_qc_and_filter(sample_map, cfg)
 
-    _validate_metadata_samples(
-        metadata_tsv=cfg.metadata_tsv,
-        batch_key=cfg.batch_key,
-        loaded_samples=sample_map,
-    )
+        # ---------------------------------------------------------
+        # Pre-filter QC plots (lightweight, from qc_df only)
+        # ---------------------------------------------------------
+        if cfg.make_figures:
+            LOGGER.info("Plotting pre-filter QC...")
+            plot_utils.run_qc_plots_pre_filter_df(qc_df, cfg)
 
-    LOGGER.info("Loaded %d samples.", len(sample_map))
+        # ---------------------------------------------------------
+        # Merge filtered samples into a single AnnData
+        # ---------------------------------------------------------
+        tmp_dir = cfg.output_dir / "tmp_merge_load_and_filter"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        merge_out = tmp_dir / "merged.filtered.zarr"
 
-    # ---------------------------------------------------------
-    # Per-sample QC + sparse filtering (OOM-safe)
-    # ---------------------------------------------------------
-    LOGGER.info("Running per-sample QC and filtering...")
-    filtered_sample_map, qc_df = _per_sample_qc_and_filter(sample_map, cfg)
+        LOGGER.info("Merging filtered samples into a single AnnData...")
+        adata = io_utils.merge_samples(
+            filtered_sample_map,
+            batch_key=cfg.batch_key,
+            out_path=merge_out,
+        )
+        LOGGER.info(
+            "Merged filtered dataset: %d cells × %d genes",
+            adata.n_obs,
+            adata.n_vars,
+        )
 
-    # ---------------------------------------------------------
-    # Pre-filter QC plots (lightweight, from qc_df only)
-    # ---------------------------------------------------------
-    if cfg.make_figures:
-        LOGGER.info("Plotting pre-filter QC...")
-        plot_utils.run_qc_plots_pre_filter_df(qc_df, cfg)
+        # ---------------------------------------------------------
+        # Preserve raw counts explicitly for SOLO
+        # ---------------------------------------------------------
+        if "counts_raw" not in adata.layers:
+            LOGGER.info("Storing raw counts in adata.layers['counts_raw']")
+            adata.layers["counts_raw"] = adata.X.copy()
 
-    # ---------------------------------------------------------
-    # Merge filtered samples into a single AnnData
-    # ---------------------------------------------------------
-    tmp_dir = cfg.output_dir / "tmp_merge_load_and_filter"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    merge_out = tmp_dir / "merged.filtered.zarr"
+        # ---------------------------------------------------------
+        # Attach per-sample metadata
+        # ---------------------------------------------------------
+        LOGGER.info("Adding metadata...")
+        adata = _add_metadata(adata, cfg.metadata_tsv, sample_id_col=cfg.batch_key)
+        adata.uns["batch_key"] = cfg.batch_key
 
-    LOGGER.info("Merging filtered samples into a single AnnData...")
-    adata = io_utils.merge_samples(
-        filtered_sample_map,
-        batch_key=cfg.batch_key,
-        out_path=merge_out,
-    )
-    LOGGER.info(
-        "Merged filtered dataset: %d cells × %d genes",
-        adata.n_obs,
-        adata.n_vars,
-    )
+        # canonical identifiers for downstream matching
+        if "sample_id" not in adata.obs:
+            adata.obs["sample_id"] = adata.obs[cfg.batch_key].astype(str)
+        if "barcode" not in adata.obs:
+            adata.obs["barcode"] = adata.obs_names.astype(str)
 
-    # ---------------------------------------------------------
-    # Preserve raw counts explicitly for SOLO
-    # ---------------------------------------------------------
-    if "counts_raw" not in adata.layers:
-        LOGGER.info("Storing raw counts in adata.layers['counts_raw']")
-        adata.layers["counts_raw"] = adata.X.copy()
+        # ---------------------------------------------------------
+        # SOLO doublet detection (GLOBAL, RAW COUNTS)
+        # ---------------------------------------------------------
+        LOGGER.info("Running SOLO doublet detection")
+        adata = run_solo_with_scvi(
+            adata,
+            batch_key=cfg.batch_key,
+            doublet_mode=cfg.doublet_mode,
+            doublet_score_threshold=cfg.doublet_score_threshold,
+            expected_doublet_rate=cfg.expected_doublet_rate,
+        )
 
-    # ---------------------------------------------------------
-    # Attach per-sample metadata
-    # ---------------------------------------------------------
-    LOGGER.info("Adding metadata...")
-    adata = _add_metadata(adata, cfg.metadata_tsv, sample_id_col=cfg.batch_key)
-    adata.uns["batch_key"] = cfg.batch_key
+        LOGGER.info("Saving Anndata with doublet scores...")
+        pre_path = cfg.output_dir / "adata.filtered.zarr"
+        adata.write_zarr(pre_path, chunks=None)
 
-    # canonical identifiers for downstream matching
-    if "sample_id" not in adata.obs:
-        adata.obs["sample_id"] = adata.obs[cfg.batch_key].astype(str)
-    if "barcode" not in adata.obs:
-        adata.obs["barcode"] = adata.obs_names.astype(str)
+        if cfg.save_h5ad:
+            adata.write_h5ad(
+                cfg.output_dir / "adata.filtered.h5ad",
+                compression="gzip",
+            )
 
-    # ---------------------------------------------------------
-    # SOLO doublet detection (GLOBAL, RAW COUNTS)
-    # ---------------------------------------------------------
-    LOGGER.info("Running SOLO doublet detection")
-    adata = run_solo_with_scvi(
-        adata,
-        batch_key=cfg.batch_key,
-        doublet_mode=cfg.doublet_mode,
-        doublet_score_threshold=cfg.doublet_score_threshold,
-        expected_doublet_rate=cfg.expected_doublet_rate,
-    )
+        LOGGER.info("Saved pre-doublet filter AnnData → %s", pre_path)
 
+    # Here 'normal mode' and 'only apply doublet filter' merge again
     if cfg.make_figures:
         plot_utils.doublet_plots(
             adata,
@@ -779,28 +762,16 @@ def run_load_and_filter(
     )
 
     # ---------------------------------------------------------
-    # Attach CellBender-denoised counts (POST-SOLO ONLY)
+    # Attach Raw counts if available
     # ---------------------------------------------------------
-    if cfg.cellbender_dir is not None:
-        LOGGER.info("Loading CellBender-denoised counts")
-        adata = io_utils.load_cellbender_filtered_layer(cfg, adata)
-
-    if "counts_cb" in adata.layers:
-        LOGGER.info("Using CellBender counts for downstream analysis")
-        adata.X = adata.layers["counts_cb"].copy()
-    else:
-        LOGGER.info("Using raw counts for downstream analysis")
-        adata.X = adata.layers["counts_raw"].copy()
+    if cfg.cellbender_dir is not None and cfg.raw_sample_dir is not None:
+        adata = io_utils.attach_raw_counts_postfilter(cfg, adata)
 
     adata.obs_names_make_unique()
 
     # ---------------------------------------------------------
     # Global QC on merged filtered data (for post-filter plots ONLY)
     # ---------------------------------------------------------
-    # NOTE:
-    # QC metrics below are recomputed on the expression matrix
-    # actually used for downstream analysis (CB if available).
-    # These are for visualization only; no further filtering is applied.
     LOGGER.info("Computing QC metrics on merged filtered data...")
     adata = compute_qc_metrics(adata, cfg)
 

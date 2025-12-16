@@ -570,6 +570,150 @@ def load_cellbender_filtered_layer(
     return adata
 
 
+def load_cellbender_filtered_data(
+    cfg: LoadAndQCConfig,
+) -> tuple[Dict[str, ad.AnnData], Dict[str, float]]:
+    """
+    Load CellBender-filtered expression matrices as the PRIMARY data space.
+
+    Returns
+    -------
+    sample_map : Dict[sample_id, AnnData]
+        AnnData objects with X = CellBender-denoised counts
+    read_counts : Dict[sample_id, float]
+        Total UMIs per sample (post-CellBender)
+    """
+    import scanpy as sc
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    cb_dirs = find_cellbender_dirs(cfg.cellbender_dir, cfg.cellbender_pattern)
+    if not cb_dirs:
+        raise RuntimeError("No CellBender outputs found")
+
+    sample_map: Dict[str, ad.AnnData] = {}
+    read_counts: Dict[str, float] = {}
+
+    def _load_one(cb_path: Path):
+        sample = cb_path.name.replace(".cellbender_filtered.output", "")
+        h5 = cb_path / f"{sample}{cfg.cellbender_h5_suffix}"
+        if not h5.exists():
+            raise FileNotFoundError(f"Missing CellBender H5 file: {h5}")
+
+        adata = sc.read_10x_h5(h5)
+        adata.var_names_make_unique()
+        adata.obs_names = adata.obs_names.astype(str)
+
+        adata.obs["barcode"] = adata.obs_names
+        adata.obs["sample_id"] = sample
+
+        total_reads = float(adata.X.sum())
+        return sample, adata, total_reads
+
+    n_workers = min(cfg.n_jobs or 8, 8)
+    LOGGER.info("Loading CellBender filtered matrices with %d threads", n_workers)
+
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = [pool.submit(_load_one, p) for p in cb_dirs]
+        for fut in as_completed(futures):
+            sample, adata, reads = fut.result()
+            sample_map[sample] = adata
+            read_counts[sample] = reads
+            LOGGER.info(
+                "[CB] %s: %d cells × %d genes, %.2e UMIs",
+                sample, adata.n_obs, adata.n_vars, reads
+            )
+
+    return sample_map, read_counts
+
+
+def attach_raw_counts_postfilter(
+    cfg: LoadAndQCConfig,
+    adata: ad.AnnData,
+) -> ad.AnnData:
+    """
+    Load RAW 10x matrices and attach them as adata.layers['counts_raw'],
+    restricted to the already-filtered cell set in adata.
+
+    Alignment:
+      - Cells: by (sample_id, barcode)
+      - Genes: by gene SYMBOLS (adata.var_names)
+    """
+    import numpy as np
+    import pandas as pd
+    import scanpy as sc
+    import scipy.sparse as sp
+
+    required = {"barcode", cfg.batch_key}
+    if not required.issubset(adata.obs.columns):
+        raise RuntimeError(
+            f"adata.obs must contain {required}, found {list(adata.obs.columns)}"
+        )
+
+    if not adata.var_names.is_unique:
+        raise RuntimeError("adata.var_names must be unique for raw-count alignment")
+
+    # Build global cell key
+    cell_key = (
+        adata.obs[cfg.batch_key].astype(str)
+        + "::"
+        + adata.obs["barcode"].astype(str)
+    )
+    cell_key = pd.Index(cell_key)
+
+    raw_dirs = find_raw_dirs(cfg.raw_sample_dir, cfg.raw_pattern)
+
+    raw_layers = []
+
+    for raw_path in raw_dirs:
+        sample = raw_path.name.split(".raw_feature_bc_matrix")[0]
+        mask = adata.obs[cfg.batch_key].astype(str) == sample
+        if mask.sum() == 0:
+            continue
+
+        LOGGER.info("Loading raw counts for sample %s", sample)
+        raw = read_raw_10x(raw_path)
+        raw.var_names_make_unique()
+        raw.obs_names = raw.obs_names.astype(str)
+
+        raw.obs["_raw_key"] = sample + "::" + raw.obs_names
+        raw = raw[raw.obs["_raw_key"].isin(cell_key)].copy()
+
+        if raw.n_obs == 0:
+            raise RuntimeError(f"No overlapping cells between raw and filtered data for {sample}")
+
+        raw_layers.append(raw)
+
+    if not raw_layers:
+        raise RuntimeError("No raw data could be aligned to filtered AnnData")
+
+    raw_all = ad.concat(
+        raw_layers,
+        axis=0,
+        join="outer",
+        fill_value=0,
+    )
+
+    # Reorder cells
+    raw_all.obs["_raw_key"] = raw_all.obs["_raw_key"].astype(str)
+    raw_all = raw_all[cell_key, :]
+
+    # Reorder genes (STRICT by symbols)
+    missing = adata.var_names.difference(raw_all.var_names)
+    if len(missing):
+        raise RuntimeError(
+            f"Raw data missing {len(missing)} genes present in filtered data "
+            f"(example: {missing[:5].tolist()})"
+        )
+
+    raw_all = raw_all[:, adata.var_names]
+
+    # Attach layer
+    adata.layers["counts_raw"] = raw_all.X.copy()
+
+    LOGGER.info("Attached raw counts layer: %s", adata.layers["counts_raw"].shape)
+    return adata
+
+
 def _prepare_sample_for_merge(
     sample_name: str,
     adata: ad.AnnData,

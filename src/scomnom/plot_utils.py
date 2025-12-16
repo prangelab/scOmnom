@@ -551,14 +551,18 @@ def run_qc_plots_postfilter(adata, cfg):
     def _run_qc_pass(adata, X, label):
         """
         Run QC plots with X temporarily set to given matrix.
+        Restores obs, var, X, and qc_metrics afterwards.
         """
-        # Deep copy obs/var only (cheap, safe)
+        # Backup state
         obs_backup = adata.obs.copy()
         var_backup = adata.var.copy()
         X_backup = adata.X
+        qc_uns_backup = adata.uns.get("qc_metrics", None)
 
         try:
             adata.X = X
+
+            compute_qc_metrics(adata, cfg)
 
             qc_violin_panels(adata, cfg, f"postfilter_{label}")
             qc_scatter_panels(adata, cfg, f"postfilter_{label}")
@@ -567,10 +571,15 @@ def run_qc_plots_postfilter(adata, cfg):
             plot_hist_total_counts(adata, cfg, f"postfilter_{label}")
 
         finally:
-            # Restore state exactly
+            # Restore exact original state
             adata.X = X_backup
             adata.obs = obs_backup
             adata.var = var_backup
+
+            if qc_uns_backup is None:
+                adata.uns.pop("qc_metrics", None)
+            else:
+                adata.uns["qc_metrics"] = qc_uns_backup
 
     # ------------------------------------------------------------------
     # Setup figure directory

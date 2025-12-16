@@ -157,11 +157,16 @@ def load_and_filter(
         None, "--filtered-sample-dir", "-f",
         help="[I/O] Path with <sample>.filtered_feature_bc_matrix folders.",
     ),
-    cellbender_dir: Optional[Path] = typer.Option(
-        None, "--cellbender-dir", "-c",
-        help="[I/O] Path with <sample>.cellbender_filtered.output folders.",
-    ),
-    output_dir: Path = typer.Option(
+        cellbender_dir: Optional[Path] = typer.Option(
+            None, "--cellbender-dir", "-c",
+            help=(
+                    "[I/O] Path with CellBender filtered outputs.\n"
+                    "Used alone: CellBender-only mode (no raw counts).\n"
+                    "Used with --raw-sample-dir: enables raw vs CellBender QC comparison."
+            ),
+        ),
+
+        output_dir: Path = typer.Option(
         ..., "--out", "-o",
         help="[I/O] Output directory for anndata and figures/",
     ),
@@ -196,17 +201,25 @@ def load_and_filter(
     doublet_mode: str = typer.Option(
         "rate",
         "--doublet-mode",
-        help="Doublet thresholding mode: fixed | rate | gmm",
+        help="Doublet thresholding: fixed | rate",
     ),
+
     doublet_score_threshold: float = typer.Option(
-        0.25,
+        0.75,
         "--doublet-score-threshold",
-        help="Used when doublet-mode=fixed.",
+        help="Used when --doublet-mode fixed",
     ),
+
     expected_doublet_rate: float = typer.Option(
         0.1,
         "--expected-doublet-rate",
-        help="Used when doublet-mode=rate.",
+        help="Used when --doublet-mode rate",
+    ),
+    apply_doublet_score: Optional[Path] = typer.Option(
+        None,
+        "--apply-doublet-score",
+        help="Reuse a filtered AnnData with SOLO scores (.zarr or .h5ad) and only apply "
+             "doublet thresholding + QC plots.",
     ),
 
     # -------------------------------------------------------------
@@ -262,6 +275,7 @@ def load_and_filter(
         doublet_mode=doublet_mode,
         doublet_score_threshold=doublet_score_threshold,
         expected_doublet_rate=expected_doublet_rate,
+        apply_doublet_score=apply_doublet_score,
         make_figures=make_figures,
         figure_formats=figure_formats,
         batch_key=batch_key,
