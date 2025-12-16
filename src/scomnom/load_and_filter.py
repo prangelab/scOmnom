@@ -472,6 +472,22 @@ def cleanup_after_solo(
     min_cells_per_sample: int,
     doublet_mode: Literal["fixed", "rate", "gmm"],
 ) -> ad.AnnData:
+    # Resolve batch_key: cfg > adata.uns
+    if batch_key is None:
+        batch_key = adata.uns.get("batch_key", None)
+
+    if batch_key is None:
+        raise RuntimeError(
+            "Cannot apply min_cells_per_sample: batch_key is None and not "
+            "found in adata.uns['batch_key']"
+        )
+
+    if batch_key not in adata.obs:
+        raise RuntimeError(
+            f"Resolved batch_key '{batch_key}' not found in adata.obs. "
+            f"Available columns: {list(adata.obs.columns)}"
+        )
+
     if "predicted_doublet" in adata.obs:
         n0 = adata.n_obs
         adata = adata[~adata.obs["predicted_doublet"].astype(bool)].copy()
