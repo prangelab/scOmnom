@@ -62,7 +62,6 @@ class LoadAndFilterConfig(BaseModel):
 
     # ---- Validators ----
     @model_validator(mode="after")
-    @model_validator(mode="after")
     def check_inputs(self):
         if self.apply_doublet_score is not None:
             return self
