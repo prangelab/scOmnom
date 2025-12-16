@@ -694,20 +694,29 @@ def attach_raw_counts_postfilter(
     )
 
     # Reorder cells
-    cell_key = adata.obs["sample_id"].astype(str) + "::" + adata.obs["barcode"].astype(str)
-
-    # raw side: construct matching composite key
-    raw_all.obs["_cell_key"] = (
-            raw_all.obs["sample_id"].astype(str)
+    # adata side (already correct)
+    cell_key = (
+            adata.obs["sample_id"].astype(str)
             + "::"
-            + raw_all.obs["barcode"].astype(str)
+            + adata.obs["barcode"].astype(str)
     )
 
-    # make it the index (must be unique!)
-    raw_all.obs_names = raw_all.obs["_cell_key"].values
+    # raw side: _raw_key already exists and is composite
+    raw_all.obs["_raw_key"] = raw_all.obs["_raw_key"].astype(str)
+
+    # make it the index
+    raw_all.obs_names = raw_all.obs["_raw_key"].values
     raw_all.obs_names_make_unique()
 
-    # now this is safe
+    # safety check
+    missing = cell_key[~cell_key.isin(raw_all.obs_names)]
+    if len(missing) > 0:
+        raise RuntimeError(
+            f"{len(missing)} cells missing in raw counts "
+            f"(example: {missing.iloc[0]})"
+        )
+
+    # reorder
     raw_all = raw_all[cell_key.values, :]
 
     # Reorder genes (STRICT by symbols)
