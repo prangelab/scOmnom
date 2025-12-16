@@ -38,7 +38,7 @@ class LoadAndFilterConfig(BaseModel):
     doublet_score_threshold: float = 0.25
     expected_doublet_rate: float = 0.1
     apply_doublet_score: Optional[bool] = None
-    apply_doublet_score_path: Optional[Path] = "adata.merged.zarr"
+    apply_doublet_score_path: Optional[Path] = "results/adata.merged.zarr"
 
     # ---- Patterns ----
     raw_pattern: str = "*.raw_feature_bc_matrix"
