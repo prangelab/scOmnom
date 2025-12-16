@@ -735,12 +735,12 @@ def run_load_and_filter(
         )
 
         LOGGER.info("Saving Anndata with doublet scores...")
-        pre_path = cfg.output_dir / "adata.filtered.zarr"
+        pre_path = cfg.output_dir / "adata.merged.zarr"
         adata.write_zarr(pre_path, chunks=None)
 
         if cfg.save_h5ad:
             adata.write_h5ad(
-                cfg.output_dir / "adata.filtered.h5ad",
+                cfg.output_dir / "adata.merged.h5ad",
                 compression="gzip",
             )
 
