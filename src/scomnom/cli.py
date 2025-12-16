@@ -215,18 +215,20 @@ def load_and_filter(
         "--expected-doublet-rate",
         help="Used when --doublet-mode rate",
     ),
-    apply_doublet_score: Optional[Path] = typer.Option(
-        None,
+    apply_doublet_score: bool = typer.Option(
+        False,
         "--apply-doublet-score",
-        help=(
-                "Reuse a filtered AnnData with SOLO scores (.zarr or .h5ad). "
-                "If provided without a path, defaults to <out>/adata.merged.zarr."
-        ),
-        flag_value=Path("__AUTO__"),
+        help="Resume from pre-doublet AnnData instead of rerunning QC + SOLO.",
+    ),
+    apply_doublet_score_path: Optional[Path] = typer.Option(
+        None,
+        "--apply-doublet-score-path",
+        help="Path to pre-doublet AnnData (.zarr or .h5ad). Defaults to <out>/adata.merged.zarr.",
     ),
 
 
-    # -------------------------------------------------------------
+
+# -------------------------------------------------------------
     # Figures
     # -------------------------------------------------------------
     make_figures: bool = typer.Option(True, help="[Figures] Whether to create QC plots."),
@@ -266,19 +268,9 @@ def load_and_filter(
     # -------------------------------------------------------------
     # Resolve implicit apply-doublet-score path
     # -------------------------------------------------------------
-    if apply_doublet_score == Path("__AUTO__"):
-        candidate_zarr = output_dir / "adata.merged.zarr"
-        candidate_h5ad = output_dir / "adata.merged.h5ad"
-
-        if candidate_zarr.exists():
-            apply_doublet_score = candidate_zarr
-        elif candidate_h5ad.exists():
-            apply_doublet_score = candidate_h5ad
-        else:
-            raise typer.BadParameter(
-                "Could not find adata.merged.zarr or adata.merged.h5ad in output directory "
-                f"({output_dir}). Please provide --apply-doublet-score <path> explicitly."
-            )
+    if apply_doublet_score:
+        if apply_doublet_score_path is None:
+            apply_doublet_score_path = output_dir / "adata.merged.zarr"
 
     cfg = LoadAndFilterConfig(
         raw_sample_dir=raw_sample_dir,
@@ -297,6 +289,7 @@ def load_and_filter(
         doublet_score_threshold=doublet_score_threshold,
         expected_doublet_rate=expected_doublet_rate,
         apply_doublet_score=apply_doublet_score,
+        apply_doublet_score_path=apply_doublet_score_path,
         make_figures=make_figures,
         figure_formats=figure_formats,
         batch_key=batch_key,

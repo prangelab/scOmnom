@@ -624,14 +624,13 @@ def run_load_and_filter(
 
     # If we are only applying a different doublet filter:
     if cfg.apply_doublet_score is not None:
-        from .io_utils import load_dataset
 
         LOGGER.info(
             "Resuming from pre-doublet AnnData: %s",
             cfg.apply_doublet_score,
         )
 
-        adata = load_dataset(cfg.apply_doublet_score)
+        adata = io_utils.load_dataset(cfg.apply_doublet_score_path)
 
         # sanity check: SOLO must already have been run
         required = {"doublet_score", "predicted_doublet"}
