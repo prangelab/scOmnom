@@ -827,7 +827,7 @@ def run_load_and_filter(
         plot_utils.umap_plots(
             adata,
             batch_key=cfg.batch_key,
-            figdir=cfg.figdir / "QC_plots",
+            figdir=cfg.figdir / "QC_plots" / "overview",
         )
 
     # ---------------------------------------------------------

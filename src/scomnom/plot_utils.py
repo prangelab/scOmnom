@@ -390,76 +390,6 @@ def plot_elbow_knee(
 
 
 # -------------------------------------------------------------------------
-# Read comparisons
-# -------------------------------------------------------------------------
-def plot_read_comparison(
-    ref_counts: dict,
-    other_counts: dict,
-    ref_label: str,
-    other_label: str,
-    figdir: Path,
-    stem: str,
-):
-    samples = sorted(set(ref_counts) | set(other_counts))
-
-    df = pd.DataFrame(
-        {
-            "sample": samples,
-            ref_label: [ref_counts.get(s, 0) for s in samples],
-            other_label: [other_counts.get(s, 0) for s in samples],
-        }
-    )
-
-    x = np.arange(len(samples))
-    width = 0.42
-
-    fig, ax = plt.subplots(figsize=(max(6, len(samples) * 0.7), 5))
-    _clean_axes(ax)
-
-    ax.bar(
-        x - width / 2,
-        df[ref_label],
-        width,
-        label=ref_label,
-        alpha=0.85,
-        color="#999999",
-    )
-
-    other_bar = ax.bar(
-        x + width / 2,
-        df[other_label],
-        width,
-        label=other_label,
-        alpha=0.85,
-        color="steelblue",
-    )
-
-    # annotate % of ref_counts relative to other_counts on other_counts bars
-    for i, rect in enumerate(other_bar):
-        ref = df.loc[i, ref_label]
-        other = df.loc[i, other_label]
-        if other > 0:
-            pct = 100 * other / ref
-            ax.text(
-                rect.get_x() + rect.get_width() / 2,
-                rect.get_height(),
-                f"{pct:.1f}%",
-                ha="center",
-                va="bottom",
-                fontsize=9,
-            )
-
-    ax.set_xticks(x)
-    ax.set_xticklabels(samples, rotation=45, ha="right")
-    ax.set_ylabel("Reads")
-    ax.set_title(f"{other_label} vs {ref_label}")
-    ax.legend(frameon=False)
-
-    fig.tight_layout()
-    save_multi(stem, figdir)
-
-
-# -------------------------------------------------------------------------
 # Final cell-counts plot
 # -------------------------------------------------------------------------
 def plot_final_cell_counts(adata, cfg) -> None:
@@ -1126,7 +1056,6 @@ def doublet_plots(
         mode,
         "none" if threshold is None else f"{threshold:.3f}",
     )
-
 
 
 def umap_plots(
