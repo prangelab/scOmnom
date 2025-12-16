@@ -686,28 +686,23 @@ def run_load_and_filter(
         # ---------------------------------------------------------
         # Merge filtered samples into a single AnnData
         # ---------------------------------------------------------
-        tmp_dir = cfg.output_dir / "tmp_merge_load_and_filter"
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-        merge_out = tmp_dir / "merged.filtered.zarr"
+        if cfg.cellbender_dir is not None:
+            input_layer_name = "counts_cb"
+        else:
+            input_layer_name = "counts_raw"
 
         LOGGER.info("Merging filtered samples into a single AnnData...")
         adata = io_utils.merge_samples(
             filtered_sample_map,
             batch_key=cfg.batch_key,
-            out_path=merge_out,
+            input_layer_name = input_layer_name,
         )
+
         LOGGER.info(
             "Merged filtered dataset: %d cells × %d genes",
             adata.n_obs,
             adata.n_vars,
         )
-
-        # ---------------------------------------------------------
-        # Preserve raw counts explicitly for SOLO
-        # ---------------------------------------------------------
-        if "counts_raw" not in adata.layers:
-            LOGGER.info("Storing raw counts in adata.layers['counts_raw']")
-            adata.layers["counts_raw"] = adata.X.copy()
 
         # ---------------------------------------------------------
         # Attach per-sample metadata
@@ -748,6 +743,8 @@ def run_load_and_filter(
 
     # Here 'normal mode' and 'only apply doublet filter' merge again
     if cfg.make_figures:
+        adata.uns["doublet_threshold"] = infer_doublet_threshold(adata)
+        adata.uns["doublet_mode"] = cfg.doublet_mode
         plot_utils.doublet_plots(
             adata,
             batch_key=cfg.batch_key,
@@ -808,14 +805,6 @@ def run_load_and_filter(
         out_h5ad = cfg.output_dir / "adata.filtered.h5ad"
         LOGGER.warning("Writing H5AD copy (loads data into RAM).")
         io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
-
-    # Cleanup tmp merge dir
-    try:
-        import shutil
-        LOGGER.info("Removing temp dir %s", tmp_dir)
-        shutil.rmtree(tmp_dir)
-    except Exception as e:
-        LOGGER.warning("Could not remove temp merge directory %s: %s", tmp_dir, e)
 
     LOGGER.info("Finished load-and-filter")
     return adata

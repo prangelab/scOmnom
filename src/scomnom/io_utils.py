@@ -432,144 +432,6 @@ def load_raw_with_cellbender_barcodes(
     return out, read_counts
 
 
-def load_cellbender_filtered_layer(
-    cfg: LoadAndFilterConfig,
-    adata: ad.AnnData,
-) -> ad.AnnData:
-    """
-    Load CellBender-denoised counts and attach as `adata.layers["counts_cb"]`.
-
-    Alignment rules (FINAL):
-    - Cells: aligned by sample-prefixed barcode: {sample}::{barcode}
-    - Genes: aligned STRICTLY by gene symbols (adata.var_names)
-    - gene_ids are preserved in adata.var but NEVER used for alignment
-    """
-
-    import scanpy as sc
-    import numpy as np
-    import pandas as pd
-    import anndata as ad
-
-    # ------------------------------------------------------------------
-    # Preconditions
-    # ------------------------------------------------------------------
-    required_obs = {"barcode", cfg.batch_key}
-    if not required_obs.issubset(adata.obs.columns):
-        raise RuntimeError(
-            f"adata.obs must contain {required_obs}, found {list(adata.obs.columns)}"
-        )
-
-    if not adata.var_names.is_unique:
-        raise RuntimeError("adata.var_names must be unique for CellBender alignment")
-
-    if "gene_ids" not in adata.var.columns:
-        raise RuntimeError(
-            "adata.var is missing 'gene_ids'. "
-            "They must be preserved from raw input, but are not used for alignment."
-        )
-
-    # Build global cell key
-    adata_cell_key = (
-        adata.obs[cfg.batch_key].astype(str)
-        + "::"
-        + adata.obs["barcode"].astype(str)
-    )
-    adata_cell_key = pd.Index(adata_cell_key)
-
-    # ------------------------------------------------------------------
-    # Locate CellBender outputs
-    # ------------------------------------------------------------------
-    cb_dirs = {}
-    for sample in adata.obs[cfg.batch_key].unique():
-        cb_path = cfg.cellbender_dir / f"{sample}{cfg.cellbender_pattern.lstrip('*')}"
-        if not cb_path.exists():
-            raise RuntimeError(
-                f"Missing CellBender output for sample {sample}: {cb_path}"
-            )
-        cb_dirs[sample] = cb_path
-
-    cb_layers = []
-
-    # ------------------------------------------------------------------
-    # Load per-sample CellBender outputs
-    # ------------------------------------------------------------------
-    for sample, cb_path in cb_dirs.items():
-        h5 = cb_path / f"{sample}{cfg.cellbender_h5_suffix}"
-        if not h5.exists():
-            raise RuntimeError(f"Missing CellBender H5 file: {h5}")
-
-        cb = sc.read_10x_h5(h5)
-
-        # We align by gene SYMBOLS → var_names
-        cb.var_names_make_unique()
-        cb.var_names = cb.var_names.astype(str)
-
-        # Attach sample + barcode metadata
-        cb.obs["barcode"] = cb.obs_names.astype(str)
-        cb.obs[cfg.batch_key] = sample
-        cb.obs["_cb_key"] = sample + "::" + cb.obs["barcode"]
-
-        cb_layers.append(cb)
-
-    # ------------------------------------------------------------------
-    # Concatenate all CellBender layers (union gene space)
-    # ------------------------------------------------------------------
-    cb_all = ad.concat(
-        cb_layers,
-        join="outer",
-        axis=0,
-        label=cfg.batch_key,
-        fill_value=0,
-    )
-
-    # ------------------------------------------------------------------
-    # Cell alignment
-    # ------------------------------------------------------------------
-    cb_all.obs["_cb_key"] = cb_all.obs["_cb_key"].astype(str)
-    cb_cell_key = pd.Index(cb_all.obs["_cb_key"])
-
-    missing_cells = adata_cell_key.difference(cb_cell_key)
-    if len(missing_cells) > 0:
-        raise RuntimeError(
-            f"{len(missing_cells)} cells present in adata but missing in CellBender output"
-        )
-
-    # Reorder CB to adata cell order
-    cb_all = cb_all[cb_cell_key.get_indexer(adata_cell_key), :]
-
-    # ------------------------------------------------------------------
-    # Gene alignment (BY SYMBOLS ONLY)
-    # ------------------------------------------------------------------
-    cb_genes = cb_all.var_names
-    adata_genes = adata.var_names
-
-    missing_genes = adata_genes.difference(cb_genes)
-    if len(missing_genes) > 0:
-        raise RuntimeError(
-            f"CellBender output missing {len(missing_genes)} genes present in adata "
-            f"(example: {missing_genes[:5].tolist()})"
-        )
-
-    # Reorder CB genes to adata gene order
-    cb_all = cb_all[:, adata_genes]
-
-    # ------------------------------------------------------------------
-    # Final safety checks
-    # ------------------------------------------------------------------
-    if cb_all.n_obs != adata.n_obs:
-        raise RuntimeError("Cell count mismatch after CellBender alignment")
-
-    if not np.array_equal(cb_all.var_names.values, adata.var_names.values):
-        raise RuntimeError("Gene symbol order mismatch after CellBender alignment")
-
-    # ------------------------------------------------------------------
-    # Attach layer
-    # ------------------------------------------------------------------
-    adata.layers["counts_cb"] = cb_all.X.copy()
-
-    return adata
-
-
 def load_cellbender_filtered_data(
     cfg: LoadAndQCConfig,
 ) -> tuple[Dict[str, ad.AnnData], Dict[str, float]]:
@@ -742,6 +604,7 @@ def _prepare_sample_for_merge(
     union_genes: list[str],
     out_dir: Path,
     batch_key: str,
+    input_layer_name: str,
 ) -> Path:
     import numpy as np
     import scipy.sparse as sp
@@ -785,11 +648,13 @@ def _prepare_sample_for_merge(
     # ------------------------------------------------------------------
     # Build padded AnnData
     # ------------------------------------------------------------------
+    layers = {input_layer_name: X_padded.copy()}
+
     a = ad.AnnData(
         X=X_padded,
         obs=adata.obs.copy(),
         var=var,
-        layers={"counts_raw": X_padded.copy()},
+        layers=layers,
     )
 
     a.obs[batch_key] = sample_name
@@ -846,7 +711,7 @@ def _merge_filtered_zarr_simple(padded_dirs: List[Path]) -> ad.AnnData:
 def merge_samples(
     sample_map: Dict[str, ad.AnnData],
     batch_key: str,
-    out_path: Path,
+    input_layer_name: str,
 ) -> ad.AnnData:
     """
     Memory-safe union-gene merge using disk-backed padded Zarr intermediates.
@@ -855,8 +720,6 @@ def merge_samples(
       1. Compute union gene list across samples.
       2. Pad each sample to the union gene space → <sample>.padded.zarr.
       3. Sequential in-memory merge using ad.concat (reliable + fast).
-      4. DO NOT write output Zarr here.
-         The caller (orchestrator) decides where/when to save.
       5. Temporary padded files are cleaned up automatically.
 
     Returns
@@ -900,6 +763,7 @@ def merge_samples(
             union_genes=union_genes,
             out_dir=padded_dir,
             batch_key=batch_key,
+            input_layer_name=input_layer_name,
         )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:

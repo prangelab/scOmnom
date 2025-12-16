@@ -41,7 +41,7 @@ class LoadAndFilterConfig(BaseModel):
     raw_pattern: str = "*.raw_feature_bc_matrix"
     filtered_pattern: str = "*.filtered_feature_bc_matrix"
     cellbender_pattern: str = "*.cellbender_filtered.output"
-    cellbender_h5_suffix: str = ".cellbender_out.h5"
+    cellbender_h5_suffix: str = ".cellbender_out_filtered.h5"
     cellbender_barcode_suffix: str = Field(
         ".cellbender_out_cell_barcodes.csv",
         description="Suffix for CellBender barcode file "

@@ -573,8 +573,8 @@ def run_qc_plots_postfilter(adata, cfg):
         finally:
             # Restore exact original state
             adata.X = X_backup
-            adata.obs = obs_backup
-            adata.var = var_backup
+            adata.obs = obs_backup.copy()
+            adata.var = var_backup.copy()
 
             if qc_uns_backup is None:
                 adata.uns.pop("qc_metrics", None)
