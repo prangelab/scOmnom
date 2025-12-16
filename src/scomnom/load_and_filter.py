@@ -624,18 +624,23 @@ def run_load_and_filter(
 
     # If we are only applying a different doublet filter:
     if cfg.apply_doublet_score is not None:
+        from .io_utils import load_dataset
+
         LOGGER.info(
             "Resuming from pre-doublet AnnData: %s",
             cfg.apply_doublet_score,
         )
-        adata = ad.read(cfg.apply_doublet_score)
 
-        # sanity
+        adata = load_dataset(cfg.apply_doublet_score)
+
+        # sanity check: SOLO must already have been run
         required = {"doublet_score", "predicted_doublet"}
-        if not required.issubset(adata.obs.columns):
+        missing = required.difference(adata.obs.columns)
+        if missing:
             raise RuntimeError(
-                "apply-doublet-score input is missing SOLO results"
+                f"apply-doublet-score input is missing required SOLO fields: {missing}"
             )
+
     # If we are running normally:
     else:
         # Infer batch key from metadata if needed

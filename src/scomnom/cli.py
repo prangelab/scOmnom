@@ -218,9 +218,13 @@ def load_and_filter(
     apply_doublet_score: Optional[Path] = typer.Option(
         None,
         "--apply-doublet-score",
-        help="Reuse a filtered AnnData with SOLO scores (.zarr or .h5ad) and only apply "
-             "doublet thresholding + QC plots.",
+        help=(
+                "Reuse a filtered AnnData with SOLO scores (.zarr or .h5ad). "
+                "If provided without a path, defaults to <out>/adata.merged.zarr."
+        ),
+        flag_value=Path("__AUTO__"),
     ),
+
 
     # -------------------------------------------------------------
     # Figures
@@ -258,6 +262,23 @@ def load_and_filter(
     init_logging(logfile)
     logging.getLogger(__name__).info("Logging initialized")
     logging.getLogger("scomnom.load_and_filter").info("load_and_filter logger active")
+
+    # -------------------------------------------------------------
+    # Resolve implicit apply-doublet-score path
+    # -------------------------------------------------------------
+    if apply_doublet_score == Path("__AUTO__"):
+        candidate_zarr = output_dir / "adata.merged.zarr"
+        candidate_h5ad = output_dir / "adata.merged.h5ad"
+
+        if candidate_zarr.exists():
+            apply_doublet_score = candidate_zarr
+        elif candidate_h5ad.exists():
+            apply_doublet_score = candidate_h5ad
+        else:
+            raise typer.BadParameter(
+                "Could not find adata.merged.zarr or adata.merged.h5ad in output directory "
+                f"({output_dir}). Please provide --apply-doublet-score <path> explicitly."
+            )
 
     cfg = LoadAndFilterConfig(
         raw_sample_dir=raw_sample_dir,
