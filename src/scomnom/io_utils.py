@@ -694,8 +694,21 @@ def attach_raw_counts_postfilter(
     )
 
     # Reorder cells
-    raw_all.obs["_raw_key"] = raw_all.obs["_raw_key"].astype(str)
-    raw_all = raw_all[cell_key, :]
+    cell_key = adata.obs["sample_id"].astype(str) + "::" + adata.obs["barcode"].astype(str)
+
+    # raw side: construct matching composite key
+    raw_all.obs["_cell_key"] = (
+            raw_all.obs["sample_id"].astype(str)
+            + "::"
+            + raw_all.obs["barcode"].astype(str)
+    )
+
+    # make it the index (must be unique!)
+    raw_all.obs_names = raw_all.obs["_cell_key"].values
+    raw_all.obs_names_make_unique()
+
+    # now this is safe
+    raw_all = raw_all[cell_key.values, :]
 
     # Reorder genes (STRICT by symbols)
     missing = adata.var_names.difference(raw_all.var_names)
