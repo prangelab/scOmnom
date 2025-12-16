@@ -540,7 +540,7 @@ def run_qc_plots_postfilter(adata, cfg):
     QC metrics are computed transiently per pass to avoid overwriting.
     """
     from scanpy import settings as sc_settings
-    import copy
+    from .load_and_filter import compute_qc_metrics
 
     if not cfg.make_figures:
         return
