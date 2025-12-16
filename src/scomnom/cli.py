@@ -245,7 +245,7 @@ def load_and_filter(
     raw_pattern: str = typer.Option("*.raw_feature_bc_matrix"),
     filtered_pattern: str = typer.Option("*.filtered_feature_bc_matrix"),
     cellbender_pattern: str = typer.Option("*.cellbender_filtered.output"),
-    cellbender_h5_suffix: str = typer.Option(".cellbender_out.h5"),
+    cellbender_h5_suffix: str = typer.Option(".cellbender_out_filtered.h5"),
     cellbender_barcode_suffix: str = typer.Option(
         ".cellbender_out_cell_barcodes.csv",
         "--cellbender-barcode-suffix",
