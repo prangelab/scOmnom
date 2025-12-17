@@ -375,7 +375,8 @@ def sparse_filter_cells_and_genes(
     # --------------------------------------------------
     # QC logging helpers
     # --------------------------------------------------
-    qc_rows: list[dict] = []
+    if qc_rows is None:
+        qc_rows = []
 
     def _log_cell_filter(
         *,
