@@ -955,12 +955,7 @@ def plot_qc_filter_stack(
     ax.set_xticklabels(plot_df.index, rotation=45, ha="right")
 
     fig.tight_layout()
-    figdir = Path(figdir)
-    figdir.mkdir(parents=True, exist_ok=True)
-
-    for ext in ("png", "pdf"):
-        fig.savefig(figdir / f"{fname}.{ext}", dpi=300)
-
+    save_multi("QC Filter effects", figdir, fig)
     plt.close(fig)
 
 
