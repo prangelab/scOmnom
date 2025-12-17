@@ -1013,6 +1013,10 @@ def run_load_and_filter(
         if "barcode" not in adata.obs:
             adata.obs["barcode"] = adata.obs_names.astype(str)
 
+        # Write QC fitlers
+        if qc_filter_rows:
+            adata.uns["qc_filter_stats"] = pd.DataFrame(qc_filter_rows)
+
         # ---------------------------------------------------------
         # SOLO doublet detection (GLOBAL, RAW COUNTS)
         # ---------------------------------------------------------
@@ -1056,10 +1060,6 @@ def run_load_and_filter(
         min_cells_per_sample=cfg.min_cells_per_sample,
         expected_doublet_rate=cfg.expected_doublet_rate,
     )
-
-    # Write QC fitlers
-    if qc_filter_rows:
-        adata.uns["qc_filter_stats"] = pd.DataFrame(qc_filter_rows)
 
     qc_stats_path = cfg.output_dir / "qc_filter_stats.tsv"
     write_qc_filter_stats(adata, out_path=qc_stats_path)
