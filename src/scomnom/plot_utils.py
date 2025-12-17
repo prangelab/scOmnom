@@ -856,33 +856,33 @@ def plot_cellbender_effects(
     LOGGER.info("Generated CellBender effect QC plots.")
 
 
-# --------------------------------------------------
-# 2. Per-sample inferred doublet score threshold
-# --------------------------------------------------
-thr_series = (
-    adata.obs[batch_key]
-    .map(thresholds)
-    .dropna()
-    .groupby(adata.obs[batch_key], observed=True)
-    .first()
-    .sort_values(ascending=False)
-)
+    # --------------------------------------------------
+    # 2. Per-sample inferred doublet score threshold
+    # --------------------------------------------------
+    thr_series = (
+        adata.obs[batch_key]
+        .map(thresholds)
+        .dropna()
+        .groupby(adata.obs[batch_key], observed=True)
+        .first()
+        .sort_values(ascending=False)
+    )
 
-fig, ax = plt.subplots(figsize=(max(6, 0.5 * len(thr_series)), 4))
+    fig, ax = plt.subplots(figsize=(max(6, 0.5 * len(thr_series)), 4))
 
-thr_series.plot.bar(
-    ax=ax,
-    color="firebrick",
-    edgecolor="black",
-)
+    thr_series.plot.bar(
+        ax=ax,
+        color="firebrick",
+        edgecolor="black",
+    )
 
-ax.set_ylabel("Doublet score threshold")
-ax.set_xlabel("sample_id")
-ax.set_title("Inferred doublet score threshold per sample")
-plt.xticks(rotation=45, ha="right")
-fig.tight_layout()
-save_multi("doublet_score_threshold_per_sample", figdir, fig)
-plt.close(fig)
+    ax.set_ylabel("Doublet score threshold")
+    ax.set_xlabel("sample_id")
+    ax.set_title("Inferred doublet score threshold per sample")
+    plt.xticks(rotation=45, ha="right")
+    fig.tight_layout()
+    save_multi("doublet_score_threshold_per_sample", figdir, fig)
+    plt.close(fig)
 
 
 def umap_plots(
