@@ -948,6 +948,7 @@ def doublet_plots(
         .sort_values(ascending=False)
     )
 
+    thr_series = thr_series.astype(float)
     fig, ax = plt.subplots(figsize=(max(6, 0.5 * len(thr_series)), 4))
 
     thr_series.plot.bar(
