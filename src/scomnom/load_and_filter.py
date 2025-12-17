@@ -488,11 +488,22 @@ def cleanup_after_solo(
             f"Available columns: {list(adata.obs.columns)}"
         )
 
+    # -------------------------------
+    # Doublet removal
+    # -------------------------------
     if "predicted_doublet" in adata.obs:
-        n0 = adata.n_obs
+        n_before = adata.n_obs  # NEW
         adata = adata[~adata.obs["predicted_doublet"].astype(bool)].copy()
-        LOGGER.info("Removed doublets: kept %d / %d", adata.n_obs, n0)
+        n_after = adata.n_obs   # NEW
 
+        LOGGER.info("Removed doublets: kept %d / %d", n_after, n_before)
+
+        # Store for logging after threshold inference
+        adata.uns["_n_cells_pre_doublet"] = n_before  # NEW
+
+    # -------------------------------
+    # Per-sample min cell filtering
+    # -------------------------------
     if min_cells_per_sample > 0:
         vc = adata.obs[batch_key].value_counts()
         small = vc[vc < min_cells_per_sample].index
@@ -507,8 +518,22 @@ def cleanup_after_solo(
                 n0,
             )
 
-    adata.uns["doublet_threshold"] = infer_doublet_threshold(adata)
+    # -------------------------------
+    # Finalize + log summary
+    # -------------------------------
+    inferred_thresh = infer_doublet_threshold(adata)
+    adata.uns["doublet_threshold"] = inferred_thresh
     adata.uns["doublet_mode"] = doublet_mode
+
+    n_before = adata.uns.pop("_n_cells_pre_doublet", None)  # NEW
+    if n_before is not None:
+        _log_doublet_cleanup(
+            n_before=n_before,
+            n_after=adata.n_obs,
+            doublet_mode=doublet_mode,
+            inferred_threshold=inferred_thresh,
+            expected_rate=adata.uns.get("expected_doublet_rate"),
+        )
 
     return adata
 
@@ -631,41 +656,43 @@ def cluster_unintegrated(adata: ad.AnnData) -> ad.AnnData:
     return adata
 
 
-def log_doublet_summary(adata: ad.AnnData) -> None:
-    """
-    Log a clear summary of doublet calling, consistent across modes.
-    """
-    if not {"doublet_score", "predicted_doublet"}.issubset(adata.obs.columns):
-        LOGGER.warning("Skipping doublet summary; missing SOLO outputs.")
-        return
+def _log_doublet_cleanup(
+    *,
+    n_before: int,
+    n_after: int,
+    doublet_mode: str,
+    inferred_threshold: float | None,
+    expected_rate: float | None = None,
+):
+    removed = n_before - n_after
+    frac_removed = removed / max(n_before, 1)
 
-    mode = adata.uns.get("doublet_mode")
-    threshold = adata.uns.get("doublet_threshold")
-
-    scores = adata.obs["doublet_score"].to_numpy()
-    mask = adata.obs["predicted_doublet"].astype(bool).to_numpy()
-
-    n = scores.size
-    n_doublets = int(mask.sum())
-    frac = n_doublets / max(n, 1)
-
-    msg = [
-        "SOLO doublet summary:",
-        f"  cells           = {n}",
-        f"  doublets        = {n_doublets} ({frac:.2%})",
-        f"  mode            = {mode}",
+    lines = [
+        "SOLO doublet filtering summary:",
+        f"  cells before = {n_before}",
+        f"  cells after  = {n_after}",
+        f"  removed      = {removed} ({frac_removed:.2%})",
+        f"  mode         = {doublet_mode}",
     ]
 
-    if mode == "rate":
-        expected = adata.uns.get("expected_doublet_rate")
-        msg.append(f"  expected rate   = {expected:.2%}" if expected is not None else "  expected rate   = <unknown>")
-        msg.append(f"  inferred thresh = {threshold:.4f}" if threshold is not None else "  inferred thresh = <none>")
+    if doublet_mode == "rate":
+        if expected_rate is not None:
+            lines.append(f"  expected rate = {expected_rate:.2%}")
+        lines.append(
+            f"  inferred threshold = {inferred_threshold:.4f}"
+            if inferred_threshold is not None
+            else "  inferred threshold = <none>"
+        )
 
-    elif mode == "fixed":
-        msg.append(f"  fixed threshold = {threshold:.4f}" if threshold is not None else "  fixed threshold = <none>")
-        msg.append(f"  observed rate   = {frac:.2%}")
+    elif doublet_mode == "fixed":
+        lines.append(
+            f"  fixed threshold = {inferred_threshold:.4f}"
+            if inferred_threshold is not None
+            else "  fixed threshold = <none>"
+        )
+        lines.append(f"  observed rate = {frac_removed:.2%}")
 
-    LOGGER.info("\n".join(msg))
+    LOGGER.info("\n".join(lines))
 
 
 def run_load_and_filter(
@@ -839,9 +866,6 @@ def run_load_and_filter(
     # Here 'normal mode' and 'only apply doublet filter' merge again
     batch_key = cfg.batch_key or adata.uns.get("batch_key")
     if cfg.make_figures:
-        adata.uns["doublet_threshold"] = infer_doublet_threshold(adata)
-        adata.uns["doublet_mode"] = cfg.doublet_mode
-        log_doublet_summary(adata)
         plot_utils.doublet_plots(
             adata,
             batch_key=batch_key,
