@@ -514,19 +514,17 @@ def call_doublets(
     """
     Call doublets PER SAMPLE using a fixed expected rate.
 
-    Parameters
-    ----------
-    adata
-        AnnData with SOLO scores in `adata.obs[score_key]`
-    batch_key
-        Column in adata.obs defining batches/samples (default: sample_id)
-    expected_doublet_rate
-        Fraction of cells to call as doublets per batch
-    score_key
-        Column containing SOLO doublet scores
-    out_stats
-        Optional path to write per-sample stats TSV
+    Threshold per sample is inferred post-hoc as:
+      min(doublet_score | predicted_doublet == True)
+
+    This value is the canonical decision boundary and is:
+      - written to TSV
+      - stored in adata.uns
+      - used by QC plots / report
     """
+
+    import numpy as np
+    import pandas as pd
 
     if score_key not in adata.obs:
         raise KeyError(f"Missing {score_key!r} in adata.obs")
@@ -537,13 +535,22 @@ def call_doublets(
     if not (0 < expected_doublet_rate < 1):
         raise ValueError("expected_doublet_rate must be in (0, 1)")
 
-    # Initialize output column
+    # --------------------------------------------------
+    # Initialize output
+    # --------------------------------------------------
     adata.obs["predicted_doublet"] = False
 
     stats_rows = []
+    thresholds_per_sample: dict[str, float] = {}
 
-    for batch, idx in adata.obs.groupby(batch_key).groups.items():
-        scores = adata.obs.loc[idx, score_key].values
+    total_cells = 0
+    total_doublets = 0
+
+    # --------------------------------------------------
+    # Per-sample calling
+    # --------------------------------------------------
+    for sample, idx in adata.obs.groupby(batch_key, observed=True).groups.items():
+        scores = adata.obs.loc[idx, score_key].to_numpy()
         n = scores.size
 
         if n == 0:
@@ -560,28 +567,42 @@ def call_doublets(
 
         adata.obs.loc[idx, "predicted_doublet"] = mask
 
-        # Stats for reporting
+        # --- inferred threshold (decision boundary) ---
+        thr = float(scores[selected].min())
+        thresholds_per_sample[sample] = thr
+
+        n_doublets = int(mask.sum())
+
         stats_rows.append(
             {
-                batch_key: batch,
+                batch_key: sample,
                 "n_cells": n,
-                "n_doublets": int(mask.sum()),
-                "doublet_rate_observed": float(mask.mean()),
-                "score_min_called": float(scores[selected].min()),
-                "score_median": float(np.median(scores)),
-                "score_max": float(scores.max()),
+                "n_doublets": n_doublets,
+                "doublet_rate_observed": float(n_doublets / n),
+                "score_threshold_inferred": thr,
             }
         )
 
+        total_cells += n
+        total_doublets += n_doublets
+
+    # --------------------------------------------------
     # Attach metadata to AnnData
+    # --------------------------------------------------
     adata.uns["doublet_calling"] = {
         "method": "rate_per_batch",
         "batch_key": batch_key,
-        "expected_doublet_rate": expected_doublet_rate,
+        "expected_doublet_rate": float(expected_doublet_rate),
         "score_key": score_key,
+        "observed_global_rate": (
+            float(total_doublets / total_cells) if total_cells > 0 else 0.0
+        ),
+        "thresholds_per_sample": thresholds_per_sample,
     }
 
-    # Write stats table
+    # --------------------------------------------------
+    # Write per-sample stats table
+    # --------------------------------------------------
     if out_stats is not None:
         out_stats = Path(out_stats)
         out_stats.parent.mkdir(parents=True, exist_ok=True)
@@ -590,7 +611,7 @@ def call_doublets(
         df.to_csv(out_stats, sep="\t", index=False)
 
         LOGGER.info(
-            "Wrote per-sample doublet statistics to %s (%d batches)",
+            "Wrote per-sample doublet statistics to %s (%d samples)",
             out_stats,
             len(df),
         )
@@ -658,8 +679,6 @@ def pca_neighbors_umap(
     return adata
 
 
-
-
 def cluster_unintegrated(adata: ad.AnnData) -> ad.AnnData:
     sc.tl.leiden(
         adata,
@@ -671,55 +690,6 @@ def cluster_unintegrated(adata: ad.AnnData) -> ad.AnnData:
     )
 
     return adata
-
-
-def _log_doublet_cleanup(
-    *,
-    n_before: int,
-    n_after: int,
-    doublet_mode: str,
-    inferred_threshold: float | None,
-    expected_rate: float | None = None,
-):
-    removed = n_before - n_after
-    frac_removed = removed / max(n_before, 1)
-
-    lines = [
-        "SOLO doublet filtering summary:",
-        f"  cells before = {n_before}",
-        f"  cells after  = {n_after}",
-        f"  removed      = {removed} ({frac_removed:.2%})",
-        f"  mode         = {doublet_mode}",
-    ]
-
-    if doublet_mode == "rate":
-        # runtime intent
-        if expected_rate is not None:
-            lines.append(f"  expected rate (config) = {expected_rate:.2%}")
-
-        # outcome always known
-        lines.append(f"  observed rate (data)   = {frac_removed:.2%}")
-
-        # threshold is secondary / diagnostic
-        if inferred_threshold is not None:
-            lines.append(f"  inferred threshold     = {inferred_threshold:.4f}")
-        else:
-            lines.append("  inferred threshold     = <not computed>")
-
-    elif doublet_mode == "fixed":
-        if inferred_threshold is not None:
-            lines.append(f"  fixed threshold        = {inferred_threshold:.4f}")
-        else:
-            lines.append("  fixed threshold        = <none>")
-
-        lines.append(f"  observed rate (data)   = {frac_removed:.2%}")
-
-    else:
-        # future-proofing (e.g. gmm)
-        lines.append(f"  observed rate (data)   = {frac_removed:.2%}")
-
-    LOGGER.info("\n".join(lines))
-
 
 
 def run_load_and_filter(

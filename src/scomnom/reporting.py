@@ -339,10 +339,9 @@ def _collect_qc_summary(adata) -> dict:
         "n_genes": int(adata.n_vars),
     }
 
-    if "predicted_doublet" in obs:
-        summary["doublet_observed_rate"] = float(
-            obs["predicted_doublet"].astype(bool).mean()
-        )
+    info = adata.uns.get("doublet_calling")
+    if info is not None:
+        summary["doublet_observed_rate"] = info.get("observed_global_rate")
 
     for col in [
         "total_counts",
