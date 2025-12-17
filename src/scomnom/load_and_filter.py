@@ -874,6 +874,8 @@ def run_load_and_filter(
     # Configure Scanpy/Matplotlib figure behavior + formats
     plot_utils.setup_scanpy_figs(cfg.figdir, cfg.figure_formats)
 
+    qc_filter_rows: list[dict] = []
+
     # If we are only applying a different doublet filter:
     if cfg.apply_doublet_score is True:
 
@@ -968,7 +970,6 @@ def run_load_and_filter(
         # Per-sample QC + sparse filtering (OOM-safe)
         # ---------------------------------------------------------
         LOGGER.info("Running per-sample QC and filtering...")
-        qc_filter_rows: list[dict] = []
         filtered_sample_map, qc_df = _per_sample_qc_and_filter(sample_map, cfg, qc_filter_rows)
 
         # ---------------------------------------------------------
