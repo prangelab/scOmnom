@@ -800,18 +800,19 @@ def run_load_and_filter(
         LOGGER.info("Saved pre-doublet filter AnnData → %s", pre_path)
 
     # Here 'normal mode' and 'only apply doublet filter' merge again
+    batch_key = cfg.batch_key or adata.uns.get("batch_key")
     if cfg.make_figures:
         adata.uns["doublet_threshold"] = infer_doublet_threshold(adata)
         adata.uns["doublet_mode"] = cfg.doublet_mode
         plot_utils.doublet_plots(
             adata,
-            batch_key=cfg.batch_key,
+            batch_key=batch_key,
             figdir=cfg.figdir / "QC_plots" / "doublets",
         )
 
     adata = cleanup_after_solo(
         adata,
-        batch_key=cfg.batch_key,
+        batch_key=batch_key,
         min_cells_per_sample=cfg.min_cells_per_sample,
         doublet_mode=cfg.doublet_mode
     )
@@ -838,7 +839,7 @@ def run_load_and_filter(
         plot_utils.run_qc_plots_postfilter(adata, cfg)
         plot_utils.plot_cellbender_effects(
             adata,
-            batch_key=cfg.batch_key,
+            batch_key=batch_key,
             figdir=cfg.figdir / "QC_plots",
         )
 
@@ -854,7 +855,7 @@ def run_load_and_filter(
     if cfg.make_figures:
         plot_utils.umap_plots(
             adata,
-            batch_key=cfg.batch_key,
+            batch_key=batch_key,
             figdir=cfg.figdir / "QC_plots" / "overview",
         )
 
