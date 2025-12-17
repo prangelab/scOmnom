@@ -656,6 +656,14 @@ def run_load_and_filter(
                 f"apply-doublet-score input is missing required SOLO fields: {missing}"
             )
 
+        if cfg.apply_doublet_score:
+            if cfg.raw_sample_dir is None:
+                LOGGER.info(
+                    "Resume mode without raw_sample_dir: "
+                    "raw-based QC and CellBender comparison plots will be skipped."
+                )
+
+
     # If we are running normally:
     else:
         # Infer batch key from metadata if needed
@@ -811,7 +819,7 @@ def run_load_and_filter(
     # ---------------------------------------------------------
     # Attach Raw counts if available
     # ---------------------------------------------------------
-    if cfg.cellbender_dir is not None and cfg.raw_sample_dir is not None:
+    if cfg.raw_sample_dir is not None and "counts_raw" not in adata.layers:
         adata = io_utils.attach_raw_counts_postfilter(cfg, adata)
 
     adata.obs_names_make_unique()

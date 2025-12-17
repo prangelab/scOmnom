@@ -544,14 +544,12 @@ def run_qc_plots_postfilter(adata, cfg):
         # --------------------------------------------------------------
         # 1. Raw counts QC (canonical)
         # --------------------------------------------------------------
-        if "counts_raw" not in adata.layers:
-            raise RuntimeError("counts_raw layer missing; cannot run raw QC")
-
-        _run_qc_pass(
-            adata,
-            adata.layers["counts_raw"],
-            label="raw",
-        )
+        if "counts_raw" in adata.layers:
+            _run_qc_pass(
+                adata,
+                adata.layers["counts_raw"],
+                label="raw",
+            )
 
         # --------------------------------------------------------------
         # 2. CellBender QC (diagnostic)
