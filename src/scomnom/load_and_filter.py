@@ -451,7 +451,6 @@ def cleanup_after_solo(
     adata: ad.AnnData,
     batch_key: str,
     min_cells_per_sample: int,
-    doublet_mode: Literal["fixed", "rate", "gmm"],
     *,
     expected_doublet_rate: float | None = None,
 ) -> ad.AnnData:
@@ -471,24 +470,9 @@ def cleanup_after_solo(
             f"Available columns: {list(adata.obs.columns)}"
         )
 
-    # -------------------------------------------------
-    # Doublet removal + logging
-    # -------------------------------------------------
-    n_before = adata.n_obs
-
     if "predicted_doublet" in adata.obs:
         adata = adata[~adata.obs["predicted_doublet"].astype(bool)].copy()
 
-    n_after = adata.n_obs
-
-    if n_after != n_before:
-        _log_doublet_cleanup(
-            n_before=n_before,
-            n_after=n_after,
-            doublet_mode=doublet_mode,
-            inferred_threshold=adata.uns.get("doublet_threshold"),
-            expected_rate=expected_doublet_rate if doublet_mode == "rate" else None,
-        )
 
     # -------------------------------------------------
     # Min-cells-per-sample filtering
@@ -506,9 +490,6 @@ def cleanup_after_solo(
                 adata.n_obs,
                 n0,
             )
-
-    # Persist for downstream plotting / resume
-    adata.uns["doublet_mode"] = doublet_mode
 
     return adata
 
@@ -953,10 +934,7 @@ def run_load_and_filter(
         adata,
         batch_key=batch_key,
         min_cells_per_sample=cfg.min_cells_per_sample,
-        doublet_mode=cfg.doublet_mode,
-        expected_doublet_rate=cfg.expected_doublet_rate
-        if cfg.doublet_mode == "rate"
-        else None,
+        expected_doublet_rate=cfg.expected_doublet_rate,
     )
 
     # ---------------------------------------------------------
