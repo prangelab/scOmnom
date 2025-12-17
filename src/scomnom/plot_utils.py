@@ -163,9 +163,9 @@ def _sorted_resolutions(resolutions: Iterable[float | str]) -> list[float]:
 
 
 def _extract_series(
-    resolutions: Sequence[float | str],
-    values: Mapping[str, Any],
-    default: float = np.nan,
+        resolutions: Sequence[float | str],
+        values: Mapping[str, Any],
+        default: float = np.nan,
 ) -> np.ndarray:
     """
     Given resolutions and a mapping keyed by canonical '%.3f' strings,
@@ -224,15 +224,15 @@ def _plateau_spans(plateaus: Sequence[Mapping[str, object]]) -> list[tuple[float
 # SCANPY WRAPPERS (QC)
 # -------------------------------------------------------------------------
 def _violin_with_points(
-    adata: ad.AnnData,
-    metric: str,
-    *,
-    groupby: str,
-    horizontal: bool,
-    ax=None,
-    point_alpha: float = 0.08,
-    point_size: float = 3.0,
-    max_points: int | None = None,
+        adata: ad.AnnData,
+        metric: str,
+        *,
+        groupby: str,
+        horizontal: bool,
+        ax=None,
+        point_alpha: float = 0.08,
+        point_size: float = 3.0,
+        max_points: int | None = None,
 ):
     """
     Draw per-cell scatter points BEHIND a Scanpy violin plot.
@@ -291,20 +291,20 @@ def _violin_with_points(
 
 
 def qc_scatter(adata, groupby: str, cfg):
-  figdir = "QC_plots" / "qc_scatter"
+    figdir = "QC_plots" / "qc_scatter"
 
-  sc.pl.scatter(
-      adata,
-      x="total_counts",
-      y="n_genes_by_counts",
-      color="pct_counts_mt",
-      show=False,
-  )
-  save_multi("QC_scatter_mt", figdir)
+    sc.pl.scatter(
+        adata,
+        x="total_counts",
+        y="n_genes_by_counts",
+        color="pct_counts_mt",
+        show=False,
+    )
+    save_multi("QC_scatter_mt", figdir)
 
 
 def hvgs_and_pca_plots(adata, max_pcs_plot: int, cfg):
-  figdir = "QC_plots" / "overview"
+    figdir = "QC_plots" / "overview"
 
     sc.pl.highly_variable_genes(adata, show=False)
     save_multi("QC_highly_variable_genes", figdir)
@@ -348,10 +348,10 @@ def umap_by(adata, keys, figdir: Path | None = None, stem: str | None = None):
 # Cell-calling elbow/knee plot
 # -------------------------------------------------------------------------
 def plot_elbow_knee(
-    adata,
-    figpath_stem: str,
-    figdir: Path,
-    title: str = "Barcode Rank UMI Knee Plot",
+        adata,
+        figpath_stem: str,
+        figdir: Path,
+        title: str = "Barcode Rank UMI Knee Plot",
 ):
     from kneed import KneeLocator
 
@@ -465,9 +465,6 @@ def run_qc_plots_pre_filter_df(qc_df: pd.DataFrame, cfg) -> None:
     if not cfg.make_figures:
         return
 
-    figdir_qc = ROOT_FIGDIR / "QC_plots"
-    figdir_qc.mkdir(parents=True, exist_ok=True)
-
     qc_df = qc_df.copy()
     qc_df.index = qc_df.index.astype(str)
 
@@ -563,8 +560,7 @@ def plot_hist_total_counts(adata, cfg, stage: str):
     if not cfg.make_figures:
         return
 
-    figdir_qc = ROOT_FIGDIR / "QC_plots" / "qc_metrics"
-    figdir_qc.mkdir(parents=True, exist_ok=True)
+    figdir_qc = "QC_plots" / "qc_metrics"
 
     plt.figure(figsize=(6, 4))
     sns.histplot(
@@ -592,8 +588,7 @@ def plot_hist_n_genes(adata, cfg, stage: str):
     if not cfg.make_figures:
         return
 
-    figdir_qc = ROOT_FIGDIR / "QC_plots" / "qc_metrics"
-    figdir_qc.mkdir(parents=True, exist_ok=True)
+    figdir_qc = "QC_plots" / "qc_metrics"
 
     plt.figure(figsize=(6, 4))
     sns.histplot(
@@ -633,8 +628,7 @@ def qc_violin_panels(adata, cfg, stage: str):
         LOGGER.warning("batch_key '%s' missing in adata.obs; skipping QC violin panels", batch_key)
         return
 
-    figdir_qc = ROOT_FIGDIR / "QC_plots" / "qc_metrics"
-    figdir_qc.mkdir(parents=True, exist_ok=True)
+    figdir_qc = "QC_plots" / "qc_metrics"
 
     # Decide layout
     n_samples = adata.obs[batch_key].nunique()
@@ -695,38 +689,38 @@ def qc_scatter_panels(adata, cfg, stage: str):
     if not cfg.make_figures:
         return
 
-  figdir = "QC_plots" / "qc_scatter"
+figdir = "QC_plots" / "qc_scatter"
 
-    # --------------------------------------------------------------
-    # Scatter 1: Complexity plot (colored by mt%)
-    # --------------------------------------------------------------
-    sc.pl.scatter(
-        adata,
-        x="total_counts",
-        y="n_genes_by_counts",
-        color="pct_counts_mt",
-        show=False,
-    )
-    save_multi(f"QC_complexity_{stage}", figdir)
-    plt.close()
+# --------------------------------------------------------------
+# Scatter 1: Complexity plot (colored by mt%)
+# --------------------------------------------------------------
+sc.pl.scatter(
+    adata,
+    x="total_counts",
+    y="n_genes_by_counts",
+    color="pct_counts_mt",
+    show=False,
+)
+save_multi(f"QC_complexity_{stage}", figdir)
+plt.close()
 
-    # --------------------------------------------------------------
-    # Scatter 2: total_counts vs pct_counts_mt
-    # --------------------------------------------------------------
-    sc.pl.scatter(
-        adata,
-        x="total_counts",
-        y="pct_counts_mt",
-        show=False,
-    )
-    save_multi(f"QC_scatter_mt_{stage}", figdir)
-    plt.close()
+# --------------------------------------------------------------
+# Scatter 2: total_counts vs pct_counts_mt
+# --------------------------------------------------------------
+sc.pl.scatter(
+    adata,
+    x="total_counts",
+    y="pct_counts_mt",
+    show=False,
+)
+save_multi(f"QC_scatter_mt_{stage}", figdir)
+plt.close()
 
 def plot_cellbender_effects(
-    adata: ad.AnnData,
-    *,
-    batch_key: str | None,
-    figdir: Path,
+        adata: ad.AnnData,
+        *,
+        batch_key: str | None,
+        figdir: Path,
 ) -> None:
     """
     Diagnostic plots comparing raw vs CellBender counts
@@ -881,10 +875,10 @@ def plot_cellbender_effects(
 
 
 def doublet_plots(
-    adata: ad.AnnData,
-    *,
-    batch_key: str,
-    figdir: Path,
+        adata: ad.AnnData,
+        *,
+        batch_key: str,
+        figdir: Path,
 ) -> None:
     """
     SOLO doublet QC plots.
@@ -1030,11 +1024,11 @@ def doublet_plots(
 
 
 def umap_plots(
-    adata: ad.AnnData,
-    *,
-    batch_key: str,
-    figdir: Path,
-    cluster_key: str = "leiden",
+        adata: ad.AnnData,
+        *,
+        batch_key: str,
+        figdir: Path,
+        cluster_key: str = "leiden",
 ) -> None:
     """
     Minimal UMAP plots.
@@ -1188,7 +1182,7 @@ def plot_scib_results_table(scaled: pd.DataFrame, figdir: Path) -> None:
                     va="center",
                     fontsize=9,
                     color=text_color,
-                )
+                    )
             else:
                 ax.scatter(
                     x_coord + 0.5,
@@ -1197,7 +1191,7 @@ def plot_scib_results_table(scaled: pd.DataFrame, figdir: Path) -> None:
                     c=[current_cmap(norm(val))],
                     edgecolor="0.8",
                     linewidth=0.8,
-                )
+                    )
                 text_color = "black" if (0.2 < val < 0.8) else "white"
                 ax.text(
                     x_coord + 0.5,
@@ -1207,7 +1201,7 @@ def plot_scib_results_table(scaled: pd.DataFrame, figdir: Path) -> None:
                     va="center",
                     fontsize=9,
                     color=text_color,
-                )
+                    )
 
     ax.grid(False)
 
@@ -1241,7 +1235,7 @@ def plot_scib_results_table(scaled: pd.DataFrame, figdir: Path) -> None:
             va="center",
             fontsize=10,
             fontweight="bold",
-        )
+            )
 
     if batch_metrics_cur:
         batch_start = len(bio_metrics_cur) + len(middle_metrics_cur)
@@ -1254,7 +1248,7 @@ def plot_scib_results_table(scaled: pd.DataFrame, figdir: Path) -> None:
             va="center",
             fontsize=10,
             fontweight="bold",
-        )
+            )
 
     if agg_metrics:
         agg_center = agg_start + (len(agg_metrics) / 2.0)
@@ -1277,7 +1271,7 @@ def plot_scib_results_table(scaled: pd.DataFrame, figdir: Path) -> None:
             va="bottom",
             fontsize=9,
             rotation=0,
-        )
+            )
 
     for idx, label in enumerate(agg_metrics):
         ax.text(
@@ -1288,7 +1282,7 @@ def plot_scib_results_table(scaled: pd.DataFrame, figdir: Path) -> None:
             va="bottom",
             fontsize=9,
             rotation=0,
-        )
+            )
 
     ax.invert_yaxis()
     ax.set_yticks(np.arange(n_rows) + 0.5)
@@ -1303,11 +1297,11 @@ def plot_scib_results_table(scaled: pd.DataFrame, figdir: Path) -> None:
 # CLUSTERING RESOLUTION / STABILITY PLOTS
 # -------------------------------------------------------------------------
 def plot_clustering_resolution_sweep(
-    resolutions: np.ndarray,
-    silhouette_scores: List[float],
-    n_clusters: List[int],
-    penalized_scores: List[float],
-    figdir: Path,
+        resolutions: np.ndarray,
+        silhouette_scores: List[float],
+        n_clusters: List[int],
+        penalized_scores: List[float],
+        figdir: Path,
 ) -> None:
     """Plot silhouette, #clusters, and penalized score across resolutions."""
     resolutions = np.array([float(r) for r in resolutions], dtype=float)
@@ -1340,8 +1334,8 @@ def plot_clustering_resolution_sweep(
 
 
 def plot_clustering_stability_ari(
-    stability_aris: List[float],
-    figdir: Path,
+        stability_aris: List[float],
+        figdir: Path,
 ) -> None:
     """Line plot of ARI vs repetition for subsampling stability."""
     if not stability_aris:
@@ -1364,10 +1358,10 @@ def plot_clustering_stability_ari(
 
 
 def plot_cluster_umaps(
-    adata,
-    label_key: str,
-    batch_key: str,
-    figdir: Path,
+        adata,
+        label_key: str,
+        batch_key: str,
+        figdir: Path,
 ) -> None:
     """UMAPs colored by cluster and batch for the clustering stage."""
     sc.pl.umap(adata, color=[label_key], show=False)
@@ -1387,13 +1381,13 @@ def plot_cluster_umaps(
 import networkx as nx
 
 def plot_cluster_tree(
-    labels_per_resolution: Mapping[str, np.ndarray],
-    resolutions: Sequence[float | str],
-    figdir: Path | str,
-    best_resolution: float | None = None,
-    palette: list[str] | None = None,
-    min_frac: float = 0.05,
-    stem: str = "cluster_tree",
+        labels_per_resolution: Mapping[str, np.ndarray],
+        resolutions: Sequence[float | str],
+        figdir: Path | str,
+        best_resolution: float | None = None,
+        palette: list[str] | None = None,
+        min_frac: float = 0.05,
+        stem: str = "cluster_tree",
 ) -> None:
     """
     Cluster evolution tree using NetworkX with hierarchical forced layout.
@@ -1639,15 +1633,15 @@ def plot_cluster_tree(
 # Stability curves (silhouette, stability, composite, tiny penalty)
 # ----------------------------------------------------------------------
 def plot_stability_curves(
-    resolutions: Sequence[float | str],
-    silhouette: Mapping[Any, Any],
-    stability: Mapping[Any, Any],
-    composite: Mapping[Any, Any],
-    tiny_cluster_penalty: Mapping[Any, Any],
-    best_resolution: float | str,
-    plateaus: Sequence[Mapping[str, object]] | None,
-    figdir: Path | str,
-    stem: str = "cluster_selection_stability",
+        resolutions: Sequence[float | str],
+        silhouette: Mapping[Any, Any],
+        stability: Mapping[Any, Any],
+        composite: Mapping[Any, Any],
+        tiny_cluster_penalty: Mapping[Any, Any],
+        best_resolution: float | str,
+        plateaus: Sequence[Mapping[str, object]] | None,
+        figdir: Path | str,
+        stem: str = "cluster_selection_stability",
 ) -> None:
     """
     Plot structural + (optionally) biological metrics vs resolution.
@@ -1690,16 +1684,16 @@ def plot_stability_curves(
 
 
 def plot_biological_metrics(
-    resolutions: Sequence[float | str],
-    bio_homogeneity: Mapping[Any, Any],
-    bio_fragmentation: Mapping[Any, Any],
-    bio_ari: Mapping[Any, Any],
-    selection_config: Mapping[str, Any],
-    best_resolution: float | str,
-    plateaus: Sequence[Mapping[str, object]] | None,
-    figdir: Path | str,
-    figure_formats: Sequence[str] = ("png", "pdf"),
-    stem: str = "biological_metrics",
+        resolutions: Sequence[float | str],
+        bio_homogeneity: Mapping[Any, Any],
+        bio_fragmentation: Mapping[Any, Any],
+        bio_ari: Mapping[Any, Any],
+        selection_config: Mapping[str, Any],
+        best_resolution: float | str,
+        plateaus: Sequence[Mapping[str, object]] | None,
+        figdir: Path | str,
+        figure_formats: Sequence[str] = ("png", "pdf"),
+        stem: str = "biological_metrics",
 ) -> None:
     """
     Biological-metrics-focused view:
@@ -1760,14 +1754,14 @@ def plot_biological_metrics(
 
 
 def plot_composite_only(
-    resolutions: Sequence[float | str],
-    structural_comp: Mapping[Any, Any],
-    biological_comp: Mapping[Any, Any] | None,
-    total_comp: Mapping[Any, Any],
-    best_resolution: float | str,
-    plateaus: Sequence[Mapping[str, object]] | None,
-    figdir: Path | str,
-    stem: str = "composite_scores",
+        resolutions: Sequence[float | str],
+        structural_comp: Mapping[Any, Any],
+        biological_comp: Mapping[Any, Any] | None,
+        total_comp: Mapping[Any, Any],
+        best_resolution: float | str,
+        plateaus: Sequence[Mapping[str, object]] | None,
+        figdir: Path | str,
+        stem: str = "composite_scores",
 ) -> None:
     """
     Plot only composite curves:
@@ -1839,15 +1833,15 @@ def plot_composite_only(
 # Plateau highlights
 # ----------------------------------------------------------------------
 def plot_plateau_highlights(
-    resolutions: Sequence[float | str],
-    silhouette: Mapping[Any, Any],
-    stability: Mapping[Any, Any],
-    composite: Mapping[Any, Any],
-    best_resolution: float | str,
-    plateaus: Sequence[Mapping[str, object]] | None,
-    figdir: Path | str,
-    figure_formats: Sequence[str] = ("png", "pdf"),
-    stem: str = "plateau_highlights",
+        resolutions: Sequence[float | str],
+        silhouette: Mapping[Any, Any],
+        stability: Mapping[Any, Any],
+        composite: Mapping[Any, Any],
+        best_resolution: float | str,
+        plateaus: Sequence[Mapping[str, object]] | None,
+        figdir: Path | str,
+        figure_formats: Sequence[str] = ("png", "pdf"),
+        stem: str = "plateau_highlights",
 ) -> None:
     res_sorted = _sorted_resolutions(resolutions)
     sil = _extract_series(res_sorted, silhouette)
@@ -1890,11 +1884,11 @@ def plot_plateau_highlights(
 # -------------------------------------------------------------------------
 
 def plot_cluster_sizes(
-    adata,
-    label_key: str,
-    figdir: Path,
-    tiny_threshold: int = 20,
-    stem: str = "cluster_sizes",
+        adata,
+        label_key: str,
+        figdir: Path,
+        tiny_threshold: int = 20,
+        stem: str = "cluster_sizes",
 ):
     """
     Barplot of cluster sizes (absolute), with % label on each bar.
@@ -1935,7 +1929,7 @@ def plot_cluster_sizes(
             ha="center",
             va="bottom",
             fontsize=8,
-        )
+            )
 
     ax.set_xticks(x)
     ax.set_xticklabels(clusters, rotation=45, ha="right")
@@ -1948,10 +1942,10 @@ def plot_cluster_sizes(
 
 
 def plot_cluster_qc_summary(
-    adata,
-    label_key: str,
-    figdir: Path,
-    stem: str = "cluster_qc_summary",
+        adata,
+        label_key: str,
+        figdir: Path,
+        stem: str = "cluster_qc_summary",
 ):
     """
     Mean QC metrics per cluster:
@@ -1985,11 +1979,11 @@ def plot_cluster_qc_summary(
 
 
 def plot_cluster_silhouette_by_cluster(
-    adata,
-    label_key: str,
-    embedding_key: str,
-    figdir: Path,
-    stem: str = "cluster_silhouette_by_cluster",
+        adata,
+        label_key: str,
+        embedding_key: str,
+        figdir: Path,
+        stem: str = "cluster_silhouette_by_cluster",
 ):
     """
     Violin plot of silhouette values per cluster (true silhouette, not centroid-based).
@@ -2025,11 +2019,11 @@ def plot_cluster_silhouette_by_cluster(
 
 
 def plot_cluster_batch_composition(
-    adata,
-    label_key: str,
-    batch_key: str,
-    figdir: Path,
-    stem: str = "cluster_batch_composition",
+        adata,
+        label_key: str,
+        batch_key: str,
+        figdir: Path,
+        stem: str = "cluster_batch_composition",
 ):
     """
     Stacked barplot showing fraction of each batch within each cluster.
@@ -2068,12 +2062,12 @@ def plot_cluster_batch_composition(
 
 
 def plot_ssgsea_cluster_topn_heatmap(
-    adata: anndata.AnnData,
-    cluster_key: str = "cluster_label",
-    figdir: Path | None = None,
-    n: int = 5,
-    z_score: bool = False,
-    cmap: str = "viridis",
+        adata: anndata.AnnData,
+        cluster_key: str = "cluster_label",
+        figdir: Path | None = None,
+        n: int = 5,
+        z_score: bool = False,
+        cmap: str = "viridis",
 ):
     if figdir is None:
         raise ValueError("figdir must be provided.")
