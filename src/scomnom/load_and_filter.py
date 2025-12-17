@@ -936,7 +936,7 @@ def run_load_and_filter(
         plot_utils.plot_cellbender_effects(
             adata,
             batch_key=batch_key,
-            figdir=Path("QC_plots") / "QC_plots",
+            figdir=Path("QC_plots"),
         )
 
         plot_utils.plot_final_cell_counts(adata, cfg)

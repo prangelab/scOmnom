@@ -724,8 +724,6 @@ def plot_cellbender_effects(
         LOGGER.info("Skipping CellBender effect plots (raw or cb counts missing).")
         return
 
-    figdir = figdir / "cellbender"
-
     X_raw = adata.layers["counts_raw"]
     X_cb = adata.layers["counts_cb"]
 
