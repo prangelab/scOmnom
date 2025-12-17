@@ -783,7 +783,7 @@ def run_load_and_filter(
         adata = io_utils.load_dataset(cfg.apply_doublet_score_path)
 
         # sanity check: SOLO must already have been run
-        required = {"doublet_score", "predicted_doublet"}
+        required = {"doublet_score"}
         missing = required.difference(adata.obs.columns)
         if missing:
             raise RuntimeError(
