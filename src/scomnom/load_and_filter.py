@@ -868,49 +868,6 @@ def cluster_unintegrated(adata: ad.AnnData) -> ad.AnnData:
     return adata
 
 
-def log_filter_effect(
-    rows: list[dict],
-    *,
-    filter_name: str,
-    scope: str,
-    batch_key: str | None,
-    before_mask: np.ndarray,
-    after_mask: np.ndarray,
-    adata: ad.AnnData,
-):
-    if batch_key is None:
-        rows.append(
-            {
-                "filter_name": filter_name,
-                "scope": scope,
-                "batch_id": "ALL",
-                "n_before": int(before_mask.sum()),
-                "n_after": int(after_mask.sum()),
-                "n_removed": int(before_mask.sum() - after_mask.sum()),
-                "frac_removed": float(
-                    (before_mask.sum() - after_mask.sum()) / before_mask.sum()
-                ),
-            }
-        )
-    else:
-        for batch in adata.obs[batch_key].unique():
-            bmask = adata.obs[batch_key] == batch
-            nb = (before_mask & bmask).sum()
-            na = (after_mask & bmask).sum()
-
-            rows.append(
-                {
-                    "filter_name": filter_name,
-                    "scope": scope,
-                    "batch_id": batch,
-                    "n_before": int(nb),
-                    "n_after": int(na),
-                    "n_removed": int(nb - na),
-                    "frac_removed": float((nb - na) / nb) if nb > 0 else 0.0,
-                }
-            )
-
-
 def run_load_and_filter(
     cfg: LoadAndFilterConfig) -> ad.AnnData:
 
