@@ -1099,7 +1099,7 @@ def run_load_and_filter(
         expected_doublet_rate=cfg.expected_doublet_rate,
     )
 
-    qc_stats_path = output_dir / "qc_filter_stats.tsv"
+    qc_stats_path = cfg.output_dir / "qc_filter_stats.tsv"
     write_qc_filter_stats(adata, out_path=qc_stats_path)
 
     # ---------------------------------------------------------
@@ -1148,7 +1148,7 @@ def run_load_and_filter(
         reporting.generate_qc_report(
             fig_root=cfg.output_dir / cfg.figdir_name,
             cfg=cfg,
-            version=__version__,  # or a literal like "0.4.2"
+            version=__version__,
             adata=adata,
         )
 
