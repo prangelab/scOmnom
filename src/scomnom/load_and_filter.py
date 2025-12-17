@@ -14,6 +14,7 @@ import anndata as ad
 import pandas as pd
 import scanpy as sc
 
+from scomnom import __version__
 from . import io_utils
 from . import plot_utils
 from . import reporting
@@ -868,7 +869,6 @@ def run_load_and_filter(
         # ---------------------------------------------------------
         # SOLO doublet detection (GLOBAL, RAW COUNTS)
         # ---------------------------------------------------------
-        LOGGER.info("Running SOLO doublet detection")
         adata = run_solo_with_scvi(
             adata,
             batch_key=cfg.batch_key,
