@@ -293,7 +293,7 @@ def _violin_with_points(
 
 
 def qc_scatter(adata, groupby: str, cfg):
-    figdir = Path(sc.settings.figdir) / "QC_plots" / "qc_scatter"
+    figdir = ROOT_FIGDIR / "QC_plots" / "qc_scatter"
 
     sc.pl.scatter(
         adata,
@@ -306,7 +306,7 @@ def qc_scatter(adata, groupby: str, cfg):
 
 
 def hvgs_and_pca_plots(adata, max_pcs_plot: int, cfg):
-    figdir = Path(sc.settings.figdir) / "QC_plots" / "overview"
+    figdir = ROOT_FIGDIR / "QC_plots" / "overview"
 
     sc.pl.highly_variable_genes(adata, show=False)
     save_multi("QC_highly_variable_genes", figdir)
@@ -340,7 +340,7 @@ def umap_by(adata, keys, figdir: Path | None = None, stem: str | None = None):
         name = stem
 
     if figdir is None:
-        figdir = Path(sc.settings.figdir)
+        figdir = ROOT_FIGDIR
 
     sc.pl.umap(adata, color=keys, use_raw=False, show=False)
     save_multi(name, figdir)
@@ -426,7 +426,7 @@ def plot_final_cell_counts(adata, cfg) -> None:
     plt.xticks(rotation=45, ha="right")
     fig.tight_layout()
 
-    figdir_qc = Path(sc.settings.figdir) / "QC_plots" / "overview"
+    figdir_qc = ROOT_FIGDIR / "QC_plots" / "overview"
     save_multi(stem="final_cell_counts", figdir=figdir_qc)
 
     plt.close(fig)
@@ -436,7 +436,7 @@ def plot_final_cell_counts(adata, cfg) -> None:
 # MT histogram
 # -------------------------------------------------------------------------
 def plot_mt_histogram(adata, cfg, suffix: str):
-    figdir_qc = Path(sc.settings.figdir) / "QC_plots" / "qc_metrics"
+    figdir_qc = ROOT_FIGDIR / "QC_plots" / "qc_metrics"
 
     fig, ax = plt.subplots(figsize=(5, 4))
     _clean_axes(ax)
@@ -467,7 +467,7 @@ def run_qc_plots_pre_filter_df(qc_df: pd.DataFrame, cfg) -> None:
     if not cfg.make_figures:
         return
 
-    figdir_qc = Path(sc.settings.figdir) / "QC_plots"
+    figdir_qc = ROOT_FIGDIR / "QC_plots"
     figdir_qc.mkdir(parents=True, exist_ok=True)
 
     qc_df = qc_df.copy()
@@ -533,37 +533,25 @@ def run_qc_plots_postfilter(adata, cfg):
             else:
                 adata.uns["qc_metrics"] = qc_uns_backup
 
-    # ------------------------------------------------------------------
-    # Setup figure directory
-    # ------------------------------------------------------------------
-    old_figdir = sc_settings.figdir
-    figdir_qc = Path(sc.settings.figdir) / "QC_plots"
-    sc_settings.figdir = figdir_qc
+    # --------------------------------------------------------------
+    # 1. Raw counts QC (canonical)
+    # --------------------------------------------------------------
+    if "counts_raw" in adata.layers:
+        _run_qc_pass(
+            adata,
+            adata.layers["counts_raw"],
+            label="raw",
+        )
 
-    try:
-        # --------------------------------------------------------------
-        # 1. Raw counts QC (canonical)
-        # --------------------------------------------------------------
-        if "counts_raw" in adata.layers:
-            _run_qc_pass(
-                adata,
-                adata.layers["counts_raw"],
-                label="raw",
-            )
-
-        # --------------------------------------------------------------
-        # 2. CellBender QC (diagnostic)
-        # --------------------------------------------------------------
-        if "counts_cb" in adata.layers:
-            _run_qc_pass(
-                adata,
-                adata.layers["counts_cb"],
-                label="cb",
-            )
-
-    finally:
-        sc_settings.figdir = old_figdir
-
+    # --------------------------------------------------------------
+    # 2. CellBender QC (diagnostic)
+    # --------------------------------------------------------------
+    if "counts_cb" in adata.layers:
+        _run_qc_pass(
+            adata,
+            adata.layers["counts_cb"],
+            label="cb",
+        )
 
 
 def plot_hist_total_counts(adata, cfg, stage: str):
@@ -577,7 +565,7 @@ def plot_hist_total_counts(adata, cfg, stage: str):
     if not cfg.make_figures:
         return
 
-    figdir_qc = Path(sc.settings.figdir) / "QC_plots" / "qc_metrics"
+    figdir_qc = ROOT_FIGDIR / "QC_plots" / "qc_metrics"
     figdir_qc.mkdir(parents=True, exist_ok=True)
 
     plt.figure(figsize=(6, 4))
@@ -606,7 +594,7 @@ def plot_hist_n_genes(adata, cfg, stage: str):
     if not cfg.make_figures:
         return
 
-    figdir_qc = Path(sc.settings.figdir) / "QC_plots" / "qc_metrics"
+    figdir_qc = ROOT_FIGDIR / "QC_plots" / "qc_metrics"
     figdir_qc.mkdir(parents=True, exist_ok=True)
 
     plt.figure(figsize=(6, 4))
@@ -647,7 +635,7 @@ def qc_violin_panels(adata, cfg, stage: str):
         LOGGER.warning("batch_key '%s' missing in adata.obs; skipping QC violin panels", batch_key)
         return
 
-    figdir_qc = Path(sc.settings.figdir) / "QC_plots" / "qc_metrics"
+    figdir_qc = ROOT_FIGDIR / "QC_plots" / "qc_metrics"
     figdir_qc.mkdir(parents=True, exist_ok=True)
 
     # Decide layout
@@ -662,47 +650,40 @@ def qc_violin_panels(adata, cfg, stage: str):
         ("pct_counts_hb", "QC_violin_hb"),
     ]
 
-    old_figdir = sc_settings.figdir
-    sc_settings.figdir = figdir_qc
+    for metric, stem in metrics:
+        if metric not in adata.obs:
+            LOGGER.warning("Metric '%s' missing in adata.obs; skipping", metric)
+            continue
 
-    try:
-        for metric, stem in metrics:
-            if metric not in adata.obs:
-                LOGGER.warning("Metric '%s' missing in adata.obs; skipping", metric)
-                continue
+        plt.figure(figsize=(10, 6) if horizontal else (12, 10))
+        ax = plt.gca()
 
-            plt.figure(figsize=(10, 6) if horizontal else (12, 10))
-            ax = plt.gca()
+        # ---- scatter points FIRST (behind violins) ----
+        _violin_with_points(
+            adata,
+            metric,
+            groupby=batch_key,
+            horizontal=horizontal,
+            ax=ax,
+            point_alpha=0.08,
+            point_size=3.0,
+            max_points=200_000,  # safety for huge datasets
+        )
 
-            # ---- scatter points FIRST (behind violins) ----
-            _violin_with_points(
-                adata,
-                metric,
-                groupby=batch_key,
-                horizontal=horizontal,
-                ax=ax,
-                point_alpha=0.08,
-                point_size=3.0,
-                max_points=200_000,  # safety for huge datasets
-            )
+        # ---- violin on top ----
+        sc.pl.violin(
+            adata,
+            metric,
+            groupby=batch_key,
+            rotation=90 if not horizontal else 0,
+            show=False,
+            stripplot=False,
+            ax=ax,
+        )
 
-            # ---- violin on top ----
-            sc.pl.violin(
-                adata,
-                metric,
-                groupby=batch_key,
-                rotation=90 if not horizontal else 0,
-                show=False,
-                stripplot=False,
-                ax=ax,
-            )
-
-            ax.set_title(f"{metric} ({stage})")
-            save_multi(f"{stem}_{stage}", figdir_qc)
-            plt.close()
-
-    finally:
-        sc_settings.figdir = old_figdir
+        ax.set_title(f"{metric} ({stage})")
+        save_multi(f"{stem}_{stage}", figdir_qc)
+        plt.close()
 
 
 def qc_scatter_panels(adata, cfg, stage: str):
@@ -716,7 +697,7 @@ def qc_scatter_panels(adata, cfg, stage: str):
     if not cfg.make_figures:
         return
 
-    figdir = Path(sc.settings.figdir) / "QC_plots" / "qc_scatter"
+    figdir = ROOT_FIGDIR / "QC_plots" / "qc_scatter"
 
     # --------------------------------------------------------------
     # Scatter 1: Complexity plot (colored by mt%)
