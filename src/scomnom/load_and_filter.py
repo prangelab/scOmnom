@@ -728,7 +728,7 @@ def run_load_and_filter(
     plot_utils.setup_scanpy_figs(cfg.figdir, cfg.figure_formats)
 
     # If we are only applying a different doublet filter:
-    if cfg.apply_doublet_score is not None:
+    if cfg.apply_doublet_score is True:
 
         LOGGER.info(
             "Resuming from pre-doublet AnnData: %s",
