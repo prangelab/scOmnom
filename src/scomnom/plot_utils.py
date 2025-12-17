@@ -855,6 +855,86 @@ def plot_cellbender_effects(
 
     LOGGER.info("Generated CellBender effect QC plots.")
 
+def doublet_plots(
+        adata: ad.AnnData,
+        *,
+        batch_key: str,
+        figdir: Path,
+) -> None:
+    """
+    SOLO doublet QC plots.
+
+    Must be called AFTER SOLO prediction (doublet_score + predicted_doublet)
+    but BEFORE cleanup. Thresholds are implied per sample from rate-based
+    calling and shown for visualization only.
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+
+    figdir = Path(figdir)
+
+    required = {"doublet_score", "predicted_doublet", batch_key}
+    if not required.issubset(adata.obs.columns):
+        LOGGER.warning("Skipping doublet plots; missing required columns.")
+        return
+
+    scores = adata.obs["doublet_score"].to_numpy()
+    is_doublet = adata.obs["predicted_doublet"].astype(bool)
+
+    # --------------------------------------------------
+    # Compute per-sample implied thresholds
+    # --------------------------------------------------
+    thresholds: dict[str, float] = {}
+    for sample, obs in adata.obs.groupby(batch_key, observed=True):
+        called = obs["predicted_doublet"].astype(bool)
+        if called.any():
+            thresholds[sample] = obs.loc[called, "doublet_score"].min()
+
+    # --------------------------------------------------
+    # Helper: draw subtle per-sample threshold lines
+    # --------------------------------------------------
+    def _draw_sample_thresholds(ax, *, vertical: bool):
+        for thr in thresholds.values():
+            if vertical:
+                ax.axvline(
+                    thr,
+                    color="red",
+                    lw=0.6,
+                    alpha=0.25,
+                    zorder=1,
+                )
+            else:
+                ax.axhline(
+                    thr,
+                    color="red",
+                    lw=0.6,
+                    alpha=0.25,
+                    zorder=1,
+                )
+
+    # --------------------------------------------------
+    # 1. Doublet score histogram (global)
+    # --------------------------------------------------
+    fig, ax = plt.subplots(figsize=(6, 4))
+
+    ax.hist(
+        scores,
+        bins=50,
+        color="steelblue",
+        alpha=0.85,
+        edgecolor="none",
+    )
+
+    _draw_sample_thresholds(ax, vertical=True)
+
+    ax.set_xlabel("Doublet score")
+    ax.set_ylabel("Cells")
+    ax.set_title("SOLO doublet score distribution")
+
+    fig.tight_layout()
+    save_multi("doublet_score_hist", figdir, fig)
+    plt.close(fig)
 
     # --------------------------------------------------
     # 2. Per-sample inferred doublet score threshold
