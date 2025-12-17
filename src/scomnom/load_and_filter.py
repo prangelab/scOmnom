@@ -108,6 +108,7 @@ def _add_metadata(adata: ad.AnnData, metadata_tsv: Path, sample_id_col: str) -> 
 def _per_sample_qc_and_filter(
     sample_map: Dict[str, ad.AnnData],
     cfg: LoadAndQCConfig,
+    qc_filter_rows: list[Dict],
 ) -> tuple[Dict[str, ad.AnnData], pd.DataFrame]:
     """
     Run QC + min_genes/min_cells filtering per sample (OOM-safe) and
@@ -153,6 +154,7 @@ def _per_sample_qc_and_filter(
             max_genes_quantile=cfg.max_genes_quantile,
             max_counts_mad=cfg.max_counts_mad,
             max_counts_quantile=cfg.max_counts_quantile,
+            qc_rows=qc_filter_rows,
         )
 
         if a.n_obs < cfg.min_cells_per_sample:
@@ -363,6 +365,7 @@ def sparse_filter_cells_and_genes(
     max_counts_mad: float | None = None,
     max_counts_quantile: float | None = None,
     batch_key: str | None = "sample_id",
+    qc_rows: list[Dict] | None = None,
 ) -> ad.AnnData:
     import numpy as np
     import pandas as pd
@@ -543,11 +546,6 @@ def sparse_filter_cells_and_genes(
     if gene_mask.sum() == 0:
         raise ValueError(f"All genes removed by min_cells={min_cells}.")
     adata = adata[:, gene_mask].copy()
-
-    # --------------------------------------------------
-    # Attach QC stats
-    # --------------------------------------------------
-    adata.uns["qc_filter_stats"] = pd.DataFrame(qc_rows)
 
     return adata
 
@@ -969,7 +967,8 @@ def run_load_and_filter(
         # Per-sample QC + sparse filtering (OOM-safe)
         # ---------------------------------------------------------
         LOGGER.info("Running per-sample QC and filtering...")
-        filtered_sample_map, qc_df = _per_sample_qc_and_filter(sample_map, cfg)
+        qc_filter_rows: list[dict] = []
+        filtered_sample_map, qc_df = _per_sample_qc_and_filter(sample_map, cfg, qc_filter_rows)
 
         # ---------------------------------------------------------
         # Pre-filter QC plots (lightweight, from qc_df only)
@@ -1055,6 +1054,10 @@ def run_load_and_filter(
         min_cells_per_sample=cfg.min_cells_per_sample,
         expected_doublet_rate=cfg.expected_doublet_rate,
     )
+
+    # Write QC fitlers
+    if qc_filter_rows:
+        adata.uns["qc_filter_stats"] = pd.DataFrame(qc_filter_rows)
 
     qc_stats_path = cfg.output_dir / "qc_filter_stats.tsv"
     write_qc_filter_stats(adata, out_path=qc_stats_path)
