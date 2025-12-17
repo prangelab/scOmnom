@@ -312,10 +312,9 @@ def render_raw_cb_block(base_key: str, entry: dict, rel_root: Path) -> str:
     def slot(p: Path | None, label: str):
         if p is None:
             return f"<div class='img-missing'>{label}<br>(missing)</div>"
-        rel = p.relative_to(rel_root)
         return f"""
         <figure>
-          <img src="{rel.as_posix()}">
+          <img src="{p.as_posix()}">
           <figcaption>{label}</figcaption>
         </figure>
         """
