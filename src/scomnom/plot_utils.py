@@ -117,11 +117,10 @@ def save_multi(stem: str, figdir: Path, fig=None) -> None:
     if fig is not None:
         plt.figure(fig.number)
 
-    figdir = figdir.resolve()
-    rel = figdir.relative_to(ROOT_FIGDIR)
+    figdir = Path(figdir)
 
     for ext in FIGURE_FORMATS:
-        outdir = ext / rel
+        outdir = ROOT_FIGDIR / ext / figdir
         outdir.mkdir(parents=True, exist_ok=True)
         outfile = outdir / f"{stem}.{ext}"
         LOGGER.info("Saving figure: %s", outfile)
