@@ -84,18 +84,6 @@ class LoadAndFilterConfig(BaseModel):
 
         return self
 
-    @model_validator(mode="after")
-    def check_doublet_config(self):
-        if self.doublet_mode == "fixed":
-            if not (0 < self.doublet_score_threshold < 1):
-                raise ValueError("doublet_score_threshold must be in (0, 1)")
-        elif self.doublet_mode == "rate":
-            if not (0 < self.expected_doublet_rate < 0.5):
-                raise ValueError("expected_doublet_rate must be in (0, 0.5)")
-        else:
-            raise ValueError("doublet_mode must be 'fixed' or 'rate'")
-        return self
-
 
 class ProcessAndIntegrateConfig(BaseModel):
 
