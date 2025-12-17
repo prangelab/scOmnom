@@ -198,18 +198,6 @@ def load_and_filter(
     # -------------------------------------------------------------
     # Doublet detection (SOLO)
     # -------------------------------------------------------------
-    doublet_mode: str = typer.Option(
-        "rate",
-        "--doublet-mode",
-        help="Doublet thresholding: fixed | rate",
-    ),
-
-    doublet_score_threshold: float = typer.Option(
-        0.75,
-        "--doublet-score-threshold",
-        help="Used when --doublet-mode fixed",
-    ),
-
     expected_doublet_rate: float = typer.Option(
         0.1,
         "--expected-doublet-rate",
@@ -285,8 +273,6 @@ def load_and_filter(
         min_cells_per_sample=min_cells_per_sample,
         max_pct_mt=max_pct_mt,
         n_top_genes=n_top_genes,
-        doublet_mode=doublet_mode,
-        doublet_score_threshold=doublet_score_threshold,
         expected_doublet_rate=expected_doublet_rate,
         apply_doublet_score=apply_doublet_score,
         apply_doublet_score_path=apply_doublet_score_path,

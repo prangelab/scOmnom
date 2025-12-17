@@ -857,15 +857,17 @@ def plot_cellbender_effects(
 
 
 def doublet_plots(
-        adata: ad.AnnData,
-        *,
-        batch_key: str,
-        figdir: Path,
+    adata: ad.AnnData,
+    *,
+    batch_key: str,
+    figdir: Path,
 ) -> None:
     """
     SOLO doublet QC plots.
-    Must be called AFTER SOLO prediction but BEFORE cleanup.
-    Does NOT assume UMAP or post-filter QC metrics.
+
+    Must be called AFTER SOLO prediction (doublet_score + predicted_doublet)
+    but BEFORE cleanup. Thresholds are implied per sample from rate-based
+    calling and shown for visualization only.
     """
     import numpy as np
     import matplotlib.pyplot as plt
@@ -882,28 +884,30 @@ def doublet_plots(
     is_doublet = adata.obs["predicted_doublet"].astype(bool)
 
     # --------------------------------------------------
-    # Read effective threshold + mode from adata.uns
+    # Compute per-sample implied thresholds
     # --------------------------------------------------
-    threshold = adata.uns.get("doublet_threshold")
-    mode = adata.uns.get("doublet_mode", "unknown")
+    thresholds = {}
+    for sample, obs in adata.obs.groupby(batch_key, observed=True):
+        called = obs["predicted_doublet"].astype(bool)
+        if called.any():
+            thresholds[sample] = obs.loc[called, "doublet_score"].min()
 
-    def _draw_threshold(ax, *, vertical: bool = True):
-        if threshold is None:
-            return
-        if vertical:
+    sample_colors = adata.uns.get(f"{batch_key}_colors", {})
+
+    def _draw_sample_thresholds(ax, *, vertical: bool):
+        for sample, thr in thresholds.items():
             ax.axvline(
-                threshold,
-                color="firebrick",
-                linestyle="--",
-                linewidth=1,
-                label=f"threshold ({mode}) = {threshold:.3f}",
-            )
-        else:
-            ax.axhline(
-                threshold,
-                color="firebrick",
-                linestyle="--",
-                linewidth=1,
+                thr,
+                color=sample_colors.get(sample, "black"),
+                lw=0.6,
+                alpha=0.25,
+                zorder=1,
+            ) if vertical else ax.axhline(
+                thr,
+                color=sample_colors.get(sample, "black"),
+                lw=0.6,
+                alpha=0.25,
+                zorder=1,
             )
 
     # --------------------------------------------------
@@ -911,10 +915,7 @@ def doublet_plots(
     # --------------------------------------------------
     fig, ax = plt.subplots(figsize=(6, 4))
     ax.hist(scores, bins=50, color="steelblue", alpha=0.85)
-    _draw_threshold(ax, vertical=True)
-
-    if threshold is not None:
-        ax.legend(frameon=False)
+    _draw_sample_thresholds(ax, vertical=True)
 
     ax.set_xlabel("Doublet score")
     ax.set_ylabel("Cells")
@@ -957,7 +958,7 @@ def doublet_plots(
         alpha=0.3,
         rasterized=True,
     )
-    _draw_threshold(ax, vertical=False)
+    _draw_sample_thresholds(ax, vertical=False)
 
     ax.set_xlabel("Total UMI counts (raw)")
     ax.set_ylabel("Doublet score")
@@ -970,15 +971,39 @@ def doublet_plots(
     # 4. Violin: doublet score per sample
     # --------------------------------------------------
     fig, ax = plt.subplots(figsize=(max(6, 0.5 * len(frac)), 4))
+
+    samples = list(frac.index)
     data = [
         adata.obs.loc[adata.obs[batch_key] == s, "doublet_score"]
-        for s in frac.index
+        for s in samples
     ]
-    ax.violinplot(data, showmeans=False, showextrema=False)
-    _draw_threshold(ax, vertical=False)
 
-    ax.set_xticks(range(1, len(frac) + 1))
-    ax.set_xticklabels(frac.index, rotation=45, ha="right")
+    parts = ax.violinplot(
+        data,
+        showmeans=False,
+        showextrema=False,
+        widths=0.8,
+    )
+
+    # Draw per-sample threshold segments
+    half_width = 0.25  # controls segment length
+    for i, sample in enumerate(samples, start=1):
+        thr = thresholds.get(sample)
+        if thr is None:
+            continue
+
+        ax.hlines(
+            y=thr,
+            xmin=i - half_width,
+            xmax=i + half_width,
+            color=sample_colors.get(sample, "black"),
+            lw=1.2,
+            alpha=0.7,
+            zorder=3,
+        )
+
+    ax.set_xticks(range(1, len(samples) + 1))
+    ax.set_xticklabels(samples, rotation=45, ha="right")
     ax.set_ylabel("Doublet score")
     ax.set_title("Doublet score distribution per sample")
     fig.tight_layout()
@@ -993,7 +1018,7 @@ def doublet_plots(
 
     fig, ax = plt.subplots(figsize=(5, 4))
     ax.plot(xs, ys, lw=1.5)
-    _draw_threshold(ax, vertical=True)
+    _draw_sample_thresholds(ax, vertical=True)
 
     ax.set_xlabel("Doublet score")
     ax.set_ylabel("Cumulative fraction")
@@ -1002,7 +1027,8 @@ def doublet_plots(
     save_multi("doublet_score_ecdf", figdir, fig)
     plt.close(fig)
 
-    LOGGER.info("Generated SOLO doublet QC plots.")
+    LOGGER.info("Generated SOLO doublet QC plots (per-sample thresholds).")
+
 
 
 def umap_plots(

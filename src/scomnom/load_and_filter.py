@@ -537,64 +537,107 @@ def infer_doublet_threshold(
 
 
 
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import anndata as ad
+import logging
+
+LOGGER = logging.getLogger(__name__)
+
+
 def call_doublets(
     adata: ad.AnnData,
     *,
-    mode: Literal["fixed", "rate"],
-    fixed_threshold: float | None = None,
-    expected_rate: float | None = None,
-) -> ad.AnnData:
+    batch_key: str = "sample_id",
+    expected_doublet_rate: float,
+    score_key: str = "doublet_score",
+    out_stats: Path | None = None,
+) -> None:
     """
-    Populate adata.obs['predicted_doublet'] from adata.obs['doublet_score'].
+    Call doublets PER SAMPLE using a fixed expected rate.
 
-    This function:
-      - applies thresholding logic
-      - stores the effective threshold in adata.uns
-      - does NOT remove cells
-      - is safe for normal + resume mode
+    Parameters
+    ----------
+    adata
+        AnnData with SOLO scores in `adata.obs[score_key]`
+    batch_key
+        Column in adata.obs defining batches/samples (default: sample_id)
+    expected_doublet_rate
+        Fraction of cells to call as doublets per batch
+    score_key
+        Column containing SOLO doublet scores
+    out_stats
+        Optional path to write per-sample stats TSV
     """
-    if "doublet_score" not in adata.obs:
-        raise RuntimeError("doublet_score missing; run SOLO first")
 
-    scores = adata.obs["doublet_score"].to_numpy()
-    n = scores.size
+    if score_key not in adata.obs:
+        raise KeyError(f"Missing {score_key!r} in adata.obs")
 
-    if mode == "fixed":
-        if fixed_threshold is None:
-            raise ValueError("fixed_threshold must be provided for mode='fixed'")
+    if batch_key not in adata.obs:
+        raise KeyError(f"Missing {batch_key!r} in adata.obs")
 
-        mask = scores > fixed_threshold
-        threshold = float(fixed_threshold)
+    if not (0 < expected_doublet_rate < 1):
+        raise ValueError("expected_doublet_rate must be in (0, 1)")
 
-    elif mode == "rate":
-        if expected_rate is None:
-            raise ValueError("expected_rate must be provided for mode='rate'")
+    # Initialize output column
+    adata.obs["predicted_doublet"] = False
 
-        k = int(np.ceil(expected_rate * n))
-        if k <= 0:
-            mask = np.zeros(n, dtype=bool)
-            threshold = None
-        else:
-            order = np.argsort(scores)[::-1]
-            idx = order[:k]
+    stats_rows = []
 
-            mask = np.zeros(n, dtype=bool)
-            mask[idx] = True
+    for batch, idx in adata.obs.groupby(batch_key).groups.items():
+        scores = adata.obs.loc[idx, score_key].values
+        n = scores.size
 
-            # diagnostic cutoff score
-            threshold = float(scores[order[k - 1]])
+        if n == 0:
+            continue
 
-    else:
-        raise ValueError(f"Unknown doublet mode: {mode}")
+        k = int(np.ceil(expected_doublet_rate * n))
+        k = max(k, 1)
 
-    adata.obs["predicted_doublet"] = pd.Categorical(
-        mask, categories=[False, True], ordered=False
-    )
+        order = np.argsort(scores)[::-1]
+        selected = order[:k]
 
-    adata.uns["doublet_mode"] = mode
-    adata.uns["doublet_threshold"] = threshold
+        mask = np.zeros(n, dtype=bool)
+        mask[selected] = True
 
-    return adata
+        adata.obs.loc[idx, "predicted_doublet"] = mask
+
+        # Stats for reporting
+        stats_rows.append(
+            {
+                batch_key: batch,
+                "n_cells": n,
+                "n_doublets": int(mask.sum()),
+                "doublet_rate_observed": float(mask.mean()),
+                "score_min_called": float(scores[selected].min()),
+                "score_median": float(np.median(scores)),
+                "score_max": float(scores.max()),
+            }
+        )
+
+    # Attach metadata to AnnData
+    adata.uns["doublet_calling"] = {
+        "method": "rate_per_batch",
+        "batch_key": batch_key,
+        "expected_doublet_rate": expected_doublet_rate,
+        "score_key": score_key,
+    }
+
+    # Write stats table
+    if out_stats is not None:
+        out_stats = Path(out_stats)
+        out_stats.parent.mkdir(parents=True, exist_ok=True)
+
+        df = pd.DataFrame(stats_rows).sort_values(batch_key)
+        df.to_csv(out_stats, sep="\t", index=False)
+
+        LOGGER.info(
+            "Wrote per-sample doublet statistics to %s (%d batches)",
+            out_stats,
+            len(df),
+        )
+
 
 
 # ---------------------------------------------------------------------
@@ -892,11 +935,11 @@ def run_load_and_filter(
     # Here 'normal mode' and 'only apply doublet filter' merge again
     batch_key = cfg.batch_key or adata.uns.get("batch_key")
 
-    adata = call_doublets(
+    call_doublets(
         adata,
-        mode=cfg.doublet_mode,
-        fixed_threshold=cfg.doublet_score_threshold,
-        expected_rate=cfg.expected_doublet_rate,
+        batch_key=cfg.batch_key or "sample_id",
+        expected_doublet_rate=cfg.expected_doublet_rate,
+        out_stats=cfg.output_dir / "doublets_per_sample.tsv",
     )
 
     if cfg.make_figures:

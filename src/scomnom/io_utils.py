@@ -488,40 +488,23 @@ def load_cellbender_filtered_data(
     return sample_map, read_counts
 
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 def attach_raw_counts_postfilter(
     cfg: LoadAndQCConfig,
     adata: ad.AnnData,
 ) -> ad.AnnData:
-    """
-    Load RAW 10x matrices and attach them as adata.layers['counts_raw'],
-    restricted to the already-filtered cell set in adata.
-
-    Alignment:
-      - Cells: by (sample_id, barcode)
-      - Genes: by gene SYMBOLS (adata.var_names)
-    """
-    import numpy as np
-    import pandas as pd
-    import scanpy as sc
-    import scipy.sparse as sp
-    from concurrent.futures import ProcessPoolExecutor, as_completed
-    import multiprocessing as mp
 
     batch_key = cfg.batch_key or adata.uns.get("batch_key")
     if batch_key is None:
-        raise RuntimeError(
-            "attach_raw_counts_postfilter requires a batch key, but none was found "
-            "in cfg.batch_key or adata.uns['batch_key']"
-        )
+        raise RuntimeError("attach_raw_counts_postfilter requires batch_key")
 
     required = {"barcode", batch_key}
     if not required.issubset(adata.obs.columns):
-        raise RuntimeError(
-            f"adata.obs must contain {required}, found {list(adata.obs.columns)}"
-        )
+        raise RuntimeError(f"adata.obs must contain {required}")
 
     if not adata.var_names.is_unique:
-        raise RuntimeError("adata.var_names must be unique for raw-count alignment")
+        raise RuntimeError("adata.var_names must be unique")
 
     # --------------------------------------------------
     # Build global cell key
@@ -531,25 +514,23 @@ def attach_raw_counts_postfilter(
         + "::"
         + adata.obs["barcode"].astype(str)
     )
-    cell_key = pd.Index(cell_key)
     cell_key_set = set(cell_key)
 
-    # --------------------------------------------------
-    # Locate raw directories
-    # --------------------------------------------------
     raw_dirs = find_raw_dirs(cfg.raw_sample_dir, cfg.raw_pattern)
     if not raw_dirs:
         raise RuntimeError("No raw data directories found")
 
-    sample_to_path = {}
-    for raw_path in raw_dirs:
-        sample = raw_path.name.split(".raw_feature_bc_matrix")[0]
-        sample_to_path[sample] = raw_path
+    sample_to_path = {
+        p.name.split(".raw_feature_bc_matrix")[0]: p
+        for p in raw_dirs
+    }
 
     # --------------------------------------------------
-    # Worker: load + subset one sample
+    # Worker: load + subset ONE sample
     # --------------------------------------------------
-    def _load_one_raw(raw_path: Path, sample: str, cell_key_set: set[str]):
+    def _load_one_raw(sample: str, raw_path: Path):
+        LOGGER.info("Loading raw counts for sample %s", sample)
+
         raw = read_raw_10x(raw_path)
         raw.var_names_make_unique()
         raw.obs_names = raw.obs_names.astype(str)
@@ -562,90 +543,51 @@ def attach_raw_counts_postfilter(
                 f"No overlapping cells between raw and filtered data for {sample}"
             )
 
-        LOGGER.info(
-            "[RAW] %s: %d cells × %d genes",
-            sample, raw.n_obs, raw.n_vars
-        )
-
         return raw
 
     # --------------------------------------------------
-    # Parallel raw loading
+    # Parallel load (THREADS, not processes)
     # --------------------------------------------------
     raw_layers = []
+    max_workers = min(8, cfg.n_jobs or 8)
 
-    max_workers = 8
     LOGGER.info(
-        "Loading raw counts (post-filter) with %d processes",
+        "Loading raw counts for %d samples using %d threads",
+        len(sample_to_path),
         max_workers,
     )
 
-    ctx = mp.get_context("spawn")
-
-    with ProcessPoolExecutor(
-        max_workers=max_workers,
-        mp_context=ctx,
-    ) as pool:
-        futures = []
-
-        for sample, raw_path in sample_to_path.items():
-            if (adata.obs[batch_key] == sample).any():
-                futures.append(
-                    pool.submit(
-                        _load_one_raw,
-                        raw_path,
-                        sample,
-                        cell_key_set,
-                    )
-                )
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(_load_one_raw, sample, path): sample
+            for sample, path in sample_to_path.items()
+        }
 
         for fut in as_completed(futures):
-            raw_layers.append(fut.result())
+            raw = fut.result()
+            raw_layers.append(raw)
 
     if not raw_layers:
-        raise RuntimeError("No raw data could be aligned to filtered AnnData")
+        raise RuntimeError("No raw data could be aligned")
 
     # --------------------------------------------------
-    # Merge raw layers
+    # Concatenate + reorder (unchanged from your version)
     # --------------------------------------------------
-    raw_all = ad.concat(
-        raw_layers,
-        axis=0,
-        join="outer",
-        fill_value=0,
-    )
+    raw_all = ad.concat(raw_layers, axis=0, join="outer", fill_value=0)
 
-    # --------------------------------------------------
-    # Reorder cells
-    # --------------------------------------------------
     raw_all.obs_names = raw_all.obs["_raw_key"].astype(str)
     raw_all.obs_names_make_unique()
 
     missing = cell_key[~cell_key.isin(raw_all.obs_names)]
-    if len(missing) > 0:
+    if len(missing):
         raise RuntimeError(
             f"{len(missing)} cells missing in raw counts "
             f"(example: {missing.iloc[0]})"
         )
 
     raw_all = raw_all[cell_key.values, :]
-
-    # --------------------------------------------------
-    # Reorder genes (strict by symbols)
-    # --------------------------------------------------
-    missing = adata.var_names.difference(raw_all.var_names)
-    if len(missing):
-        raise RuntimeError(
-            f"Raw data missing {len(missing)} genes present in filtered data "
-            f"(example: {missing[:5].tolist()})"
-        )
-
     raw_all = raw_all[:, adata.var_names]
 
-    # --------------------------------------------------
-    # Attach layer
-    # --------------------------------------------------
-    adata.obs_names_make_unique()
     adata.layers["counts_raw"] = raw_all.X.copy()
 
     LOGGER.info(
@@ -654,6 +596,7 @@ def attach_raw_counts_postfilter(
     )
 
     return adata
+
 
 def _prepare_sample_for_merge(
     sample_name: str,

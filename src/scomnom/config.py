@@ -34,8 +34,6 @@ class LoadAndFilterConfig(BaseModel):
     n_top_genes: int = 2000
 
     # ---- Doublets (SOLO) ----
-    doublet_mode: Literal["fixed", "rate"] = "rate"
-    doublet_score_threshold: float = 0.25
     expected_doublet_rate: float = 0.1
     apply_doublet_score: Optional[bool] = None
     apply_doublet_score_path: Optional[Path] = "results/adata.merged.zarr"
