@@ -33,6 +33,24 @@ class LoadAndFilterConfig(BaseModel):
     max_pct_mt: float = 5.0
     n_top_genes: int = 2000
 
+    # ---- QC: upper-cut filters (MAD + quantile) ----
+    max_genes_mad: float = Field(
+        5.0,
+        description="Upper cutoff for n_genes_by_counts as median + k*MAD (default: 5).",
+    )
+    max_genes_quantile: float = Field(
+        0.999,
+        description="Upper quantile cutoff for n_genes_by_counts (default: 0.999).",
+    )
+    max_counts_mad: float = Field(
+        5.0,
+        description="Upper cutoff for total_counts as median + k*MAD (default: 5).",
+    )
+    max_counts_quantile: float = Field(
+        0.999,
+        description="Upper quantile cutoff for total_counts (default: 0.999).",
+    )
+
     # ---- Doublets (SOLO) ----
     expected_doublet_rate: float = 0.1
     apply_doublet_score: Optional[bool] = None

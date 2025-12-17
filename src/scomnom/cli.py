@@ -196,6 +196,30 @@ def load_and_filter(
     n_top_genes: int = typer.Option(2000, help="Number of highly variable genes to select"),
 
     # -------------------------------------------------------------
+    # QC upper-cut filters (MAD + quantile)
+    # -------------------------------------------------------------
+    max_genes_mad: float = typer.Option(
+        5.0,
+        "--max-genes-mad",
+        help="[QC] Upper cutoff for genes per cell as median + k*MAD (default: 5).",
+    ),
+    max_genes_quantile: float = typer.Option(
+        0.999,
+        "--max-genes-quantile",
+        help="[QC] Upper quantile cutoff for genes per cell (default: 0.999).",
+    ),
+    max_counts_mad: float = typer.Option(
+        5.0,
+        "--max-counts-mad",
+        help="[QC] Upper cutoff for total UMI counts as median + k*MAD (default: 5).",
+    ),
+    max_counts_quantile: float = typer.Option(
+        0.999,
+        "--max-counts-quantile",
+        help="[QC] Upper quantile cutoff for total UMI counts (default: 0.999).",
+    ),
+
+    # -------------------------------------------------------------
     # Doublet detection (SOLO)
     # -------------------------------------------------------------
     expected_doublet_rate: float = typer.Option(
@@ -216,7 +240,7 @@ def load_and_filter(
 
 
 
-# -------------------------------------------------------------
+    # -------------------------------------------------------------
     # Figures
     # -------------------------------------------------------------
     make_figures: bool = typer.Option(True, help="[Figures] Whether to create QC plots."),
@@ -273,6 +297,10 @@ def load_and_filter(
         min_cells_per_sample=min_cells_per_sample,
         max_pct_mt=max_pct_mt,
         n_top_genes=n_top_genes,
+        max_genes_mad=max_genes_mad,
+        max_genes_quantile=max_genes_quantile,
+        max_counts_mad=max_counts_mad,
+        max_counts_quantile=max_counts_quantile,
         expected_doublet_rate=expected_doublet_rate,
         apply_doublet_score=apply_doublet_score,
         apply_doublet_score_path=apply_doublet_score_path,

@@ -149,6 +149,10 @@ def _per_sample_qc_and_filter(
             min_genes=cfg.min_genes,
             min_cells=cfg.min_cells,
             max_pct_mt=cfg.max_pct_mt,
+            max_genes_mad=cfg.max_genes_mad,
+            max_genes_quantile=cfg.max_genes_quantile,
+            max_counts_mad=cfg.max_counts_mad,
+            max_counts_quantile=cfg.max_counts_quantile,
         )
 
         if a.n_obs < cfg.min_cells_per_sample:
@@ -353,10 +357,15 @@ def sparse_filter_cells_and_genes(
     min_genes: int,
     min_cells: int,
     max_pct_mt: float | None = None,
+    # --- new: upper-cut filtering ---
+    max_genes_mad: float | None = None,        # e.g. 5.0
+    max_genes_quantile: float | None = None,   # e.g. 0.999
+    max_counts_mad: float | None = None,       # e.g. 5.0
+    max_counts_quantile: float | None = None,  # e.g. 0.999
 ) -> ad.AnnData:
     import numpy as np
 
-    X = adata.X
+    X = adata.X  # assumed CSR
 
     # --------------------------------------------------
     # Cell filtering: min_genes
@@ -386,6 +395,56 @@ def sparse_filter_cells_and_genes(
 
         adata = adata[mt_mask].copy()
         X = adata.X
+
+    # --------------------------------------------------
+    # Cell filtering: UPPER CUTS (MAD + quantile)
+    # --------------------------------------------------
+    def _upper_cut(values: np.ndarray, *, k_mad: float | None, q: float | None):
+        if k_mad is None and q is None:
+            return None
+
+        med = np.median(values)
+        cut_mad = None
+        if k_mad is not None:
+            mad = np.median(np.abs(values - med))
+            if mad > 0:
+                cut_mad = med + k_mad * mad
+
+        cut_q = np.quantile(values, q) if q is not None else None
+
+        cuts = [c for c in (cut_mad, cut_q) if c is not None]
+        return min(cuts) if cuts else None
+
+    # --- n_genes_by_counts upper cut ---
+    if max_genes_mad is not None or max_genes_quantile is not None:
+        n_genes = np.diff(X.indptr)
+        cut = _upper_cut(
+            n_genes,
+            k_mad=max_genes_mad,
+            q=max_genes_quantile,
+        )
+        if cut is not None:
+            keep = n_genes <= cut
+            if keep.sum() == 0:
+                raise ValueError("All cells removed by max_genes upper-cut.")
+            adata = adata[keep].copy()
+            X = adata.X
+
+    # --- total_counts upper cut ---
+    if max_counts_mad is not None or max_counts_quantile is not None:
+        # sparse-safe row sums
+        total_counts = np.add.reduceat(X.data, X.indptr[:-1])
+        cut = _upper_cut(
+            total_counts,
+            k_mad=max_counts_mad,
+            q=max_counts_quantile,
+        )
+        if cut is not None:
+            keep = total_counts <= cut
+            if keep.sum() == 0:
+                raise ValueError("All cells removed by max_counts upper-cut.")
+            adata = adata[keep].copy()
+            X = adata.X
 
     # --------------------------------------------------
     # Gene filtering: min_cells
