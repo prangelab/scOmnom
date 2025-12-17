@@ -956,10 +956,10 @@ def run_load_and_filter(
             figdir=Path("QC_plots") / "overview",
         )
         reporting.generate_qc_report(
-            figdir=cfg.output_dir / cfg.figdir_name,
-            out_html=cfg.output_dir / "qc_report.html",
-            run_config=cfg.__dict__,
-            title="scOmnom load-and-filter QC report",
+            fig_root=cfg.output_dir / cfg.figdir_name,
+            cfg=cfg,
+            version=__version__,  # or a literal like "0.4.2"
+            adata=adata,
         )
 
     # ---------------------------------------------------------
