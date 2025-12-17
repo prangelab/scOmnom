@@ -505,7 +505,14 @@ def attach_raw_counts_postfilter(
     import scanpy as sc
     import scipy.sparse as sp
 
-    required = {"barcode", cfg.batch_key}
+    batch_key = cfg.batch_key or adata.uns.get("batch_key")
+    if batch_key is None:
+        raise RuntimeError(
+            "attach_raw_counts_postfilter requires a batch key, but none was found "
+            "in cfg.batch_key or adata.uns['batch_key']"
+        )
+
+    required = {"barcode", batch_key}
     if not required.issubset(adata.obs.columns):
         raise RuntimeError(
             f"adata.obs must contain {required}, found {list(adata.obs.columns)}"
@@ -516,7 +523,7 @@ def attach_raw_counts_postfilter(
 
     # Build global cell key
     cell_key = (
-        adata.obs[cfg.batch_key].astype(str)
+        adata.obs[batch_key].astype(str)
         + "::"
         + adata.obs["barcode"].astype(str)
     )
@@ -528,7 +535,7 @@ def attach_raw_counts_postfilter(
 
     for raw_path in raw_dirs:
         sample = raw_path.name.split(".raw_feature_bc_matrix")[0]
-        mask = adata.obs[cfg.batch_key].astype(str) == sample
+        mask = adata.obs[batch_key].astype(str) == sample
         if mask.sum() == 0:
             continue
 
