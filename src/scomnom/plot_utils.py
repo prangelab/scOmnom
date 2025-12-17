@@ -293,14 +293,14 @@ def _violin_with_points(
 def qc_scatter(adata, groupby: str, cfg):
   figdir = "QC_plots" / "qc_scatter"
 
-    sc.pl.scatter(
-        adata,
-        x="total_counts",
-        y="n_genes_by_counts",
-        color="pct_counts_mt",
-        show=False,
-    )
-    save_multi("QC_scatter_mt", figdir)
+  sc.pl.scatter(
+      adata,
+      x="total_counts",
+      y="n_genes_by_counts",
+      color="pct_counts_mt",
+      show=False,
+  )
+  save_multi("QC_scatter_mt", figdir)
 
 
 def hvgs_and_pca_plots(adata, max_pcs_plot: int, cfg):
