@@ -358,22 +358,82 @@ def sparse_filter_cells_and_genes(
     min_cells: int,
     max_pct_mt: float | None = None,
     # --- new: upper-cut filtering ---
-    max_genes_mad: float | None = None,        # e.g. 5.0
-    max_genes_quantile: float | None = None,   # e.g. 0.999
-    max_counts_mad: float | None = None,       # e.g. 5.0
-    max_counts_quantile: float | None = None,  # e.g. 0.999
+    max_genes_mad: float | None = None,
+    max_genes_quantile: float | None = None,
+    max_counts_mad: float | None = None,
+    max_counts_quantile: float | None = None,
+    batch_key: str | None = "sample_id",
 ) -> ad.AnnData:
     import numpy as np
+    import pandas as pd
 
     X = adata.X  # assumed CSR
+
+    # --------------------------------------------------
+    # QC logging helpers
+    # --------------------------------------------------
+    qc_rows: list[dict] = []
+
+    def _log_cell_filter(
+        *,
+        filter_name: str,
+        before_mask: np.ndarray,
+        after_mask: np.ndarray,
+        adata_obs,
+    ):
+        # global
+        qc_rows.append(
+            {
+                "filter": filter_name,
+                "scope": "cell",
+                "batch": "ALL",
+                "n_before": int(before_mask.sum()),
+                "n_after": int(after_mask.sum()),
+                "n_removed": int(before_mask.sum() - after_mask.sum()),
+                "frac_removed": float(
+                    (before_mask.sum() - after_mask.sum()) / before_mask.sum()
+                ),
+            }
+        )
+
+        # per batch
+        if batch_key is not None and batch_key in adata_obs:
+            for batch in adata_obs[batch_key].unique():
+                bmask = adata_obs[batch_key].to_numpy() == batch
+                nb = (before_mask & bmask).sum()
+                na = (after_mask & bmask).sum()
+                if nb == 0:
+                    continue
+
+                qc_rows.append(
+                    {
+                        "filter": filter_name,
+                        "scope": "cell",
+                        "batch": batch,
+                        "n_before": int(nb),
+                        "n_after": int(na),
+                        "n_removed": int(nb - na),
+                        "frac_removed": float((nb - na) / nb),
+                    }
+                )
 
     # --------------------------------------------------
     # Cell filtering: min_genes
     # --------------------------------------------------
     gene_counts = np.diff(X.indptr)
+    before = np.ones(adata.n_obs, dtype=bool)
     cell_mask = gene_counts >= min_genes
+
     if cell_mask.sum() == 0:
         raise ValueError(f"All cells removed by min_genes={min_genes}.")
+
+    _log_cell_filter(
+        filter_name="min_genes",
+        before_mask=before,
+        after_mask=cell_mask,
+        adata_obs=adata.obs,
+    )
+
     adata = adata[cell_mask].copy()
     X = adata.X
 
@@ -387,11 +447,20 @@ def sparse_filter_cells_and_genes(
                 "Run compute_qc_metrics() before sparse filtering."
             )
 
+        before = np.ones(adata.n_obs, dtype=bool)
         mt_mask = adata.obs["pct_counts_mt"].to_numpy() <= max_pct_mt
+
         if mt_mask.sum() == 0:
             raise ValueError(
                 f"All cells removed by max_pct_mt={max_pct_mt}."
             )
+
+        _log_cell_filter(
+            filter_name="max_pct_mt",
+            before_mask=before,
+            after_mask=mt_mask,
+            adata_obs=adata.obs,
+        )
 
         adata = adata[mt_mask].copy()
         X = adata.X
@@ -411,7 +480,6 @@ def sparse_filter_cells_and_genes(
                 cut_mad = med + k_mad * mad
 
         cut_q = np.quantile(values, q) if q is not None else None
-
         cuts = [c for c in (cut_mad, cut_q) if c is not None]
         return min(cuts) if cuts else None
 
@@ -423,37 +491,63 @@ def sparse_filter_cells_and_genes(
             k_mad=max_genes_mad,
             q=max_genes_quantile,
         )
+
         if cut is not None:
+            before = np.ones(adata.n_obs, dtype=bool)
             keep = n_genes <= cut
+
             if keep.sum() == 0:
                 raise ValueError("All cells removed by max_genes upper-cut.")
+
+            _log_cell_filter(
+                filter_name="upper_cut_n_genes",
+                before_mask=before,
+                after_mask=keep,
+                adata_obs=adata.obs,
+            )
+
             adata = adata[keep].copy()
             X = adata.X
 
     # --- total_counts upper cut ---
     if max_counts_mad is not None or max_counts_quantile is not None:
-        # sparse-safe row sums
         total_counts = np.add.reduceat(X.data, X.indptr[:-1])
         cut = _upper_cut(
             total_counts,
             k_mad=max_counts_mad,
             q=max_counts_quantile,
         )
+
         if cut is not None:
+            before = np.ones(adata.n_obs, dtype=bool)
             keep = total_counts <= cut
+
             if keep.sum() == 0:
                 raise ValueError("All cells removed by max_counts upper-cut.")
+
+            _log_cell_filter(
+                filter_name="upper_cut_total_counts",
+                before_mask=before,
+                after_mask=keep,
+                adata_obs=adata.obs,
+            )
+
             adata = adata[keep].copy()
             X = adata.X
 
     # --------------------------------------------------
-    # Gene filtering: min_cells
+    # Gene filtering: min_cells (not logged here)
     # --------------------------------------------------
     gene_nnz = np.bincount(X.indices, minlength=adata.n_vars)
     gene_mask = gene_nnz >= min_cells
     if gene_mask.sum() == 0:
         raise ValueError(f"All genes removed by min_cells={min_cells}.")
     adata = adata[:, gene_mask].copy()
+
+    # --------------------------------------------------
+    # Attach QC stats
+    # --------------------------------------------------
+    adata.uns["qc_filter_stats"] = pd.DataFrame(qc_rows)
 
     return adata
 
@@ -673,6 +767,32 @@ def call_doublets(
         )
 
 
+def write_qc_filter_stats(
+    adata,
+    *,
+    out_path: Path,
+) -> None:
+    if "qc_filter_stats" not in adata.uns:
+        LOGGER.warning("No qc_filter_stats found in adata.uns; skipping QC table write.")
+        return
+
+    df = adata.uns["qc_filter_stats"]
+
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        LOGGER.warning("qc_filter_stats is empty; skipping QC table write.")
+        return
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    df.to_csv(out_path, sep="\t", index=False)
+
+    LOGGER.info(
+        "Wrote QC filter statistics to %s (%d rows)",
+        out_path,
+        len(df),
+    )
+
 
 # ---------------------------------------------------------------------
 # Normalization + PCA
@@ -746,6 +866,49 @@ def cluster_unintegrated(adata: ad.AnnData) -> ad.AnnData:
     )
 
     return adata
+
+
+def log_filter_effect(
+    rows: list[dict],
+    *,
+    filter_name: str,
+    scope: str,
+    batch_key: str | None,
+    before_mask: np.ndarray,
+    after_mask: np.ndarray,
+    adata: ad.AnnData,
+):
+    if batch_key is None:
+        rows.append(
+            {
+                "filter_name": filter_name,
+                "scope": scope,
+                "batch_id": "ALL",
+                "n_before": int(before_mask.sum()),
+                "n_after": int(after_mask.sum()),
+                "n_removed": int(before_mask.sum() - after_mask.sum()),
+                "frac_removed": float(
+                    (before_mask.sum() - after_mask.sum()) / before_mask.sum()
+                ),
+            }
+        )
+    else:
+        for batch in adata.obs[batch_key].unique():
+            bmask = adata.obs[batch_key] == batch
+            nb = (before_mask & bmask).sum()
+            na = (after_mask & bmask).sum()
+
+            rows.append(
+                {
+                    "filter_name": filter_name,
+                    "scope": scope,
+                    "batch_id": batch,
+                    "n_before": int(nb),
+                    "n_after": int(na),
+                    "n_removed": int(nb - na),
+                    "frac_removed": float((nb - na) / nb) if nb > 0 else 0.0,
+                }
+            )
 
 
 def run_load_and_filter(
@@ -936,6 +1099,9 @@ def run_load_and_filter(
         expected_doublet_rate=cfg.expected_doublet_rate,
     )
 
+    qc_stats_path = output_dir / "qc_filter_stats.tsv"
+    write_qc_filter_stats(adata, out_path=qc_stats_path)
+
     # ---------------------------------------------------------
     # Attach Raw counts if available
     # ---------------------------------------------------------
@@ -961,6 +1127,10 @@ def run_load_and_filter(
         )
 
         plot_utils.plot_final_cell_counts(adata, cfg)
+        plot_utils.plot_qc_filter_stack(
+            adata,
+            figdir=Path("QC_plots") / "overview",
+        )
 
     # ---------------------------------------------------------
     # Normalize

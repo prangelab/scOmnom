@@ -855,6 +855,115 @@ def plot_cellbender_effects(
 
     LOGGER.info("Generated CellBender effect QC plots.")
 
+
+def plot_qc_filter_stack(
+    adata,
+    *,
+    batch_key: str = "sample_id",
+    figdir: Path,
+    fname: str = "qc_filter_effects_stacked",
+) -> None:
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    if "qc_filter_stats" not in adata.uns:
+        raise KeyError("qc_filter_stats not found in adata.uns")
+
+    df = adata.uns["qc_filter_stats"].copy()
+
+    # --------------------------------------------------
+    # Keep only per-sample cell filters
+    # --------------------------------------------------
+    df = df[
+        (df["scope"] == "cell")
+        & (df["batch"] != "ALL")
+    ]
+
+    if df.empty:
+        raise ValueError("No per-sample QC filter stats available")
+
+    # --------------------------------------------------
+    # Determine filter order (as applied)
+    # --------------------------------------------------
+    filter_order = (
+        df.groupby("filter")["n_before"]
+        .mean()
+        .sort_values(ascending=False)
+        .index
+        .tolist()
+    )
+
+    # --------------------------------------------------
+    # Reconstruct fraction relative to ORIGINAL cell count
+    # --------------------------------------------------
+    rows = []
+
+    for batch, g in df.groupby("batch"):
+        g = g.set_index("filter").loc[filter_order]
+
+        n0 = g["n_before"].iloc[0]  # original cells
+        for filt, row in g.iterrows():
+            rows.append(
+                {
+                    "batch": batch,
+                    "filter": filt,
+                    "frac_removed_total": row["n_removed"] / n0,
+                }
+            )
+
+    plot_df = pd.DataFrame(rows)
+
+    # Pivot: batch × filter
+    plot_df = (
+        plot_df
+        .pivot(index="batch", columns="filter", values="frac_removed_total")
+        .fillna(0.0)
+    )
+
+    # --------------------------------------------------
+    # Plot
+    # --------------------------------------------------
+    fig, ax = plt.subplots(
+        figsize=(max(6, 0.6 * plot_df.shape[0]), 4)
+    )
+
+    bottom = np.zeros(plot_df.shape[0])
+
+    for filt in plot_df.columns:
+        vals = plot_df[filt].values
+        ax.bar(
+            plot_df.index,
+            vals,
+            bottom=bottom,
+            label=filt,
+            edgecolor="black",
+            linewidth=0.3,
+        )
+        bottom += vals
+
+    ax.set_ylim(0, 1)
+    ax.set_ylabel("Fraction of original cells removed")
+    ax.set_title("QC filtering effects per sample (100% stacked)")
+    ax.legend(
+        title="Filter",
+        bbox_to_anchor=(1.02, 1),
+        loc="upper left",
+        frameon=False,
+    )
+
+    ax.set_xticklabels(plot_df.index, rotation=45, ha="right")
+
+    fig.tight_layout()
+    figdir = Path(figdir)
+    figdir.mkdir(parents=True, exist_ok=True)
+
+    for ext in ("png", "pdf"):
+        fig.savefig(figdir / f"{fname}.{ext}", dpi=300)
+
+    plt.close(fig)
+
+
 def doublet_plots(
     adata: ad.AnnData,
     *,
