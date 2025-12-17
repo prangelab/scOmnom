@@ -902,7 +902,7 @@ def run_load_and_filter(
         plot_utils.doublet_plots(
             adata,
             batch_key=batch_key,
-            figdir=cfg.figdir / "QC_plots" / "doublets",
+            figdir=Path("QC_plots") / "doublets",
         )
 
     adata = cleanup_after_solo(
@@ -936,7 +936,7 @@ def run_load_and_filter(
         plot_utils.plot_cellbender_effects(
             adata,
             batch_key=batch_key,
-            figdir=cfg.figdir / "QC_plots",
+            figdir=Path("QC_plots") / "QC_plots",
         )
 
         plot_utils.plot_final_cell_counts(adata, cfg)
@@ -952,7 +952,7 @@ def run_load_and_filter(
         plot_utils.umap_plots(
             adata,
             batch_key=batch_key,
-            figdir=cfg.figdir / "QC_plots" / "overview",
+            figdir=Path("QC_plots") / "overview",
         )
 
     # ---------------------------------------------------------
