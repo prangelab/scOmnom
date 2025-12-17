@@ -394,7 +394,7 @@ def plot_elbow_knee(
 # -------------------------------------------------------------------------
 def plot_final_cell_counts(adata, cfg) -> None:
     """Plot final per-sample cell counts with a mean line and summary box."""
-    batch_key = cfg.batch_key
+    batch_key = cfg.batch_key or adata.uns.get("batch_key")
     if batch_key not in adata.obs:
         LOGGER.warning("batch_key '%s' not found in adata.obs; skipping plot.", batch_key)
         return
@@ -642,7 +642,7 @@ def qc_violin_panels(adata, cfg, stage: str):
     if not cfg.make_figures:
         return
 
-    batch_key = cfg.batch_key
+    batch_key = cfg.batch_key or adata.uns.get("batch_key")
     if batch_key not in adata.obs:
         LOGGER.warning("batch_key '%s' missing in adata.obs; skipping QC violin panels", batch_key)
         return
@@ -1049,11 +1049,7 @@ def doublet_plots(
     save_multi("doublet_score_ecdf", figdir, fig)
     plt.close(fig)
 
-    LOGGER.info(
-        "Generated SOLO doublet QC plots (mode=%s, threshold=%s)",
-        mode,
-        "none" if threshold is None else f"{threshold:.3f}",
-    )
+    LOGGER.info("Generated SOLO doublet QC plots.")
 
 
 def umap_plots(

@@ -631,6 +631,43 @@ def cluster_unintegrated(adata: ad.AnnData) -> ad.AnnData:
     return adata
 
 
+def log_doublet_summary(adata: ad.AnnData) -> None:
+    """
+    Log a clear summary of doublet calling, consistent across modes.
+    """
+    if not {"doublet_score", "predicted_doublet"}.issubset(adata.obs.columns):
+        LOGGER.warning("Skipping doublet summary; missing SOLO outputs.")
+        return
+
+    mode = adata.uns.get("doublet_mode")
+    threshold = adata.uns.get("doublet_threshold")
+
+    scores = adata.obs["doublet_score"].to_numpy()
+    mask = adata.obs["predicted_doublet"].astype(bool).to_numpy()
+
+    n = scores.size
+    n_doublets = int(mask.sum())
+    frac = n_doublets / max(n, 1)
+
+    msg = [
+        "SOLO doublet summary:",
+        f"  cells           = {n}",
+        f"  doublets        = {n_doublets} ({frac:.2%})",
+        f"  mode            = {mode}",
+    ]
+
+    if mode == "rate":
+        expected = adata.uns.get("expected_doublet_rate")
+        msg.append(f"  expected rate   = {expected:.2%}" if expected is not None else "  expected rate   = <unknown>")
+        msg.append(f"  inferred thresh = {threshold:.4f}" if threshold is not None else "  inferred thresh = <none>")
+
+    elif mode == "fixed":
+        msg.append(f"  fixed threshold = {threshold:.4f}" if threshold is not None else "  fixed threshold = <none>")
+        msg.append(f"  observed rate   = {frac:.2%}")
+
+    LOGGER.info("\n".join(msg))
+
+
 def run_load_and_filter(
     cfg: LoadAndFilterConfig) -> ad.AnnData:
 
@@ -804,6 +841,7 @@ def run_load_and_filter(
     if cfg.make_figures:
         adata.uns["doublet_threshold"] = infer_doublet_threshold(adata)
         adata.uns["doublet_mode"] = cfg.doublet_mode
+        log_doublet_summary(adata)
         plot_utils.doublet_plots(
             adata,
             batch_key=batch_key,
@@ -822,8 +860,6 @@ def run_load_and_filter(
     # ---------------------------------------------------------
     if cfg.raw_sample_dir is not None and "counts_raw" not in adata.layers:
         adata = io_utils.attach_raw_counts_postfilter(cfg, adata)
-
-    adata.obs_names_make_unique()
 
     # ---------------------------------------------------------
     # Global QC on merged filtered data (for post-filter plots ONLY)

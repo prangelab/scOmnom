@@ -600,6 +600,7 @@ def attach_raw_counts_postfilter(
 
     # Attach layer
     adata.layers["counts_raw"] = raw_all.X.copy()
+    adata.obs_names_make_unique()
 
     LOGGER.info("Attached raw counts layer: %s", adata.layers["counts_raw"].shape)
     return adata
