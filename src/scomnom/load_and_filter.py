@@ -465,9 +465,6 @@ def run_solo_with_scvi(
     adata: ad.AnnData,
     *,
     batch_key: Optional[str],
-    doublet_mode: Literal["fixed", "rate", "gmm"],
-    doublet_score_threshold: float,
-    expected_doublet_rate: float,
 ) -> ad.AnnData:
     from scvi.external import SOLO
 
@@ -901,9 +898,6 @@ def run_load_and_filter(
         adata = run_solo_with_scvi(
             adata,
             batch_key=cfg.batch_key,
-            doublet_mode=cfg.doublet_mode,
-            doublet_score_threshold=cfg.doublet_score_threshold,
-            expected_doublet_rate=cfg.expected_doublet_rate,
         )
 
         LOGGER.info("Saving Anndata with doublet scores...")
