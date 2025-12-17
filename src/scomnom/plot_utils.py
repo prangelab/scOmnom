@@ -689,32 +689,32 @@ def qc_scatter_panels(adata, cfg, stage: str):
     if not cfg.make_figures:
         return
 
-figdir = Path("QC_plots") / "qc_scatter"
+    figdir = Path("QC_plots") / "qc_scatter"
 
-# --------------------------------------------------------------
-# Scatter 1: Complexity plot (colored by mt%)
-# --------------------------------------------------------------
-sc.pl.scatter(
-    adata,
-    x="total_counts",
-    y="n_genes_by_counts",
-    color="pct_counts_mt",
-    show=False,
-)
-save_multi(f"QC_complexity_{stage}", figdir)
-plt.close()
+    # --------------------------------------------------------------
+    # Scatter 1: Complexity plot (colored by mt%)
+    # --------------------------------------------------------------
+    sc.pl.scatter(
+        adata,
+        x="total_counts",
+        y="n_genes_by_counts",
+        color="pct_counts_mt",
+        show=False,
+    )
+    save_multi(f"QC_complexity_{stage}", figdir)
+    plt.close()
 
-# --------------------------------------------------------------
-# Scatter 2: total_counts vs pct_counts_mt
-# --------------------------------------------------------------
-sc.pl.scatter(
-    adata,
-    x="total_counts",
-    y="pct_counts_mt",
-    show=False,
-)
-save_multi(f"QC_scatter_mt_{stage}", figdir)
-plt.close()
+    # --------------------------------------------------------------
+    # Scatter 2: total_counts vs pct_counts_mt
+    # --------------------------------------------------------------
+    sc.pl.scatter(
+        adata,
+        x="total_counts",
+        y="pct_counts_mt",
+        show=False,
+    )
+    save_multi(f"QC_scatter_mt_{stage}", figdir)
+    plt.close()
 
 def plot_cellbender_effects(
         adata: ad.AnnData,
