@@ -435,27 +435,6 @@ def run_solo_with_scvi(
 
     adata.obs["doublet_score"] = scores
 
-    mask = _call_doublets(
-        scores,
-        mode=doublet_mode,
-        fixed_threshold=doublet_score_threshold,
-        expected_rate=expected_doublet_rate,
-    )
-
-    adata.obs["predicted_doublet"] = pd.Categorical(
-        mask,
-        categories=[False, True],
-        ordered=False,
-    )
-
-    LOGGER.info(
-        "Doublet calling: mode=%s, detected=%d / %d (%.2f%%)",
-        doublet_mode,
-        mask.sum(),
-        adata.n_obs,
-        100 * mask.mean(),
-    )
-
     del scvi_model
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -556,28 +535,64 @@ def infer_doublet_threshold(
 
 
 
-def _call_doublets(
-    scores: np.ndarray,
-    mode: str,
+def call_doublets(
+    adata: ad.AnnData,
     *,
-    fixed_threshold: float,
-    expected_rate: float,
-) -> np.ndarray:
+    mode: Literal["fixed", "rate"],
+    fixed_threshold: float | None = None,
+    expected_rate: float | None = None,
+) -> ad.AnnData:
+    """
+    Populate adata.obs['predicted_doublet'] from adata.obs['doublet_score'].
+
+    This function:
+      - applies thresholding logic
+      - stores the effective threshold in adata.uns
+      - does NOT remove cells
+      - is safe for normal + resume mode
+    """
+    if "doublet_score" not in adata.obs:
+        raise RuntimeError("doublet_score missing; run SOLO first")
+
+    scores = adata.obs["doublet_score"].to_numpy()
     n = scores.size
 
     if mode == "fixed":
-        return scores > fixed_threshold
+        if fixed_threshold is None:
+            raise ValueError("fixed_threshold must be provided for mode='fixed'")
 
-    if mode == "rate":
+        mask = scores > fixed_threshold
+        threshold = float(fixed_threshold)
+
+    elif mode == "rate":
+        if expected_rate is None:
+            raise ValueError("expected_rate must be provided for mode='rate'")
+
         k = int(np.ceil(expected_rate * n))
         if k <= 0:
-            return np.zeros(n, dtype=bool)
-        idx = np.argsort(scores)[::-1][:k]
-        mask = np.zeros(n, dtype=bool)
-        mask[idx] = True
-        return mask
+            mask = np.zeros(n, dtype=bool)
+            threshold = None
+        else:
+            order = np.argsort(scores)[::-1]
+            idx = order[:k]
 
-    raise ValueError(f"Unknown doublet threshold mode: {mode}")
+            mask = np.zeros(n, dtype=bool)
+            mask[idx] = True
+
+            # diagnostic cutoff score
+            threshold = float(scores[order[k - 1]])
+
+    else:
+        raise ValueError(f"Unknown doublet mode: {mode}")
+
+    adata.obs["predicted_doublet"] = pd.Categorical(
+        mask, categories=[False, True], ordered=False
+    )
+
+    adata.uns["doublet_mode"] = mode
+    adata.uns["doublet_threshold"] = threshold
+
+    return adata
 
 
 # ---------------------------------------------------------------------
@@ -875,6 +890,14 @@ def run_load_and_filter(
 
     # Here 'normal mode' and 'only apply doublet filter' merge again
     batch_key = cfg.batch_key or adata.uns.get("batch_key")
+
+    adata = call_doublets(
+        adata,
+        mode=cfg.doublet_mode,
+        fixed_threshold=cfg.doublet_score_threshold,
+        expected_rate=cfg.expected_doublet_rate,
+    )
+
     if cfg.make_figures:
         plot_utils.doublet_plots(
             adata,
