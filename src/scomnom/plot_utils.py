@@ -869,7 +869,6 @@ def doublet_plots(
     calling and visualized for diagnostics only.
     """
     import numpy as np
-    import pandas as pd
     import matplotlib.pyplot as plt
     from pathlib import Path
 
