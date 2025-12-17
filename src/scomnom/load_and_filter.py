@@ -494,30 +494,6 @@ def cleanup_after_solo(
     return adata
 
 
-def infer_doublet_threshold(
-    adata: ad.AnnData,
-    *,
-    mode: Literal["fixed", "rate", "gmm"],
-    expected_doublet_rate: float | None = None,
-    doublet_score_threshold: float | None = None,
-) -> float | None:
-    if mode == "fixed":
-        return float(doublet_score_threshold) if doublet_score_threshold is not None else None
-
-    if mode == "rate":
-        if expected_doublet_rate is None:
-            return None
-        if "doublet_score" not in adata.obs:
-            return None
-        scores = adata.obs["doublet_score"].to_numpy()
-        # threshold so that approx expected_doublet_rate are called doublets (upper tail)
-        q = 1.0 - float(expected_doublet_rate)
-        return float(np.quantile(scores, q))
-
-    return adata.uns.get("doublet_threshold")
-
-
-
 from pathlib import Path
 import numpy as np
 import pandas as pd
