@@ -500,10 +500,7 @@ def attach_raw_counts_postfilter(
       - Cells: by (sample_id, barcode)
       - Genes: by gene SYMBOLS (adata.var_names)
     """
-    import numpy as np
     import pandas as pd
-    import scanpy as sc
-    import scipy.sparse as sp
 
     batch_key = cfg.batch_key or adata.uns.get("batch_key")
     if batch_key is None:
@@ -545,7 +542,10 @@ def attach_raw_counts_postfilter(
         raw.obs_names = raw.obs_names.astype(str)
 
         raw.obs["_raw_key"] = sample + "::" + raw.obs_names
-        raw = raw[raw.obs["_raw_key"].isin(cell_key)].copy()
+        raw.obs_names = raw.obs["_raw_key"].values
+        raw.obs_names_make_unique()
+
+        raw = raw[raw.obs_names.isin(cell_key)].copy()
 
         if raw.n_obs == 0:
             raise RuntimeError(f"No overlapping cells between raw and filtered data for {sample}")
