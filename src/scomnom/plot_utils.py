@@ -78,21 +78,6 @@ def setup_scanpy_figs(figdir: Path, formats: Sequence[str] | None = None) -> Non
     figdir.mkdir(parents=True, exist_ok=True)
 
 
-def cleanup_scanpy_tmp() -> None:
-    """
-    Remove the temporary Scanpy figure directory if it exists.
-    Safe to call multiple times.
-    """
-    global ROOT_FIGDIR
-    if ROOT_FIGDIR is None:
-        return
-
-    tmp = "_scanpy_tmp"
-    if tmp.exists():
-        import shutil
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
 def save_multi(stem: str, figdir: Path, fig=None) -> None:
     """
     Save the current matplotlib figure (or a provided figure) to multiple formats

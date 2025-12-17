@@ -967,7 +967,5 @@ def run_load_and_filter(
         LOGGER.warning("Writing H5AD copy (loads data into RAM).")
         io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
 
-    plot_utils.cleanup_scanpy_tmp()
-
     LOGGER.info("Finished load-and-filter")
     return adata
