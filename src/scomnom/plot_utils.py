@@ -59,9 +59,7 @@ def setup_scanpy_figs(figdir: Path, formats: Sequence[str] | None = None) -> Non
     if formats is not None:
         set_figure_formats(formats)
 
-    tmp = figdir / "_scanpy_tmp"
-    tmp.mkdir(parents=True, exist_ok=True)
-    sc.settings.figdir = str(tmp)
+    sc.settings.figdir = ROOT_FIGDIR
 
     sc.settings.autoshow = False
     sc.settings.autosave = False
@@ -293,7 +291,7 @@ def _violin_with_points(
 
 
 def qc_scatter(adata, groupby: str, cfg):
-    figdir = ROOT_FIGDIR / "QC_plots" / "qc_scatter"
+  figdir = "QC_plots" / "qc_scatter"
 
     sc.pl.scatter(
         adata,
@@ -306,7 +304,7 @@ def qc_scatter(adata, groupby: str, cfg):
 
 
 def hvgs_and_pca_plots(adata, max_pcs_plot: int, cfg):
-    figdir = ROOT_FIGDIR / "QC_plots" / "overview"
+  figdir = "QC_plots" / "overview"
 
     sc.pl.highly_variable_genes(adata, show=False)
     save_multi("QC_highly_variable_genes", figdir)
@@ -697,7 +695,7 @@ def qc_scatter_panels(adata, cfg, stage: str):
     if not cfg.make_figures:
         return
 
-    figdir = ROOT_FIGDIR / "QC_plots" / "qc_scatter"
+  figdir = "QC_plots" / "qc_scatter"
 
     # --------------------------------------------------------------
     # Scatter 1: Complexity plot (colored by mt%)
@@ -749,7 +747,6 @@ def plot_cellbender_effects(
         return
 
     figdir = figdir / "cellbender"
-    figdir.mkdir(parents=True, exist_ok=True)
 
     X_raw = adata.layers["counts_raw"]
     X_cb = adata.layers["counts_cb"]
@@ -899,7 +896,6 @@ def doublet_plots(
     from pathlib import Path
 
     figdir = Path(figdir)
-    figdir.mkdir(parents=True, exist_ok=True)
 
     required = {"doublet_score", "predicted_doublet", batch_key}
     if not required.issubset(adata.obs.columns):
@@ -1052,7 +1048,6 @@ def umap_plots(
     from pathlib import Path
 
     figdir = Path(figdir)
-    figdir.mkdir(parents=True, exist_ok=True)
 
     if "X_umap" not in adata.obsm:
         LOGGER.warning("Skipping UMAP plots: X_umap not found.")
