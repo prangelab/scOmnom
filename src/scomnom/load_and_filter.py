@@ -16,6 +16,7 @@ import scanpy as sc
 
 from . import io_utils
 from . import plot_utils
+from . import reporting
 
 LOGGER = logging.getLogger(__name__)
 
@@ -953,6 +954,12 @@ def run_load_and_filter(
             adata,
             batch_key=batch_key,
             figdir=Path("QC_plots") / "overview",
+        )
+        reporting.generate_qc_report(
+            figdir=cfg.output_dir / cfg.figdir_name,
+            out_html=cfg.output_dir / "qc_report.html",
+            run_config=cfg.__dict__,
+            title="scOmnom load-and-filter QC report",
         )
 
     # ---------------------------------------------------------
