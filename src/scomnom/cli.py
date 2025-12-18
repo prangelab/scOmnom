@@ -17,11 +17,12 @@ ALLOWED_METHODS = {"scVI", "scANVI", "BBKNN"}
 app = typer.Typer(help="scOmnom CLI — high-throughput scRNA-seq preprocessing and analysis pipeline.")
 
 # Globally suppress noisy warnings
-warnings.filterwarnings("ignore", message="Variable names are not unique", category=UserWarning, module="anndata")
-warnings.filterwarnings("ignore", message=".*not compatible with tight_layout.*", category=UserWarning)
-warnings.filterwarnings("ignore", message="pkg_resources is deprecated as an API", category=UserWarning)
-warnings.filterwarnings("ignore", message=r".*does not have many workers.*", category=UserWarning, module="lightning.pytorch")
-warnings.filterwarnings("ignore", message=".*already log-transformed.*", category=UserWarning)
+warnings.filterwarnings(action="ignore", message="Variable names are not unique", category=UserWarning, module="anndata")
+warnings.filterwarnings(action="ignore", message=".*not compatible with tight_layout.*", category=UserWarning)
+warnings.filterwarnings(action="ignore", message="pkg_resources is deprecated as an API", category=UserWarning)
+warnings.filterwarnings(action="ignore", message=r".*does not have many workers.*", category=UserWarning, module="lightning.pytorch")
+warnings.filterwarnings(action="ignore", message=".*already log-transformed.*", category=UserWarning)
+warnings.filterwarnings(action="ignore", message="Argument `use_highly_variable` is deprecated",category=FutureWarning,module="scanpy",)
 
 
 # ---------------------------------------------------------------------

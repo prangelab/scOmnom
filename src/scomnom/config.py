@@ -122,7 +122,7 @@ class IntegrateConfig(BaseModel):
     logfile: Optional[Path] = None
 
     @property
-    def figdir_name(self) -> Path:
+    def figdir(self) -> Path:
         return self.output_dir / self.figdir_name
 
     @validator("methods")

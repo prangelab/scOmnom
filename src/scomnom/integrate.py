@@ -387,7 +387,7 @@ def run_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
     LOGGER.info("Starting integration module")
 
     # Configure Scanpy/Matplotlib figure behavior + formats
-    plot_utils.setup_scanpy_figs(cfg.figdir_name, cfg.figure_formats)
+    plot_utils.setup_scanpy_figs(cfg.figdir, cfg.figure_formats)
 
     adata = io_utils.load_dataset(cfg.input_path)
 
@@ -426,12 +426,12 @@ def run_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
     sc.pp.neighbors(adata, use_rep="X_integrated")
     sc.tl.umap(adata)
 
-    out_zarr = cfg.output_dir / (cfg.output_name + ".integrated.zarr")
+    out_zarr = cfg.output_dir / (cfg.output_name + ".zarr")
     LOGGER.info("Saving integrated dataset as Zarr → %s", out_zarr)
     io_utils.save_dataset(adata, out_zarr, fmt="zarr")
 
     if getattr(cfg, "save_h5ad", False):
-        out_h5ad = cfg.output_dir / (cfg.output_name + ".integrated.h5ad")
+        out_h5ad = cfg.output_dir / (cfg.output_name + ".h5ad")
         LOGGER.warning(
             "Writing additional H5AD output (loads full matrix into RAM): %s",
             out_h5ad,
