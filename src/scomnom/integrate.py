@@ -378,9 +378,9 @@ def run_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
     # Configure Scanpy/Matplotlib figure behavior + formats
     plot_utils.setup_scanpy_figs(cfg.figdir_name, cfg.figure_formats)
 
-    adata_full = io_utils.load_dataset(cfg.input_path)
+    adata = io_utils.load_dataset(cfg.input_path)
 
-    batch_key = cfg.batch_key or adata_full.uns.get("batch_key")
+    batch_key = cfg.batch_key or adata.uns.get("batch_key")
     if batch_key is None:
         raise RuntimeError("batch_key missing")
 
