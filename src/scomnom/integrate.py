@@ -14,7 +14,7 @@ import torch
 
 from scomnom import __version__
 from .config import IntegrateConfig
-from . import io_utils, plot_utils
+from . import io_utils, plot_utils, reporting
 from .logging_utils import init_logging
 
 torch.set_float32_matmul_precision("high")
@@ -502,7 +502,7 @@ def run_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
 
     sc.tl.umap(adata)
 
-    generate_integration_report(
+    reporting.generate_integration_report(
         fig_root=cfg.figdir,
         version=__version__,
         adata=adata,
