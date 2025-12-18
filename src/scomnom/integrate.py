@@ -401,7 +401,6 @@ def run_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
     adata, emb_keys = _run_integrations(
         adata,
         methods=methods,
-        layer=layer,
         batch_key=batch_key,
         label_key=cfg.label_key,
     )
