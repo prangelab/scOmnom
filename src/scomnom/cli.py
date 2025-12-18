@@ -5,10 +5,10 @@ from pathlib import Path
 import warnings
 
 from .load_and_filter import run_load_and_filter
-from .process_and_integrate import run_process_and_integrate
+from .integrate import run_integrate
 from .cluster_and_annotate import run_clustering
 
-from .config import LoadAndFilterConfig, ProcessAndIntegrateConfig, ClusterAnnotateConfig
+from .config import LoadAndFilterConfig, IntegrateConfig, ClusterAnnotateConfig
 import logging
 from .logging_utils import init_logging
 
