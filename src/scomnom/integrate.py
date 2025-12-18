@@ -358,26 +358,27 @@ def _select_best_embedding(
     label_key: str,
     n_jobs: int,
     output_dir: Path,
-    figdir: Path,
 ) -> str:
     """
     Run scIB benchmarking and select the best integration embedding.
-
-    BBKNN rule:
-      - BBKNN can NEVER win against real integrations
-      - BBKNN may only win if the only alternative is Unintegrated
+    Exclude BBKNN because it is no embedding
     """
     from scib_metrics.benchmark import Benchmarker, BioConservation, BatchCorrection
 
     _ensure_label_key(adata, label_key)
 
-    LOGGER.info("Running scIB benchmarking on embeddings: %s", list(embedding_keys))
+    benchmark_embeddings = [
+        e for e in embedding_keys
+        if not e.upper().startswith("BBKNN")
+    ]
+
+    LOGGER.info("Running scIB benchmarking on embeddings: %s", benchmark_embeddings)
 
     bm = Benchmarker(
         adata,
         batch_key=batch_key,
         label_key=label_key,
-        embedding_obsm_keys=list(embedding_keys),
+        embedding_obsm_keys=benchmark_embeddings,
         bio_conservation_metrics=BioConservation(),
         batch_correction_metrics=BatchCorrection(),
         n_jobs=n_jobs,
@@ -414,42 +415,10 @@ def _select_best_embedding(
         LOGGER.error("No valid scIB scores; falling back to Unintegrated.")
         return "Unintegrated"
 
-    # ------------------------------------------------------------------
-    # Apply BBKNN selection rules
-    # ------------------------------------------------------------------
-    all_embeddings = numeric.index.tolist()
+    scores = numeric.mean(axis=1)
+    best = scores.idxmax()
 
-    bbknn = [e for e in all_embeddings if e.upper().startswith("BBKNN")]
-    has_unintegrated = "Unintegrated" in all_embeddings
-
-    real_integrations = [
-        e for e in all_embeddings
-        if e not in bbknn and e != "Unintegrated"
-    ]
-
-    # Case 1: at least one real integration → BBKNN excluded
-    if real_integrations:
-        candidates = real_integrations + (["Unintegrated"] if has_unintegrated else [])
-        best = numeric.loc[candidates].mean(axis=1).idxmax()
-
-        LOGGER.info(
-            "Selected best embedding (BBKNN excluded): '%s'",
-            best,
-        )
-        return str(best)
-
-    # Case 2: only Unintegrated + BBKNN remain
-    candidates = []
-    if has_unintegrated:
-        candidates.append("Unintegrated")
-    candidates.extend(bbknn)
-
-    best = numeric.loc[candidates].mean(axis=1).idxmax()
-
-    LOGGER.warning(
-        "No real integrations available; selected baseline embedding: '%s'",
-        best,
-    )
+    LOGGER.info("Selected best embedding: '%s'", best)
     return str(best)
 
 
@@ -493,7 +462,6 @@ def run_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
         label_key=cfg.label_key,
         n_jobs=cfg.benchmark_n_jobs,
         output_dir=cfg.output_dir,
-        figdir=Path("integration"),
     )
 
     plot_utils.plot_integration_umaps(
