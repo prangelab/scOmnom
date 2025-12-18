@@ -1233,6 +1233,7 @@ def plot_scib_results_table(scaled: pd.DataFrame) -> None:
     df = df.sort_values("Total", ascending=False)
     # Filter out junk rows
     df = df.loc[~df.index.str.contains("Metric", case=False, na=False)]
+    df = df.apply(pd.to_numeric, errors="coerce")
 
     all_cols = df.columns.tolist()
 
@@ -1312,6 +1313,7 @@ def plot_scib_results_table_old(scaled: pd.DataFrame) -> None:
     df = scaled.copy()
     df = df.sort_values("Total", ascending=False)
     df = df.loc[~df.index.str.contains("Metric", case=False, na=False)]
+    df = df.apply(pd.to_numeric, errors="coerce")
 
     all_cols = df.columns.tolist()
 
