@@ -1231,11 +1231,16 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+from pathlib import Path
+
 
 def plot_scib_results_table(scaled: pd.DataFrame) -> None:
     df = scaled.copy()
 
-    # 1. Clean and Sort
+    # 1. Clean, Cast, and Sort
     df = df.loc[~df.index.str.contains("Metric", case=False, na=False)]
     df = df.apply(pd.to_numeric, errors="coerce")
     df = df.sort_values("Total", ascending=False)
@@ -1244,25 +1249,38 @@ def plot_scib_results_table(scaled: pd.DataFrame) -> None:
 
     # Define Categories
     agg_metrics = [c for c in ["Batch correction", "Bio conservation", "Total"] if c in all_cols]
-    batch_metrics = [c for c in ["iLISI", "KBET", "Graph connectivity", "PCR comparison", "Silhouette batch"] if c in all_cols]
+    batch_metrics = [c for c in ["iLISI", "KBET", "Graph connectivity", "PCR comparison", "Silhouette batch"] if
+                     c in all_cols]
     bio_metrics = [c for c in all_cols if c not in agg_metrics + batch_metrics]
 
     ordered_cols = bio_metrics + batch_metrics + agg_metrics
     df = df[ordered_cols]
 
     # 2. X-Position Mapping
-    cell_w, cell_h = 1.2, 0.6
-    agg_gap = 0.5
+    cell_w, cell_h = 1.2, 0.7
+    agg_gap = 0.8  # Slightly wider gap for vertical lines
     x_positions = {}
     x_curr = 0
-    for col in ordered_cols:
-        if col in agg_metrics and x_curr > 0 and ordered_cols[ordered_cols.index(col) - 1] not in agg_metrics:
-            x_curr += agg_gap
+
+    # Store section boundaries for vertical lines
+    section_boundaries = []
+
+    for i, col in enumerate(ordered_cols):
+        # Check for transitions between categories to mark boundaries
+        if i > 0:
+            prev_col = ordered_cols[i - 1]
+            is_new_section = (
+                    (prev_col in bio_metrics and col in batch_metrics) or
+                    (prev_col in batch_metrics and col in agg_metrics)
+            )
+            if is_new_section:
+                section_boundaries.append(x_curr + (agg_gap / 2) - 0.5)
+                x_curr += agg_gap
+
         x_positions[col] = x_curr
         x_curr += 1
 
     n_rows = len(df)
-    # Increase height slightly for horizontal headers
     fig, ax = plt.subplots(figsize=(cell_w * (x_curr + 1), cell_h * (n_rows + 4)))
 
     # 3. DRAW DATA
@@ -1274,38 +1292,39 @@ def plot_scib_results_table(scaled: pd.DataFrame) -> None:
             if np.isnan(val): continue
 
             if col in agg_metrics:
-                # Aggregate bars
-                ax.barh(y_coord, val, left=x_c, height=cell_h * 0.7, color="#2c7fb8", align='center', zorder=2)
-                # FIX: Conditional text color for low values
-                text_color = 'white' if val > 0.3 else 'black'
+                # Use a lighter blue for background bars so black text is always visible
+                ax.barh(y_coord, val, left=x_c, height=cell_h * 0.6, color="#a6bddb", align='center', zorder=2)
                 ax.text(x_c + 0.05, y_coord, f"{val:.2f}", va='center', ha='left',
-                        color=text_color, fontsize=9, fontweight='bold', zorder=3)
+                        color='black', fontsize=10, fontweight='bold', zorder=3)
             else:
                 # Metric circles
-                ax.scatter(x_c + 0.5, y_coord, s=700, c=[plt.cm.viridis(val)], edgecolors='none', zorder=3)
-                ax.text(x_c + 0.5, y_coord, f"{val:.2f}", ha='center', va='center', fontsize=8,
-                        color='white' if val < 0.3 or val > 0.7 else 'black', zorder=4)
+                ax.scatter(x_c + 0.5, y_coord, s=800, c=[plt.cm.viridis(val)], edgecolors='none', zorder=2)
+                ax.text(x_c + 0.5, y_coord, f"{val:.2f}", ha='center', va='center', fontsize=9,
+                        color='white' if val < 0.3 or val > 0.8 else 'black', zorder=3)
 
-    # 4. DYNAMIC HEADERS (Horizontal)
-    def draw_header(cols, title, y_top=-1.8, y_sub=-0.6):
+    # 4. DRAW VERTICAL DIVIDERS
+    for boundary in section_boundaries:
+        ax.axvline(x=boundary, color='gray', linestyle='--', linewidth=0.8, alpha=0.5, zorder=1)
+
+    # 5. DYNAMIC HEADERS
+    def draw_header(cols, title, y_top=-2.2, y_sub=-0.8):
         if not cols: return
         pos = [x_positions[c] for c in cols]
         center = (min(pos) + max(pos) + 1) / 2
-        # Section Title (e.g. Biological Conservation)
-        ax.text(center, y_top, title, ha='center', va='bottom', fontweight='bold', fontsize=10)
-        # Column Labels (Horizontal)
+        # Section Title (Large & Bold)
+        ax.text(center, y_top, title, ha='center', va='bottom', fontweight='bold', fontsize=12)
+        # Column Labels (Horizontal, wrapped)
         for c in cols:
-            # Wrap long names if necessary by replacing space with newline
             display_name = c.replace(" ", "\n")
-            ax.text(x_positions[c] + 0.5, y_sub, display_name, ha='center', va='bottom', fontsize=7)
+            ax.text(x_positions[c] + 0.5, y_sub, display_name, ha='center', va='bottom', fontsize=8.5)
 
     draw_header(bio_metrics, "Biological Conservation")
     draw_header(batch_metrics, "Batch Correction")
     draw_header(agg_metrics, "Aggregate Scores")
 
-    # 5. FINAL STYLING
-    ax.set_ylim(-2.5, n_rows)  # More space for horizontal multi-line headers
-    ax.set_xlim(0, x_curr)
+    # 6. FINAL STYLING
+    ax.set_ylim(-3, n_rows)
+    ax.set_xlim(-0.5, x_curr)
     ax.invert_yaxis()
 
     ax.grid(False)
@@ -1315,21 +1334,23 @@ def plot_scib_results_table(scaled: pd.DataFrame) -> None:
     ax.set_xticks([])
     ax.set_yticks(np.arange(n_rows) + 0.5)
 
-    # Robust Baseline Labeling
+    # Baseline Labeling with newlines for better vertical spacing
     new_labels = []
     for idx in df.index:
-        idx_str = str(idx)
-        if "unintegrated" in idx_str.lower():
-            new_labels.append(f"{idx_str}\n(baseline)")
-        elif "bbknn" in idx_str.lower():
-            new_labels.append(f"{idx_str}\n(graph baseline)")
+        idx_s = str(idx)
+        if "unintegrated" in idx_s.lower():
+            new_labels.append(f"{idx_s}\n(baseline)")
+        elif "bbknn" in idx_s.lower():
+            new_labels.append(f"{idx_s}\n(graph baseline)")
         else:
-            new_labels.append(idx_str)
+            new_labels.append(idx_s)
 
-    ax.set_yticklabels(new_labels, fontsize=9, fontweight='medium')
+    ax.set_yticklabels(new_labels, fontsize=10, fontweight='medium')
     ax.tick_params(axis='both', which='both', length=0)
 
     plt.tight_layout()
+
+    # Using your specific saving function
     save_multi("scIB_results_table", Path("integration"))
     plt.close(fig)
 
