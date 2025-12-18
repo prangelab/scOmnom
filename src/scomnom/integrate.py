@@ -475,21 +475,9 @@ def run_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
     batch_key = cfg.batch_key or adata.uns.get("batch_key")
     if batch_key is None:
         raise RuntimeError("batch_key missing")
-
     LOGGER.info("Using batch_key='%s'", batch_key)
-    # ------------------------------------------------------------
-    # Pull scaled scIB table (already stored from prior run)
-    # ------------------------------------------------------------
-    scaled = _load_scib_table_from_disk(cfg.output_dir)
 
-    # ------------------------------------------------------------
-    # Plot ONLY the scIB results table
-    # ------------------------------------------------------------
-    plot_utils.plot_scib_results_table(scaled)
-
-    LOGGER.info("DEBUG SHORT-CIRCUIT: plots complete, exiting integration module")
-    return
-    methods = cfg.methods or ["scVI", "scANVI"]
+    methods = cfg.methods or ["scVI", "scANVI", "BBKNN"]
 
     adata, emb_keys = _run_integrations(
         adata,
