@@ -1287,7 +1287,16 @@ def plot_scib_results_table(scaled: pd.DataFrame) -> None:
 
     # Final Formatting
     ax.set_yticks(np.arange(n_rows) + 0.5)
-    ax.set_yticklabels(df.index.tolist())
+    labels = []
+    for idx in df.index:
+        if idx == "Unintegrated":
+            labels.append(f"{idx} (baseline)")
+        elif idx.upper().startswith("BBKNN"):
+            labels.append(f"{idx} (graph baseline)")
+        else:
+            labels.append(idx)
+
+    ax.set_yticklabels(labels, fontsize=10)
     ax.set_ylim(0, n_rows)
     ax.invert_yaxis()  # Now correctly puts Row 0 at top
     ax.set_frame_on(False)
@@ -1410,7 +1419,16 @@ def plot_scib_results_table_old(scaled: pd.DataFrame) -> None:
     ax.tick_params(axis="both", length=0)
 
     ax.set_yticks(np.arange(n_rows) + 0.5)
-    ax.set_yticklabels(df.index.tolist(), fontsize=10)
+    labels = []
+    for idx in df.index:
+        if idx == "Unintegrated":
+            labels.append(f"{idx} (baseline)")
+        elif idx.upper().startswith("BBKNN"):
+            labels.append(f"{idx} (graph baseline)")
+        else:
+            labels.append(idx)
+
+    ax.set_yticklabels(labels, fontsize=10)
 
     for idx, label in enumerate(normal_metrics):
         ax.text(

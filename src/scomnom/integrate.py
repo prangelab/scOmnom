@@ -320,33 +320,35 @@ def _run_integrations(
 
     return adata, created
 
-def _run_bbknn_embedding(
+def _run_bbknn(
     adata: ad.AnnData,
+    *,
     batch_key: str,
-) -> np.ndarray:
+    use_rep: str = "X_pca",
+) -> None:
     """
-    Run BBKNN and return a UMAP embedding derived from the BBKNN graph.
-
-    NOTE:
-    BBKNN does not produce a latent space.
-    UMAP is used here as a proxy embedding for scIB benchmarking only.
+    Run BBKNN as a graph-based baseline.
     """
     import bbknn
     import scanpy as sc
 
-    tmp = adata.copy()
+    LOGGER.info("Running BBKNN (graph-based baseline)")
 
-    # Ensure PCA exists
-    if "X_pca" not in tmp.obsm:
-        sc.tl.pca(tmp)
+    # BBKNN operates on an existing representation (usually PCA)
+    bbknn.bbknn(
+        adata,
+        batch_key=batch_key,
+        use_rep=use_rep,
+    )
 
-    # Build BBKNN graph
-    bbknn.bbknn(tmp, batch_key=batch_key)
+    # Optional: compute UMAP ONLY for visualization
+    sc.tl.umap(adata)
 
-    # Compute UMAP from BBKNN graph
-    sc.tl.umap(tmp, min_dist=0.5, spread=1.0)
-
-    return tmp.obsm["X_umap"].copy()
+    # Tag for provenance
+    adata.uns["bbknn"] = {
+        "batch_key": batch_key,
+        "use_rep": use_rep,
+    }
 
 
 def _select_best_embedding(
@@ -355,16 +357,15 @@ def _select_best_embedding(
     batch_key: str,
     label_key: str,
     n_jobs: int,
-    output_dir : Path,
+    output_dir: Path,
     figdir: Path,
 ) -> str:
     """
     Run scIB benchmarking and select the best integration embedding.
 
-    Returns
-    -------
-    str
-        Name of the best embedding key.
+    BBKNN rule:
+      - BBKNN can NEVER win against real integrations
+      - BBKNN may only win if the only alternative is Unintegrated
     """
     from scib_metrics.benchmark import Benchmarker, BioConservation, BatchCorrection
 
@@ -390,7 +391,6 @@ def _select_best_embedding(
     raw = bm.get_results(min_max_scale=False)
     scaled = bm.get_results(min_max_scale=True)
 
-    # Save tables
     raw_path = Path(output_dir) / "integration_metrics_raw.tsv"
     scaled_path = Path(output_dir) / "integration_metrics_scaled.tsv"
     raw.to_csv(raw_path, sep="\t")
@@ -399,42 +399,59 @@ def _select_best_embedding(
     plot_utils.plot_scib_results_table(scaled)
 
     # ------------------------------------------------------------------
-    # Clean + score
+    # Clean numeric table
     # ------------------------------------------------------------------
-    scaled_str = scaled.astype(str)
-    numeric = scaled_str.apply(pd.to_numeric, errors="coerce")
-
-    # Drop metadata rows if present
-    numeric = numeric.drop(index=["Metric Type"], errors="ignore")
-    numeric = numeric.dropna(axis=1, how="all")
+    numeric = (
+        scaled.astype(str)
+        .apply(pd.to_numeric, errors="coerce")
+        .drop(index=["Metric Type"], errors="ignore")
+        .dropna(axis=1, how="all")
+    )
 
     LOGGER.info("scIB results table (head):\n%s", numeric.head())
 
-    valid_embeddings: List[str] = []
-    for emb in numeric.index:
-        row = numeric.loc[emb]
-        if row.notna().any() and np.isfinite(row).any():
-            valid_embeddings.append(emb)
-        else:
-            LOGGER.warning(
-                "Dropping embedding '%s' due to all-NaN or non-finite metrics.",
-                emb,
-            )
-
-    if not valid_embeddings:
-        LOGGER.error(
-            "All embeddings had invalid scores; falling back to 'Unintegrated'."
-        )
+    if numeric.empty:
+        LOGGER.error("No valid scIB scores; falling back to Unintegrated.")
         return "Unintegrated"
 
-    scores = numeric.loc[valid_embeddings].mean(axis=1)
-    best = scores.idxmax()
+    # ------------------------------------------------------------------
+    # Apply BBKNN selection rules
+    # ------------------------------------------------------------------
+    all_embeddings = numeric.index.tolist()
 
-    if isinstance(best, tuple):
-        best = best[0]
+    bbknn = [e for e in all_embeddings if e.upper().startswith("BBKNN")]
+    has_unintegrated = "Unintegrated" in all_embeddings
 
-    LOGGER.info("Selected best embedding: '%s'", best)
+    real_integrations = [
+        e for e in all_embeddings
+        if e not in bbknn and e != "Unintegrated"
+    ]
+
+    # Case 1: at least one real integration → BBKNN excluded
+    if real_integrations:
+        candidates = real_integrations + (["Unintegrated"] if has_unintegrated else [])
+        best = numeric.loc[candidates].mean(axis=1).idxmax()
+
+        LOGGER.info(
+            "Selected best embedding (BBKNN excluded): '%s'",
+            best,
+        )
+        return str(best)
+
+    # Case 2: only Unintegrated + BBKNN remain
+    candidates = []
+    if has_unintegrated:
+        candidates.append("Unintegrated")
+    candidates.extend(bbknn)
+
+    best = numeric.loc[candidates].mean(axis=1).idxmax()
+
+    LOGGER.warning(
+        "No real integrations available; selected baseline embedding: '%s'",
+        best,
+    )
     return str(best)
+
 
 def _load_scib_table_from_disk(output_dir: Path) -> pd.DataFrame:
     path = Path("integration_metrics_scaled.tsv")
@@ -472,9 +489,8 @@ def run_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
     plot_utils.plot_scib_results_table_old(scaled)
 
     LOGGER.info("DEBUG SHORT-CIRCUIT: plots complete, exiting integration module")
-    sys.exit(0)
-
-    methods = cfg.methods or ["scVI", "scANVI", "BBKNN"]
+    return
+    methods = cfg.methods or ["scVI", "scANVI"]
 
     adata, emb_keys = _run_integrations(
         adata,
