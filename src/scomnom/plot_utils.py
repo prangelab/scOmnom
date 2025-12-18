@@ -1255,25 +1255,34 @@ from pathlib import Path
 def plot_scib_results_table(scaled: pd.DataFrame) -> None:
     df = scaled.copy()
 
-    # 1. Clean and Sort
+    # ------------------------------------------------------------------
+    # 1. Clean and sort
+    # ------------------------------------------------------------------
     df = df.loc[~df.index.str.contains("Metric", case=False, na=False)]
     df = df.apply(pd.to_numeric, errors="coerce")
     df = df.sort_values("Total", ascending=False)
 
     all_cols = df.columns.tolist()
 
-    # Define Categories
+    # ------------------------------------------------------------------
+    # 2. Define categories
+    # ------------------------------------------------------------------
     agg_metrics = [c for c in ["Batch correction", "Bio conservation", "Total"] if c in all_cols]
-    batch_metrics = [c for c in ["iLISI", "KBET", "Graph connectivity", "PCR comparison", "Silhouette batch"] if
-                     c in all_cols]
+    batch_metrics = [
+        c for c in ["iLISI", "KBET", "Graph connectivity", "PCR comparison", "Silhouette batch"]
+        if c in all_cols
+    ]
     bio_metrics = [c for c in all_cols if c not in agg_metrics + batch_metrics]
 
     ordered_cols = bio_metrics + batch_metrics + agg_metrics
     df = df[ordered_cols]
 
-    # 2. X-Position Mapping with Centered Divider Logic
-    cell_w, cell_h = 1.3, 0.9
-    agg_gap = 1.2
+    # ------------------------------------------------------------------
+    # 3. X-position mapping (tighter gaps, centered dividers)
+    # ------------------------------------------------------------------
+    cell_w, cell_h = 1.15, 0.85
+    agg_gap = 0.6
+
     x_positions = {}
     x_curr = 0
     section_boundaries = []
@@ -1281,10 +1290,12 @@ def plot_scib_results_table(scaled: pd.DataFrame) -> None:
     for i, col in enumerate(ordered_cols):
         if i > 0:
             prev_col = ordered_cols[i - 1]
-            if (prev_col in bio_metrics and col in batch_metrics) or \
-                    (prev_col in batch_metrics and col in agg_metrics):
-                # MATHEMATICAL CENTER: boundary is half-way through the gap
-                section_boundaries.append(x_curr + (agg_gap / 2) - 0.5)
+            if (
+                (prev_col in bio_metrics and col in batch_metrics)
+                or (prev_col in batch_metrics and col in agg_metrics)
+            ):
+                # divider exactly centered in the gap
+                section_boundaries.append(x_curr + agg_gap / 2)
                 x_curr += agg_gap
 
         x_positions[col] = x_curr
@@ -1293,52 +1304,112 @@ def plot_scib_results_table(scaled: pd.DataFrame) -> None:
     n_rows = len(df)
     fig, ax = plt.subplots(figsize=(cell_w * (x_curr + 1), cell_h * (n_rows + 4)))
 
-    # 3. DRAW DATA
+    # ------------------------------------------------------------------
+    # 4. Draw data
+    # ------------------------------------------------------------------
     for i, (method_name, row) in enumerate(df.iterrows()):
         y_coord = i + 0.5
         for col in df.columns:
             x_c = x_positions[col]
             val = row[col]
-            if np.isnan(val): continue
+            if np.isnan(val):
+                continue
 
             if col in agg_metrics:
-                # Always use black text + light blue for aggregate bars
-                ax.barh(y_coord, val, left=x_c, height=cell_h * 0.55, color="#a6bddb", align='center', zorder=2)
-                ax.text(x_c + 0.05, y_coord, f"{val:.2f}", va='center', ha='left',
-                        color='black', fontsize=12, fontweight='bold', zorder=3)
+                ax.barh(
+                    y_coord,
+                    val,
+                    left=x_c,
+                    height=cell_h * 0.55,
+                    color="#a6bddb",
+                    align="center",
+                    zorder=2,
+                )
+                ax.text(
+                    x_c + 0.05,
+                    y_coord,
+                    f"{val:.2f}",
+                    va="center",
+                    ha="left",
+                    color="black",
+                    fontsize=12,
+                    fontweight="bold",
+                    zorder=3,
+                )
             else:
-                # Metric circles
-                ax.scatter(x_c + 0.5, y_coord, s=1100, c=[plt.cm.viridis(val)], edgecolors='none', zorder=2)
-                ax.text(x_c + 0.5, y_coord, f"{val:.2f}", ha='center', va='center', fontsize=11,
-                        color='white' if val < 0.3 or val > 0.8 else 'black', zorder=3)
+                ax.scatter(
+                    x_c + 0.5,
+                    y_coord,
+                    s=1100,
+                    c=[plt.cm.viridis(val)],
+                    edgecolors="none",
+                    zorder=2,
+                )
+                ax.text(
+                    x_c + 0.5,
+                    y_coord,
+                    f"{val:.2f}",
+                    ha="center",
+                    va="center",
+                    fontsize=11,
+                    color="white" if val < 0.3 or val > 0.8 else "black",
+                    zorder=3,
+                )
 
-    # 4. DRAW THICK SOLID DIVIDERS (Centered)
+    # ------------------------------------------------------------------
+    # 5. Section dividers (shorter, centered)
+    # ------------------------------------------------------------------
     for boundary in section_boundaries:
-        # Start at 0 (top row) to n_rows (bottom row)
-        ax.plot([boundary, boundary], [0, n_rows], color='gray', linestyle='-', linewidth=2.0, alpha=0.6, zorder=1)
+        ax.plot(
+            [boundary, boundary],
+            [0.2, n_rows - 0.2],
+            color="gray",
+            linestyle="-",
+            linewidth=2.0,
+            alpha=0.6,
+            zorder=1,
+        )
 
-    # 5. DYNAMIC HEADERS (Lowered and Larger)
-    def draw_header(cols, title, y_top=-1.8, y_sub=-0.5):
-        if not cols: return
+    # ------------------------------------------------------------------
+    # 6. Headers (lowered)
+    # ------------------------------------------------------------------
+    def draw_header(cols, title, y_top=-1.4, y_sub=-0.35):
+        if not cols:
+            return
         pos = [x_positions[c] for c in cols]
         center = (min(pos) + max(pos) + 1) / 2
 
-        # Section Category (Lowered from -2.2 to -1.8)
-        ax.text(center, y_top, title, ha='center', va='bottom', fontweight='bold', fontsize=15)
+        ax.text(
+            center,
+            y_top,
+            title,
+            ha="center",
+            va="bottom",
+            fontweight="bold",
+            fontsize=15,
+        )
 
-        # Column Labels
         for c in cols:
             display_name = c.replace(" ", "\n")
-            ax.text(x_positions[c] + 0.5, y_sub, display_name, ha='center', va='bottom',
-                    fontsize=12, fontweight='medium')
+            ax.text(
+                x_positions[c] + 0.5,
+                y_sub,
+                display_name,
+                ha="center",
+                va="bottom",
+                fontsize=12,
+                fontweight="medium",
+            )
 
     draw_header(bio_metrics, "Biological Conservation")
     draw_header(batch_metrics, "Batch Correction")
     draw_header(agg_metrics, "Aggregate Scores")
 
-    # 6. FINAL STYLING (Tightened Left Margin)
-    ax.set_ylim(-2.8, n_rows)
-    ax.set_xlim(0, x_curr)  # Tightened from -0.5 to 0 to remove white space
+    # ------------------------------------------------------------------
+    # 7. Final styling
+    # ------------------------------------------------------------------
+    ax.set_ylim(-2.4, n_rows)
+    ax.set_xlim(0, x_curr)
     ax.invert_yaxis()
 
     ax.grid(False)
@@ -1348,7 +1419,7 @@ def plot_scib_results_table(scaled: pd.DataFrame) -> None:
     ax.set_xticks([])
     ax.set_yticks(np.arange(n_rows) + 0.5)
 
-    # Row Labels
+    # Row labels with baseline annotation
     new_labels = []
     for idx in df.index:
         idx_s = str(idx)
@@ -1359,14 +1430,13 @@ def plot_scib_results_table(scaled: pd.DataFrame) -> None:
         else:
             new_labels.append(idx_s)
 
-    ax.set_yticklabels(new_labels, fontsize=13, fontweight='bold')
-    ax.tick_params(axis='both', which='both', length=0)
+    ax.set_yticklabels(new_labels, fontsize=13, fontweight="bold")
+    ax.tick_params(axis="both", which="both", length=0)
 
     plt.tight_layout()
-
-    # Save using your custom function
     save_multi("scIB_results_table", Path("integration"))
     plt.close(fig)
+
 
 
 # -------------------------------------------------------------------------
