@@ -388,7 +388,7 @@ def integrate(
     logfile = (output_dir or input_path.parent) / "process-and-integrate.log"
     init_logging(logfile)
 
-    cfg = ProcessAndIntegrateConfig(
+    cfg = IntegrateConfig(
         input_path=input_path,
         output_dir=output_dir or input_path.parent,
         output_name=output_name,
