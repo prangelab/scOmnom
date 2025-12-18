@@ -386,9 +386,11 @@ def run_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
 
     LOGGER.info("Using batch_key='%s'", batch_key)
 
+    methods = cfg.methods or ["scVI", "scANVI", "BBKNN"]
+
     adata, emb_keys = _run_integrations(
         adata,
-        methods=cfg.methods,
+        methods=methods,
         batch_key=batch_key,
         label_key=cfg.label_key,
     )

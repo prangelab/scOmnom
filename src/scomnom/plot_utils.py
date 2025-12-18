@@ -52,6 +52,7 @@ def setup_scanpy_figs(figdir: Path, formats: Sequence[str] | None = None) -> Non
     Configure Scanpy and global figure settings for scOmnom.
     """
     global ROOT_FIGDIR
+    figdir = Path(figdir)
     ROOT_FIGDIR = figdir.resolve()
 
     if formats is not None:
