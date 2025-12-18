@@ -437,7 +437,7 @@ def _select_best_embedding(
     return str(best)
 
 def _load_scib_table_from_disk(output_dir: Path) -> pd.DataFrame:
-    path = output_dir / "integration_metrics_scaled.tsv"
+    path = "integration_metrics_scaled.tsv"
     if not path.exists():
         raise RuntimeError(
             f"scIB metrics file not found on disk: {path}"
