@@ -12,7 +12,7 @@ import scanpy as sc
 import pandas as pd
 import torch
 
-from .config import ProcessAndIntegrateConfig
+from .config import IntegrateConfig
 from . import io_utils, plot_utils
 from .logging_utils import init_logging
 
