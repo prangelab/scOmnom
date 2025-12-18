@@ -486,7 +486,6 @@ def run_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
     # Plot ONLY the scIB results table
     # ------------------------------------------------------------
     plot_utils.plot_scib_results_table(scaled)
-    plot_utils.plot_scib_results_table_old(scaled)
 
     LOGGER.info("DEBUG SHORT-CIRCUIT: plots complete, exiting integration module")
     return
