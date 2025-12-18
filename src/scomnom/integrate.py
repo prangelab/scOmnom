@@ -301,12 +301,12 @@ def _run_integrations(
         except Exception as e:
             LOGGER.warning("scPoli failed: %s", e)
 
-    # BBKNN (UMAP is 2D, but that’s fine for benchmarking if you want; many prefer PCA/latent)
+    # BBKNN
     if "bbknn" in method_set:
         try:
-            emb = _run_bbknn_embedding(adata, batch_key=batch_key)
-            adata.obsm["BBKNN_umap"] = emb
-            created.append("BBKNN_umap")
+            emb = _run_bbknn(adata, batch_key=batch_key)
+            adata.obsm["BBKNN"] = emb
+            created.append("BBKNN")
         except Exception as e:
             LOGGER.warning("BBKNN failed: %s", e)
 
