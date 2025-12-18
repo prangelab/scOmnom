@@ -1248,8 +1248,26 @@ def plot_scib_results_table(scaled: pd.DataFrame) -> None:
     bio_metrics = [c for c in all_cols if c not in exclude_list]
 
     normal_metrics = bio_metrics + middle_metrics + batch_metrics
-
     df = df[normal_metrics + agg_metrics]
+
+    # ------------------------------------------------------------------
+    # FIX: define global x-position mapping ONCE
+    # ------------------------------------------------------------------
+    cell_w, cell_h = 1.2, 0.6
+    agg_gap = 0.5
+
+    x_positions = {}
+    x = 0
+    for col in normal_metrics:
+        x_positions[col] = x
+        x += 1
+
+    x += agg_gap
+
+    for col in agg_metrics:
+        x_positions[col] = x
+        x += 1
+
     vals = df.values.astype(float)
     n_rows, n_cols = vals.shape
 
@@ -1259,25 +1277,23 @@ def plot_scib_results_table(scaled: pd.DataFrame) -> None:
     cmap_agg = mpl.cm.get_cmap("YlGnBu")
     norm = mpl.colors.Normalize(vmin=0, vmax=1)
 
-    cell_w, cell_h = 1.2, 0.6
-    agg_gap = 0.5
-
-    fig_w = cell_w * (n_cols + 0.5) + agg_gap + 1.0
+    fig_w = cell_w * (x + 0.5) + 1.0
     fig_h = cell_h * (n_rows + 1.5)
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
     bar_h = cell_h * 0.7
 
+    # ------------------------------------------------------------------
+    # Draw cells
+    # ------------------------------------------------------------------
     for i in range(n_rows):
-        for j in range(n_cols):
-            metric = df.columns[j]
-            x_coord = j + agg_gap if metric in agg_metrics else j
+        for j, metric in enumerate(df.columns):
+            x_coord = x_positions[metric]
             y_coord = n_rows - i - 0.5
             val = vals[i, j]
-            current_cmap = cmap_agg if metric in agg_metrics else cmap_metrics
 
             if metric in agg_metrics:
-                bar_color = current_cmap(norm(val))
+                bar_color = cmap_agg(norm(val))
                 ax.barh(
                     y=y_coord,
                     width=val,
@@ -1286,37 +1302,6 @@ def plot_scib_results_table(scaled: pd.DataFrame) -> None:
                     color=bar_color,
                     edgecolor="none",
                 )
-
-                ax.hlines(
-                    y=y_coord + bar_h / 2,
-                    xmin=x_coord,
-                    xmax=x_coord + 1,
-                    color="white",
-                    linewidth=1,
-                )
-                ax.hlines(
-                    y=y_coord - bar_h / 2,
-                    xmin=x_coord,
-                    xmax=x_coord + 1,
-                    color="white",
-                    linewidth=1,
-                )
-                ax.vlines(
-                    x=x_coord,
-                    ymin=y_coord - bar_h / 2,
-                    ymax=y_coord + bar_h / 2,
-                    color="white",
-                    linewidth=1,
-                )
-                ax.vlines(
-                    x=x_coord + 1,
-                    ymin=y_coord - bar_h / 2,
-                    ymax=y_coord + bar_h / 2,
-                    color="white",
-                    linewidth=1,
-                )
-
-                text_color = "white" if val > 0.4 else "black"
                 ax.text(
                     x_coord + 0.05,
                     y_coord,
@@ -1324,18 +1309,17 @@ def plot_scib_results_table(scaled: pd.DataFrame) -> None:
                     ha="left",
                     va="center",
                     fontsize=9,
-                    color=text_color,
-                    )
+                    color="white" if val > 0.4 else "black",
+                )
             else:
                 ax.scatter(
                     x_coord + 0.5,
                     y_coord,
                     s=900 * cell_h,
-                    c=[current_cmap(norm(val))],
+                    c=[cmap_metrics(norm(val))],
                     edgecolor="0.8",
                     linewidth=0.8,
-                    )
-                text_color = "black" if (0.2 < val < 0.8) else "white"
+                )
                 ax.text(
                     x_coord + 0.5,
                     y_coord,
@@ -1343,97 +1327,56 @@ def plot_scib_results_table(scaled: pd.DataFrame) -> None:
                     ha="center",
                     va="center",
                     fontsize=9,
-                    color=text_color,
-                    )
+                    color="black" if 0.2 < val < 0.8 else "white",
+                )
 
-    ax.grid(False)
-
-    for i in range(n_rows + 1):
-        ax.axhline(i, color="0.85", linewidth=0.8, linestyle="dotted")
-
-    bio_metrics_cur = bio_metrics
-    middle_metrics_cur = middle_metrics
-    batch_metrics_cur = batch_metrics
-
-    bio_batch_divider_x = len(bio_metrics_cur) + len(middle_metrics_cur)
-    ax.axvline(bio_batch_divider_x, color="0.3", linewidth=1.5, linestyle="-")
-
-    agg_start = len(normal_metrics) + agg_gap
-    ax.axvline(agg_start, color="0.3", linewidth=1.5)
-
-    ax.set_xlim(0, n_cols + agg_gap)
+    # ------------------------------------------------------------------
+    # Layout / separators / labels
+    # ------------------------------------------------------------------
     ax.set_ylim(0, n_rows)
-    ax.set_xticks([])
-    ax.set_frame_on(False)
-    ax.tick_params(axis="y", length=0)
-
-    if bio_metrics_cur or middle_metrics_cur:
-        bio_start = 0
-        bio_width = len(bio_metrics_cur) + len(middle_metrics_cur)
-        ax.text(
-            bio_start + (bio_width / 2.0),
-            -0.5,
-            "Bio conservation",
-            ha="center",
-            va="center",
-            fontsize=10,
-            fontweight="bold",
-            )
-
-    if batch_metrics_cur:
-        batch_start = len(bio_metrics_cur) + len(middle_metrics_cur)
-        batch_width = len(batch_metrics_cur)
-        ax.text(
-            batch_start + (batch_width / 2.0),
-            -0.5,
-            "Batch correction",
-            ha="center",
-            va="center",
-            fontsize=10,
-            fontweight="bold",
-            )
-
-    if agg_metrics:
-        agg_center = agg_start + (len(agg_metrics) / 2.0)
-        ax.text(
-            agg_center,
-            -0.5,
-            "Aggregate score",
-            ha="center",
-            va="center",
-            fontsize=10,
-            fontweight="bold",
-        )
-
-    for idx, label in enumerate(normal_metrics):
-        ax.text(
-            idx + 0.5,
-            0.0,
-            label,
-            ha="center",
-            va="bottom",
-            fontsize=9,
-            rotation=0,
-            )
-
-    for idx, label in enumerate(agg_metrics):
-        ax.text(
-            agg_start + idx + 0.5,
-            0.0,
-            label,
-            ha="center",
-            va="bottom",
-            fontsize=9,
-            rotation=0,
-            )
-
+    ax.set_xlim(0, x)
     ax.invert_yaxis()
+    ax.set_frame_on(False)
+    ax.tick_params(axis="both", length=0)
+
     ax.set_yticks(np.arange(n_rows) + 0.5)
     ax.set_yticklabels(df.index.tolist(), fontsize=10)
 
+    for idx, label in enumerate(normal_metrics):
+        ax.text(
+            x_positions[label] + 0.5,
+            -0.5,
+            label,
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
+
+    for idx, label in enumerate(agg_metrics):
+        ax.text(
+            x_positions[label] + 0.5,
+            -0.5,
+            label,
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
+
+    # Section headers
+    if bio_metrics or middle_metrics:
+        width = sum(1 for _ in bio_metrics + middle_metrics)
+        ax.text(width / 2, -1.1, "Bio conservation", ha="center", fontweight="bold")
+
+    if batch_metrics:
+        start = len(bio_metrics) + len(middle_metrics)
+        ax.text(start + len(batch_metrics) / 2, -1.1, "Batch correction", ha="center", fontweight="bold")
+
+    if agg_metrics:
+        agg_center = sum(x_positions[m] for m in agg_metrics) / len(agg_metrics) + 0.5
+        ax.text(agg_center, -1.1, "Aggregate score", ha="center", fontweight="bold")
+
     plt.tight_layout()
-    base = Path("integration")
-    save_multi("scIB_results_table", base)
+    save_multi("scIB_results_table", Path("integration"))
     plt.close(fig)
 
 

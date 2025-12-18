@@ -454,6 +454,23 @@ def run_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
         raise RuntimeError("batch_key missing")
 
     LOGGER.info("Using batch_key='%s'", batch_key)
+    # ------------------------------------------------------------
+    # Pull scaled scIB table (already stored from prior run)
+    # ------------------------------------------------------------
+    scaled = adata.uns.get("scib_metrics_scaled")
+    if scaled is None:
+        raise RuntimeError(
+            "scib_metrics_scaled not found in adata.uns — "
+            "cannot short-circuit plot."
+        )
+
+    # ------------------------------------------------------------
+    # Plot ONLY the scIB results table
+    # ------------------------------------------------------------
+    plot_utils.plot_scib_results_table(scaled)
+
+    LOGGER.info("DEBUG SHORT-CIRCUIT: plot complete, exiting integration module")
+    sys.exit(0)
 
     methods = cfg.methods or ["scVI", "scANVI", "BBKNN"]
 
