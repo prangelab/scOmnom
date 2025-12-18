@@ -1302,8 +1302,7 @@ def plot_scib_results_table(scaled: pd.DataFrame) -> None:
     ax.invert_yaxis()  # Now correctly puts Row 0 at top
     ax.set_frame_on(False)
     plt.tight_layout()
-    plt.show()
-
+    save_multi("scIB_results_table", "integration")
 
 # -------------------------------------------------------------------------
 # CLUSTERING RESOLUTION / STABILITY PLOTS
@@ -1368,7 +1367,9 @@ def plot_clustering_stability_ari(
     fig.tight_layout()
     save_multi("clustering_stability_ari", figdir)
 
-
+#------------------------------------------
+# Plot UMAPs
+#------------------------------------------
 def plot_cluster_umaps(
         adata,
         label_key: str,
