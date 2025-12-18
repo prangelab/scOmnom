@@ -1494,8 +1494,12 @@ def plot_integration_umaps(
             # Single UMAP
             # ---------------------------
             tmp = adata.copy()
-            sc.pp.neighbors(tmp, use_rep=emb)
-            sc.tl.umap(tmp)
+
+            if emb.startswith("BBKNN"):
+                tmp.obsm["X_umap"] = adata.obsm[emb]
+            else:
+                sc.pp.neighbors(tmp, use_rep=emb)
+                sc.tl.umap(tmp)
 
             fig = sc.pl.umap(
                 tmp,
@@ -1513,10 +1517,15 @@ def plot_integration_umaps(
             if emb != "Unintegrated" and "Unintegrated" in adata.obsm:
                 tmp2 = adata.copy()
 
-                sc.pp.neighbors(tmp2, use_rep=emb)
-                sc.tl.umap(tmp2)
-                umap_int = tmp2.obsm["X_umap"].copy()
+                # ----- integrated side -----
+                if emb.startswith("BBKNN"):
+                    umap_int = adata.obsm[emb].copy()
+                else:
+                    sc.pp.neighbors(tmp2, use_rep=emb)
+                    sc.tl.umap(tmp2)
+                    umap_int = tmp2.obsm["X_umap"].copy()
 
+                # ----- unintegrated side -----
                 sc.pp.neighbors(tmp2, use_rep="Unintegrated")
                 sc.tl.umap(tmp2)
                 umap_raw = tmp2.obsm["X_umap"].copy()
