@@ -436,7 +436,13 @@ def _select_best_embedding(
     LOGGER.info("Selected best embedding: '%s'", best)
     return str(best)
 
-
+def _load_scib_table_from_disk(output_dir: Path) -> pd.DataFrame:
+    path = output_dir / "integration_metrics_scaled.tsv"
+    if not path.exists():
+        raise RuntimeError(
+            f"scIB metrics file not found on disk: {path}"
+        )
+    return pd.read_csv(path, sep="\t", index_col=0)
 # ---------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------
@@ -457,19 +463,28 @@ def run_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
     # ------------------------------------------------------------
     # Pull scaled scIB table (already stored from prior run)
     # ------------------------------------------------------------
-    scaled = adata.uns.get("scib_metrics_scaled")
-    if scaled is None:
-        raise RuntimeError(
-            "scib_metrics_scaled not found in adata.uns — "
-            "cannot short-circuit plot."
-        )
+    scaled = _load_scib_table_from_disk(cfg.output_dir)
 
     # ------------------------------------------------------------
     # Plot ONLY the scIB results table
     # ------------------------------------------------------------
     plot_utils.plot_scib_results_table(scaled)
 
-    LOGGER.info("DEBUG SHORT-CIRCUIT: plot complete, exiting integration module")
+    methods = cfg.methods or ["scVI", "scANVI", "BBKNN"]
+
+    # Collect embedding keys that actually exist
+    embedding_keys = ["Unintegrated"] + [
+        m for m in methods if m in adata.obsm
+    ]
+
+    LOGGER.info("Plotting integration UMAPs for embeddings: %s", embedding_keys)
+
+    plot_utils.plot_integration_umaps(
+        adata,
+        embedding_keys=embedding_keys,
+        color=batch_key,
+    )
+    LOGGER.info("DEBUG SHORT-CIRCUIT: plots complete, exiting integration module")
     sys.exit(0)
 
     methods = cfg.methods or ["scVI", "scANVI", "BBKNN"]
