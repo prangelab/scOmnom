@@ -1327,7 +1327,7 @@ def plot_scib_results_table(scaled: pd.DataFrame) -> None:
     ax.tick_params(axis='both', which='both', length=0)  # Hide tick marks
 
     plt.tight_layout()
-    plt.show()
+    save_multi("scIB_results_table","integration")
 
 # -------------------------------------------------------------------------
 # CLUSTERING RESOLUTION / STABILITY PLOTS
