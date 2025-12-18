@@ -376,7 +376,7 @@ def run_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
     LOGGER.info("Starting integration module")
 
     # Configure Scanpy/Matplotlib figure behavior + formats
-    plot_utils.setup_scanpy_figs(cfg.figdir, cfg.figure_formats)
+    plot_utils.setup_scanpy_figs(cfg.figdir_name, cfg.figure_formats)
 
     adata_full = io_utils.load_dataset(cfg.input_path)
 

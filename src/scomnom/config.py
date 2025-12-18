@@ -121,6 +121,10 @@ class IntegrateConfig(BaseModel):
 
     logfile: Optional[Path] = None
 
+    @property
+    def figdir(self) -> Path:
+        return self.output_dir / self.figdir_name
+
     @validator("methods")
     def normalize_methods(cls, v):
         if v is None:

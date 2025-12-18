@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Dict, Sequence, Mapping, Iterable, List, Any
 
 import logging
-import math
 from sklearn.metrics import silhouette_samples
 
 import matplotlib as mpl
@@ -13,7 +12,6 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import anndata as ad
-from matplotlib.collections import LineCollection
 
 LOGGER = logging.getLogger(__name__)
 

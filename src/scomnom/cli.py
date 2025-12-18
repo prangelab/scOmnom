@@ -157,16 +157,15 @@ def load_and_filter(
         None, "--filtered-sample-dir", "-f",
         help="[I/O] Path with <sample>.filtered_feature_bc_matrix folders.",
     ),
-        cellbender_dir: Optional[Path] = typer.Option(
-            None, "--cellbender-dir", "-c",
-            help=(
-                    "[I/O] Path with CellBender filtered outputs.\n"
-                    "Used alone: CellBender-only mode (no raw counts).\n"
-                    "Used with --raw-sample-dir: enables raw vs CellBender QC comparison."
-            ),
+    cellbender_dir: Optional[Path] = typer.Option(
+        None, "--cellbender-dir", "-c",
+        help=(
+                "[I/O] Path with CellBender filtered outputs.\n"
+                "Used alone: CellBender-only mode (no raw counts).\n"
+                "Used with --raw-sample-dir: enables raw vs CellBender QC comparison."
         ),
-
-        output_dir: Path = typer.Option(
+    ),
+    output_dir: Path = typer.Option(
         ..., "--out", "-o",
         help="[I/O] Output directory for anndata and figures/",
     ),
