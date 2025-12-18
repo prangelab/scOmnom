@@ -1229,8 +1229,8 @@ def umap_plots(
 # -------------------------------------------------------------------------
 def plot_scib_results_table(scaled: pd.DataFrame) -> None:
     # Add this right at the start of your plotting function
-    df = df.sort_values("Total", ascending=False)
     df = scaled.copy()
+    df = df.sort_values("Total", ascending=False)
     # Filter out junk rows
     df = df.loc[~df.index.str.contains("Metric", case=False, na=False)]
 
@@ -1299,8 +1299,9 @@ def plot_scib_results_table_old(scaled: pd.DataFrame) -> None:
     Generate a scIB-style results table with circles for metrics and bars for aggregate scores.
     """
     # Add this right at the start of your plotting function
-    df = df.sort_values("Total", ascending=False)
+
     df = scaled.copy()
+    df = df.sort_values("Total", ascending=False)
     df = df.loc[~df.index.str.contains("Metric", case=False, na=False)]
 
     all_cols = df.columns.tolist()
