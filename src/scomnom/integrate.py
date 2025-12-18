@@ -297,6 +297,7 @@ def _select_best_embedding(
     batch_key: str,
     label_key: str,
     n_jobs: int,
+    output_dir : Path,
     figdir: Path,
 ) -> str:
     """
@@ -332,8 +333,8 @@ def _select_best_embedding(
     scaled = bm.get_results(min_max_scale=True)
 
     # Save tables
-    raw_path = Path(cfg.output_dir) / "integration_metrics_raw.tsv"
-    scaled_path = Path(cfg.output_dir) / "integration_metrics_scaled.tsv"
+    raw_path = Path(output_dir) / "integration_metrics_raw.tsv"
+    scaled_path = Path(output_dir) / "integration_metrics_scaled.tsv"
     raw.to_csv(raw_path, sep="\t")
     scaled.to_csv(scaled_path, sep="\t")
 
@@ -411,6 +412,7 @@ def run_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
         batch_key=batch_key,
         label_key=cfg.label_key,
         n_jobs=cfg.benchmark_n_jobs,
+        output_dir=cfg.output_dir,
         figdir=Path("integration"),
     )
 
