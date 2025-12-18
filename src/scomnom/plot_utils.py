@@ -1227,23 +1227,27 @@ def umap_plots(
 # -------------------------------------------------------------------------
 # scIB-style results table
 # -------------------------------------------------------------------------
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+
+
 def plot_scib_results_table(scaled: pd.DataFrame) -> None:
-    # Add this right at the start of your plotting function
     df = scaled.copy()
-    df = df.sort_values("Total", ascending=False)
-    # Filter out junk rows
+
+    # 1. Clean and Sort
     df = df.loc[~df.index.str.contains("Metric", case=False, na=False)]
     df = df.apply(pd.to_numeric, errors="coerce")
+    df = df.sort_values("Total", ascending=False)
 
     all_cols = df.columns.tolist()
 
-    # 1. Define Categories
+    # Define Categories
     agg_metrics = [c for c in ["Batch correction", "Bio conservation", "Total"] if c in all_cols]
     batch_metrics = [c for c in ["iLISI", "KBET", "Graph connectivity", "PCR comparison", "Silhouette batch"] if
                      c in all_cols]
     bio_metrics = [c for c in all_cols if c not in agg_metrics + batch_metrics]
 
-    # Reorder DataFrame
     ordered_cols = bio_metrics + batch_metrics + agg_metrics
     df = df[ordered_cols]
 
@@ -1251,58 +1255,79 @@ def plot_scib_results_table(scaled: pd.DataFrame) -> None:
     cell_w, cell_h = 1.2, 0.6
     agg_gap = 0.5
     x_positions = {}
-    x = 0
+    x_curr = 0
     for col in ordered_cols:
-        if col in agg_metrics and x > 0 and ordered_cols[ordered_cols.index(col) - 1] not in agg_metrics:
-            x += agg_gap  # Add gap before aggregates
-        x_positions[col] = x
-        x += 1
+        if col in agg_metrics and x_curr > 0 and ordered_cols[ordered_cols.index(col) - 1] not in agg_metrics:
+            x_curr += agg_gap
+        x_positions[col] = x_curr
+        x_curr += 1
 
     n_rows = len(df)
-    fig, ax = plt.subplots(figsize=(cell_w * (x + 1), cell_h * (n_rows + 2)))
+    fig, ax = plt.subplots(figsize=(cell_w * (x_curr + 1), cell_h * (n_rows + 2)))
 
-    # 3. DRAW DATA (The Fix)
-    for i, (idx, row) in enumerate(df.iterrows()):
-        y_coord = i + 0.5  # Row 0 is at 0.5, Row 1 at 1.5...
+    # 3. DRAW DATA
+    for i, (method_name, row) in enumerate(df.iterrows()):
+        y_coord = i + 0.5
         for col in df.columns:
             x_c = x_positions[col]
             val = row[col]
+            if np.isnan(val): continue
 
             if col in agg_metrics:
-                ax.barh(y_coord, val, left=x_c, height=cell_h * 0.8, color="#2c7fb8")
-                ax.text(x_c + 0.05, y_coord, f"{val:.2f}", va='center', color='white')
+                # Aggregate bars
+                ax.barh(y_coord, val, left=x_c, height=cell_h * 0.7, color="#2c7fb8", align='center')
+                ax.text(x_c + 0.05, y_coord, f"{val:.2f}", va='center', ha='left', color='white', fontsize=9,
+                        fontweight='bold')
             else:
-                ax.scatter(x_c + 0.5, y_coord, s=500, c=[plt.cm.viridis(val)])
-                ax.text(x_c + 0.5, y_coord, f"{val:.2f}", ha='center', va='center')
+                # Metric circles
+                ax.scatter(x_c + 0.5, y_coord, s=700, c=[plt.cm.viridis(val)], edgecolors='none', zorder=3)
+                ax.text(x_c + 0.5, y_coord, f"{val:.2f}", ha='center', va='center', fontsize=8,
+                        color='white' if val < 0.3 or val > 0.7 else 'black', zorder=4)
 
-    # 4. DYNAMIC HEADERS (The Improvement)
-    def draw_header(cols, title, y=-1.1):
+    # 4. DYNAMIC HEADERS
+    def draw_header(cols, title, y=-0.5):
         if not cols: return
         pos = [x_positions[c] for c in cols]
         center = (min(pos) + max(pos) + 1) / 2
-        ax.text(center, y, title, ha='center', fontweight='bold', fontsize=11)
+        ax.text(center, y, title, ha='center', va='bottom', fontweight='bold', fontsize=10)
+        # Add column sub-labels
+        for c in cols:
+            ax.text(x_positions[c] + 0.5, 0, c, ha='center', va='bottom', fontsize=8, rotation=45)
 
     draw_header(bio_metrics, "Biological Conservation")
     draw_header(batch_metrics, "Batch Correction")
     draw_header(agg_metrics, "Aggregate Scores")
 
-    # Final Formatting
-    ax.set_yticks(np.arange(n_rows) + 0.5)
-    labels = []
-    for idx in df.index:
-        if idx == "Unintegrated":
-            labels.append(f"{idx} (baseline)")
-        elif idx.upper().startswith("BBKNN"):
-            labels.append(f"{idx} (graph baseline)")
-        else:
-            labels.append(idx)
+    # 5. FINAL STYLING (The "Clean" Fix)
+    ax.set_ylim(-1, n_rows)  # Give space for headers
+    ax.set_xlim(0, x_curr)
+    ax.invert_yaxis()
 
-    ax.set_yticklabels(labels, fontsize=10)
-    ax.set_ylim(0, n_rows)
-    ax.invert_yaxis()  # Now correctly puts Row 0 at top
-    ax.set_frame_on(False)
+    # Remove all gridlines and spines
+    ax.grid(False)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    # Clean up axes
+    ax.set_xticks([])  # Remove X axis labels entirely
+    ax.set_yticks(np.arange(n_rows) + 0.5)
+
+    # Robust Baseline Labeling
+    new_labels = []
+    for idx in df.index:
+        idx_str = str(idx)
+        if "unintegrated" in idx_str.lower():
+            new_labels.append(f"{idx_str} (baseline)")
+        elif "bbknn" in idx_str.lower():
+            new_labels.append(f"{idx_str} (graph baseline)")
+        else:
+            new_labels.append(idx_str)
+
+    ax.set_yticklabels(new_labels, fontsize=10, fontweight='medium')
+    ax.tick_params(axis='both', which='both', length=0)  # Hide tick marks
+
     plt.tight_layout()
-    save_multi("scIB_results_table", "integration")
+    plt.show()
 
 # -------------------------------------------------------------------------
 # CLUSTERING RESOLUTION / STABILITY PLOTS
