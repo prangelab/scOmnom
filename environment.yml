@@ -55,7 +55,11 @@ dependencies:
       - pip>=23
       - setuptools>=69
       - wheel>=0.42
-
+      # GPU acceleration:
+      # On macOS: Metal/MPS enabled automatically.
+      # On Linux (NVIDIA GPU) uncomment the next lines.
+      #- "jax[cuda12]"
+      #- -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
       - umap-learn
       - scvi-tools
       - scib-metrics
