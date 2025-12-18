@@ -115,7 +115,7 @@ def _train_scvi(
                 accelerator=accelerator,
                 devices=devices,
                 batch_size=bsz,
-                enable_progress_bar=False,
+                enable_progress_bar=True,
             )
 
             LOGGER.info("SCVI trained successfully (batch_size=%d)", bsz)
