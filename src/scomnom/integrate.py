@@ -22,6 +22,13 @@ LOGGER = logging.getLogger(__name__)
 # ---------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------
+def _get_scvi_layer(adata: ad.AnnData) -> Optional[str]:
+    if "counts_cb" in adata.layers:
+        return "counts_cb"
+    if "counts_raw" in adata.layers:
+        return "counts_raw"
+    return None
+
 def _ensure_label_key(adata: ad.AnnData, label_key: str) -> None:
     if label_key not in adata.obs:
         raise KeyError(
@@ -214,10 +221,13 @@ def _run_integrations(
     # scVI
     if "scvi" in method_set:
         LOGGER.info("Training SCVI for integration")
+
+        layer = _get_scvi_layer(adata)
+
         scvi_model = _train_scvi(
             adata,
             batch_key=batch_key,
-            layer="counts" if "counts" in adata.layers else None,
+            layer=layer,
             purpose="integration",
         )
         adata.obsm["scVI"] = np.asarray(
@@ -391,6 +401,7 @@ def run_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
     adata, emb_keys = _run_integrations(
         adata,
         methods=methods,
+        layer=layer,
         batch_key=batch_key,
         label_key=cfg.label_key,
     )
