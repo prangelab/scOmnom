@@ -103,7 +103,7 @@ class LoadAndFilterConfig(BaseModel):
         return self
 
 
-class ProcessAndIntegrateConfig(BaseModel):
+class IntegrateConfig(BaseModel):
 
     input_path: Path
     output_dir: Path

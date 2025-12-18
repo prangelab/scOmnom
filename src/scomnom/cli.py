@@ -319,10 +319,10 @@ def load_and_filter(
 
 
 # ======================================================================
-#  process-and-integrate
+#  integrate
 # ======================================================================
-@app.command("process-and-integrate", help="Integration + benchmarking only.")
-def process_and_integrate(
+@app.command("integrate", help="Integration + benchmarking.")
+def integrate(
     # -----------------------------
     # I/O
     # -----------------------------
@@ -403,7 +403,7 @@ def process_and_integrate(
         logfile=logfile,
     )
 
-    run_process_and_integrate(cfg)
+    run_integrate(cfg)
 
 
 # ======================================================================

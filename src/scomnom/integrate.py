@@ -1,7 +1,8 @@
+# src/scomnom/process_and_integrate.py
+
 from __future__ import annotations
 import logging
-import sys
-from os import mkdir
+import warnings
 from pathlib import Path
 from typing import List, Optional, Sequence
 
@@ -9,174 +10,275 @@ import anndata as ad
 import numpy as np
 import scanpy as sc
 import pandas as pd
-
-from .config import IntegrationConfig
-from .logging_utils import init_logging
-from . import io_utils,plot_utils
 import torch
-torch.set_float32_matmul_precision('high')
 
-torch.set_float32_matmul_precision('high')
+from .config import ProcessAndIntegrateConfig
+from . import io_utils, plot_utils
+from .logging_utils import init_logging
 
+torch.set_float32_matmul_precision("high")
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_METHODS: tuple[str, ...] = ("Scanorama", "Harmony", "scVI", "BBKNN")
-SCANVI_NAME = "scANVI"
-
-
-def _as_path(p: str | Path) -> Path:
-    return p if isinstance(p, Path) else Path(p)
-
-
-def _subset_to_hvgs(adata: ad.AnnData) -> ad.AnnData:
-    if "highly_variable" not in adata.var:
-        raise ValueError("Missing adata.var['highly_variable'].")
-    mask = adata.var["highly_variable"].to_numpy()
-    if mask.sum() == 0:
-        raise ValueError("No HVGs found.")
-    return adata[:, mask].copy()
-
-
+# ---------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------
 def _ensure_label_key(adata: ad.AnnData, label_key: str) -> None:
     if label_key not in adata.obs:
-        raise KeyError(f"Label key '{label_key}' missing.")
+        raise KeyError(
+            f"Label key '{label_key}' missing from adata.obs. "
+            f"Available: {list(adata.obs.columns)[:20]}..."
+        )
+
+def _select_device():
+    if torch.cuda.is_available():
+        return "gpu", "auto"
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return "mps", 1
+    return "cpu", "auto"
 
 
-def _run_scanorama_embedding(adata: ad.AnnData, batch_key: str) -> np.ndarray:
-    import scanorama
-
-    LOGGER.info("Running Scanorama")
-    batch_cats = adata.obs[batch_key].unique().tolist()
-    adata_list = [adata[adata.obs[batch_key] == b].copy() for b in batch_cats]
-    scanorama.integrate_scanpy(adata_list)
-
-    dim = adata_list[0].obsm["X_scanorama"].shape[1]
-    out = np.zeros((adata.n_obs, dim), dtype=float)
-    for b, sub in zip(batch_cats, adata_list):
-        mask = (adata.obs[batch_key] == b).to_numpy()
-        out[mask] = sub.obsm["X_scanorama"]
-    return out
+def _is_oom_error(e: Exception) -> bool:
+    txt = str(e).lower()
+    return (
+        "out of memory" in txt
+        or "cuda error" in txt
+        or "cublas_status_alloc_failed" in txt
+        or ("mps" in txt and "oom" in txt)
+    )
 
 
-def _run_harmony_embedding(adata: ad.AnnData, batch_key: str) -> np.ndarray:
-    import harmonypy as hm
+def _auto_scvi_epochs(n_cells: int) -> int:
+    if n_cells < 50_000:
+        return 80
+    if n_cells < 200_000:
+        return 60
+    return 40
 
-    LOGGER.info("Running Harmony")
-    if "X_pca" not in adata.obsm:
-        raise ValueError("Missing X_pca for Harmony.")
-    ho = hm.run_harmony(adata.obsm["X_pca"], adata.obs, batch_key)
-    return ho.Z_corr.T
+def _auto_scanvi_epochs(n_cells: int) -> int:
+    if n_cells < 50_000:
+        return 100
+    if n_cells < 200_000:
+        return 150
+    return 200
 
-def _run_bbknn_embedding(adata: AnnData, batch_key: str) -> np.ndarray:
+
+# ---------------------------------------------------------------------
+# Generic SCVI trainer (used everywhere)
+# ---------------------------------------------------------------------
+def _train_scvi(
+    adata: ad.AnnData,
+    *,
+    batch_key: Optional[str],
+    layer: Optional[str],
+    purpose: str,
+):
     """
-    Run BBKNN in an isolated copy so original neighbors graph is untouched.
-    Returns a UMAP embedding (n_cells × 2) as a NumPy array.
+    Train an SCVI model with auto batch-size + auto epochs.
+
+    purpose: "solo" | "integration" (logging only)
     """
-    LOGGER.info("Running BBKNN")
+    from scvi.model import SCVI
 
-    import bbknn
-    import scanpy as sc
+    accelerator, devices = _select_device()
+    epochs = _auto_scvi_epochs(adata.n_obs)
 
-    # Work on a copy to avoid modifying real neighbors
-    tmp = adata.copy()
+    batch_ladder = [1024, 512, 256, 128, 64, 32]
+    last_err = None
 
-    # Build BBKNN neighbors
-    bbknn.bbknn(tmp, batch_key=batch_key)
+    LOGGER.info(
+        "Training SCVI for %s (n_cells=%d, epochs=%d)",
+        purpose,
+        adata.n_obs,
+        epochs,
+    )
 
-    # Compute UMAP based on the BBKNN neighbor graph
-    sc.tl.umap(tmp)
+    for bsz in batch_ladder:
+        try:
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=".*setup_anndata is overwriting.*")
+                SCVI.setup_anndata(
+                    adata,
+                    layer=layer,
+                    batch_key=batch_key,
+                )
 
-    # Extract embedding
-    emb = tmp.obsm["X_umap"].copy()
+            model = SCVI(adata)
+            model.train(
+                max_epochs=epochs,
+                accelerator=accelerator,
+                devices=devices,
+                batch_size=bsz,
+                enable_progress_bar=False,
+            )
 
-    return emb
+            LOGGER.info("SCVI trained successfully (batch_size=%d)", bsz)
+            return model
 
-# scVI and scANVI ------------------------------------------------------------
+        except RuntimeError as e:
+            if _is_oom_error(e):
+                LOGGER.warning("OOM at batch_size=%d, retrying smaller...", bsz)
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                last_err = e
+                continue
+            raise
 
-def _fit_scvi(adata: ad.AnnData, batch_key: str, n_latent: int = 30, max_epochs: int = 400):
-    import scvi
-
-    if "counts" not in adata.layers:
-        raise ValueError("Missing adata.layers['counts'] for scVI.")
-
-    LOGGER.info("Running scVI")
-    scvi.settings.seed = 0
-    scvi.settings.dl_num_workers = 0
-
-    scvi.model.SCVI.setup_anndata(adata, layer="counts", batch_key=batch_key)
-    model = scvi.model.SCVI(adata, gene_likelihood="nb", n_layers=2, n_latent=n_latent)
-    model.train(max_epochs=max_epochs, early_stopping=True, enable_progress_bar=False)
-    return model, model.get_latent_representation()
+    raise RuntimeError("SCVI training failed") from last_err
 
 
-def _run_scanvi_from_scvi(scvi_model, adata: ad.AnnData, label_key: str, max_epochs: int = 400) -> np.ndarray:
+# ---------------------------------------------------------------------
+# scANVI (reuses integration SCVI model)
+# ---------------------------------------------------------------------
+def _run_scanvi_from_scvi(
+    scvi_model,
+    adata: ad.AnnData,
+    label_key: str,
+):
+    """
+    Run scANVI using an existing, already-trained SCVI model.
+
+    Parameters
+    ----------
+    scvi_model
+        Trained SCVI model from the integration stage
+    adata
+        AnnData object used for integration
+    label_key
+        Key in adata.obs with cluster / cell-type labels
+
+    Returns
+    -------
+    np.ndarray
+        Latent representation (n_cells × n_latent)
+    """
     from scvi.model import SCANVI
 
-    LOGGER.info("Running scANVI")
-    lvae = SCANVI.from_scvi_model(scvi_model, adata=adata, labels_key=label_key, unlabeled_category="Unknown")
-    lvae.train(max_epochs=max_epochs, n_samples_per_label=100, early_stopping=True, enable_progress_bar=False)
-    return lvae.get_latent_representation()
+    _ensure_label_key(adata, label_key)
+
+    accelerator, devices = _select_device()
+    max_epochs = _auto_scanvi_epochs(adata.n_obs)
+
+    LOGGER.info(
+        "Running scANVI (reuse SCVI, n_cells=%d, max_epochs=%d)",
+        adata.n_obs,
+        max_epochs,
+    )
+
+    # Build SCANVI on top of trained SCVI
+    lvae = SCANVI.from_scvi_model(
+        scvi_model,
+        adata=adata,
+        labels_key=label_key,
+        unlabeled_category="Unknown",
+    )
+
+    # Train scANVI
+    lvae.train(
+        max_epochs=max_epochs,
+        n_samples_per_label=100,
+        early_stopping=True,
+        enable_progress_bar=False,
+        accelerator=accelerator,
+        devices=devices,
+    )
+
+    return np.asarray(lvae.get_latent_representation())
 
 
-# Method orchestrator --------------------------------------------------------
-
-def _run_all_embeddings(
+# ---------------------------------------------------------------------
+# Integration
+# ---------------------------------------------------------------------
+def _run_integrations(
     adata: ad.AnnData,
     methods: Sequence[str],
     batch_key: str,
     label_key: str,
-) -> List[str]:
+) -> tuple[ad.AnnData, List[str]]:
+    """
+    Run requested integration methods and write embeddings into adata.obsm.
 
+    Returns
+    -------
+    (adata, created_keys)
+    """
+    # Ensure PCA exists and store as "Unintegrated"
     if "X_pca" not in adata.obsm:
         sc.tl.pca(adata)
+    adata.obsm["Unintegrated"] = np.asarray(adata.obsm["X_pca"])
+    created: List[str] = ["Unintegrated"]
 
-    # Always include unintegrated PCA
-    adata.obsm["Unintegrated"] = adata.obsm["X_pca"]
-    created = ["Unintegrated"]
+    method_set = {m.lower() for m in (methods or [])}
 
-    method_set = {m.lower() for m in methods}
-    scvi_model = None
+    scvi_model = None  # local to this integration run
 
-    # ------------------------
-    # SCVI/SCANVI shared model
-    # ------------------------
-    if {"scvi", "scanvi"} & method_set:
-        scvi_model, emb = _fit_scvi(adata, batch_key=batch_key)
-        adata.obsm["scVI"] = emb
+    # scVI
+    if "scvi" in method_set:
+        LOGGER.info("Training SCVI for integration")
+        scvi_model = _train_scvi(
+            adata,
+            batch_key=batch_key,
+            layer="counts" if "counts" in adata.layers else None,
+            purpose="integration",
+        )
+        adata.obsm["scVI"] = np.asarray(
+            scvi_model.get_latent_representation(adata)
+        )
         created.append("scVI")
 
-    # ------------------------
-    # Other methods
-    # ------------------------
-    for m in methods:
-        key = m.lower()
+    # scANVI
+    if "scanvi" in method_set:
         try:
-            if key == "scanorama":
-                adata.obsm["Scanorama"] = _run_scanorama_embedding(adata, batch_key)
-                created.append("Scanorama")
+            # Train SCVI only if it does not already exist
+            if scvi_model is None:
+                LOGGER.info(
+                    "scANVI requested without prior scVI; training SCVI backbone first"
+                )
+                scvi_model = _train_scvi(
+                    adata,
+                    batch_key=batch_key,
+                    layer="counts" if "counts" in adata.layers else None,
+                    purpose="integration",
+                )
 
-            elif key == "harmony":
-                adata.obsm["Harmony"] = _run_harmony_embedding(adata, batch_key)
-                created.append("Harmony")
-
-            elif key == "bbknn":
-                LOGGER.info("Running BBKNN")
-                emb = _run_bbknn_embedding(adata, batch_key=batch_key)
-                adata.obsm["BBKNN"] = emb
-                created.append("BBKNN")
-
-            elif key == "scvi":
-                # Already done above
-                continue
-
-            elif key == "scanvi":
-                adata.obsm[SCANVI_NAME] = _run_scanvi_from_scvi(scvi_model, adata, label_key)
-                created.append(SCANVI_NAME)
+            emb = _run_scanvi_from_scvi(scvi_model, adata, label_key)
+            adata.obsm["scANVI"] = np.asarray(emb)
+            created.append("scANVI")
 
         except Exception as e:
-            LOGGER.warning("Method '%s' failed: %s", m, e)
+            LOGGER.warning("scANVI failed: %s", e)
 
-    return created
+    # BBKNN (UMAP is 2D, but that’s fine for benchmarking if you want; many prefer PCA/latent)
+    if "bbknn" in method_set:
+        try:
+            emb = _run_bbknn_embedding(adata, batch_key=batch_key)
+            adata.obsm["BBKNN"] = np.asarray(emb)
+            created.append("BBKNN")
+        except Exception as e:
+            LOGGER.warning("BBKNN failed: %s", e)
+
+    # Safety: verify keys exist
+    missing = [k for k in created if k not in adata.obsm]
+    if missing:
+        raise RuntimeError(f"Integration embeddings missing from adata.obsm: {missing}")
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    return adata, created
+
+def _run_bbknn_embedding(adata: ad.AnnData, batch_key: str) -> np.ndarray:
+    import bbknn
+
+    tmp = adata.copy()
+
+    if "X_pca" not in tmp.obsm:
+        sc.tl.pca(tmp)
+
+    bbknn.bbknn(tmp, batch_key=batch_key)
+
+    # IMPORTANT: embedding = PCA, graph = BBKNN
+    return np.asarray(tmp.obsm["X_pca"])
+
 
 
 def _select_best_embedding(
@@ -187,8 +289,19 @@ def _select_best_embedding(
     n_jobs: int,
     figdir: Path,
 ) -> str:
+    """
+    Run scIB benchmarking and select the best integration embedding.
+
+    Returns
+    -------
+    str
+        Name of the best embedding key.
+    """
     from scib_metrics.benchmark import Benchmarker, BioConservation, BatchCorrection
+
     _ensure_label_key(adata, label_key)
+
+    LOGGER.info("Running scIB benchmarking on embeddings: %s", list(embedding_keys))
 
     bm = Benchmarker(
         adata,
@@ -202,179 +315,116 @@ def _select_best_embedding(
 
     bm.benchmark()
 
-    #mkdir(figdir.parent / "svg")
-    #bm.plot_results_table(show=False, save_dir=figdir.parent / "svg")
-
+    # ------------------------------------------------------------------
+    # Retrieve results
+    # ------------------------------------------------------------------
     raw = bm.get_results(min_max_scale=False)
     scaled = bm.get_results(min_max_scale=True)
 
-    plot_utils.plot_scib_results_table(scaled, figdir)
+    # Save tables
+    raw_path = Path(cfg.output_dir) / "integration_metrics_raw.tsv"
+    scaled_path = Path(cfg.output_dir) / "integration_metrics_scaled.tsv"
+    raw.to_csv(raw_path, sep="\t")
+    scaled.to_csv(scaled_path, sep="\t")
 
-    raw.to_csv(figdir.parent.parent / "integration_metrics_raw.tsv", sep="\t")
-    scaled.to_csv(figdir.parent.parent / "integration_metrics_scaled.tsv", sep="\t")
+    plot_utils.plot_scib_results_table(scaled)
 
-    # Convert everything to string first to avoid mixed dtypes
+    # ------------------------------------------------------------------
+    # Clean + score
+    # ------------------------------------------------------------------
     scaled_str = scaled.astype(str)
-
-    # Coerce everything to numeric (strings → numeric or NaN)
     numeric = scaled_str.apply(pd.to_numeric, errors="coerce")
 
-    # Drop the Metric Type row
+    # Drop metadata rows if present
     numeric = numeric.drop(index=["Metric Type"], errors="ignore")
-
-    # Drop columns that are entirely NaN (scIB sometimes leaves these)
     numeric = numeric.dropna(axis=1, how="all")
 
-    LOGGER.info(f"scIB results table:\n{numeric.head()}")
+    LOGGER.info("scIB results table (head):\n%s", numeric.head())
 
-    valid_embeddings = []
+    valid_embeddings: List[str] = []
     for emb in numeric.index:
         row = numeric.loc[emb]
         if row.notna().any() and np.isfinite(row).any():
             valid_embeddings.append(emb)
         else:
-            LOGGER.warning(f"Dropping embedding '{emb}' due to all-NaN or non-finite metrics")
+            LOGGER.warning(
+                "Dropping embedding '%s' due to all-NaN or non-finite metrics.",
+                emb,
+            )
 
     if not valid_embeddings:
-        LOGGER.error("All embeddings had invalid (NaN) scores. Falling back to 'Unintegrated'.")
+        LOGGER.error(
+            "All embeddings had invalid scores; falling back to 'Unintegrated'."
+        )
         return "Unintegrated"
 
-    # Compute mean score only across valid embeddings
     scores = numeric.loc[valid_embeddings].mean(axis=1)
-
     best = scores.idxmax()
+
     if isinstance(best, tuple):
         best = best[0]
 
-    LOGGER.info(f"Selected best embedding: '{best}'")
+    LOGGER.info("Selected best embedding: '%s'", best)
     return str(best)
 
 
+# ---------------------------------------------------------------------
+# Orchestrator
+# ---------------------------------------------------------------------
+def run_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
+    init_logging(cfg.logfile)
+    LOGGER.info("Starting integration module")
 
-def run_integration(cfg: IntegrationConfig) -> ad.AnnData:
-    setup_logging(cfg.logfile)
+    # Configure Scanpy/Matplotlib figure behavior + formats
+    plot_utils.setup_scanpy_figs(cfg.figdir, cfg.figure_formats)
 
-    in_path: Path = cfg.input_path
-    out_path: Path = cfg.output_path or in_path.with_name(f"{in_path.stem}.integrated.h5ad")
+    adata_full = io_utils.load_dataset(cfg.input_path)
 
-    # Figure directory root
-    figroot = out_path.parent / "figures"
-    plot_utils.setup_scanpy_figs(figroot)
+    batch_key = cfg.batch_key or adata_full.uns.get("batch_key")
+    if batch_key is None:
+        raise RuntimeError("batch_key missing")
 
-    # Base directory for integration-specific plots:
-    figdir = figroot / "integration"
+    LOGGER.info("Using batch_key='%s'", batch_key)
 
-    # Handle output file path (directory vs file)
-    if out_path.exists() and out_path.is_dir():
-        out_path = out_path / f"{in_path.stem}.integrated.h5ad"
-    elif not out_path.suffix:
-        out_path = out_path / f"{in_path.stem}.integrated.h5ad"
-
-    # Load data, infer batch key, compute HVGs
-    full = sc.read_h5ad(str(in_path))
-    batch_key = io_utils.infer_batch_key(full, cfg.batch_key)
-    cfg.batch_key = batch_key
-    hvg = _subset_to_hvgs(full)
-
-    if "X_pca" not in hvg.obsm:
-        sc.tl.pca(hvg)
-
-    methods = cfg.methods or list(DEFAULT_METHODS)
-
-    # Run all embeddings
-    emb_keys = _run_all_embeddings(hvg, methods, batch_key, cfg.label_key)
-
-    # Benchmark and choose best embedding
-    best = _select_best_embedding(
-        hvg, emb_keys, batch_key, cfg.label_key, cfg.benchmark_n_jobs, figdir
+    adata, emb_keys = _run_integrations(
+        adata,
+        methods=cfg.methods,
+        batch_key=batch_key,
+        label_key=cfg.label_key,
     )
 
-    # Copy embeddings to full-data object
-    for k in emb_keys:
-        full.obsm[k] = hvg.obsm[k]
+    best = _select_best_embedding(
+        adata,
+        embedding_keys=emb_keys,
+        batch_key=batch_key,
+        label_key=cfg.label_key,
+        n_jobs=cfg.benchmark_n_jobs,
+        figdir=Path("integration"),
+    )
 
-    # Compute integrated neighbors + UMAP
-    full.obsm["X_integrated"] = full.obsm[best]
-    sc.pp.neighbors(full, use_rep="X_integrated")
-    sc.tl.umap(full)
+    plot_utils.plot_integration_umaps(
+        adata,
+        embedding_keys=emb_keys,
+        color=batch_key,
+    )
 
-    # Store metadata
-    full.uns.setdefault("integration", {})
-    full.uns["integration"].update({
-        "methods": emb_keys,
-        "best_embedding": best,
-        "batch_key": batch_key,
-        "label_key": cfg.label_key,
-        "input_path": str(in_path),
-        "benchmark_metrics_raw_path": str(figdir / "integration_metrics_raw.tsv"),
-        "benchmark_metrics_scaled_path": str(figdir / "integration_metrics_scaled.tsv"),
-    })
+    adata.obsm["X_integrated"] = adata.obsm[best]
+    sc.pp.neighbors(adata, use_rep="X_integrated")
+    sc.tl.umap(adata)
 
-    # Plot per-method UMAPs
-    import matplotlib.pyplot as plt
+    out_zarr = cfg.output_dir / (cfg.output_name + ".integrated.zarr")
+    LOGGER.info("Saving integrated dataset as Zarr → %s", out_zarr)
+    io_utils.save_dataset(adata, out_zarr, fmt="zarr")
 
-    for method in emb_keys:
-        try:
-            LOGGER.info(f"Plotting UMAPs for method: {method}")
+    if getattr(cfg, "save_h5ad", False):
+        out_h5ad = cfg.output_dir / (cfg.output_name + ".integrated.h5ad")
+        LOGGER.warning(
+            "Writing additional H5AD output (loads full matrix into RAM): %s",
+            out_h5ad,
+        )
+        io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
+        LOGGER.info("Saved integrated H5AD → %s", out_h5ad)
 
-            # ---- Single-panel integrated UMAP ----
-            tmp = full.copy()
-            sc.pp.neighbors(tmp, use_rep=method)
-            sc.tl.umap(tmp)
-
-            fig = sc.pl.umap(
-                tmp,
-                color=cfg.batch_key,
-                show=False,
-                return_fig=True,
-            )
-            plot_utils.save_multi(f"{method}_umap", figdir)
-            plt.close(fig)
-
-            # ---- Two-panel: integrated (left) vs unintegrated (right) ----
-            # Skip the unintegrated embedding
-            if method == "Unintegrated":
-                continue
-            tmp2 = full.copy()
-
-            sc.pp.neighbors(tmp2, use_rep=method)
-            sc.tl.umap(tmp2)
-            umap_integrated = tmp2.obsm["X_umap"].copy()
-
-            sc.pp.neighbors(tmp2, use_rep="Unintegrated")
-            sc.tl.umap(tmp2)
-            umap_unintegrated = tmp2.obsm["X_umap"].copy()
-
-            # Build two-panel figure
-            fig, axs = plt.subplots(1, 2, figsize=(10, 4))
-
-            tmp2.obsm["X_umap"] = umap_integrated
-            sc.pl.umap(
-                tmp2,
-                color=cfg.batch_key,
-                ax=axs[0],
-                show=False,
-                title=f"{method}",
-            )
-
-            tmp2.obsm["X_umap"] = umap_unintegrated
-            sc.pl.umap(
-                tmp2,
-                color=cfg.batch_key,
-                ax=axs[1],
-                show=False,
-                title="Unintegrated",
-            )
-
-            plot_utils.save_multi(f"{method}_vs_Unintegrated_umap", figdir)
-            plt.close(fig)
-
-        except Exception as e:
-            LOGGER.warning("UMAP plotting for %s failed: %s", method, e)
-
-    # ------------------------------------------------------------------
-    # Save integrated data
-    # ------------------------------------------------------------------
-    io_utils.save_adata(full, out_path)
-    return full
+    LOGGER.info("Finished integration module")
+    return adata
 

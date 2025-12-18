@@ -1228,7 +1228,7 @@ def umap_plots(
 # -------------------------------------------------------------------------
 # scIB-style results table
 # -------------------------------------------------------------------------
-def plot_scib_results_table(scaled: pd.DataFrame, figdir: Path) -> None:
+def plot_scib_results_table(scaled: pd.DataFrame) -> None:
     """
     Generate a scIB-style results table with circles for metrics and bars for aggregate scores.
     """
@@ -1433,7 +1433,8 @@ def plot_scib_results_table(scaled: pd.DataFrame, figdir: Path) -> None:
     ax.set_yticklabels(df.index.tolist(), fontsize=10)
 
     plt.tight_layout()
-    save_multi("scIB_results_table", figdir)
+    base = Path("integration")
+    save_multi("scIB_results_table", base)
     plt.close(fig)
 
 
@@ -1517,6 +1518,84 @@ def plot_cluster_umaps(
 
         sc.pl.umap(adata, color=[batch_key, label_key], legend_loc="on data", show=False)
         save_multi(f"cluster_umap_{batch_key}_and_{label_key}", figdir)
+
+from pathlib import Path
+import matplotlib.pyplot as plt
+import scanpy as sc
+import logging
+
+LOGGER = logging.getLogger(__name__)
+
+
+def plot_integration_umaps(
+    adata,
+    *,
+    embedding_keys,
+    color: str,
+) -> None:
+    """
+    Plot UMAPs for unintegrated + integrated embeddings.
+
+    All plots are written under figures/integration/
+    via save_multi().
+    """
+
+    base = Path("integration")
+
+    for emb in embedding_keys:
+        if emb not in adata.obsm:
+            LOGGER.warning("Embedding '%s' missing; skipping", emb)
+            continue
+
+        try:
+            # ---------------------------
+            # Single UMAP
+            # ---------------------------
+            tmp = adata.copy()
+            sc.pp.neighbors(tmp, use_rep=emb)
+            sc.tl.umap(tmp)
+
+            fig = sc.pl.umap(
+                tmp,
+                color=color,
+                title=emb,
+                show=False,
+                return_fig=True,
+            )
+            save_multi(f"umap_{emb}", figdir=base, fig=fig)
+            plt.close(fig)
+
+            # ---------------------------
+            # Comparison vs Unintegrated
+            # ---------------------------
+            if emb != "Unintegrated" and "Unintegrated" in adata.obsm:
+                tmp2 = adata.copy()
+
+                sc.pp.neighbors(tmp2, use_rep=emb)
+                sc.tl.umap(tmp2)
+                umap_int = tmp2.obsm["X_umap"].copy()
+
+                sc.pp.neighbors(tmp2, use_rep="Unintegrated")
+                sc.tl.umap(tmp2)
+                umap_raw = tmp2.obsm["X_umap"].copy()
+
+                fig, axs = plt.subplots(1, 2, figsize=(10, 4))
+
+                tmp2.obsm["X_umap"] = umap_int
+                sc.pl.umap(tmp2, color=color, ax=axs[0], show=False, title=emb)
+
+                tmp2.obsm["X_umap"] = umap_raw
+                sc.pl.umap(tmp2, color=color, ax=axs[1], show=False, title="Unintegrated")
+
+                save_multi(
+                    f"umap_{emb}_vs_unintegrated",
+                    figdir=base,
+                    fig=fig,
+                )
+                plt.close(fig)
+
+        except Exception as e:
+            LOGGER.warning("Failed to plot UMAP for %s: %s", emb, e)
 
 
 # ----------------------------------------------------------------------
