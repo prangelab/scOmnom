@@ -27,7 +27,7 @@ def generate_qc_report(
 
     fig_root = fig_root.resolve()
     png_root = fig_root / "png"
-    out_html = fig_root / "report.html"
+    out_html = fig_root / "qc_report.html"
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -355,3 +355,205 @@ def _collect_qc_summary(adata) -> dict:
             summary[f"mean_{col}"] = float(obs[col].mean())
 
     return summary
+
+
+# ======================================================================
+# Integration report
+# ======================================================================
+def generate_integration_report(
+    *,
+    fig_root: Path,
+    version: str,
+    adata,
+    batch_key: str,
+    label_key: str,
+    methods: list[str],
+    selected_embedding: str,
+    benchmark_n_jobs: int,
+):
+    """
+    Generate a self-contained HTML integration report embedding all plots.
+
+    Output:
+      <fig_root>/integration_report.html
+    """
+
+    fig_root = fig_root.resolve()
+    png_root = fig_root / "png"
+    out_html = fig_root / "integration_report.html"
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # ------------------------------------------------------------------
+    # Collect images (PNG only)
+    # ------------------------------------------------------------------
+    images = sorted(png_root.rglob("*.png"))
+    rel_images = [img.relative_to(fig_root) for img in images]
+
+    # ------------------------------------------------------------------
+    # Section classification
+    # ------------------------------------------------------------------
+    sections: Dict[str, List[Path]] = {
+        "Integration benchmarking": [],
+        "UMAPs": [],
+        "Other": [],
+    }
+
+    for p in rel_images:
+        s = p.as_posix().lower()
+        if "scib" in s:
+            sections["Integration benchmarking"].append(p)
+        elif "umap" in s:
+            sections["UMAPs"].append(p)
+        else:
+            sections["Other"].append(p)
+
+    # ------------------------------------------------------------------
+    # Header
+    # ------------------------------------------------------------------
+    header = f"""
+    <h1>scOmnom Integration Report</h1>
+
+    <div class="meta">
+    Version:   {version}
+    Timestamp: {timestamp}
+
+    Selected embedding:
+    {html.escape(selected_embedding)}
+    </div>
+    """
+
+    # ------------------------------------------------------------------
+    # Summary table
+    # ------------------------------------------------------------------
+    summary = {
+        "version": version,
+        "timestamp": timestamp,
+        "batch_key": batch_key,
+        "label_key": label_key,
+        "methods_requested": methods,
+        "benchmark_n_jobs": benchmark_n_jobs,
+        "selected_embedding": selected_embedding,
+    }
+
+    rows = []
+    for k, v in summary.items():
+        rows.append(f"<tr><td>{k}</td><td>{html.escape(str(v))}</td></tr>")
+
+    summary_html = f"""
+    <h2>Summary</h2>
+    <table class="summary">
+      <thead>
+        <tr><th>Metric</th><th>Value</th></tr>
+      </thead>
+      <tbody>
+        {''.join(rows)}
+      </tbody>
+    </table>
+    """
+
+    # ------------------------------------------------------------------
+    # Render body
+    # ------------------------------------------------------------------
+    body = [header, summary_html]
+
+    for title, imgs in sections.items():
+        if not imgs:
+            continue
+
+        body.append(f"<details open><summary><h2>{title}</h2></summary>")
+        body.append('<div class="grid">')
+
+        for p in imgs:
+            body.append(render_image_block(p))
+
+        body.append("</div></details>")
+
+    # ------------------------------------------------------------------
+    # Final HTML
+    # ------------------------------------------------------------------
+    html_doc = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>scOmnom Integration Report</title>
+      <style>{_REPORT_CSS}</style>
+    </head>
+    <body>
+      {''.join(body)}
+    </body>
+    </html>
+    """
+
+    out_html.write_text(html_doc, encoding="utf-8")
+
+
+# ----------------------------------------------------------------------
+# Shared CSS (reuse QC report style verbatim)
+# ----------------------------------------------------------------------
+_REPORT_CSS = """
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  margin: 2rem;
+  max-width: 1400px;
+}
+
+h1, h2, h3, h4 {
+  margin-top: 1.5rem;
+}
+
+details > summary {
+  cursor: pointer;
+  font-weight: 600;
+  margin: 0.5rem 0;
+}
+
+.meta {
+  background: #f6f8fa;
+  border: 1px solid #ddd;
+  padding: 1rem;
+  border-radius: 6px;
+  font-family: monospace;
+  white-space: pre-wrap;
+}
+
+figure {
+  margin: 0.5rem;
+}
+
+figure img {
+  max-width: 100%;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
+figcaption {
+  font-size: 0.85rem;
+  color: #444;
+  margin-top: 0.25rem;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+  gap: 1rem;
+}
+
+table.summary {
+  border-collapse: collapse;
+  margin-top: 1rem;
+  margin-bottom: 2rem;
+}
+
+table.summary th,
+table.summary td {
+  border: 1px solid #ccc;
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+}
+
+table.summary th {
+  background: #f0f0f0;
+}
+"""

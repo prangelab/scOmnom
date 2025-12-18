@@ -6,8 +6,7 @@ import logging
 import warnings
 
 from pathlib import Path
-from typing import Dict, Optional, Literal
-import numpy as np
+from typing import Dict, Optional
 import torch
 
 import anndata as ad

@@ -59,7 +59,11 @@ dependencies:
       # On macOS: Metal/MPS enabled automatically.
       # On Linux (NVIDIA GPU) uncomment the next lines.
       #- "jax[cuda12]"
-      #- -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+      #- -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html pip install flax chex optax numpyro
+      #- flax
+      #- chex
+      #- optax
+      #- numpyro
       - umap-learn
       - scvi-tools
       - scib-metrics

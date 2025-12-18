@@ -12,6 +12,7 @@ import scanpy as sc
 import pandas as pd
 import torch
 
+from scomnom import __version__
 from .config import IntegrateConfig
 from . import io_utils, plot_utils
 from .logging_utils import init_logging
@@ -192,6 +193,36 @@ def _run_scanvi_from_scvi(
     return np.asarray(lvae.get_latent_representation())
 
 
+def _run_scpoli(
+    adata: ad.AnnData,
+    batch_key: str,
+    label_key: Optional[str],
+) -> np.ndarray:
+    """
+    Run scPoli integration.
+
+    scPoli models sample relationships via a learned batch embedding.
+    Optionally supervised via label_key.
+    """
+    from scvi.model import SCPOLI
+
+    LOGGER.info("Training scPoli for integration")
+
+    SCPOLI.setup_anndata(
+        adata,
+        batch_key=batch_key,
+        cell_type_key=label_key,
+    )
+
+    model = SCPOLI(adata)
+    model.train(
+        max_epochs=50,
+        enable_progress_bar=False,
+    )
+
+    return np.asarray(model.get_latent_representation())
+
+
 # ---------------------------------------------------------------------
 # Integration
 # ---------------------------------------------------------------------
@@ -257,12 +288,25 @@ def _run_integrations(
         except Exception as e:
             LOGGER.warning("scANVI failed: %s", e)
 
+    # scPoli
+    if "scpoli" in method_set:
+        try:
+            emb = _run_scpoli(
+                adata,
+                batch_key=batch_key,
+                label_key=label_key,
+            )
+            adata.obsm["scPoli"] = emb
+            created.append("scPoli")
+        except Exception as e:
+            LOGGER.warning("scPoli failed: %s", e)
+
     # BBKNN (UMAP is 2D, but that’s fine for benchmarking if you want; many prefer PCA/latent)
     if "bbknn" in method_set:
         try:
             emb = _run_bbknn_embedding(adata, batch_key=batch_key)
-            adata.obsm["BBKNN"] = np.asarray(emb)
-            created.append("BBKNN")
+            adata.obsm["BBKNN_umap"] = emb
+            created.append("BBKNN_umap")
         except Exception as e:
             LOGGER.warning("BBKNN failed: %s", e)
 
@@ -276,19 +320,33 @@ def _run_integrations(
 
     return adata, created
 
-def _run_bbknn_embedding(adata: ad.AnnData, batch_key: str) -> np.ndarray:
+def _run_bbknn_embedding(
+    adata: ad.AnnData,
+    batch_key: str,
+) -> np.ndarray:
+    """
+    Run BBKNN and return a UMAP embedding derived from the BBKNN graph.
+
+    NOTE:
+    BBKNN does not produce a latent space.
+    UMAP is used here as a proxy embedding for scIB benchmarking only.
+    """
     import bbknn
+    import scanpy as sc
 
     tmp = adata.copy()
 
+    # Ensure PCA exists
     if "X_pca" not in tmp.obsm:
         sc.tl.pca(tmp)
 
+    # Build BBKNN graph
     bbknn.bbknn(tmp, batch_key=batch_key)
 
-    # IMPORTANT: embedding = PCA, graph = BBKNN
-    return np.asarray(tmp.obsm["X_pca"])
+    # Compute UMAP from BBKNN graph
+    sc.tl.umap(tmp, min_dist=0.5, spread=1.0)
 
+    return tmp.obsm["X_umap"].copy()
 
 
 def _select_best_embedding(
@@ -422,9 +480,38 @@ def run_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
         color=batch_key,
     )
 
-    adata.obsm["X_integrated"] = adata.obsm[best]
-    sc.pp.neighbors(adata, use_rep="X_integrated")
+    if best.lower().startswith("bbknn"):
+        LOGGER.warning(
+            "BBKNN selected as best integration; "
+            "using BBKNN neighbor graph (graph-based integration)."
+        )
+
+        import bbknn
+        bbknn.bbknn(
+            adata,
+            batch_key=batch_key,
+            use_rep="X_pca",
+        )
+
+        # For API consistency only; BBKNN integration lives in the graph
+        adata.obsm["X_integrated"] = adata.obsm["X_pca"]
+
+    else:
+        adata.obsm["X_integrated"] = adata.obsm[best]
+        sc.pp.neighbors(adata, use_rep="X_integrated")
+
     sc.tl.umap(adata)
+
+    generate_integration_report(
+        fig_root=cfg.figdir,
+        version=__version__,
+        adata=adata,
+        batch_key=batch_key,
+        label_key=cfg.label_key,
+        methods=methods,
+        benchmark_n_jobs=cfg.benchmark_n_jobs,
+        selected_embedding=best,
+    )
 
     out_zarr = cfg.output_dir / (cfg.output_name + ".zarr")
     LOGGER.info("Saving integrated dataset as Zarr → %s", out_zarr)
