@@ -1228,9 +1228,78 @@ def umap_plots(
 # scIB-style results table
 # -------------------------------------------------------------------------
 def plot_scib_results_table(scaled: pd.DataFrame) -> None:
+    # Add this right at the start of your plotting function
+    df = df.sort_values("Total", ascending=False)
+    df = scaled.copy()
+    # Filter out junk rows
+    df = df.loc[~df.index.str.contains("Metric", case=False, na=False)]
+
+    all_cols = df.columns.tolist()
+
+    # 1. Define Categories
+    agg_metrics = [c for c in ["Batch correction", "Bio conservation", "Total"] if c in all_cols]
+    batch_metrics = [c for c in ["iLISI", "KBET", "Graph connectivity", "PCR comparison", "Silhouette batch"] if
+                     c in all_cols]
+    bio_metrics = [c for c in all_cols if c not in agg_metrics + batch_metrics]
+
+    # Reorder DataFrame
+    ordered_cols = bio_metrics + batch_metrics + agg_metrics
+    df = df[ordered_cols]
+
+    # 2. X-Position Mapping
+    cell_w, cell_h = 1.2, 0.6
+    agg_gap = 0.5
+    x_positions = {}
+    x = 0
+    for col in ordered_cols:
+        if col in agg_metrics and x > 0 and ordered_cols[ordered_cols.index(col) - 1] not in agg_metrics:
+            x += agg_gap  # Add gap before aggregates
+        x_positions[col] = x
+        x += 1
+
+    n_rows = len(df)
+    fig, ax = plt.subplots(figsize=(cell_w * (x + 1), cell_h * (n_rows + 2)))
+
+    # 3. DRAW DATA (The Fix)
+    for i, (idx, row) in enumerate(df.iterrows()):
+        y_coord = i + 0.5  # Row 0 is at 0.5, Row 1 at 1.5...
+        for col in df.columns:
+            x_c = x_positions[col]
+            val = row[col]
+
+            if col in agg_metrics:
+                ax.barh(y_coord, val, left=x_c, height=cell_h * 0.8, color="#2c7fb8")
+                ax.text(x_c + 0.05, y_coord, f"{val:.2f}", va='center', color='white')
+            else:
+                ax.scatter(x_c + 0.5, y_coord, s=500, c=[plt.cm.viridis(val)])
+                ax.text(x_c + 0.5, y_coord, f"{val:.2f}", ha='center', va='center')
+
+    # 4. DYNAMIC HEADERS (The Improvement)
+    def draw_header(cols, title, y=-1.1):
+        if not cols: return
+        pos = [x_positions[c] for c in cols]
+        center = (min(pos) + max(pos) + 1) / 2
+        ax.text(center, y, title, ha='center', fontweight='bold', fontsize=11)
+
+    draw_header(bio_metrics, "Biological Conservation")
+    draw_header(batch_metrics, "Batch Correction")
+    draw_header(agg_metrics, "Aggregate Scores")
+
+    # Final Formatting
+    ax.set_yticks(np.arange(n_rows) + 0.5)
+    ax.set_yticklabels(df.index.tolist())
+    ax.set_ylim(0, n_rows)
+    ax.invert_yaxis()  # Now correctly puts Row 0 at top
+    ax.set_frame_on(False)
+    plt.tight_layout()
+    plt.show()
+
+def plot_scib_results_table_old(scaled: pd.DataFrame) -> None:
     """
     Generate a scIB-style results table with circles for metrics and bars for aggregate scores.
     """
+    # Add this right at the start of your plotting function
+    df = df.sort_values("Total", ascending=False)
     df = scaled.copy()
     df = df.loc[~df.index.str.contains("Metric", case=False, na=False)]
 
@@ -1289,7 +1358,7 @@ def plot_scib_results_table(scaled: pd.DataFrame) -> None:
     for i in range(n_rows):
         for j, metric in enumerate(df.columns):
             x_coord = x_positions[metric]
-            y_coord = n_rows - i - 0.5
+            y_coord = i + 0.5
             val = vals[i, j]
 
             if metric in agg_metrics:
@@ -1376,7 +1445,7 @@ def plot_scib_results_table(scaled: pd.DataFrame) -> None:
         ax.text(agg_center, -1.1, "Aggregate score", ha="center", fontweight="bold")
 
     plt.tight_layout()
-    save_multi("scIB_results_table", Path("integration"))
+    save_multi("scIB_results_table_old", Path("integration"))
     plt.close(fig)
 
 

@@ -469,21 +469,8 @@ def run_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
     # Plot ONLY the scIB results table
     # ------------------------------------------------------------
     plot_utils.plot_scib_results_table(scaled)
+    plot_utils.plot_scib_results_table_old(scaled)
 
-    methods = cfg.methods or ["scVI", "scANVI", "BBKNN"]
-
-    # Collect embedding keys that actually exist
-    embedding_keys = ["Unintegrated"] + [
-        m for m in methods if m in adata.obsm
-    ]
-
-    LOGGER.info("Plotting integration UMAPs for embeddings: %s", embedding_keys)
-
-    plot_utils.plot_integration_umaps(
-        adata,
-        embedding_keys=embedding_keys,
-        color=batch_key,
-    )
     LOGGER.info("DEBUG SHORT-CIRCUIT: plots complete, exiting integration module")
     sys.exit(0)
 
