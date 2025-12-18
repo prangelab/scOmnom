@@ -1244,8 +1244,7 @@ def plot_scib_results_table(scaled: pd.DataFrame) -> None:
 
     # Define Categories
     agg_metrics = [c for c in ["Batch correction", "Bio conservation", "Total"] if c in all_cols]
-    batch_metrics = [c for c in ["iLISI", "KBET", "Graph connectivity", "PCR comparison", "Silhouette batch"] if
-                     c in all_cols]
+    batch_metrics = [c for c in ["iLISI", "KBET", "Graph connectivity", "PCR comparison", "Silhouette batch"] if c in all_cols]
     bio_metrics = [c for c in all_cols if c not in agg_metrics + batch_metrics]
 
     ordered_cols = bio_metrics + batch_metrics + agg_metrics
@@ -1263,7 +1262,8 @@ def plot_scib_results_table(scaled: pd.DataFrame) -> None:
         x_curr += 1
 
     n_rows = len(df)
-    fig, ax = plt.subplots(figsize=(cell_w * (x_curr + 1), cell_h * (n_rows + 2)))
+    # Increase height slightly for horizontal headers
+    fig, ax = plt.subplots(figsize=(cell_w * (x_curr + 1), cell_h * (n_rows + 4)))
 
     # 3. DRAW DATA
     for i, (method_name, row) in enumerate(df.iterrows()):
@@ -1275,41 +1275,44 @@ def plot_scib_results_table(scaled: pd.DataFrame) -> None:
 
             if col in agg_metrics:
                 # Aggregate bars
-                ax.barh(y_coord, val, left=x_c, height=cell_h * 0.7, color="#2c7fb8", align='center')
-                ax.text(x_c + 0.05, y_coord, f"{val:.2f}", va='center', ha='left', color='white', fontsize=9,
-                        fontweight='bold')
+                ax.barh(y_coord, val, left=x_c, height=cell_h * 0.7, color="#2c7fb8", align='center', zorder=2)
+                # FIX: Conditional text color for low values
+                text_color = 'white' if val > 0.3 else 'black'
+                ax.text(x_c + 0.05, y_coord, f"{val:.2f}", va='center', ha='left',
+                        color=text_color, fontsize=9, fontweight='bold', zorder=3)
             else:
                 # Metric circles
                 ax.scatter(x_c + 0.5, y_coord, s=700, c=[plt.cm.viridis(val)], edgecolors='none', zorder=3)
                 ax.text(x_c + 0.5, y_coord, f"{val:.2f}", ha='center', va='center', fontsize=8,
                         color='white' if val < 0.3 or val > 0.7 else 'black', zorder=4)
 
-    # 4. DYNAMIC HEADERS
-    def draw_header(cols, title, y=-0.5):
+    # 4. DYNAMIC HEADERS (Horizontal)
+    def draw_header(cols, title, y_top=-1.8, y_sub=-0.6):
         if not cols: return
         pos = [x_positions[c] for c in cols]
         center = (min(pos) + max(pos) + 1) / 2
-        ax.text(center, y, title, ha='center', va='bottom', fontweight='bold', fontsize=10)
-        # Add column sub-labels
+        # Section Title (e.g. Biological Conservation)
+        ax.text(center, y_top, title, ha='center', va='bottom', fontweight='bold', fontsize=10)
+        # Column Labels (Horizontal)
         for c in cols:
-            ax.text(x_positions[c] + 0.5, 0, c, ha='center', va='bottom', fontsize=8, rotation=45)
+            # Wrap long names if necessary by replacing space with newline
+            display_name = c.replace(" ", "\n")
+            ax.text(x_positions[c] + 0.5, y_sub, display_name, ha='center', va='bottom', fontsize=7)
 
     draw_header(bio_metrics, "Biological Conservation")
     draw_header(batch_metrics, "Batch Correction")
     draw_header(agg_metrics, "Aggregate Scores")
 
-    # 5. FINAL STYLING (The "Clean" Fix)
-    ax.set_ylim(-1, n_rows)  # Give space for headers
+    # 5. FINAL STYLING
+    ax.set_ylim(-2.5, n_rows)  # More space for horizontal multi-line headers
     ax.set_xlim(0, x_curr)
     ax.invert_yaxis()
 
-    # Remove all gridlines and spines
     ax.grid(False)
     for spine in ax.spines.values():
         spine.set_visible(False)
 
-    # Clean up axes
-    ax.set_xticks([])  # Remove X axis labels entirely
+    ax.set_xticks([])
     ax.set_yticks(np.arange(n_rows) + 0.5)
 
     # Robust Baseline Labeling
@@ -1317,17 +1320,19 @@ def plot_scib_results_table(scaled: pd.DataFrame) -> None:
     for idx in df.index:
         idx_str = str(idx)
         if "unintegrated" in idx_str.lower():
-            new_labels.append(f"{idx_str} (baseline)")
+            new_labels.append(f"{idx_str}\n(baseline)")
         elif "bbknn" in idx_str.lower():
-            new_labels.append(f"{idx_str} (graph baseline)")
+            new_labels.append(f"{idx_str}\n(graph baseline)")
         else:
             new_labels.append(idx_str)
 
-    ax.set_yticklabels(new_labels, fontsize=10, fontweight='medium')
-    ax.tick_params(axis='both', which='both', length=0)  # Hide tick marks
+    ax.set_yticklabels(new_labels, fontsize=9, fontweight='medium')
+    ax.tick_params(axis='both', which='both', length=0)
 
     plt.tight_layout()
-    save_multi("scIB_results_table","integration")
+    save_multi("scIB_results_table", Path("integration"))
+    plt.close(fig)
+
 
 # -------------------------------------------------------------------------
 # CLUSTERING RESOLUTION / STABILITY PLOTS
