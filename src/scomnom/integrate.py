@@ -223,9 +223,6 @@ def _run_scpoli(
     return np.asarray(model.get_latent_representation())
 
 
-# ---------------------------------------------------------------------
-# Run Scanorama
-# ---------------------------------------------------------------------
 def _run_scanorama(
     adata: ad.AnnData,
     batch_key: str,
@@ -245,7 +242,7 @@ def _run_scanorama(
         for b in adata.obs[batch_key].astype("category").cat.categories
     ]
 
-    # Run Scanorama on PCA
+    # Run Scanorama
     scanorama.correct_scanpy(
         adatas,
         return_dimred=True,
@@ -253,14 +250,16 @@ def _run_scanorama(
         verbose=False,
     )
 
-    # Reassemble corrected PCA
+    # Reassemble corrected data
     Z = np.zeros_like(adata.obsm["X_pca"])
     for sub in adatas:
-        Z[sub.obs_names.map(adata.obs_names.get_loc)] = sub.obsm["X_pca"]
+        if "X_scanorama" in sub.obsm:
+            indices = [adata.obs_names.get_loc(name) for name in sub.obs_names]
+            Z[indices] = sub.obsm["X_scanorama"]
+        else:
+            LOGGER.warning("Scanorama key missing for a batch!")
 
     return Z
-
-
 # ---------------------------------------------------------------------
 # Run Harmony
 # ---------------------------------------------------------------------
