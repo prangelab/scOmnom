@@ -243,10 +243,17 @@ def _run_scanorama(
     ]
 
     # Run Scanorama
+    MAX_SCANORAMA_PCS = 20
+
+    dim = min(
+        MAX_SCANORAMA_PCS,
+        adata.obsm["X_pca"].shape[1],
+    )
+
     scanorama.correct_scanpy(
         adatas,
         return_dimred=True,
-        dimred=adata.obsm["X_pca"].shape[1],
+        dimred=dim,
         verbose=False,
     )
 
@@ -630,9 +637,14 @@ def run_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
         output_dir=cfg.output_dir,
     )
 
+    plot_keys = list(emb_keys)
+    if "bbknn" in {m.lower() for m in methods}:
+        plot_keys.append("BBKNN")
+
     plot_utils.plot_integration_umaps(
         adata,
-        embedding_keys=emb_keys,
+        embedding_keys=plot_keys,
+        batch_key=batch_key,
         color=batch_key,
     )
 

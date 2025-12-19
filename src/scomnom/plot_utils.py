@@ -1534,6 +1534,7 @@ def plot_integration_umaps(
     adata,
     *,
     embedding_keys,
+    batch_key: str,
     color: str,
 ) -> None:
     """
@@ -1611,6 +1612,12 @@ def plot_integration_umaps(
 
                 tmp_raw.obsm["X_umap"] = umap_raw
                 sc.pl.umap(tmp_raw, color=color, ax=axs[1], show=False, title="Unintegrated")
+                save_multi(
+                    f"umap_{emb}_vs_Unintegrated",
+                    figdir=base,
+                    fig=fig,
+                )
+                plt.close(fig)
 
 
         except Exception as e:
