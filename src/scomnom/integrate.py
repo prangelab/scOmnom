@@ -251,13 +251,22 @@ def _run_scanorama(
     )
 
     # Reassemble corrected data
-    Z = np.zeros_like(adata.obsm["X_pca"])
+    # Use index-based mapping instead of .map() for speed and safety
+    Z = np.zeros(
+        (adata.n_obs, adata.obsm["X_pca"].shape[1]),
+        dtype=adata.obsm["X_pca"].dtype,
+    )
+
     for sub in adatas:
         if "X_scanorama" in sub.obsm:
-            indices = [adata.obs_names.get_loc(name) for name in sub.obs_names]
-            Z[indices] = sub.obsm["X_scanorama"]
+            # Get integer positions of these cells in the original adata
+            idx = adata.obs_names.get_indexer(sub.obs_names)
+            Z[idx] = sub.obsm["X_scanorama"]
         else:
-            LOGGER.warning("Scanorama key missing for a batch!")
+            # If a batch failed, use its original PCA so the matrix isn't zeros
+            idx = adata.obs_names.get_indexer(sub.obs_names)
+            Z[idx] = sub.obsm["X_pca"]
+            LOGGER.warning("Scanorama failed for batch %s; using original PCA", sub.obs[batch_key][0])
 
     return Z
 # ---------------------------------------------------------------------
@@ -446,18 +455,41 @@ def _select_best_embedding(
 ) -> str:
     """
     Run scIB benchmarking and select the best integration embedding.
-    Exclude BBKNN because it is no embedding
+
+    Selection strategy (baseline-aware):
+      1. batch > Unintegrated AND bio > Unintegrated
+      2. bio > Unintegrated
+      3. batch > Unintegrated
+      4. fallback: highest Total
+
+    Supervised methods are allowed to win, but are explicitly annotated.
     """
     from scib_metrics.benchmark import Benchmarker, BioConservation, BatchCorrection
 
     _ensure_label_key(adata, label_key)
+
+    # --------------------------------------------------
+    # Method classes (for logging / reporting only)
+    # --------------------------------------------------
+    METHOD_CLASS = {
+        "Unintegrated": "baseline",
+        "BBKNN": "baseline",
+        "Harmony": "unsupervised",
+        "Scanorama": "unsupervised",
+        "scVI": "unsupervised",
+        "scANVI": "supervised",
+        "scPoli": "supervised",
+    }
 
     benchmark_embeddings = [
         e for e in embedding_keys
         if not e.upper().startswith("BBKNN")
     ]
 
-    LOGGER.info("Running scIB benchmarking on embeddings: %s", benchmark_embeddings)
+    LOGGER.info(
+        "Running scIB benchmarking on embeddings: %s",
+        benchmark_embeddings,
+    )
 
     bm = Benchmarker(
         adata,
@@ -471,22 +503,20 @@ def _select_best_embedding(
 
     bm.benchmark()
 
-    # ------------------------------------------------------------------
-    # Retrieve results
-    # ------------------------------------------------------------------
+    # --------------------------------------------------
+    # Retrieve + save results
+    # --------------------------------------------------
     raw = bm.get_results(min_max_scale=False)
     scaled = bm.get_results(min_max_scale=True)
 
-    raw_path = Path(output_dir) / "integration_metrics_raw.tsv"
-    scaled_path = Path(output_dir) / "integration_metrics_scaled.tsv"
-    raw.to_csv(raw_path, sep="\t")
-    scaled.to_csv(scaled_path, sep="\t")
+    raw.to_csv(output_dir / "integration_metrics_raw.tsv", sep="\t")
+    scaled.to_csv(output_dir / "integration_metrics_scaled.tsv", sep="\t")
 
     plot_utils.plot_scib_results_table(scaled)
 
-    # ------------------------------------------------------------------
+    # --------------------------------------------------
     # Clean numeric table
-    # ------------------------------------------------------------------
+    # --------------------------------------------------
     numeric = (
         scaled.astype(str)
         .apply(pd.to_numeric, errors="coerce")
@@ -494,17 +524,68 @@ def _select_best_embedding(
         .dropna(axis=1, how="all")
     )
 
-    LOGGER.info("scIB results table (head):\n%s", numeric.head())
+    if "Unintegrated" not in numeric.index:
+        LOGGER.error("Unintegrated baseline missing from scIB table.")
+        return numeric["Total"].idxmax()
 
-    if numeric.empty:
-        LOGGER.error("No valid scIB scores; falling back to Unintegrated.")
-        return "Unintegrated"
+    baseline = numeric.loc["Unintegrated"]
 
-    scores = numeric.mean(axis=1)
-    best = scores.idxmax()
-    LOGGER.info("Selected best embedding: '%s'", best)
+    # --------------------------------------------------
+    # Helper masks
+    # --------------------------------------------------
+    bio_ok = numeric["Bio conservation"] > baseline["Bio conservation"]
+    batch_ok = numeric["Batch correction"] > baseline["Batch correction"]
+
+    # Never compare baseline to itself
+    candidates = numeric.index != "Unintegrated"
+
+    # --------------------------------------------------
+    # Tiered selection
+    # --------------------------------------------------
+    tier1 = numeric.loc[candidates & bio_ok & batch_ok]
+    tier2 = numeric.loc[candidates & bio_ok]
+    tier3 = numeric.loc[candidates & batch_ok]
+
+    if not tier1.empty:
+        best = tier1["Total"].idxmax()
+        reason = "bio > baseline AND batch > baseline"
+    elif not tier2.empty:
+        best = tier2["Total"].idxmax()
+        reason = "bio > baseline"
+    elif not tier3.empty:
+        best = tier3["Total"].idxmax()
+        reason = "batch > baseline"
+    else:
+        best = numeric.loc[candidates, "Total"].idxmax()
+        reason = "fallback (highest Total)"
+
+    # --------------------------------------------------
+    # Logging + annotation
+    # --------------------------------------------------
+    method_class = METHOD_CLASS.get(best, "unknown")
+
+    LOGGER.info(
+        "Selected best embedding: '%s' (%s) — reason: %s",
+        best,
+        method_class,
+        reason,
+    )
+
+    if method_class == "supervised":
+        unsup = [
+            m for m in numeric.index
+            if METHOD_CLASS.get(m) == "unsupervised"
+        ]
+        if unsup:
+            best_unsup = numeric.loc[unsup, "Total"].idxmax()
+            LOGGER.info(
+                "Best unsupervised alternative: '%s' (Total=%.3f)",
+                best_unsup,
+                numeric.loc[best_unsup, "Total"],
+            )
 
     return str(best)
+
 
 
 def _load_scib_table_from_disk(output_dir: Path) -> pd.DataFrame:
