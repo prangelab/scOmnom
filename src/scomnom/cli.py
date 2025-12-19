@@ -13,7 +13,7 @@ import logging
 from .logging_utils import init_logging
 
 
-ALLOWED_METHODS = {"scVI", "scANVI", "scPoli", "BBKNN"}
+ALLOWED_METHODS = {"scVI", "scANVI", "scPoli", "Harmony", "Scanorama", "BBKNN"}
 app = typer.Typer(help="scOmnom CLI — high-throughput scRNA-seq preprocessing and analysis pipeline.")
 
 # Globally suppress noisy warnings

@@ -224,6 +224,84 @@ def _run_scpoli(
 
 
 # ---------------------------------------------------------------------
+# Run Scanorama
+# ---------------------------------------------------------------------
+def _run_scanorama(
+    adata: ad.AnnData,
+    batch_key: str,
+    *,
+    use_rep: str = "X_pca",
+) -> np.ndarray:
+    """
+    Run Scanorama integration using PCA (HVG-based).
+
+    This avoids raw-X overintegration and memory blowups.
+    """
+    import scanorama
+
+    if use_rep not in adata.obsm:
+        raise KeyError(f"{use_rep} not found in adata.obsm")
+
+    LOGGER.info("Running Scanorama integration")
+
+    # Split PCA by batch
+    batches = adata.obs[batch_key].astype("category")
+    Xs = []
+    order = []
+
+    for b in batches.cat.categories:
+        idx = np.where(batches == b)[0]
+        Xs.append(adata.obsm[use_rep][idx])
+        order.append(idx)
+
+    # Run Scanorama in reduced space
+    Zs = scanorama.correct(
+        Xs,
+        return_dimred=True,
+        verbose=False,
+    )[0]
+
+    # Reassemble in original cell order
+    Z = np.zeros_like(adata.obsm[use_rep])
+    for idx, z in zip(order, Zs):
+        Z[idx] = z
+
+    return Z
+
+
+# ---------------------------------------------------------------------
+# Run Harmony
+# ---------------------------------------------------------------------
+def _run_harmony(
+    adata: ad.AnnData,
+    batch_key: str,
+    *,
+    use_rep: str = "X_pca",
+) -> np.ndarray:
+    """
+    Run Harmony integration on PCA space.
+    """
+    import harmonypy as hm
+
+    if use_rep not in adata.obsm:
+        raise KeyError(f"{use_rep} not found in adata.obsm")
+
+    LOGGER.info("Running Harmony integration")
+
+    Z = adata.obsm[use_rep]
+    meta = adata.obs[[batch_key]].copy()
+
+    ho = hm.run_harmony(
+        Z,
+        meta,
+        vars_use=[batch_key],
+        verbose=False,
+    )
+
+    return np.asarray(ho.Z_corr)
+
+
+# ---------------------------------------------------------------------
 # Integration
 # ---------------------------------------------------------------------
 def _run_integrations(
@@ -248,6 +326,32 @@ def _run_integrations(
     method_set = {m.lower() for m in (methods or [])}
 
     scvi_model = None  # local to this integration run
+
+    # Harmony
+    if "harmony" in method_set:
+        try:
+            emb = _run_harmony(
+                adata,
+                batch_key=batch_key,
+                use_rep="X_pca",
+            )
+            adata.obsm["Harmony"] = emb
+            created.append("Harmony")
+        except Exception as e:
+            LOGGER.warning("Harmony failed: %s", e)
+
+    # Scanorama
+    if "scanorama" in method_set:
+        try:
+            emb = _run_scanorama(
+                adata,
+                batch_key=batch_key,
+                use_rep="X_pca",
+            )
+            adata.obsm["Scanorama"] = emb
+            created.append("Scanorama")
+        except Exception as e:
+            LOGGER.warning("Scanorama failed: %s", e)
 
     # scVI
     if "scvi" in method_set:
@@ -428,7 +532,7 @@ def run_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
         raise RuntimeError("batch_key missing")
     LOGGER.info("Using batch_key='%s'", batch_key)
 
-    methods = cfg.methods or ["scVI", "scANVI", "BBKNN"]
+    methods = cfg.methods or ["scVI", "scANVI", "Harmony", "Scanorama", "BBKNN"]
 
     adata, emb_keys = _run_integrations(
         adata,
