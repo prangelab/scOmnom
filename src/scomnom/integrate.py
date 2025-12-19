@@ -304,8 +304,8 @@ def _run_integrations(
     # BBKNN
     if "bbknn" in method_set:
         try:
-            emb = _run_bbknn(adata, batch_key=batch_key)
-            adata.obsm["BBKNN"] = emb
+            LOGGER.info("Running BBKNN (graph-only baseline)")
+            _run_bbknn(adata, batch_key=batch_key)
             created.append("BBKNN")
         except Exception as e:
             LOGGER.warning("BBKNN failed: %s", e)
@@ -320,35 +320,17 @@ def _run_integrations(
 
     return adata, created
 
-def _run_bbknn(
-    adata: ad.AnnData,
-    *,
-    batch_key: str,
-    use_rep: str = "X_pca",
-) -> None:
-    """
-    Run BBKNN as a graph-based baseline.
-    """
+def _run_bbknn(adata: ad.AnnData, batch_key: str) -> None:
     import bbknn
-    import scanpy as sc
 
-    LOGGER.info("Running BBKNN (graph-based baseline)")
+    if "X_pca" not in adata.obsm:
+        sc.tl.pca(adata)
 
-    # BBKNN operates on an existing representation (usually PCA)
     bbknn.bbknn(
         adata,
         batch_key=batch_key,
-        use_rep=use_rep,
+        use_rep="X_pca",
     )
-
-    # Optional: compute UMAP ONLY for visualization
-    sc.tl.umap(adata)
-
-    # Tag for provenance
-    adata.uns["bbknn"] = {
-        "batch_key": batch_key,
-        "use_rep": use_rep,
-    }
 
 
 def _select_best_embedding(
