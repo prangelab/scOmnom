@@ -232,39 +232,31 @@ def _run_scanorama(
     *,
     use_rep: str = "X_pca",
 ) -> np.ndarray:
-    """
-    Run Scanorama integration using PCA (HVG-based).
-
-    This avoids raw-X overintegration and memory blowups.
-    """
     import scanorama
 
-    if use_rep not in adata.obsm:
-        raise KeyError(f"{use_rep} not found in adata.obsm")
+    if use_rep != "X_pca":
+        raise ValueError("Scanorama integration expects PCA (X_pca)")
 
     LOGGER.info("Running Scanorama integration")
 
-    # Split PCA by batch
-    batches = adata.obs[batch_key].astype("category")
-    Xs = []
-    order = []
+    # Split AnnData by batch
+    adatas = [
+        adata[adata.obs[batch_key] == b].copy()
+        for b in adata.obs[batch_key].astype("category").cat.categories
+    ]
 
-    for b in batches.cat.categories:
-        idx = np.where(batches == b)[0]
-        Xs.append(adata.obsm[use_rep][idx])
-        order.append(idx)
-
-    # Run Scanorama in reduced space
-    Zs = scanorama.correct(
-        Xs,
+    # Run Scanorama on PCA
+    scanorama.correct_scanpy(
+        adatas,
         return_dimred=True,
+        dimred=adata.obsm["X_pca"].shape[1],
         verbose=False,
-    )[0]
+    )
 
-    # Reassemble in original cell order
-    Z = np.zeros_like(adata.obsm[use_rep])
-    for idx, z in zip(order, Zs):
-        Z[idx] = z
+    # Reassemble corrected PCA
+    Z = np.zeros_like(adata.obsm["X_pca"])
+    for sub in adatas:
+        Z[sub.obs_names.map(adata.obs_names.get_loc)] = sub.obsm["X_pca"]
 
     return Z
 
@@ -278,9 +270,6 @@ def _run_harmony(
     *,
     use_rep: str = "X_pca",
 ) -> np.ndarray:
-    """
-    Run Harmony integration on PCA space.
-    """
     import harmonypy as hm
 
     if use_rep not in adata.obsm:
@@ -288,7 +277,7 @@ def _run_harmony(
 
     LOGGER.info("Running Harmony integration")
 
-    Z = adata.obsm[use_rep]
+    Z = np.asarray(adata.obsm[use_rep])          # (n_cells, n_pcs)
     meta = adata.obs[[batch_key]].copy()
 
     ho = hm.run_harmony(
@@ -298,7 +287,15 @@ def _run_harmony(
         verbose=False,
     )
 
-    return np.asarray(ho.Z_corr)
+    # IMPORTANT: transpose
+    Z_corr = np.asarray(ho.Z_corr).T              # (n_cells, n_pcs)
+
+    if Z_corr.shape[0] != adata.n_obs:
+        raise RuntimeError(
+            f"Harmony output shape mismatch: {Z_corr.shape}"
+        )
+
+    return Z_corr
 
 
 # ---------------------------------------------------------------------
