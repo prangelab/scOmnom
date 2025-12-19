@@ -407,7 +407,7 @@ def _run_integrations(
         try:
             LOGGER.info("Running BBKNN (graph-only baseline)")
             _run_bbknn(adata, batch_key=batch_key)
-            created.append("BBKNN")
+            # Do not put in 'created' as it does not actually create an embedding
         except Exception as e:
             LOGGER.warning("BBKNN failed: %s", e)
 
@@ -433,6 +433,9 @@ def _run_bbknn(adata: ad.AnnData, batch_key: str) -> None:
         use_rep="X_pca",
     )
 
+    adata.uns["neighbors_BBKNN"] = adata.uns["neighbors"].copy()
+    adata.obsp["connectivities_BBKNN"] = adata.obsp["connectivities"].copy()
+    adata.obsp["distances_BBKNN"] = adata.obsp["distances"].copy()
 
 def _select_best_embedding(
     adata: ad.AnnData,
@@ -500,8 +503,8 @@ def _select_best_embedding(
 
     scores = numeric.mean(axis=1)
     best = scores.idxmax()
-
     LOGGER.info("Selected best embedding: '%s'", best)
+
     return str(best)
 
 
