@@ -554,8 +554,8 @@ def _select_best_embedding(
     n_jobs: int,
     output_dir: Path,
     *,
-    benchmark_threshold: int = 100_000,
-    benchmark_n_cells: int = 100_000,
+    benchmark_threshold: int = 100000,
+    benchmark_n_cells: int = 100000,
     benchmark_random_state: int = 42,
 ) -> str:
     """

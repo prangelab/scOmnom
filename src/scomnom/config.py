@@ -115,6 +115,9 @@ class IntegrateConfig(BaseModel):
 
     methods: Optional[List[str]] = None
     benchmark_n_jobs: int = 16
+    benchmark_threshold: int = 100000,
+    benchmark_n_cells: int = 100000,
+    benchmark_random_state: int = 42,
 
     figdir_name: str = "figures"
     figure_formats: List[str] = Field(default_factory=lambda: ["png", "pdf"])

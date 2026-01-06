@@ -385,6 +385,9 @@ def integrate(
         "--benchmark-n-jobs",
         help="[scIB] Parallel workers.",
     ),
+    benchmark_threshold: int = 100000,
+    benchmark_n_cells: int = 100000,
+    benchmark_random_state: int = 42,
 ):
     logfile = (output_dir or input_path.parent) / "process-and-integrate.log"
     init_logging(logfile)
@@ -400,6 +403,9 @@ def integrate(
         batch_key=batch_key,
         label_key=label_key,
         benchmark_n_jobs=benchmark_n_jobs,
+        benchmark_threshold=benchmark_threshold,
+        benchmark_n_cells=benchmark_n_cells,
+        benchmark_random_state=benchmark_random_state,
         logfile=logfile,
     )
 
