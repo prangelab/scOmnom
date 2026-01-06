@@ -229,53 +229,92 @@ def _run_scanorama(
     *,
     use_rep: str = "X_pca",
 ) -> np.ndarray:
+    """
+    Run Scanorama integration and return a global embedding (n_cells × dim).
+    """
+    import numpy as np
     import scanorama
+    from scipy import sparse
 
-    if use_rep != "X_pca":
-        raise ValueError("Scanorama integration expects PCA (X_pca)")
+    if batch_key not in adata.obs:
+        raise KeyError(f"{batch_key!r} not found in adata.obs")
 
     LOGGER.info("Running Scanorama integration")
 
-    # Split AnnData by batch
-    adatas = [
-        adata[adata.obs[batch_key] == b].copy()
-        for b in adata.obs[batch_key].astype("category").cat.categories
-    ]
+    # -----------------------------
+    # Use HVGs if available
+    # -----------------------------
+    if "highly_variable" in adata.var.columns:
+        hvg_mask = adata.var["highly_variable"].to_numpy(dtype=bool)
+        if hvg_mask.sum() >= 200:  # sanity floor
+            adata_run = adata[:, hvg_mask].copy()
+        else:
+            LOGGER.warning(
+                "highly_variable present but too few HVGs (%d); using all genes for Scanorama",
+                int(hvg_mask.sum()),
+            )
+            adata_run = adata.copy()
+    else:
+        adata_run = adata.copy()
 
+    # Ensure float32 (Scanorama may densify internally; this helps memory)
+    if sparse.issparse(adata_run.X):
+        adata_run.X = adata_run.X.astype(np.float32)
+    else:
+        adata_run.X = np.asarray(adata_run.X, dtype=np.float32)
+
+    # -----------------------------
+    # Split by batch
+    # -----------------------------
+    batches = adata_run.obs[batch_key].astype("category").cat.categories.tolist()
+    adatas = [adata_run[adata_run.obs[batch_key] == b].copy() for b in batches]
+
+    # -----------------------------
     # Run Scanorama
-    MAX_SCANORAMA_PCS = 20
+    # -----------------------------
+    # Scanorama produces an embedding in each batch object: obsm["X_scanorama"]
+    MAX_SCANORAMA_DIM = 20
+    dim = MAX_SCANORAMA_DIM  # Scanorama "dimred" space (not PCA space)
 
-    dim = min(
-        MAX_SCANORAMA_PCS,
-        adata.obsm["X_pca"].shape[1],
-    )
-
-    scanorama.correct_scanpy(
+    adatas_cor = scanorama.correct_scanpy(
         adatas,
         return_dimred=True,
         dimred=dim,
         verbose=False,
     )
 
-    # Reassemble corrected data
-    # Use index-based mapping instead of .map() for speed and safety
-    Z = np.zeros(
-        (adata.n_obs, adata.obsm["X_pca"].shape[1]),
-        dtype=adata.obsm["X_pca"].dtype,
-    )
+    # -----------------------------
+    # Reassemble global embedding (n_cells × dim)
+    # -----------------------------
+    Z = np.zeros((adata.n_obs, dim), dtype=np.float32)
 
-    for sub in adatas:
-        if "X_scanorama" in sub.obsm:
-            # Get integer positions of these cells in the original adata
-            idx = adata.obs_names.get_indexer(sub.obs_names)
-            Z[idx] = sub.obsm["X_scanorama"]
-        else:
-            # If a batch failed, use its original PCA so the matrix isn't zeros
-            idx = adata.obs_names.get_indexer(sub.obs_names)
-            Z[idx] = sub.obsm["X_pca"]
-            LOGGER.warning("Scanorama failed for batch %s; using original PCA", sub.obs[batch_key][0])
+    for b, sub in zip(batches, adatas_cor):
+        if "X_scanorama" not in sub.obsm:
+            # If this happens, something truly failed upstream
+            LOGGER.warning(
+                "Scanorama did not produce X_scanorama for batch %s; using PCA slice as fallback",
+                str(b),
+            )
+            # fallback: if PCA exists, take first dim components; otherwise zeros remain
+            if use_rep in adata.obsm and adata.obsm[use_rep].shape[1] >= dim:
+                idx = adata.obs_names.get_indexer(sub.obs_names)
+                Z[idx] = np.asarray(adata.obsm[use_rep][idx, :dim], dtype=np.float32)
+            continue
+
+        idx = adata.obs_names.get_indexer(sub.obs_names)
+        emb = np.asarray(sub.obsm["X_scanorama"], dtype=np.float32)
+
+        if emb.shape[1] != dim:
+            raise RuntimeError(
+                f"Scanorama embedding dim mismatch for batch {b}: got {emb.shape[1]} expected {dim}"
+            )
+
+        Z[idx] = emb
 
     return Z
+
+
+
 # ---------------------------------------------------------------------
 # Run Harmony
 # ---------------------------------------------------------------------
