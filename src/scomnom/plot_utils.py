@@ -1536,64 +1536,87 @@ def plot_integration_umaps(
     embedding_keys,
     batch_key: str,
     color: str,
-):
+) -> None:
     """
-    Plot UMAPs for integration methods.
+    Plot UMAPs for unintegrated + integrated embeddings.
 
     Notes
     -----
-    - Embedding-based methods (scVI, Harmony, Scanorama, …) must exist in adata.obsm
-    - BBKNN is graph-based and does NOT live in adata.obsm; it is handled specially
+    - BBKNN is graph-only; we compute neighbors via bbknn.bbknn(...) and then UMAP.
+    - For other embeddings, we compute neighbors with sc.pp.neighbors(use_rep=<emb>) then UMAP.
     """
-    import logging
     from pathlib import Path
+    import matplotlib.pyplot as plt
     import scanpy as sc
 
-    LOGGER = logging.getLogger(__name__)
+    base = Path("integration")
 
-    outdir = Path("integration")
-    outdir.mkdir(parents=True, exist_ok=True)
+    # Ensure Scanpy never autosaves/autoopens
+    sc.settings.autoshow = False
+    sc.settings.autosave = False
 
     for emb in embedding_keys:
         try:
             tmp = adata.copy()
 
-            # --------------------------------------------------
-            # BBKNN: graph-based, no embedding
-            # --------------------------------------------------
+            # ---------------------------
+            # Neighbors + UMAP
+            # ---------------------------
             if emb == "BBKNN":
                 import bbknn
 
-                LOGGER.info("Plotting BBKNN UMAP (graph-based)")
-                bbknn.bbknn(
-                    tmp,
-                    batch_key=batch_key,
-                    use_rep="X_pca",
-                )
-
-            # --------------------------------------------------
-            # Embedding-based methods
-            # --------------------------------------------------
+                # BBKNN works on PCA
+                if "X_pca" not in tmp.obsm:
+                    sc.tl.pca(tmp)
+                bbknn.bbknn(tmp, batch_key=batch_key, use_rep="X_pca")
             else:
                 if emb not in tmp.obsm:
                     LOGGER.warning("Embedding '%s' missing; skipping", emb)
                     continue
-
-                LOGGER.info("Plotting UMAP for embedding '%s'", emb)
                 sc.pp.neighbors(tmp, use_rep=emb)
 
-            # --------------------------------------------------
-            # UMAP + plotting
-            # --------------------------------------------------
             sc.tl.umap(tmp)
 
-            sc.pl.umap(
+            # ---------------------------
+            # Single UMAP
+            # ---------------------------
+            fig1 = sc.pl.umap(
                 tmp,
                 color=color,
                 title=emb,
                 show=False,
-                save=f"_{emb}.png",
+                return_fig=True,
             )
+            save_multi(f"umap_{emb}", figdir=base, fig=fig1)
+            plt.close(fig1)
+
+            # ---------------------------
+            # Comparison vs Unintegrated
+            # ---------------------------
+            if emb != "Unintegrated" and "Unintegrated" in adata.obsm and emb != "BBKNN":
+                # integrated UMAP coordinates
+                tmp_int = adata.copy()
+                sc.pp.neighbors(tmp_int, use_rep=emb)
+                sc.tl.umap(tmp_int)
+                umap_int = tmp_int.obsm["X_umap"].copy()
+
+                # unintegrated UMAP coordinates
+                tmp_raw = adata.copy()
+                sc.pp.neighbors(tmp_raw, use_rep="Unintegrated")
+                sc.tl.umap(tmp_raw)
+                umap_raw = tmp_raw.obsm["X_umap"].copy()
+
+                fig, axs = plt.subplots(1, 2, figsize=(10, 4))
+
+                tmp_plot = adata.copy()
+                tmp_plot.obsm["X_umap"] = umap_int
+                sc.pl.umap(tmp_plot, color=color, ax=axs[0], show=False, title=emb)
+
+                tmp_plot.obsm["X_umap"] = umap_raw
+                sc.pl.umap(tmp_plot, color=color, ax=axs[1], show=False, title="Unintegrated")
+
+                save_multi(f"umap_{emb}_vs_Unintegrated", figdir=base, fig=fig)
+                plt.close(fig)
 
         except Exception as e:
             LOGGER.warning("Failed to plot UMAP for %s: %s", emb, e)
