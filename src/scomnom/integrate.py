@@ -1,4 +1,4 @@
-# src/scomnom/process_and_integrate.py
+# src/scomnom/integrate.py
 
 from __future__ import annotations
 import logging
@@ -323,23 +323,79 @@ def _run_integrations(
     label_key: str,
 ) -> tuple[ad.AnnData, List[str]]:
     """
-    Run requested integration methods and write embeddings into adata.obsm.
+    Run requested integration methods and write embeddings / graphs into adata.
 
-    Returns
-    -------
-    (adata, created_keys)
+    Policy:
+      - PCA is ALWAYS recomputed on HVGs (mask_var='highly_variable') to guarantee substrate correctness.
+      - Harmony/Scanorama/BBKNN operate on HVG PCA.
+      - scVI/scANVI/scPoli are trained on HVGs only; embeddings are written back to full adata.
+      - BBKNN is graph-only (no embedding in .obsm). We still include "BBKNN" in `created`
+        so downstream plotting can generate a BBKNN UMAP using the BBKNN neighbor graph.
     """
-    # Ensure PCA exists and store as "Unintegrated"
+    # ----------------------------
+    # Preconditions: HVGs
+    # ----------------------------
+    if "highly_variable" not in adata.var:
+        raise RuntimeError(
+            "Expected HVGs in adata.var['highly_variable'] (from load-and-filter). "
+            "Refusing to integrate on all genes implicitly."
+        )
+
+    hvg_mask = adata.var["highly_variable"].to_numpy()
+    if hvg_mask.sum() == 0:
+        raise RuntimeError("adata.var['highly_variable'] is present but selects 0 genes.")
+
+    # ----------------------------
+    # PCA on HVGs (ALWAYS recompute)
+    # ----------------------------
+    LOGGER.info("Recomputing PCA on HVGs (mask_var='highly_variable')")
+
+    # Wipe existing PCA/related state to avoid confusion
+    adata.obsm.pop("X_pca", None)
+    adata.uns.pop("pca", None)
+    for k in ("PCs", "variance_ratio", "variance"):
+        # scanpy stores under adata.uns["pca"], but keep this defensive
+        try:
+            adata.varm.pop(k, None)
+        except Exception:
+            pass
+
+    sc.tl.pca(
+        adata,
+        mask_var="highly_variable",
+        svd_solver="arpack",
+    )
+
     if "X_pca" not in adata.obsm:
-        sc.tl.pca(adata)
+        raise RuntimeError("PCA failed: adata.obsm['X_pca'] missing after recompute.")
+
+    # Baseline embedding for benchmarking
     adata.obsm["Unintegrated"] = np.asarray(adata.obsm["X_pca"])
     created: List[str] = ["Unintegrated"]
 
     method_set = {m.lower() for m in (methods or [])}
 
-    scvi_model = None  # local to this integration run
+    # Helper: ensure a full-size embedding is aligned to full adata obs_names
+    def _write_embedding_from_hvg(full_key: str, Z_hvg: np.ndarray, obs_names_hvg) -> None:
+        if Z_hvg.shape[0] != len(obs_names_hvg):
+            raise RuntimeError(f"{full_key}: latent rows != HVG adata cells")
 
-    # Harmony
+        if not np.array_equal(np.asarray(obs_names_hvg), np.asarray(adata.obs_names)):
+            order = pd.Index(obs_names_hvg).get_indexer(adata.obs_names)
+            if (order < 0).any():
+                raise RuntimeError(f"{full_key}: HVG adata missing cells from full adata")
+            Z_full = Z_hvg[order, :]
+        else:
+            Z_full = Z_hvg
+
+        adata.obsm[full_key] = np.asarray(Z_full)
+
+    # Create HVG-only AnnData for scVI-family training
+    adata_hvg = adata[:, hvg_mask].copy()
+
+    # ----------------------------
+    # Harmony (HVG PCA)
+    # ----------------------------
     if "harmony" in method_set:
         try:
             emb = _run_harmony(
@@ -347,12 +403,14 @@ def _run_integrations(
                 batch_key=batch_key,
                 use_rep="X_pca",
             )
-            adata.obsm["Harmony"] = emb
+            adata.obsm["Harmony"] = np.asarray(emb)
             created.append("Harmony")
         except Exception as e:
             LOGGER.warning("Harmony failed: %s", e)
 
-    # Scanorama
+    # ----------------------------
+    # Scanorama (HVG PCA)
+    # ----------------------------
     if "scanorama" in method_set:
         try:
             emb = _run_scanorama(
@@ -360,79 +418,76 @@ def _run_integrations(
                 batch_key=batch_key,
                 use_rep="X_pca",
             )
-            adata.obsm["Scanorama"] = emb
+            adata.obsm["Scanorama"] = np.asarray(emb)
             created.append("Scanorama")
         except Exception as e:
             LOGGER.warning("Scanorama failed: %s", e)
 
-    # scVI
-    if "scvi" in method_set:
-        LOGGER.info("Training SCVI for integration")
-
-        layer = _get_scvi_layer(adata)
-
-        scvi_model = _train_scvi(
-            adata,
-            batch_key=batch_key,
-            layer=layer,
-            purpose="integration",
-        )
-        adata.obsm["scVI"] = np.asarray(
-            scvi_model.get_latent_representation(adata)
-        )
-        created.append("scVI")
-
-    # scANVI
-    if "scanvi" in method_set:
+    # ----------------------------
+    # scVI/scANVI (HVGs)
+    # ----------------------------
+    scvi_model = None
+    if "scvi" in method_set or "scanvi" in method_set:
         try:
-            # Train SCVI only if it does not already exist
-            if scvi_model is None:
-                LOGGER.info(
-                    "scANVI requested without prior scVI; training SCVI backbone first"
-                )
-                scvi_model = _train_scvi(
-                    adata,
-                    batch_key=batch_key,
-                    layer="counts" if "counts" in adata.layers else None,
-                    purpose="integration",
-                )
+            LOGGER.info("Training scVI backbone on HVGs for integration")
 
-            emb = _run_scanvi_from_scvi(scvi_model, adata, label_key)
-            adata.obsm["scANVI"] = np.asarray(emb)
-            created.append("scANVI")
+            layer = _get_scvi_layer(adata_hvg)  # counts_cb > counts_raw > None
+            scvi_model = _train_scvi(
+                adata_hvg,
+                batch_key=batch_key,
+                layer=layer,
+                purpose="integration",
+            )
+
+            if "scvi" in method_set:
+                Z = np.asarray(scvi_model.get_latent_representation(adata_hvg))
+                _write_embedding_from_hvg("scVI", Z, adata_hvg.obs_names)
+                created.append("scVI")
+
+            if "scanvi" in method_set:
+                Zs = _run_scanvi_from_scvi(scvi_model, adata_hvg, label_key)
+                _write_embedding_from_hvg("scANVI", np.asarray(Zs), adata_hvg.obs_names)
+                created.append("scANVI")
 
         except Exception as e:
-            LOGGER.warning("scANVI failed: %s", e)
+            LOGGER.warning("scVI/scANVI failed: %s", e)
+        finally:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
-    # scPoli
+    # ----------------------------
+    # scPoli (HVGs)
+    # ----------------------------
     if "scpoli" in method_set:
         try:
-            emb = _run_scpoli(
-                adata,
+            Z = _run_scpoli(
+                adata_hvg,
                 batch_key=batch_key,
                 label_key=label_key,
             )
-            adata.obsm["scPoli"] = emb
+            _write_embedding_from_hvg("scPoli", np.asarray(Z), adata_hvg.obs_names)
             created.append("scPoli")
         except Exception as e:
             LOGGER.warning("scPoli failed: %s", e)
 
-    # BBKNN
+    # ----------------------------
+    # BBKNN (graph-only; HVG PCA)
+    # ----------------------------
     if "bbknn" in method_set:
         try:
-            LOGGER.info("Running BBKNN (graph-only baseline)")
+            LOGGER.info("Running BBKNN (graph-only baseline) on HVG PCA")
             _run_bbknn(adata, batch_key=batch_key)
-            # Do not put in 'created' as it does not actually create an embedding
+            created.append("BBKNN")  # graph-only; no adata.obsm["BBKNN"]
         except Exception as e:
             LOGGER.warning("BBKNN failed: %s", e)
 
-    # Safety: verify keys exist
-    missing = [k for k in created if k not in adata.obsm]
+    # ----------------------------
+    # Safety: verify embedding keys that are supposed to exist
+    # ----------------------------
+    expected_obsm = [k for k in created if k not in ("BBKNN",)]
+    missing = [k for k in expected_obsm if k not in adata.obsm]
     if missing:
         raise RuntimeError(f"Integration embeddings missing from adata.obsm: {missing}")
-
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
 
     return adata, created
 
