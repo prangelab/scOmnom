@@ -553,17 +553,26 @@ def _select_best_embedding(
     label_key: str,
     n_jobs: int,
     output_dir: Path,
+    *,
+    benchmark_threshold: int = 100_000,
+    benchmark_n_cells: int = 100_000,
+    benchmark_random_state: int = 42,
 ) -> str:
     """
     Run scIB benchmarking and select the best integration embedding.
 
-    Selection strategy (baseline-aware):
-      1. batch > Unintegrated AND bio > Unintegrated
-      2. bio > Unintegrated
-      3. batch > Unintegrated
-      4. fallback: highest Total
+      - If adata.n_obs > benchmark_threshold: stratified subsample by batch_key
+        to benchmark_n_cells (default 100k), then run scIB on that subset.
+      - Else: run scIB on full data.
 
-    Supervised methods are allowed to win, but are explicitly annotated.
+    Selection strategy (baseline-aware):
+      1) batch > Unintegrated AND bio > Unintegrated
+      2) bio > Unintegrated
+      3) batch > Unintegrated
+      4) fallback: highest Total
+
+    Returns:
+      best embedding key (string)
     """
     from scib_metrics.benchmark import Benchmarker, BioConservation, BatchCorrection
 
@@ -587,13 +596,126 @@ def _select_best_embedding(
         if not e.upper().startswith("BBKNN")
     ]
 
+    # --------------------------------------------------
+    # Subsample (stratified by batch) if needed
+    # --------------------------------------------------
+    n_total = int(adata.n_obs)
+    do_subsample = (
+        benchmark_threshold is not None
+        and benchmark_n_cells is not None
+        and n_total > int(benchmark_threshold)
+        and int(benchmark_n_cells) < n_total
+    )
+
+    if do_subsample:
+        if batch_key not in adata.obs:
+            raise KeyError(
+                f"batch_key '{batch_key}' not found in adata.obs; cannot stratify subsample."
+            )
+
+        target = int(benchmark_n_cells)
+        rng = np.random.default_rng(int(benchmark_random_state))
+
+        # batch sizes
+        batch_series = adata.obs[batch_key].astype("category")
+        batches = batch_series.cat.categories.tolist()
+        batch_counts = batch_series.value_counts().reindex(batches).to_numpy()
+        batch_props = batch_counts / batch_counts.sum()
+
+        # initial allocation
+        alloc = np.floor(batch_props * target).astype(int)
+
+        # ensure we don't allocate more than available per batch
+        alloc = np.minimum(alloc, batch_counts)
+
+        # ensure at least 1 from each batch that exists (if target allows)
+        if target >= len(batches):
+            alloc = np.maximum(alloc, (batch_counts > 0).astype(int))
+            alloc = np.minimum(alloc, batch_counts)
+
+        # fix rounding to hit exact target (as close as possible)
+        current = int(alloc.sum())
+        leftover = target - current
+
+        if leftover > 0:
+            # distribute leftover to batches with remaining capacity
+            capacity = batch_counts - alloc
+            eligible = np.where(capacity > 0)[0]
+            if eligible.size > 0:
+                # weight by remaining capacity
+                weights = capacity[eligible].astype(float)
+                weights = weights / weights.sum() if weights.sum() > 0 else None
+                picks = rng.choice(eligible, size=leftover, replace=True, p=weights)
+                for i in picks:
+                    if alloc[i] < batch_counts[i]:
+                        alloc[i] += 1
+
+        elif leftover < 0:
+            # remove extras from batches with alloc > 1 (or >0 if needed)
+            remove = -leftover
+            removable = np.where(alloc > 0)[0]
+            if removable.size > 0:
+                weights = alloc[removable].astype(float)
+                weights = weights / weights.sum() if weights.sum() > 0 else None
+                picks = rng.choice(removable, size=remove, replace=True, p=weights)
+                for i in picks:
+                    if alloc[i] > 0:
+                        alloc[i] -= 1
+
+        # final indices
+        picked_obs = []
+        obs_names = adata.obs_names.to_numpy()
+
+        for b, k in zip(batches, alloc):
+            if k <= 0:
+                continue
+            idx = np.where(batch_series.to_numpy() == b)[0]
+            if idx.size == 0:
+                continue
+            if k >= idx.size:
+                chosen = idx
+            else:
+                chosen = rng.choice(idx, size=int(k), replace=False)
+            picked_obs.append(chosen)
+
+        if not picked_obs:
+            raise RuntimeError("Stratified subsample produced zero cells (unexpected).")
+
+        picked = np.concatenate(picked_obs)
+        rng.shuffle(picked)
+
+        # Safety: clip to target (can happen due to min-1 logic)
+        if picked.size > target:
+            picked = picked[:target]
+
+        LOGGER.info(
+            "scIB benchmarking: stratified subsample enabled (%d → %d cells; threshold=%d)",
+            n_total,
+            int(picked.size),
+            int(benchmark_threshold),
+        )
+
+        # Copy is important because Benchmarker writes neighbors/graphs into adata
+        adata_bm = adata[picked].copy()
+
+    else:
+        LOGGER.info(
+            "scIB benchmarking: using full dataset (%d cells; threshold=%s)",
+            n_total,
+            str(benchmark_threshold),
+        )
+        adata_bm = adata.copy()
+
+    # --------------------------------------------------
+    # Run benchmarking
+    # --------------------------------------------------
     LOGGER.info(
         "Running scIB benchmarking on embeddings: %s",
         benchmark_embeddings,
     )
 
     bm = Benchmarker(
-        adata,
+        adata_bm,
         batch_key=batch_key,
         label_key=label_key,
         embedding_obsm_keys=benchmark_embeddings,
@@ -610,8 +732,8 @@ def _select_best_embedding(
     raw = bm.get_results(min_max_scale=False)
     scaled = bm.get_results(min_max_scale=True)
 
-    raw.to_csv(output_dir / "integration_metrics_raw.tsv", sep="\t")
-    scaled.to_csv(output_dir / "integration_metrics_scaled.tsv", sep="\t")
+    raw.to_csv(Path(output_dir) / "integration_metrics_raw.tsv", sep="\t")
+    scaled.to_csv(Path(output_dir) / "integration_metrics_scaled.tsv", sep="\t")
 
     plot_utils.plot_scib_results_table(scaled)
 
@@ -627,7 +749,7 @@ def _select_best_embedding(
 
     if "Unintegrated" not in numeric.index:
         LOGGER.error("Unintegrated baseline missing from scIB table.")
-        return numeric["Total"].idxmax()
+        return str(numeric["Total"].idxmax())
 
     baseline = numeric.loc["Unintegrated"]
 
@@ -663,29 +785,27 @@ def _select_best_embedding(
     # --------------------------------------------------
     # Logging + annotation
     # --------------------------------------------------
-    method_class = METHOD_CLASS.get(best, "unknown")
+    method_class = METHOD_CLASS.get(str(best), "unknown")
 
     LOGGER.info(
         "Selected best embedding: '%s' (%s) — reason: %s",
-        best,
+        str(best),
         method_class,
         reason,
     )
 
     if method_class == "supervised":
-        unsup = [
-            m for m in numeric.index
-            if METHOD_CLASS.get(m) == "unsupervised"
-        ]
+        unsup = [m for m in numeric.index if METHOD_CLASS.get(m) == "unsupervised"]
         if unsup:
             best_unsup = numeric.loc[unsup, "Total"].idxmax()
             LOGGER.info(
                 "Best unsupervised alternative: '%s' (Total=%.3f)",
-                best_unsup,
-                numeric.loc[best_unsup, "Total"],
+                str(best_unsup),
+                float(numeric.loc[best_unsup, "Total"]),
             )
 
     return str(best)
+
 
 
 
