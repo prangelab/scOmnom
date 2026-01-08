@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import warnings
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Dict, List, Tuple, Sequence, Optional
@@ -1479,10 +1480,11 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
     - CellTypist annotation using precomputed labels
     - Plots + save outputs
     """
+    init_logging(cfg.logfile)
     LOGGER.info("Starting cluster_and_annotate")
 
-    in_path: Path = cfg.input_path
-    adata = sc.read_h5ad(str(in_path))
+    plot_utils.setup_scanpy_figs(cfg.figdir, cfg.figure_formats)
+    adata = io_utils.load_dataset(cfg.input_path)
 
     batch_key = io_utils.infer_batch_key(adata, cfg.batch_key)
     cfg.batch_key = batch_key
@@ -1498,7 +1500,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
 
     if cfg.make_figures:
         plot_utils.setup_scanpy_figs(cfg.figdir, cfg.figure_formats)
-    figdir_cluster = cfg.figdir / "cluster_and_annotate"
+    figdir_cluster = Path("cluster_and_annotate")
 
     best_res, sweep, clusterings = _resolution_sweep(
         adata,
@@ -1783,17 +1785,12 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
     except Exception as e:
         LOGGER.warning("ssGSEA step failed: %s", e)
 
-    if cfg.output_path is not None:
-        out_path = cfg.output_path
-    else:
-        out_path = in_path.with_name(f"{in_path.stem}.clustered.annotated.h5ad")
-
-    if getattr(cfg, "run_ssgsea", False) and "ssgsea_cluster_means" in adata.uns:
+    if cfg.make_figures and getattr(cfg, "run_ssgsea", False) and "ssgsea_cluster_means" in adata.uns:
         plot_utils.plot_ssgsea_cluster_topn_heatmap(
             adata,
-            cluster_key="cluster_label",
-            figdir=figdir_cluster,
-            top_n=5,
+            cluster_key = "cluster_label",
+            figdir = figdir_cluster,
+            n = 5,
         )
 
     # Make 'plateaus' HDF5-safe: JSON-encode list of dicts if present
@@ -1805,7 +1802,23 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
         ca_uns["clustering"] = clustering
         adata.uns["cluster_and_annotate"] = ca_uns
 
-    io_utils.save_adata(adata, out_path)
-    LOGGER.info("Finished cluster_and_annotate. Wrote %s", out_path)
+    # ---------------------------------------------------------
+    # Save outputs
+    # ---------------------------------------------------------
+    out_zarr = cfg.output_dir / (cfg.output_name + ".zarr")
+    LOGGER.info("Saving clustered/annotated dataset as Zarr → %s", out_zarr)
+    io_utils.save_dataset(adata, out_zarr, fmt="zarr")
+
+
+    if getattr(cfg, "save_h5ad", False):
+        out_h5ad = cfg.output_dir / (cfg.output_name + ".h5ad")
+        LOGGER.warning(
+            "Writing additional H5AD output (loads full matrix into RAM): %s",
+            out_h5ad,
+        )
+        io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
+        LOGGER.info("Saved clustered/annotated H5AD → %s", out_h5ad)
+
+    LOGGER.info("Finished cluster_and_annotate")
 
     return adata

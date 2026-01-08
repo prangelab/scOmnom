@@ -139,17 +139,33 @@ class IntegrateConfig(BaseModel):
 # CLUSTER AND ANNOTATE CONFIG
 # ---------------------------------------------------------------------
 class ClusterAnnotateConfig(BaseModel):
-    # I/O
-    input_path: Path = Field(..., description="Integrated h5ad from the integration step")
-    output_path: Optional[Path] = Field(
-        None,
-        description="Output clustered/annotated h5ad. Defaults to <input>.clustered.annotated.h5ad",
+    # ------------------------------------------------------------------
+    # I/O (mirror IntegrateConfig)
+    # ------------------------------------------------------------------
+    input_path: Path = Field(
+        ...,
+        description="Integrated dataset from the integration step (.zarr or .h5ad)",
     )
 
+    output_dir: Optional[Path] = Field(
+        None,
+        description="Directory for outputs. Defaults to input_path.parent",
+    )
+    output_name: str = Field(
+        "adata.clustered.annotated",
+        description="Base name for outputs (no extension)",
+    )
+    save_h5ad: bool = Field(
+        False,
+        description="If True, also write an .h5ad copy in addition to the .zarr output",
+    )
+
+    # ------------------------------------------------------------------
     # Embedding / batch / labels
+    # ------------------------------------------------------------------
     embedding_key: str = Field(
         "X_integrated",
-        description="Key in .obsm to use for neighbors / silhouette (default: X_integrated from integration)",
+        description="Key in .obsm to use for neighbors / silhouette",
     )
     batch_key: Optional[str] = Field(
         None,
@@ -161,42 +177,34 @@ class ClusterAnnotateConfig(BaseModel):
     )
     final_auto_idents_key: str = "final_auto_idents"
 
-    # bioARI
+    # ------------------------------------------------------------------
+    # bio-guided clustering weights
+    # ------------------------------------------------------------------
     bio_guided_clustering: bool = True
     w_hom: float = 0.15
     w_frag: float = 0.10
     w_bioari: float = 0.15
 
-    # -------------------------------
-    # ssGSEA defaults
-    # -------------------------------
+    # ------------------------------------------------------------------
+    # ssGSEA
+    # ------------------------------------------------------------------
     run_ssgsea: bool = True
-
-    # Default gene sets: Hallmark + Reactome (MSigDB)
-    # User may override with CLI like:
-    #   --ssgsea-gene-sets /path/to/hallmark.gmt,/path/to/reactome.gmt
     ssgsea_gene_sets: List[str] = Field(
         default_factory=lambda: ["HALLMARK", "REACTOME"],
-        description="Gene set collections to use for ssGSEA."
+        description="Gene set collections to use for ssGSEA",
     )
-
-    # Expression source: raw counts if present
     ssgsea_use_raw: bool = True
-
-    # Gene set size filters
     ssgsea_min_size: int = 10
     ssgsea_max_size: int = 500
-
-    # Rank-based normalization is standard for ssGSEA
     ssgsea_sample_norm_method: str = "rank"
-
-    # Parallel workers — auto-detect CPU cores − 1 (but minimum = 1)
     ssgsea_nproc: int = Field(
         default_factory=lambda: max(1, multiprocessing.cpu_count() - 1),
-        description="Number of parallel worker processes for ssGSEA."
+        description="Number of parallel worker processes for ssGSEA",
     )
 
-    # Figure handling
+    # ------------------------------------------------------------------
+    # Figures
+    # ------------------------------------------------------------------
     figdir_name: str = "figures"
     make_figures: bool = True
     figure_formats: List[str] = Field(
@@ -204,24 +212,16 @@ class ClusterAnnotateConfig(BaseModel):
         description="Figure formats to save",
     )
 
-    # Resolution sweep
+    # ------------------------------------------------------------------
+    # Resolution sweep / stability
+    # ------------------------------------------------------------------
     res_min: float = Field(0.1, ge=0.0)
     res_max: float = Field(2.5, ge=0.0)
     n_resolutions: int = Field(25, ge=2)
-    penalty_alpha: float = Field(
-        0.02,
-        ge=0.0,
-        description="Penalty term for number of clusters in penalized silhouette",
-    )
+    penalty_alpha: float = Field(0.02, ge=0.0)
 
-    # Stability analysis
     stability_repeats: int = Field(5, ge=1)
-    subsample_frac: float = Field(
-        0.8,
-        gt=0.0,
-        le=1.0,
-        description="Fraction of cells to use per subsample for stability ARI",
-    )
+    subsample_frac: float = Field(0.8, gt=0.0, le=1.0)
     random_state: int = 42
 
     tiny_cluster_size: int = 20
@@ -234,35 +234,50 @@ class ClusterAnnotateConfig(BaseModel):
     w_sil: float = 0.35
     w_tiny: float = 0.15
 
-    # Celltypist annotation
+    # ------------------------------------------------------------------
+    # CellTypist
+    # ------------------------------------------------------------------
     celltypist_model: Optional[str] = Field(
         "Immune_All_Low.pkl",
-        description="Path or name of CellTypist model (.pkl file). If None, skip annotation.",
+        description="Path or name of CellTypist model (.pkl). If None, skip annotation",
     )
     celltypist_majority_voting: bool = True
     celltypist_label_key: str = "celltypist_label"
-    final_label_key: str = Field(
-        "leiden",
-        description="Final annotation label. "
-                    "If CellTypist is run, this will be overwritten to celltypist_cluster_label."
-    )
-
-    # cluster-collapsed CellTypist label
+    final_label_key: str = "leiden"
     celltypist_cluster_label_key: str = "celltypist_cluster_label"
 
     annotation_csv: Optional[Path] = None
     available_models: Optional[List[Dict[str, str]]] = None
 
+    # ------------------------------------------------------------------
     # Logging
+    # ------------------------------------------------------------------
     logfile: Optional[Path] = None
+
+    # ------------------------------------------------------------------
+    # Derived paths (same pattern as IntegrateConfig)
+    # ------------------------------------------------------------------
+    @property
+    def resolved_output_dir(self) -> Path:
+        return (self.output_dir or self.input_path.parent).resolve()
 
     @property
     def figdir(self) -> Path:
-        base = self.output_path.parent if self.output_path is not None else self.input_path.parent
-        return base / self.figdir_name
+        return self.resolved_output_dir / self.figdir_name
 
+    @property
+    def output_zarr_path(self) -> Path:
+        return self.resolved_output_dir / f"{self.output_name}.zarr"
+
+    @property
+    def output_h5ad_path(self) -> Path:
+        return self.resolved_output_dir / f"{self.output_name}.h5ad"
+
+    # ------------------------------------------------------------------
+    # Validators
+    # ------------------------------------------------------------------
     @model_validator(mode="after")
-    def check_resolution_range(self):
+    def _check_resolution_range(self):
         if self.res_min >= self.res_max:
             raise ValueError("res_min must be < res_max")
         return self
@@ -277,3 +292,4 @@ class ClusterAnnotateConfig(BaseModel):
                 f"Supported formats include: {', '.join(sorted(supported))}"
             )
         return fmt
+
