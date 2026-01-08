@@ -423,8 +423,8 @@ def cluster_and_annotate(
     # -----------------------------
     # I/O (integrate-style)
     # -----------------------------
-    input_path: Path = typer.Option(
-        ...,
+    input_path: Optional[Path] = typer.Option(
+        None,
         "--input-path",
         "-i",
         help="[I/O] Integrated dataset produced by `scomnom integrate` (.zarr or .h5ad).",
@@ -586,6 +586,12 @@ def cluster_and_annotate(
         from .io_utils import download_all_celltypist_models
         download_all_celltypist_models()
         raise typer.Exit()
+
+    # ---------------------------------------------------------
+    # Validate required input
+    # ---------------------------------------------------------
+    if input_path is None:
+        raise typer.BadParameter("Missing required option --input / -i")
 
     # ---------------------------------------------------------
     # Resolve output dir + logging
