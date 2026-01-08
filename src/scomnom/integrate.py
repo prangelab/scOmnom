@@ -855,6 +855,8 @@ def run_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
     if "bbknn" in {m.lower() for m in methods}:
         plot_keys.append("BBKNN")
 
+    plot_keys = list(dict.fromkeys(plot_keys))
+
     plot_utils.plot_integration_umaps(
         adata,
         embedding_keys=plot_keys,
