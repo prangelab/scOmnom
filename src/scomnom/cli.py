@@ -389,7 +389,7 @@ def integrate(
     benchmark_n_cells: int = 100000,
     benchmark_random_state: int = 42,
 ):
-    logfile = (output_dir or input_path.parent) / "process-and-integrate.log"
+    logfile = (output_dir or input_path.parent) / "integrate.log"
     init_logging(logfile)
 
     cfg = IntegrateConfig(
