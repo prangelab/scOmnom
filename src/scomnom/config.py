@@ -243,7 +243,6 @@ class ClusterAnnotateConfig(BaseModel):
     )
     celltypist_majority_voting: bool = True
     celltypist_label_key: str = "celltypist_label"
-    final_label_key: str = "leiden"
     celltypist_cluster_label_key: str = "celltypist_cluster_label"
 
     annotation_csv: Optional[Path] = None
