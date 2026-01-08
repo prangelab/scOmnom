@@ -1262,9 +1262,6 @@ def _run_ssgsea(adata: ad.AnnData, cfg: ClusterAnnotateConfig) -> None:
     # ------------------------------------------------------------------
     from scipy import sparse
 
-    genes = adata.var_names
-    X = adata.X
-
     if getattr(cfg, "ssgsea_use_raw", True):
         if adata.raw is not None:
             LOGGER.info(
@@ -1274,27 +1271,40 @@ def _run_ssgsea(adata: ad.AnnData, cfg: ClusterAnnotateConfig) -> None:
             )
             X = adata.raw.X
             genes = adata.raw.var_names
-        elif "X_raw" in adata.layers:
+
+        elif "counts_raw" in adata.layers:
             LOGGER.info(
-                "ssGSEA using adata.layers['X_raw'] (genes=%d, cells=%d).",
+                "ssGSEA using adata.layers['counts_raw'] (genes=%d, cells=%d).",
                 adata.n_vars,
                 adata.n_obs,
             )
+            X = adata.layers["counts_raw"]
+            genes = adata.var_names
+
+        elif "counts_cb" in adata.layers:
+            LOGGER.info(
+                "ssGSEA using adata.layers['counts_cb'] (genes=%d, cells=%d).",
+                adata.n_vars,
+                adata.n_obs,
+            )
+            X = adata.layers["counts_cb"]
+            genes = adata.var_names
+
+        elif "X_raw" in adata.layers:
+            # keep backwards compatibility if it exists
+            LOGGER.info("ssGSEA using adata.layers['X_raw'].")
             X = adata.layers["X_raw"]
             genes = adata.var_names
+
         else:
             LOGGER.info(
-                "ssGSEA: ssgsea_use_raw=True but no adata.raw / 'X_raw' layer found; "
+                "ssGSEA: ssgsea_use_raw=True but no adata.raw / counts_raw / counts_cb / X_raw found; "
                 "falling back to adata.X."
             )
             X = adata.X
             genes = adata.var_names
     else:
-        LOGGER.info(
-            "ssGSEA using adata.X (genes=%d, cells=%d).",
-            adata.n_vars,
-            adata.n_obs,
-        )
+        LOGGER.info("ssGSEA using adata.X (genes=%d, cells=%d).", adata.n_vars, adata.n_obs)
         X = adata.X
         genes = adata.var_names
 
