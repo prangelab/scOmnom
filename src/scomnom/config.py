@@ -281,14 +281,18 @@ class ClusterAnnotateConfig(BaseModel):
             raise ValueError("res_min must be < res_max")
         return self
 
-    @field_validator("figure_formats", each_item=True)
-    def validate_formats(cls, fmt: str):
+    @field_validator("figure_formats")
+    @classmethod
+    def validate_formats(cls, fmts: list[str]) -> list[str]:
         supported = Figure().canvas.get_supported_filetypes()
-        fmt = fmt.lower()
-        if fmt not in supported:
-            raise ValueError(
-                f"Unsupported figure format '{fmt}'. "
-                f"Supported formats include: {', '.join(sorted(supported))}"
-            )
-        return fmt
+        out: list[str] = []
+        for fmt in fmts:
+            fmt_l = str(fmt).lower()
+            if fmt_l not in supported:
+                raise ValueError(
+                    f"Unsupported figure format '{fmt}'. "
+                    f"Supported formats include: {', '.join(sorted(supported))}"
+                )
+            out.append(fmt_l)
+        return out
 
