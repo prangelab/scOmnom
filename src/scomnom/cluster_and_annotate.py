@@ -1809,7 +1809,6 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
     LOGGER.info("Saving clustered/annotated dataset as Zarr → %s", out_zarr)
     io_utils.save_dataset(adata, out_zarr, fmt="zarr")
 
-
     if getattr(cfg, "save_h5ad", False):
         out_h5ad = cfg.output_dir / (cfg.output_name + ".h5ad")
         LOGGER.warning(
