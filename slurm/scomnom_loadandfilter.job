@@ -1,0 +1,38 @@
+#! /bin/bash
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --partition=gpu_a100
+#SBATCH --gres=gpu:2
+#SBATCH --constraint=scratch-node
+
+# Setup env
+module load 2025
+module load CUDA/12.8.0
+module load cuDNN/9.10.1.4-CUDA-12.8.0
+
+eval "$(micromamba shell hook -s bash)"
+micromamba activate scOmnom_env
+
+python - << 'EOF'
+import torch
+print("torch.cuda.is_available() =", torch.cuda.is_available())
+print("CUDA devices =", torch.cuda.device_count())
+EOF
+
+# Copy our stuff
+echo "Copying data to scratch..."
+cp -R data/cellbender $TMPDIR/.
+cp -R data/raw $TMPDIR/.
+cp metadata.tsv $TMPDIR/.
+PREVLOC=$(pwd)
+cd $TMPDIR
+pwd
+
+# Run scOmnom
+echo "Running scomnom..."
+scomnom load-and-filter -c cellbender -r raw -o results -m metadata.tsv --n-jobs $SLURM_CPUS_PER_TASK --min-genes 200 --max-pct-mt 30
+
+# Copy the results back
+echo "Copying results back to $PREVLOC"
+rsync -a results $PREVLOC/.
+echo "Done!"

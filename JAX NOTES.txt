@@ -1,2 +1,0 @@
-pip install -U "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-pip install jax-cuda12-plugin jax-cuda12-pjrt nvidia-cusparse-cu12 nvidia-cudnn-cu12 nvidia-cublas-cu12 nvidia-nvjitlink-cu12
