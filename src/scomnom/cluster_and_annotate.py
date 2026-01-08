@@ -1805,12 +1805,12 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
     # ---------------------------------------------------------
     # Save outputs
     # ---------------------------------------------------------
-    out_zarr = cfg.output_dir / (cfg.output_name + ".zarr")
+    out_zarr = cfg.resolved_output_dir / (cfg.output_name + ".zarr")
     LOGGER.info("Saving clustered/annotated dataset as Zarr → %s", out_zarr)
     io_utils.save_dataset(adata, out_zarr, fmt="zarr")
 
     if getattr(cfg, "save_h5ad", False):
-        out_h5ad = cfg.output_dir / (cfg.output_name + ".h5ad")
+        out_h5ad = cfg.resolved_output_dir / (cfg.output_name + ".h5ad")
         LOGGER.warning(
             "Writing additional H5AD output (loads full matrix into RAM): %s",
             out_h5ad,

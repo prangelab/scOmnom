@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from numba.core.types import Boolean
-from pydantic import BaseModel, Field, validator, model_validator
+from pydantic import BaseModel, Field, validator, model_validator, field_validator
 from pathlib import Path
 from typing import Optional, Dict, List, Literal
 from matplotlib.figure import Figure
@@ -128,7 +128,7 @@ class IntegrateConfig(BaseModel):
     def figdir(self) -> Path:
         return self.output_dir / self.figdir_name
 
-    @validator("methods")
+    @field_validator("methods")
     def normalize_methods(cls, v):
         if v is None:
             return None
@@ -281,7 +281,7 @@ class ClusterAnnotateConfig(BaseModel):
             raise ValueError("res_min must be < res_max")
         return self
 
-    @validator("figure_formats", each_item=True)
+    @field_validator("figure_formats", each_item=True)
     def validate_formats(cls, fmt: str):
         supported = Figure().canvas.get_supported_filetypes()
         fmt = fmt.lower()
