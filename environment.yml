@@ -42,10 +42,9 @@ dependencies:
   - pytorch-lightning
 
   # GPU acceleration:
-  # On macOS: Metal/MPS enabled automatically.
-  # On Linux (NVIDIA GPU) uncomment the next line. Adjust version as needed
-  # You will also manually need to install Jax.
-  # - pytorch-cuda=12.1
+  # On macOS: Metal/MPS enabled automatically. Comment out or remove the next line (pytorch-cuda)
+  # On Linux (NVIDIA GPU) keep the next line to install pytorch-cuda.
+  - pytorch-cuda=12.4
 
   # Testing
   - pytest
