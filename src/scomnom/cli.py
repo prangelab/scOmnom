@@ -547,6 +547,11 @@ def cluster_and_annotate(
         "--run-ssgsea/--no-run-ssgsea",
         help="[ssGSEA] Run ssGSEA enrichment per cell.",
     ),
+    ssgsea_aggregate: str = typer.Option(
+        "mean",
+        "--ssgsea-aggregate",
+        help="[ssGSEA] Cluster aggregation: mean or median.",
+    ),
     ssgsea_gene_sets_cli: Optional[str] = typer.Option(
         None,
         "--ssgsea-gene-sets",
@@ -646,6 +651,8 @@ def cluster_and_annotate(
         annotation_csv=annotation_csv,
 
         run_ssgsea=run_ssgsea,
+        ssgsea_aggregate=ssgsea_aggregate,
+        ssgsea_gene_sets_cli=ssgsea_gene_sets_cli,
         ssgsea_use_raw=ssgsea_use_raw,
         ssgsea_min_size=ssgsea_min_size,
         ssgsea_max_size=ssgsea_max_size,

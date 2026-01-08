@@ -194,6 +194,10 @@ class ClusterAnnotateConfig(BaseModel):
         default_factory=lambda: ["HALLMARK", "REACTOME"],
         description="Gene set collections to use for ssGSEA",
     )
+    ssgsea_aggregate: str = Field(
+        "mean",
+        description="Aggregation for cluster-level ssGSEA. One of: 'mean', 'median'.",
+    )
     ssgsea_use_raw: bool = True
     ssgsea_min_size: int = 10
     ssgsea_max_size: int = 500
@@ -297,3 +301,10 @@ class ClusterAnnotateConfig(BaseModel):
             out.append(fmt_l)
         return out
 
+    @field_validator("ssgsea_aggregate")
+    @classmethod
+    def _validate_ssgsea_aggregate(cls, v: str) -> str:
+        v = str(v).lower().strip()
+        if v not in {"mean", "median"}:
+            raise ValueError("ssgsea_aggregate must be one of: 'mean', 'median'")
+        return v
