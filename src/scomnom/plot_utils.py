@@ -1530,9 +1530,8 @@ import logging
 LOGGER = logging.getLogger(__name__)
 
 
-ddef plot_integration_umaps(
+def plot_integration_umaps(
     adata,
-    *,
     embedding_keys,
     batch_key: str,
     color: str,
