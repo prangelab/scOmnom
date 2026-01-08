@@ -129,6 +129,7 @@ class IntegrateConfig(BaseModel):
         return self.output_dir / self.figdir_name
 
     @field_validator("methods")
+    @classmethod
     def normalize_methods(cls, v):
         if v is None:
             return None
