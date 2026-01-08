@@ -1235,7 +1235,7 @@ def _run_ssgsea(adata: ad.AnnData, cfg: ClusterAnnotateConfig) -> None:
     # 1) Resolve gene set GMT files
     # --------------------------------------------------
     try:
-        gmt_files, used_keywords = resolve_msigdb_gene_sets(cfg.ssgsea_gene_sets)
+        gmt_files, used_keywords, msigdb_release = resolve_msigdb_gene_sets(cfg.ssgsea_gene_sets)
     except Exception as e:
         LOGGER.warning("ssGSEA: failed to resolve gene sets: %s", e)
         return
@@ -1426,6 +1426,7 @@ def _run_ssgsea(adata: ad.AnnData, cfg: ClusterAnnotateConfig) -> None:
     adata.uns.setdefault("ssgsea", {})
     adata.uns["ssgsea"]["config"] = {
         "run_ssgsea": True,
+        "msigdb_release": msigdb_release,
         "mode": "cluster",
         "cluster_key": cluster_key,
         "aggregate": agg,
