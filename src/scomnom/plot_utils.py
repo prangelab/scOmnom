@@ -193,6 +193,44 @@ def _clean_axes(ax):
     return ax
 
 
+def _reserve_bottom_for_xticklabels(
+    fig,
+    ax,
+    *,
+    rotation: float = 45,
+    fontsize: float | None = None,
+    ha: str = "right",
+    extra_bottom: float = 0.02,
+    max_bottom: float = 0.60,
+):
+    """
+    Rotate x tick labels and reserve enough bottom margin so they don't clip.
+
+    Heuristic: bottom margin increases with the longest label length.
+    """
+    labels = [t.get_text() for t in ax.get_xticklabels()]
+    max_len = max((len(s) for s in labels), default=0)
+
+    # Base bottom + length-dependent bump (works well for long cluster names)
+    bottom = 0.22 + 0.006 * max_len + extra_bottom
+    bottom = float(min(max_bottom, bottom))
+
+    try:
+        for t in ax.get_xticklabels():
+            t.set_rotation(rotation)
+            t.set_ha(ha)
+            if fontsize is not None:
+                t.set_fontsize(fontsize)
+    except Exception:
+        pass
+
+    # Critical: manual adjust AFTER any tight_layout / plotting
+    try:
+        fig.subplots_adjust(bottom=bottom)
+    except Exception:
+        pass
+
+
 def _ensure_path(p: Path | str) -> Path:
     return p if isinstance(p, Path) else Path(p)
 
@@ -2241,28 +2279,23 @@ def plot_cluster_sizes(
             )
 
     ax.set_xticks(x)
-    ax.set_xticklabels(clusters, rotation=45, ha="right")
+    ax.set_xticklabels(clusters)
     ax.set_ylabel("Cells")
     ax.set_title("Cluster sizes")
 
     fig.tight_layout()
     _finalize_categorical_x(fig, ax, rotate=45, ha="right", bottom=0.40)
+    _reserve_bottom_for_xticklabels(fig, ax, rotation=45, fontsize=9, ha="right")
     save_multi(stem, figdir)
     plt.close(fig)
 
 
 def plot_cluster_qc_summary(
-        adata,
-        label_key: str,
-        figdir: Path,
-        stem: str = "cluster_qc_summary",
+    adata,
+    label_key: str,
+    figdir: Path,
+    stem: str = "cluster_qc_summary",
 ):
-    """
-    Mean QC metrics per cluster:
-      - n_genes_by_counts
-      - total_counts
-      - pct_counts_mt
-    """
     if label_key not in adata.obs:
         LOGGER.warning("plot_cluster_qc_summary: '%s' not in obs.", label_key)
         return
@@ -2274,20 +2307,34 @@ def plot_cluster_qc_summary(
         return
 
     df = adata.obs[[label_key] + metrics].groupby(label_key).mean()
+
     n = df.shape[0]
-    fig_w = max(14, 0.35 * n)  # scale width with number of clusters
-    fig, axs = plt.subplots(1, 3, figsize=(fig_w, 4))
+    fig_w = max(10, 0.35 * n)
+
+    # 3 rows, shared x: avoids label clutter completely
+    fig, axs = plt.subplots(3, 1, figsize=(fig_w, 7.5), sharex=True)
+    fig.set_constrained_layout(False)
 
     for ax, m in zip(axs, metrics):
         _clean_axes(ax)
         df[m].plot(kind="bar", ax=ax, color="steelblue", edgecolor="black")
         ax.set_title(m.replace("_", " "))
-        ax.set_xlabel("Cluster")
+        ax.set_xlabel("")  # only bottom axis will get label
 
-    # apply once (all axes share categorical x labels)
-    _finalize_categorical_x(fig, axs[0], rotate=45, ha="right", bottom=0.40)
+    axs[-1].set_xlabel("Cluster")
+
+    # Hide x tick labels on upper panels
+    for ax in axs[:-1]:
+        ax.tick_params(axis="x", which="both", labelbottom=False)
+
+    # Rotate/reserve space ONLY once (bottom axis)
+    _reserve_bottom_for_xticklabels(fig, axs[-1], rotation=45, fontsize=9, ha="right")
+
+    # Reduce vertical spacing a bit
+    fig.subplots_adjust(hspace=0.25)
+
     fig.tight_layout()
-    save_multi(stem, figdir)
+    save_multi(stem, figdir, fig)
     plt.close(fig)
 
 
@@ -2355,6 +2402,7 @@ def plot_cluster_batch_composition(
 
     fig, ax = plt.subplots(figsize=(max(8, 0.40 * len(df)), 4))
     _clean_axes(ax)
+    _reserve_bottom_for_xticklabels(fig, ax, rotation=45, fontsize=9, ha="right")
 
     frac.plot(
         kind="bar",
