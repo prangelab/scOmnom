@@ -113,9 +113,76 @@ def save_multi(stem: str, figdir: Path, fig=None) -> None:
     plt.close()
 
 
+def save_umap_multi(
+    stem: str,
+    figdir: Path,
+    fig: mpl.figure.Figure,
+    *,
+    pad_inches: float = 0.25,
+    tight: bool = True,
+    right: float | None = 0.78,
+) -> None:
+    """
+    UMAP-only saver that prevents Scanpy legends / annotations from being clipped.
+    Does NOT affect other plotting functions.
+    """
+    global ROOT_FIGDIR
+
+    if ROOT_FIGDIR is None:
+        raise RuntimeError("ROOT_FIGDIR is not set. Call setup_scanpy_figs() first.")
+
+    if right is not None:
+        # reserve space for legends on the right
+        try:
+            fig.subplots_adjust(right=right)
+        except Exception:
+            pass
+
+    figdir = Path(figdir)
+
+    for ext in FIGURE_FORMATS:
+        outdir = ROOT_FIGDIR / ext / figdir
+        outdir.mkdir(parents=True, exist_ok=True)
+        outfile = outdir / f"{stem}.{ext}"
+        LOGGER.info("Saving figure: %s", outfile)
+
+        if tight:
+            fig.savefig(outfile, dpi=300, bbox_inches="tight", pad_inches=pad_inches)
+        else:
+            fig.savefig(outfile, dpi=300)
+    plt.close(fig)
+
+
 # -------------------------------------------------------------------------
 # Internal helpers
 # -------------------------------------------------------------------------
+def _finalize_categorical_x(
+    fig,
+    ax,
+    *,
+    rotate: float = 45,
+    ha: str = "right",
+    bottom: float = 0.30,
+    right: float = 0.98,
+    left: float = 0.10,
+    top: float = 0.92,
+):
+    """
+    For plots with many categorical x tick labels:
+    - rotate labels
+    - reserve margins so labels don't get clipped
+    """
+    try:
+        plt.setp(ax.get_xticklabels(), rotation=rotate, ha=ha)
+    except Exception:
+        pass
+
+    try:
+        fig.subplots_adjust(left=left, right=right, bottom=bottom, top=top)
+    except Exception:
+        pass
+
+
 def _clean_axes(ax):
     ax.grid(False)
     for spine in ["left", "bottom"]:
@@ -296,35 +363,23 @@ def hvgs_and_pca_plots(adata, max_pcs_plot: int, cfg):
     save_multi("QC_pca_variance_ratio", figdir)
 
 
-def umap_by(adata, keys, figdir: Path | None = None, stem: str | None = None):
-    """
-    Plot UMAP colored by one or more keys.
-
-    Parameters
-    ----------
-    adata : AnnData
-        Annotated data matrix with existing 'X_umap'.
-    keys : str or list[str]
-        Columns in adata.obs to color by.
-    figdir : Path, optional
-        Directory under ROOT_FIGDIR where figures are placed.
-        Defaults to scanpy's current figdir.
-    stem : str, optional
-        Base filename (without extension). If None, uses 'QC_umap_<keys>'.
-    """
+ddef umap_by(adata, keys, figdir: Path | None = None, stem: str | None = None):
     if isinstance(keys, str):
         keys = [keys]
 
-    if stem is None:
-        name = f"QC_umap_{'_'.join(keys)}"
-    else:
-        name = stem
+    name = stem or f"QC_umap_{'_'.join(keys)}"
+    figdir = figdir or Path("QC_plots") / "overview"
 
-    if figdir is None:
-        figdir = ROOT_FIGDIR
+    fig = sc.pl.umap(
+        adata,
+        color=keys,
+        use_raw=False,
+        show=False,
+        return_fig=True,
+        legend_loc="right margin",
+    )
+    save_umap_multi(name, figdir, fig, right=0.78)
 
-    sc.pl.umap(adata, color=keys, use_raw=False, show=False)
-    save_multi(name, figdir)
 
 
 # -------------------------------------------------------------------------
@@ -657,6 +712,27 @@ def qc_violin_panels(adata, cfg, stage: str):
         )
 
         ax.set_title(f"{metric} ({stage})")
+
+        # --- reserve space for long sample names ---
+        n_cats = adata.obs[batch_key].astype("category").cat.categories.size
+
+        # heuristic: more categories → more bottom margin
+        bottom = 0.28 if n_cats <= 20 else 0.36 if n_cats <= 40 else 0.45
+
+        fig = ax.figure
+
+        if not horizontal:
+            # categories are y ticklabels, give them room
+            fig.subplots_adjust(left=0.35, right=0.98, top=0.92, bottom=0.10)
+
+        _finalize_categorical_x(
+            fig,
+            ax,
+            rotate=45 if horizontal else 0,  # when rotated layout, ticks are on y anyway
+            ha="right",
+            bottom=bottom,
+        )
+
         save_multi(f"{stem}_{stage}", figdir_qc)
         plt.close()
 
@@ -1167,20 +1243,12 @@ def doublet_plots(
 
 
 def umap_plots(
-        adata: ad.AnnData,
-        *,
-        batch_key: str,
-        figdir: Path,
-        cluster_key: str = "leiden",
+    adata: ad.AnnData,
+    *,
+    batch_key: str,
+    figdir: Path,
+    cluster_key: str = "leiden",
 ) -> None:
-    """
-    Minimal UMAP plots.
-    Generates:
-      1) UMAP colored by batch
-      2) UMAP colored by clusters (e.g. Leiden)
-
-    Must be called AFTER UMAP computation.
-    """
     import matplotlib.pyplot as plt
     from pathlib import Path
 
@@ -1190,34 +1258,29 @@ def umap_plots(
         LOGGER.warning("Skipping UMAP plots: X_umap not found.")
         return
 
-    # --------------------------------------------------
-    # 1. UMAP colored by batch
-    # --------------------------------------------------
+    # 1) batch
     if batch_key in adata.obs:
         fig = sc.pl.umap(
             adata,
             color=batch_key,
             show=False,
             return_fig=True,
+            legend_loc="right margin",   # <- consistent, outside axes
         )
-        save_multi("umap_batch", figdir, fig)
-        plt.close(fig)
+        save_umap_multi("umap_batch", figdir, fig, right=0.78)
     else:
         LOGGER.warning("Batch key '%s' not found in adata.obs", batch_key)
 
-    # --------------------------------------------------
-    # 2. UMAP colored by clusters
-    # --------------------------------------------------
+    # 2) clusters
     if cluster_key in adata.obs:
         fig = sc.pl.umap(
             adata,
             color=cluster_key,
-            legend_loc="on data",
             show=False,
             return_fig=True,
+            legend_loc="right margin",   # <- NOT "on data" (avoids messy labels)
         )
-        save_multi(f"umap_{cluster_key}", figdir, fig)
-        plt.close(fig)
+        save_umap_multi(f"umap_{cluster_key}", figdir, fig, right=0.78)
     else:
         LOGGER.warning("Cluster key '%s' not found in adata.obs", cluster_key)
 
@@ -1227,26 +1290,6 @@ def umap_plots(
 # -------------------------------------------------------------------------
 # scIB-style results table
 # -------------------------------------------------------------------------
-import matplotlib.pyplot as plt
-import pandas as pd
-import numpy as np
-
-import matplotlib.pyplot as plt
-import pandas as pd
-import numpy as np
-from pathlib import Path
-
-import matplotlib.pyplot as plt
-import pandas as pd
-import numpy as np
-from pathlib import Path
-
-import matplotlib.pyplot as plt
-import pandas as pd
-import numpy as np
-from pathlib import Path
-
-import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -1506,28 +1549,27 @@ def plot_clustering_stability_ari(
 # Plot UMAPs
 #------------------------------------------
 def plot_cluster_umaps(
-        adata,
-        label_key: str,
-        batch_key: str,
-        figdir: Path,
+    adata,
+    label_key: str,
+    batch_key: str,
+    figdir: Path,
 ) -> None:
-    """UMAPs colored by cluster and batch for the clustering stage."""
-    sc.pl.umap(adata, color=[label_key], show=False)
-    save_multi(f"cluster_umap_{label_key}", figdir)
+    fig = sc.pl.umap(adata, color=[label_key], show=False, return_fig=True, legend_loc="right margin")
+    save_umap_multi(f"cluster_umap_{label_key}", figdir, fig, right=0.78)
 
     if batch_key in adata.obs:
-        sc.pl.umap(adata, color=[batch_key], show=False)
-        save_multi(f"cluster_umap_{batch_key}", figdir)
+        fig = sc.pl.umap(adata, color=[batch_key], show=False, return_fig=True, legend_loc="right margin")
+        save_umap_multi(f"cluster_umap_{batch_key}", figdir, fig, right=0.78)
 
-        sc.pl.umap(adata, color=[batch_key, label_key], legend_loc="on data", show=False)
-        save_multi(f"cluster_umap_{batch_key}_and_{label_key}", figdir)
+        fig = sc.pl.umap(
+            adata,
+            color=[batch_key, label_key],
+            show=False,
+            return_fig=True,
+            legend_loc="right margin",
+        )
+        save_umap_multi(f"cluster_umap_{batch_key}_and_{label_key}", figdir, fig, right=0.78)
 
-from pathlib import Path
-import matplotlib.pyplot as plt
-import scanpy as sc
-import logging
-
-LOGGER = logging.getLogger(__name__)
 
 
 def plot_integration_umaps(
@@ -2179,7 +2221,7 @@ def plot_cluster_sizes(
     else:
         colors = palette[:len(clusters)]
 
-    fig, ax = plt.subplots(figsize=(max(6, len(clusters) * 0.6), 4))
+    fig, ax = plt.subplots(figsize=(max(8, 0.35 * len(clusters)), 4))
     _clean_axes(ax)
 
     x = np.arange(len(clusters))
@@ -2204,6 +2246,7 @@ def plot_cluster_sizes(
     ax.set_title("Cluster sizes")
 
     fig.tight_layout()
+    _finalize_categorical_x(fig, ax, rotate=45, ha="right", bottom=0.40)
     save_multi(stem, figdir)
     plt.close(fig)
 
@@ -2231,15 +2274,18 @@ def plot_cluster_qc_summary(
         return
 
     df = adata.obs[[label_key] + metrics].groupby(label_key).mean()
+    n = df.shape[0]
+    fig_w = max(14, 0.35 * n)  # scale width with number of clusters
+    fig, axs = plt.subplots(1, 3, figsize=(fig_w, 4))
 
-    fig, axs = plt.subplots(1, 3, figsize=(14, 4))
     for ax, m in zip(axs, metrics):
         _clean_axes(ax)
         df[m].plot(kind="bar", ax=ax, color="steelblue", edgecolor="black")
         ax.set_title(m.replace("_", " "))
         ax.set_xlabel("Cluster")
-        ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right")
 
+    # apply once (all axes share categorical x labels)
+    _finalize_categorical_x(fig, axs[0], rotate=45, ha="right", bottom=0.40)
     fig.tight_layout()
     save_multi(stem, figdir)
     plt.close(fig)
@@ -2268,7 +2314,7 @@ def plot_cluster_silhouette_by_cluster(
 
     df = pd.DataFrame({"cluster": labels, "silhouette": silvals})
 
-    fig, ax = plt.subplots(figsize=(10, 4.5))
+    fig, ax = plt.subplots(figsize=(max(10, 0.35 * df["cluster"].nunique()), 4.5))
     _clean_axes(ax)
 
     df.boxplot(column="silhouette", by="cluster", ax=ax)
@@ -2280,9 +2326,9 @@ def plot_cluster_silhouette_by_cluster(
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
 
     fig.tight_layout()
+    _finalize_categorical_x(fig, ax, rotate=45, ha="right", bottom=0.45)
     save_multi(stem, figdir)
     plt.close(fig)
-
 
 
 def plot_cluster_batch_composition(
@@ -2307,7 +2353,7 @@ def plot_cluster_batch_composition(
     )
     frac = df.div(df.sum(axis=1), axis=0)
 
-    fig, ax = plt.subplots(figsize=(max(6, len(df) * 0.6), 4))
+    fig, ax = plt.subplots(figsize=(max(8, 0.40 * len(df)), 4))
     _clean_axes(ax)
 
     frac.plot(
@@ -2324,6 +2370,7 @@ def plot_cluster_batch_composition(
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
 
     fig.tight_layout()
+    _finalize_categorical_x(fig, ax, rotate=45, ha="right", bottom=0.42)
     save_multi(stem, figdir)
     plt.close(fig)
 
