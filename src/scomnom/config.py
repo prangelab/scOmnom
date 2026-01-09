@@ -206,6 +206,7 @@ class ClusterAnnotateConfig(BaseModel):
         default_factory=lambda: max(1, multiprocessing.cpu_count() - 1),
         description="Number of parallel worker processes for ssGSEA",
     )
+    ssgsea_plot_n: int = 5
 
     # ------------------------------------------------------------------
     # Figures

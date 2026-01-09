@@ -2637,3 +2637,350 @@ def plot_ssgsea_cluster_topn_heatmap(
 
         save_multi(stem, figdir, fig)
         plt.close(fig)
+
+
+def _ssgsea_pathways_figdir(figdir: Path | None) -> Path:
+    """
+    Ensure plots land in a 'pathways' subfolder relative to caller figdir.
+    This stays compatible with save_multi() which prefixes ROOT_FIGDIR/<ext>/.
+    """
+    if figdir is None:
+        return Path("pathways")
+    return Path(figdir) / "pathways"
+
+
+def _parse_gmt_gene_set_sizes(gmt_paths: list[str]) -> dict[str, int]:
+    """
+    Parse GMT files and return {term -> gene_set_size}.
+    Term keys are the raw TERM strings inside the GMT (e.g. 'REACTOME_FOO').
+    """
+    sizes: dict[str, int] = {}
+    for gmt in gmt_paths:
+        try:
+            with open(gmt, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split("\t")
+                    if len(parts) < 3:
+                        continue
+                    term = parts[0].strip()
+                    genes = [x for x in parts[2:] if x]
+                    sizes[term] = len(genes)
+        except Exception as e:
+            LOGGER.warning("Failed to parse GMT '%s' for gene set sizes: %s", gmt, e)
+    return sizes
+
+
+def _get_ssgsea_df(adata) -> pd.DataFrame | None:
+    if "ssgsea_cluster_means" not in adata.uns:
+        LOGGER.warning("No ssGSEA cluster means found in adata.uns['ssgsea_cluster_means'].")
+        return None
+    df = adata.uns["ssgsea_cluster_means"]
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        LOGGER.warning("adata.uns['ssgsea_cluster_means'] is empty or not a DataFrame.")
+        return None
+    return df.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+
+
+def _zscore_by_pathway(df: pd.DataFrame, *, eps: float = 1e-9) -> pd.DataFrame:
+    """
+    Z-score each pathway across clusters (column-wise).
+    """
+    mu = df.mean(axis=0)
+    sd = df.std(axis=0).replace(0, np.nan)
+    z = (df - mu) / (sd + eps)
+    return z.replace([np.inf, -np.inf], 0.0).fillna(0.0)
+
+
+def _split_prefix_term(col: str) -> tuple[str, str]:
+    if "::" in col:
+        p, t = col.split("::", 1)
+        return p, t
+    return "UNKNOWN", col
+
+
+def _shorten_term(term: str) -> str:
+    term = str(term).replace("_", " ").strip()
+    for drop in ("REACTOME ", "HALLMARK ", "KEGG ", "GO BP ", "GO CC ", "GO MF "):
+        if term.startswith(drop):
+            term = term[len(drop):]
+    return term.strip()
+
+
+def plot_ssgsea_cluster_topn_barplots(
+    adata,
+    *,
+    figdir: Path | None,
+    cluster_key: str = "cluster_label",
+    n: int = 5,
+    use_zscore_for_ranking: bool = True,
+    score_label: str = "ssGSEA ES",
+    max_clusters: int | None = None,
+    prefix_filter: list[str] | None = None,
+) -> None:
+    """
+    Per-cluster Top-N pathways as horizontal barplots.
+
+    - One figure per cluster per prefix (e.g. HALLMARK, REACTOME).
+    - x-axis: score (ES or z-scored ES)
+    - y-axis: pathway
+    - vertical dotted line at x=0 for reference
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    df = _get_ssgsea_df(adata)
+    if df is None:
+        return
+
+    outdir = _ssgsea_pathways_figdir(figdir)
+
+    # Determine ordering / ranking matrix
+    rank_df = _zscore_by_pathway(df) if use_zscore_for_ranking else df
+
+    # cluster list
+    clusters = list(rank_df.index.astype(str))
+    if max_clusters is not None and len(clusters) > max_clusters:
+        clusters = clusters[: max_clusters]
+
+    # Identify prefixes
+    prefixes = sorted({_split_prefix_term(c)[0] for c in rank_df.columns})
+    if prefix_filter:
+        prefixes = [p for p in prefixes if p in set(prefix_filter)]
+    if not prefixes:
+        LOGGER.warning("No ssGSEA prefixes found to plot.")
+        return
+
+    for cl in clusters:
+        for prefix in prefixes:
+            cols = [c for c in rank_df.columns if c.startswith(prefix + "::")]
+            if not cols:
+                continue
+
+            # pick top-N for this cluster by rank_df
+            s_rank = rank_df.loc[cl, cols]
+            top_cols = s_rank.sort_values(ascending=False).head(n).index.tolist()
+
+            # values to plot come from original df (ES) but ranking may be z
+            s_val = df.loc[cl, top_cols].copy()
+            terms = [_shorten_term(_split_prefix_term(c)[1]) for c in s_val.index]
+            plot_df = pd.DataFrame(
+                {"term": terms, "score": s_val.values.astype(float)}
+            ).sort_values("score", ascending=True)  # horizontal bar: bottom->top
+
+            # adaptive sizing
+            fig_w = 7.0
+            fig_h = max(2.8, 0.55 * len(plot_df) + 1.6)
+            fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+            sns.barplot(
+                data=plot_df,
+                x="score",
+                y="term",
+                ax=ax,
+                color="#2b8cbe",
+                edgecolor="black",
+                linewidth=0.3,
+            )
+
+            ax.axvline(0.0, linestyle=":", color="black", lw=1.2, alpha=0.8)
+            ax.set_xlabel(score_label, fontsize=12)
+            ax.set_ylabel("Pathway", fontsize=12)
+
+            title = f"Top {n} {prefix} pathways — {cluster_key}={cl}"
+            if use_zscore_for_ranking:
+                title += " (ranked by z-score)"
+            ax.set_title(title, fontsize=14, pad=10)
+
+            ax.tick_params(axis="y", labelsize=10)
+            ax.tick_params(axis="x", labelsize=10)
+
+            fig.tight_layout()
+
+            stem = f"{cluster_key}_{cl}__top{n}_bar_{prefix}"
+            # IMPORTANT: figdir is relative inside ROOT_FIGDIR via save_multi
+            save_multi(stem, outdir, fig)
+            plt.close(fig)
+
+
+def plot_ssgsea_cluster_topn_dotplots(
+    adata,
+    *,
+    figdir: Path | None,
+    cluster_key: str = "cluster_label",
+    n: int = 5,
+    use_zscore_for_ranking: bool = True,
+    x: str = "score",                 # "score" only for now
+    color_by: str = "score_z",         # "score" or "score_z"
+    size_by: str = "gene_set_size",    # "gene_set_size" (from GMT) or "abs_score"
+    prefix_filter: list[str] | None = None,
+    max_clusters: int | None = None,
+) -> None:
+    """
+    Dotplot for per-cluster Top-N ssGSEA pathways.
+
+      - x-axis: score (ES)
+      - color: score_z (z-scored across clusters per pathway) by default
+      - size: gene set size (from GMT) if available, else abs(score)
+
+    One figure per cluster per prefix.
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    df = _get_ssgsea_df(adata)
+    if df is None:
+        return
+
+    outdir = _ssgsea_pathways_figdir(figdir)
+
+    rank_df = _zscore_by_pathway(df) if use_zscore_for_ranking else df
+    z_df = _zscore_by_pathway(df)
+
+    # Try to read GMTs used for ssGSEA so we can size dots by gene-set size
+    gmt_sizes: dict[str, int] = {}
+    try:
+        cfg = adata.uns.get("ssgsea", {}).get("config", {})
+        gmt_paths = cfg.get("gene_sets", [])
+        if isinstance(gmt_paths, list) and gmt_paths:
+            gmt_sizes = _parse_gmt_gene_set_sizes([str(p) for p in gmt_paths])
+    except Exception:
+        gmt_sizes = {}
+
+    clusters = list(rank_df.index.astype(str))
+    if max_clusters is not None and len(clusters) > max_clusters:
+        clusters = clusters[: max_clusters]
+
+    prefixes = sorted({_split_prefix_term(c)[0] for c in rank_df.columns})
+    if prefix_filter:
+        prefixes = [p for p in prefixes if p in set(prefix_filter)]
+    if not prefixes:
+        LOGGER.warning("No ssGSEA prefixes found to plot.")
+        return
+
+    for cl in clusters:
+        for prefix in prefixes:
+            cols = [c for c in rank_df.columns if c.startswith(prefix + "::")]
+            if not cols:
+                continue
+
+            # choose top-N by ranking matrix
+            top_cols = (
+                rank_df.loc[cl, cols]
+                .sort_values(ascending=False)
+                .head(n)
+                .index
+                .tolist()
+            )
+
+            rows = []
+            for col in top_cols:
+                _, term = _split_prefix_term(col)
+                term_short = _shorten_term(term)
+                score = float(df.loc[cl, col])
+                score_z = float(z_df.loc[cl, col])
+
+                if size_by == "gene_set_size":
+                    dot_size = float(gmt_sizes.get(term, np.nan))
+                elif size_by == "abs_score":
+                    dot_size = float(abs(score))
+                else:
+                    dot_size = float(gmt_sizes.get(term, np.nan))
+
+                rows.append(
+                    {
+                        "term": term_short,
+                        "score": score,
+                        "score_z": score_z,
+                        "gene_set_size": dot_size,
+                    }
+                )
+
+            plot_df = pd.DataFrame(rows)
+            if plot_df.empty:
+                continue
+
+            # If gene set sizes unavailable, fallback gracefully
+            if plot_df["gene_set_size"].isna().all():
+                plot_df["gene_set_size"] = np.abs(plot_df["score"].values)
+                size_by_used = "abs_score"
+            else:
+                size_by_used = size_by
+
+            # order terms: ascending so the "top" ends up at bottom->top visually
+            plot_df = plot_df.sort_values("score", ascending=True)
+
+            # adaptive sizing
+            fig_w = 7.5
+            fig_h = max(2.8, 0.60 * len(plot_df) + 1.6)
+            fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+            # Size scaling
+            size_vals = plot_df["gene_set_size"].to_numpy(dtype=float)
+            s_min, s_max = np.nanmin(size_vals), np.nanmax(size_vals)
+            if not np.isfinite(s_min) or not np.isfinite(s_max) or s_min == s_max:
+                sizes = np.full_like(size_vals, 120.0, dtype=float)
+            else:
+                # map to [90, 340]
+                sizes = 90.0 + (size_vals - s_min) / (s_max - s_min) * (340.0 - 90.0)
+
+            sca = ax.scatter(
+                plot_df[x].values,
+                plot_df["term"].values,
+                s=sizes,
+                c=plot_df[color_by].values if color_by in plot_df.columns else plot_df["score_z"].values,
+                cmap="viridis",
+                edgecolors="black",
+                linewidths=0.3,
+                alpha=0.95,
+            )
+
+            ax.axvline(0.0, linestyle=":", color="black", lw=1.2, alpha=0.8)
+            ax.set_xlabel("ssGSEA ES", fontsize=12)
+            ax.set_ylabel("Pathway", fontsize=12)
+
+            title = f"Top {n} {prefix} pathways — {cluster_key}={cl}"
+            if use_zscore_for_ranking:
+                title += " (ranked by z-score)"
+            ax.set_title(title, fontsize=14, pad=10)
+
+            cbar = fig.colorbar(sca, ax=ax, fraction=0.045, pad=0.02)
+            cbar.set_label("z-score" if color_by == "score_z" else color_by, fontsize=11)
+
+            # small legend for dot size
+            try:
+                # pick a few representative sizes
+                reps = np.unique(np.nanpercentile(size_vals, [20, 50, 80]).round(0))
+                reps = [r for r in reps if np.isfinite(r)]
+                if reps:
+                    handles = []
+                    labels = []
+                    for r in reps:
+                        # map r -> s
+                        if s_min == s_max:
+                            s = 180.0
+                        else:
+                            s = 90.0 + (r - s_min) / (s_max - s_min) * (340.0 - 90.0)
+                        handles.append(
+                            plt.Line2D([0], [0], marker="o", color="w",
+                                       markerfacecolor="gray", markeredgecolor="black",
+                                       markersize=np.sqrt(s) / 2)
+                        )
+                        labels.append(f"{int(r)}")
+                    ax.legend(
+                        handles,
+                        labels,
+                        title=("Genes" if size_by_used == "gene_set_size" else "|ES|"),
+                        loc="lower right",
+                        frameon=False,
+                    )
+            except Exception:
+                pass
+
+            fig.tight_layout()
+
+            stem = f"{cluster_key}_{cl}__top{n}_dot_{prefix}"
+            save_multi(stem, outdir, fig)
+            plt.close(fig)

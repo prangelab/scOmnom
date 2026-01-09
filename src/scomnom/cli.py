@@ -571,6 +571,7 @@ def cluster_and_annotate(
         "--ssgsea-nproc",
         help="[ssGSEA] Parallel workers. Default = CPU cores - 1.",
     ),
+    ssgsea_plot_n: int = typer.Option(5, "--ssgsea-plot-n"),
 ):
     """
     Run clustering + annotation (CellTypist + ssGSEA).
@@ -658,6 +659,7 @@ def cluster_and_annotate(
         ssgsea_max_size=ssgsea_max_size,
         ssgsea_sample_norm_method=ssgsea_sample_norm_method,
         ssgsea_nproc=nproc,
+        ssgsea_plot_n=ssgsea_plot_n,
 
         make_figures=make_figures,
         figdir_name=figdir_name,
