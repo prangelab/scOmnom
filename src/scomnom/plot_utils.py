@@ -200,8 +200,8 @@ def _reserve_bottom_for_xticklabels(
     rotation: float = 45,
     fontsize: float | None = None,
     ha: str = "right",
-    extra_bottom: float = 0.02,
-    max_bottom: float = 0.60,
+    extra_bottom: float = 0.03,
+    max_bottom: float = 0.72,
 ):
     """
     Rotate x tick labels and reserve enough bottom margin so they don't clip.
@@ -212,7 +212,7 @@ def _reserve_bottom_for_xticklabels(
     max_len = max((len(s) for s in labels), default=0)
 
     # Base bottom + length-dependent bump (works well for long cluster names)
-    bottom = 0.22 + 0.006 * max_len + extra_bottom
+    bottom = 0.26 + 0.0085 * max_len + extra_bottom
     bottom = float(min(max_bottom, bottom))
 
     try:
@@ -2286,6 +2286,7 @@ def plot_cluster_sizes(
     fig.tight_layout()
     _finalize_categorical_x(fig, ax, rotate=45, ha="right", bottom=0.40)
     _reserve_bottom_for_xticklabels(fig, ax, rotation=45, fontsize=9, ha="right")
+    fig.subplots_adjust(bottom=max(fig.subplotpars.bottom, 0.34))
     save_multi(stem, figdir)
     plt.close(fig)
 
@@ -2403,6 +2404,7 @@ def plot_cluster_batch_composition(
     fig, ax = plt.subplots(figsize=(max(8, 0.40 * len(df)), 4))
     _clean_axes(ax)
     _reserve_bottom_for_xticklabels(fig, ax, rotation=45, fontsize=9, ha="right")
+    fig.subplots_adjust(bottom=max(fig.subplotpars.bottom, 0.36))
 
     frac.plot(
         kind="bar",
