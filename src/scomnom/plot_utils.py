@@ -2426,59 +2426,174 @@ def plot_cluster_batch_composition(
 
 
 def plot_ssgsea_cluster_topn_heatmap(
-        adata: anndata.AnnData,
-        cluster_key: str = "cluster_label",
-        figdir: Path | None = None,
-        n: int = 5,
-        z_score: bool = False,
-        cmap: str = "viridis",
+    adata: anndata.AnnData,
+    cluster_key: str = "cluster_label",
+    figdir: Path | None = None,
+    n: int = 5,
+    z_score: bool = False,
+    cmap: str = "viridis",
 ):
+    """
+    Plot ssGSEA cluster-level heatmaps (top-N pathways per cluster), one heatmap per GMT prefix.
+
+    Reads:
+      - adata.uns["ssgsea_cluster_means"] : DataFrame (clusters x pathways), columns like "<prefix>::<TERM>"
+
+    Writes:
+      - figures via save_multi()
+
+    Notes / "optional" improvements baked in (no API changes):
+      - Adaptive font sizes based on plot dimensions
+      - Smarter label shortening (drops prefix before '::', replaces '_' with ' ')
+      - Optional label wrapping to reduce x-label collisions
+      - Optional z-score (existing flag)
+      - Robust color scaling (percentile clipping) for nicer contrast
+      - Optional ordering: clusters and terms are ordered by hierarchical clustering (if scipy available),
+        otherwise falls back to original order.
+    """
     if figdir is None:
         raise ValueError("figdir must be provided.")
     if "ssgsea_cluster_means" not in adata.uns:
         LOGGER.warning("No ssGSEA cluster means found; skipping.")
         return
 
-    df = adata.uns["ssgsea_cluster_means"].apply(pd.to_numeric, errors="coerce").fillna(0)
-
+    import numpy as np
+    import pandas as pd
     import matplotlib.pyplot as plt
     import seaborn as sns
     import matplotlib.cm as cm
-    import numpy as np
+    import textwrap
 
-    cmap_force = cm.get_cmap("viridis")  # TRUE viridis colormap
+    df = adata.uns["ssgsea_cluster_means"]
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        LOGGER.warning("ssgsea_cluster_means is missing/empty; skipping.")
+        return
 
-    prefixes = sorted({c.split("::")[0] for c in df.columns})
+    # Ensure numeric
+    df = df.apply(pd.to_numeric, errors="coerce").fillna(0)
+
+    # Helper: wrap long labels nicely
+    def _wrap_label(s: str, width: int = 28) -> str:
+        s = str(s)
+        if len(s) <= width:
+            return s
+        # Prefer breaking on spaces
+        return "\n".join(textwrap.wrap(s, width=width, break_long_words=False, break_on_hyphens=False))
+
+    # Helper: shorten pathway names
+    def _shorten_term(col: str) -> str:
+        # Input like "<prefix>::REACTOME_FOO_BAR"
+        term = col.split("::", 1)[1] if "::" in col else col
+        term = term.replace("_", " ")
+        # Optional extra cleanups:
+        # Drop common collection prefixes if still present
+        for drop in ("REACTOME ", "HALLMARK ", "KEGG ", "GO BP ", "GO CC ", "GO MF "):
+            if term.startswith(drop):
+                term = term[len(drop):]
+        return term.strip()
+
+    # Helper: cluster ordering using scipy if available
+    def _maybe_cluster_order(mat: pd.DataFrame):
+        try:
+            from scipy.cluster.hierarchy import linkage, leaves_list
+            from scipy.spatial.distance import pdist
+        except Exception:
+            return mat  # scipy not available
+
+        if mat.shape[0] >= 2:
+            try:
+                Zr = linkage(pdist(mat.values, metric="euclidean"), method="average")
+                r_ord = leaves_list(Zr)
+                mat = mat.iloc[r_ord, :]
+            except Exception:
+                pass
+
+        if mat.shape[1] >= 2:
+            try:
+                Zc = linkage(pdist(mat.values.T, metric="euclidean"), method="average")
+                c_ord = leaves_list(Zc)
+                mat = mat.iloc[:, c_ord]
+            except Exception:
+                pass
+
+        return mat
+
+    # Use the requested cmap, but default to true viridis if user passed "viridis"
+    cmap_force = cm.get_cmap(cmap) if cmap else cm.get_cmap("viridis")
+
+    prefixes = sorted({c.split("::")[0] for c in df.columns if "::" in c})
+    if not prefixes:
+        LOGGER.warning("ssGSEA heatmap: no 'prefix::term' columns found; skipping.")
+        return
 
     for prefix in prefixes:
-
         cols = [c for c in df.columns if c.startswith(prefix + "::")]
         if not cols:
             continue
 
-        sub = df[cols]
+        sub = df[cols].copy()
 
+        # Optional z-score across clusters for each term (column-wise)
         if z_score:
-            sub = (sub - sub.mean(0)) / sub.std(0).replace(0, np.nan)
+            denom = sub.std(axis=0).replace(0, np.nan)
+            sub = (sub - sub.mean(axis=0)) / denom
+            sub = sub.fillna(0.0)
 
-        # ---- select top N ----
+        # ---- select top N terms per cluster ----
         top_terms = []
         for cl in sub.index:
-            top_terms.extend(sub.loc[cl].nlargest(n).index.tolist())
+            # nlargest on row
+            try:
+                top_terms.extend(sub.loc[cl].nlargest(n).index.tolist())
+            except Exception:
+                # if some weird dtype slips through
+                row = pd.to_numeric(sub.loc[cl], errors="coerce").fillna(0.0)
+                top_terms.extend(row.nlargest(n).index.tolist())
 
-        selected = sorted(set(top_terms))
+        selected = list(dict.fromkeys(top_terms))  # preserve encounter order, unique
+        if not selected:
+            LOGGER.warning("ssGSEA heatmap (%s): no terms selected; skipping.", prefix)
+            continue
+
         sub = sub[selected]
 
-        # ---- shorten labels ----
-        short_labels = [c.split("::", 1)[1].replace("_", " ") for c in selected]
+        # Optional ordering (clusters + terms), if scipy available
+        sub = _maybe_cluster_order(sub)
+
+        # ---- shorten + wrap labels ----
+        short_labels = [_shorten_term(c) for c in sub.columns]
+
+        # Wrap more aggressively when many columns
+        n_terms = len(short_labels)
+        wrap_width = 34 if n_terms <= 12 else (28 if n_terms <= 20 else 22)
+        short_labels = [_wrap_label(lbl, width=wrap_width) for lbl in short_labels]
         sub.columns = short_labels
 
-        # ---- figure ----
-        fig_w = 2.5 + 0.55 * len(selected)
-        fig_h = 2.5 + 0.40 * len(sub)
+        # ---- figure sizing ----
+        # Keep your original scaling, but add minimums and slightly larger base for readability
+        fig_w = max(8.5, 2.8 + 0.55 * sub.shape[1])
+        fig_h = max(8.0, 2.8 + 0.40 * sub.shape[0])
         fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-        # ---- ACTUAL HEATMAP ----
+        # ---- adaptive font sizes (based on fig dims and matrix size) ----
+        # Make y-labels readable even with 40–80 clusters; x-labels readable even with long pathways.
+        tick_fs_y = int(np.clip(0.26 * fig_h + 3, 9, 14))
+        tick_fs_x = int(np.clip(0.18 * fig_w + 3, 9, 13))
+        label_fs = max(12, tick_fs_y + 1)
+        title_fs = label_fs + 3
+
+        # ---- robust color scaling ----
+        # Percentile clipping improves contrast vs a few extreme values
+        v = sub.values.astype(float)
+        if v.size:
+            vmin = float(np.nanpercentile(v, 2))
+            vmax = float(np.nanpercentile(v, 98))
+            if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
+                vmin, vmax = None, None
+        else:
+            vmin, vmax = None, None
+
+        # ---- heatmap ----
         sns.heatmap(
             sub,
             ax=ax,
@@ -2487,32 +2602,34 @@ def plot_ssgsea_cluster_topn_heatmap(
             cbar=True,
             linewidths=0,
             linecolor=None,
+            vmin=vmin,
+            vmax=vmax,
         )
 
-        # ---- REMOVE ALL SPINES ----
+        # ---- remove spines/grid ----
         for spine in ax.spines.values():
             spine.set_visible(False)
-
-        # ---- REMOVE ALL GRIDLINES ----
         ax.grid(False)
         ax.set_axisbelow(False)
 
         # ---- ticks ----
-        ax.tick_params(axis="x", rotation=60, labelsize=8, length=4, color="black")
-        ax.tick_params(axis="y", rotation=0, labelsize=8, length=4, color="black")
+        ax.tick_params(axis="x", rotation=60, labelsize=tick_fs_x, length=4, color="black")
+        ax.tick_params(axis="y", rotation=0, labelsize=tick_fs_y, length=4, color="black")
         ax.minorticks_off()
 
         # ---- labels ----
-        ax.set_xlabel("Pathway", fontsize=11)
-        ax.set_ylabel(cluster_key, fontsize=11)
+        ax.set_xlabel("Pathway", fontsize=label_fs)
+        ax.set_ylabel(cluster_key, fontsize=label_fs)
 
         title = f"Top {n} ssGSEA pathways per cluster ({prefix})"
         if z_score:
             title += " — Z-score"
-        ax.set_title(title, fontsize=14, pad=12)
+        ax.set_title(title, fontsize=title_fs, pad=14)
 
-        # ---- MANUAL MARGINS ----
-        fig.subplots_adjust(left=0.30, bottom=0.32, right=0.98, top=0.88)
+        # ---- margins ----
+        # Keep your manual margins but slightly more bottom room for larger x tick fonts/wrapped labels
+        # (This only affects this heatmap function.)
+        fig.subplots_adjust(left=0.30, bottom=0.34, right=0.98, top=0.90)
 
         stem = f"ssgsea_top{n}_{prefix}"
         if z_score:
@@ -2520,4 +2637,3 @@ def plot_ssgsea_cluster_topn_heatmap(
 
         save_multi(stem, figdir, fig)
         plt.close(fig)
-
