@@ -2732,19 +2732,18 @@ def plot_ssgsea_cluster_topn_barplots(
     cluster_key: str = "cluster_label",
     figdir: Path | None = None,
     n: int = 5,
-    gmt_label: str | None = None,  # pass the GMT filename or keyword if you have it
-    score_col: str = "ES",
-    library_prefix: str | None = None,  # optional explicit "HALLMARK"/"REACTOME"
+    gmt_label: str | None = None,
+    library_prefix: str | None = None,
 ) -> None:
     """
     Per-cluster Top-N ssGSEA pathways as horizontal bar plots.
 
     Expects:
       adata.uns["ssgsea_cluster_means"] : DataFrame (clusters x pathways)
-        with columns like "<prefix>::<TERM>" from your ssGSEA code.
+        with columns like "<prefix>::<TERM>"
 
     Saves into:
-      figures/<fmt>/.../<figdir>/  (you'll pass figdir=Path("cluster_and_annotate")/"ssgsea_pathways")
+      figures/<fmt>/.../<figdir>/pathways/
     """
     import numpy as np
     import pandas as pd
@@ -2753,26 +2752,19 @@ def plot_ssgsea_cluster_topn_barplots(
 
     if figdir is None:
         raise ValueError("figdir must be provided.")
-    figdir = Path(figdir)
+    outdir = _ssgsea_pathways_figdir(figdir)
 
     if "ssgsea_cluster_means" not in adata.uns:
         LOGGER.warning("No ssGSEA cluster means found; skipping top-N barplots.")
         return
 
-    df = adata.uns["ssgsea_cluster_means"].apply(pd.to_numeric, errors="coerce")
-    df = df.fillna(0.0)
+    df = adata.uns["ssgsea_cluster_means"].apply(pd.to_numeric, errors="coerce").fillna(0.0)
 
-    # Determine which "prefix" groups exist (same logic as your heatmap)
+    # Determine which "<prefix>::<term>" groups exist
     prefixes = sorted({c.split("::")[0] for c in df.columns if "::" in c})
     if not prefixes:
         LOGGER.warning("ssgsea_cluster_means has no '<prefix>::<term>' columns; skipping.")
         return
-
-    # Decide subtitle label (nice GMT)
-    if library_prefix is not None:
-        nice_lib = str(library_prefix)
-    else:
-        nice_lib = _nice_gmt_name(gmt_label) if gmt_label else None
 
     for prefix in prefixes:
         cols = [c for c in df.columns if c.startswith(prefix + "::")]
@@ -2780,77 +2772,101 @@ def plot_ssgsea_cluster_topn_barplots(
             continue
 
         sub = df[cols].copy()
-        # Clean term labels for plotting (keep long labels; no wrapping)
+
+        # Keep long labels; only clean underscores
         sub.columns = [c.split("::", 1)[1].replace("_", " ") for c in sub.columns]
 
-        # One plot per cluster
+        # Nice library subtitle: per-prefix (preferred), else user override, else legacy gmt_label
+        if library_prefix is not None:
+            nice_lib = str(library_prefix)
+        else:
+            # prefer naming from the prefix itself (e.g. h.all.v... -> HALLMARK)
+            nice_lib = _nice_gmt_name(prefix)
+            if not nice_lib and gmt_label:
+                nice_lib = _nice_gmt_name(gmt_label)
+
         for cl in sub.index.astype(str):
             s = sub.loc[cl]
 
-            # pick top N by ES (descending)
+            # Top N by ES (descending)
             top = s.sort_values(ascending=False).head(int(n))
-
             if top.empty:
                 continue
 
-            # reverse order so BEST is on TOP in barh
+            # Reverse so BEST ends up on TOP in barh (matplotlib draws bottom->top)
             top_plot = top.sort_values(ascending=True)
 
-            # ---- figure sizing: scale height with #terms and label length ----
-            # Width: enough for long pathway names; Height: enough spacing
-            fig_h = max(2.8, 0.55 * len(top_plot) + 1.2)
-            fig_w = 10.5  # wider to fit long labels cleanly
+            # ---- layout heuristics (avoid squishing with long labels) ----
+            max_label_len = max(len(str(x)) for x in top_plot.index)
+            # map label length to left margin; clamp to keep reasonable
+            left_margin = min(0.62, max(0.32, 0.012 * max_label_len))
+
+            fig_h = max(2.9, 0.62 * len(top_plot) + 1.6)
+            fig_w = 10.5
             fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
+            try:
+                fig.set_constrained_layout(False)
+            except Exception:
+                pass
+
             # bars
+            y = np.arange(len(top_plot))
             ax.barh(
-                y=np.arange(len(top_plot)),
+                y=y,
                 width=top_plot.values,
                 color="#3b84a8",
                 edgecolor="#1f2d3a",
                 linewidth=0.6,
             )
 
-            ax.set_yticks(np.arange(len(top_plot)))
+            ax.set_yticks(y)
             ax.set_yticklabels(top_plot.index, fontsize=11)
 
             ax.set_xlabel("ssGSEA ES", fontsize=12)
             ax.set_ylabel("Pathway", fontsize=12)
 
-            # Title: cluster only
-            ax.set_title(str(cl), fontsize=16, pad=10)
+            # ---- title + subtitle ----
+            ax.set_title(
+                str(cl),
+                fontsize=15,
+                fontweight="bold",
+                y=1.06,
+                pad=6,
+            )
 
-            # Optional subtitle: nice library name (only if we can infer it)
-            # If we can't infer, omit completely (as requested)
-            if nice_lib is not None:
+            if nice_lib:
                 ax.text(
-                    0.0,
+                    0.5,
                     1.02,
-                    nice_lib,
+                    str(nice_lib),
                     transform=ax.transAxes,
-                    ha="left",
+                    ha="center",
                     va="bottom",
-                    fontsize=12,
-                    color="#444444",
+                    fontsize=11,
+                    color="dimgray",
+                    clip_on=False,
                 )
 
-            # No vertical gridlines
-            ax.grid(False)                 # kill both
-            ax.xaxis.grid(False)           # ensure x-grid is off
+            # ---- styling ----
+            ax.grid(False)
+            ax.xaxis.grid(False)
             ax.yaxis.grid(False)
 
-            # Clean spines a bit
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
 
-            # Leave room on the left for long labels + top title/subtitle
-            fig.subplots_adjust(left=0.42, right=0.98, top=0.88, bottom=0.12)
+            # Make sure we have space for long labels + title/subtitle
+            fig.subplots_adjust(
+                left=left_margin,
+                right=0.98,
+                top=0.84,
+                bottom=0.14,
+            )
 
-            # Filename still includes prefix for disambiguation (saved safely by your sanitized save_multi)
             stem = f"{cluster_key}_{cl}__top{int(n)}_bar_{prefix}"
-            save_multi(stem, figdir, fig)
+            save_multi(stem, outdir, fig)
             plt.close(fig)
-
 
 def plot_ssgsea_cluster_topn_dotplots(
     adata,
@@ -2859,49 +2875,24 @@ def plot_ssgsea_cluster_topn_dotplots(
     cluster_key: str = "cluster_label",
     n: int = 5,
     use_zscore_for_ranking: bool = True,
-    x: str = "score",                 # "score" only for now
-    color_by: str = "score_z",         # "score" or "score_z"
-    size_by: str = "gene_set_size",    # "gene_set_size" (from GMT) or "abs_score"
+    x: str = "score",
+    color_by: str = "score_z",
+    size_by: str = "gene_set_size",
     prefix_filter: list[str] | None = None,
     max_clusters: int | None = None,
-    # --- NEW/OPTIONAL LOOKS ---
-    show_subtitle: bool = True,        # show nice GMT name if we can infer it
-    subtitle_override: dict[str, str] | None = None,  # e.g. {"h.all.v2025.1.Hs.symbols":"HALLMARK"}
-    title_fontsize: int = 16,
-    subtitle_fontsize: int = 12,
-    axis_label_fontsize: int = 12,
-    tick_fontsize: int = 11,
-    cmap: str = "viridis",
-    edgecolor: str = "black",
-    linewidth: float = 0.3,
-    alpha: float = 0.95,
-    # size scaling for dots
-    dot_min: float = 90.0,
-    dot_max: float = 340.0,
-    # layout controls
-    base_fig_w: float = 9.5,           # a bit wider for long pathway labels
-    row_height: float = 0.62,
-    left_margin: float = 0.42,         # more space for long y labels
-    right_margin: float = 0.98,
-    top_margin: float = 0.88,
-    bottom_margin: float = 0.14,
 ) -> None:
     """
     Dotplot for per-cluster Top-N ssGSEA pathways.
 
-      - x-axis: score (ES)
-      - color: score_z (z-scored across clusters per pathway) by default
-      - size: gene set size (from GMT) if available, else abs(score)
-
-    One figure per cluster per prefix.
+    - x-axis: ssGSEA ES
+    - color: z-score (default)
+    - size: gene set size (from GMT) or |ES|
     """
+
+    import matplotlib.pyplot as plt
     import numpy as np
     import pandas as pd
-    import matplotlib.pyplot as plt
 
-    # -----------------------------
-    # Fetch ssGSEA matrix
-    # -----------------------------
     df = _get_ssgsea_df(adata)
     if df is None:
         return
@@ -2911,46 +2902,34 @@ def plot_ssgsea_cluster_topn_dotplots(
     rank_df = _zscore_by_pathway(df) if use_zscore_for_ranking else df
     z_df = _zscore_by_pathway(df)
 
-    # -----------------------------
-    # Parse GMT gene set sizes (optional)
-    # -----------------------------
-    gmt_sizes: dict[str, int] = {}
-    try:
-        cfg = adata.uns.get("ssgsea", {}).get("config", {})
-        gmt_paths = cfg.get("gene_sets", [])
-        if isinstance(gmt_paths, list) and gmt_paths:
+    # GMT sizes (optional)
+    gmt_sizes = {}
+    cfg = adata.uns.get("ssgsea", {}).get("config", {})
+    gmt_paths = cfg.get("gene_sets", [])
+    if isinstance(gmt_paths, list) and gmt_paths:
+        try:
             gmt_sizes = _parse_gmt_gene_set_sizes([str(p) for p in gmt_paths])
-    except Exception:
-        gmt_sizes = {}
+        except Exception:
+            gmt_sizes = {}
 
-    # -----------------------------
-    # Clusters + prefixes
-    # -----------------------------
     clusters = list(rank_df.index.astype(str))
-    if max_clusters is not None and len(clusters) > max_clusters:
-        clusters = clusters[: max_clusters]
+    if max_clusters is not None:
+        clusters = clusters[:max_clusters]
 
     prefixes = sorted({_split_prefix_term(c)[0] for c in rank_df.columns})
     if prefix_filter:
         prefixes = [p for p in prefixes if p in set(prefix_filter)]
-    if not prefixes:
-        LOGGER.warning("No ssGSEA prefixes found to plot.")
-        return
 
-    # -----------------------------
-    # Plot loop
-    # -----------------------------
     for cl in clusters:
         for prefix in prefixes:
             cols = [c for c in rank_df.columns if c.startswith(prefix + "::")]
             if not cols:
                 continue
 
-            # choose top-N by ranking matrix (z-score by default)
             top_cols = (
                 rank_df.loc[cl, cols]
                 .sort_values(ascending=False)
-                .head(int(n))
+                .head(n)
                 .index
                 .tolist()
             )
@@ -2958,24 +2937,12 @@ def plot_ssgsea_cluster_topn_dotplots(
             rows = []
             for col in top_cols:
                 _, term = _split_prefix_term(col)
-                term_short = _shorten_term(term)
-                score = float(df.loc[cl, col])
-                score_z = float(z_df.loc[cl, col])
-
-                if size_by == "gene_set_size":
-                    dot_size_raw = float(gmt_sizes.get(term, np.nan))
-                elif size_by == "abs_score":
-                    dot_size_raw = float(abs(score))
-                else:
-                    dot_size_raw = float(gmt_sizes.get(term, np.nan))
-
                 rows.append(
                     {
-                        "term": term_short,
-                        "score": score,
-                        "score_z": score_z,
-                        "gene_set_size": dot_size_raw,
-                        "_term_full": term,  # keep full term for size lookup etc.
+                        "term": _shorten_term(term),
+                        "score": float(df.loc[cl, col]),
+                        "score_z": float(z_df.loc[cl, col]),
+                        "gene_set_size": float(gmt_sizes.get(term, np.nan)),
                     }
                 )
 
@@ -2983,139 +2950,111 @@ def plot_ssgsea_cluster_topn_dotplots(
             if plot_df.empty:
                 continue
 
-            # If gene set sizes unavailable, fallback
             if plot_df["gene_set_size"].isna().all():
-                plot_df["gene_set_size"] = np.abs(plot_df["score"].values)
-                size_by_used = "abs_score"
+                plot_df["gene_set_size"] = np.abs(plot_df["score"])
+                size_label = "|ES|"
             else:
-                size_by_used = size_by
+                size_label = "Genes"
 
-            # Order so BEST is on TOP:
-            plot_df = plot_df.sort_values("score", ascending=True).reset_index(drop=True)
+            # order best on top
+            plot_df = plot_df.sort_values("score", ascending=True)
 
-            # Figure sizing
-            fig_w = float(base_fig_w)
-            fig_h = max(2.8, float(row_height) * len(plot_df) + 1.6)
+            # ---- layout heuristics ----
+            max_label_len = max(len(s) for s in plot_df["term"])
+            left_margin = min(0.55, max(0.30, 0.012 * max_label_len))
+
+            fig_h = max(3.0, 0.6 * len(plot_df) + 1.8)
+            fig_w = 8.5
+
             fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-            # Size scaling
-            size_vals = plot_df["gene_set_size"].to_numpy(dtype=float)
-            s_min = float(np.nanmin(size_vals)) if np.isfinite(size_vals).any() else np.nan
-            s_max = float(np.nanmax(size_vals)) if np.isfinite(size_vals).any() else np.nan
-
-            if not np.isfinite(s_min) or not np.isfinite(s_max) or s_min == s_max:
-                sizes = np.full_like(size_vals, 140.0, dtype=float)
+            # size scaling
+            size_vals = plot_df["gene_set_size"].to_numpy(float)
+            smin, smax = np.nanmin(size_vals), np.nanmax(size_vals)
+            if not np.isfinite(smin) or smin == smax:
+                sizes = np.full_like(size_vals, 180.0)
             else:
-                sizes = dot_min + (size_vals - s_min) / (s_max - s_min) * (dot_max - dot_min)
-
-            # Color values
-            if color_by in plot_df.columns:
-                cvals = plot_df[color_by].values
-            else:
-                cvals = plot_df["score_z"].values
+                sizes = 90 + (size_vals - smin) / (smax - smin) * (360 - 90)
 
             sca = ax.scatter(
-                plot_df[x].values,
-                plot_df["term"].values,
+                plot_df[x],
+                plot_df["term"],
                 s=sizes,
-                c=cvals,
-                cmap=cmap,
-                edgecolors=edgecolor,
-                linewidths=linewidth,
-                alpha=alpha,
+                c=plot_df[color_by],
+                cmap="viridis",
+                edgecolors="black",
+                linewidths=0.3,
+                alpha=0.95,
             )
 
-            # Reference line at 0
-            ax.axvline(0.0, linestyle=":", color="black", lw=1.2, alpha=0.8)
+            ax.axvline(0, linestyle=":", color="black", lw=1.1, alpha=0.8)
 
-            # Labels
-            ax.set_xlabel("ssGSEA ES", fontsize=axis_label_fontsize)
-            ax.set_ylabel("Pathway", fontsize=axis_label_fontsize)
+            ax.set_xlabel("ssGSEA ES", fontsize=12)
+            ax.set_ylabel("Pathway", fontsize=12)
 
-            # Title: cluster only
-            ax.set_title(str(cl), fontsize=title_fontsize, pad=10)
+            # ---- title & subtitle ----
+            ax.set_title(
+                cl,
+                fontsize=15,
+                weight="bold",
+                y=1.04,
+            )
 
-            # Optional subtitle: nice lib name
-            if show_subtitle:
-                nice = _nice_gmt_name(prefix)
-                if nice is not None:
-                    ax.text(
-                        0.0,
-                        1.02,
-                        nice,
-                        transform=ax.transAxes,
-                        ha="left",
-                        va="bottom",
-                        fontsize=subtitle_fontsize,
-                        color="#444444",
-                    )
+            nice_prefix = _nice_gmt_name(prefix)
+            if nice_prefix:
+                ax.text(
+                    0.5,
+                    1.01,
+                    nice_prefix,
+                    transform=ax.transAxes,
+                    ha="center",
+                    va="bottom",
+                    fontsize=11,
+                    color="dimgray",
+                )
 
-            # Remove gridlines
-            ax.grid(False)
-            ax.xaxis.grid(False)
-            ax.yaxis.grid(False)
+            # ---- colorbar ----
+            cbar = fig.colorbar(sca, ax=ax, fraction=0.04, pad=0.02)
+            cbar.set_label("z-score", fontsize=11)
 
-            # Cleaner spines
-            ax.spines["top"].set_visible(False)
-            ax.spines["right"].set_visible(False)
-
-            # Tick sizes
-            ax.tick_params(axis="x", labelsize=tick_fontsize)
-            ax.tick_params(axis="y", labelsize=tick_fontsize)
-
-            # Put best on top
-            ax.invert_yaxis()
-
-            # Colorbar
-            cbar = fig.colorbar(sca, ax=ax, fraction=0.045, pad=0.02)
-            if color_by == "score_z":
-                cbar.set_label("z-score", fontsize=11)
-            else:
-                cbar.set_label(str(color_by), fontsize=11)
-
-            # Dot size legend
+            # ---- size legend (RIGHT side, outside) ----
             try:
-                reps = np.unique(np.nanpercentile(size_vals, [20, 50, 80]).round(0))
-                reps = [r for r in reps if np.isfinite(r)]
-                if reps:
-                    handles = []
-                    labels = []
-                    for r in reps:
-                        if not np.isfinite(s_min) or not np.isfinite(s_max) or s_min == s_max:
-                            s = 180.0
-                        else:
-                            s = dot_min + (r - s_min) / (s_max - s_min) * (dot_max - dot_min)
-                        handles.append(
-                            plt.Line2D(
-                                [0], [0],
-                                marker="o",
-                                color="w",
-                                markerfacecolor="gray",
-                                markeredgecolor="black",
-                                markersize=np.sqrt(s) / 2,
-                            )
+                reps = np.unique(np.nanpercentile(size_vals, [25, 50, 75]).round())
+                handles = []
+                labels = []
+                for r in reps:
+                    s = 180 if smin == smax else 90 + (r - smin) / (smax - smin) * (360 - 90)
+                    handles.append(
+                        plt.Line2D(
+                            [0], [0],
+                            marker="o",
+                            color="w",
+                            markerfacecolor="gray",
+                            markeredgecolor="black",
+                            markersize=np.sqrt(s) / 2,
                         )
-                        labels.append(f"{int(r)}")
-
-                    ax.legend(
-                        handles,
-                        labels,
-                        title=("Genes" if size_by_used == "gene_set_size" else "|ES|"),
-                        loc="lower right",
-                        frameon=False,
                     )
+                    labels.append(str(int(r)))
+
+                ax.legend(
+                    handles,
+                    labels,
+                    title=size_label,
+                    loc="center left",
+                    bbox_to_anchor=(1.02, 0.5),
+                    frameon=False,
+                )
             except Exception:
                 pass
 
-            # Layout margins (better for long labels)
+            # ---- margins (NO squishing) ----
             fig.subplots_adjust(
-                left=float(left_margin),
-                right=float(right_margin),
-                top=float(top_margin),
-                bottom=float(bottom_margin),
+                left=left_margin,
+                right=0.86,
+                top=0.88,
+                bottom=0.12,
             )
 
-            stem = f"{cluster_key}_{cl}__top{int(n)}_dot_{prefix}"
+            stem = f"{cluster_key}_{cl}__top{n}_dot_{prefix}"
             save_multi(stem, outdir, fig)
             plt.close(fig)
-

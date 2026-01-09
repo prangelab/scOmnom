@@ -1779,6 +1779,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
             cluster_key = "cluster_label",
             figdir = figdir_cluster,
             n = cfg.ssgsea_plot_n,
+            z_score = True,
         )
         plot_utils.plot_ssgsea_cluster_topn_barplots(
             adata,
