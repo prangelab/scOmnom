@@ -2645,8 +2645,8 @@ def _ssgsea_pathways_figdir(figdir: Path | None) -> Path:
     This stays compatible with save_multi() which prefixes ROOT_FIGDIR/<ext>/.
     """
     if figdir is None:
-        return Path("pathways")
-    return Path(figdir) / "pathways"
+        return Path("ssgsea_pathways")
+    return Path(figdir) / "ssgsea_pathways"
 
 
 def _parse_gmt_gene_set_sizes(gmt_paths: list[str]) -> dict[str, int]:
