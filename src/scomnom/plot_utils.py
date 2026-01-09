@@ -363,7 +363,7 @@ def hvgs_and_pca_plots(adata, max_pcs_plot: int, cfg):
     save_multi("QC_pca_variance_ratio", figdir)
 
 
-ddef umap_by(adata, keys, figdir: Path | None = None, stem: str | None = None):
+def umap_by(adata, keys, figdir: Path | None = None, stem: str | None = None):
     if isinstance(keys, str):
         keys = [keys]
 
