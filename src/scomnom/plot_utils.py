@@ -82,30 +82,68 @@ def save_multi(stem: str, figdir: Path, fig=None) -> None:
     Save the current matplotlib figure (or a provided figure) to multiple formats
     under ext / relative_path.
 
-    Parameters
-    ----------
-    stem : str
-        Base filename without extension.
-    figdir : Path
-        Directory where figures should be placed (subdirectories created automatically).
-    fig : matplotlib.figure.Figure, optional
-        If provided, activate and save this figure instead of the current active one.
+    The filename stem is ALWAYS sanitized to be filesystem-safe.
     """
+    import re
     import matplotlib.pyplot as plt
     global ROOT_FIGDIR
 
     if ROOT_FIGDIR is None:
         raise RuntimeError("ROOT_FIGDIR is not set. Call setup_scanpy_figs() first.")
 
-    # If a figure is provided, activate it
+    # --------------------------------------------------
+    # Sanitize filename stem
+    # --------------------------------------------------
+    def _safe_stem(s: str, max_len: int = 180) -> str:
+        if s is None:
+            return "figure"
+
+        s = str(s)
+
+        # Kill path separators first
+        s = s.replace("/", "_").replace("\\", "_")
+
+        # Replace other common offenders
+        s = s.replace(":", "_")
+
+        # Normalize whitespace
+        s = re.sub(r"\s+", " ", s).strip()
+
+        # Replace anything not filesystem-safe
+        s = re.sub(r"[^A-Za-z0-9._-]+", "_", s)
+
+        # Collapse multiple underscores
+        s = re.sub(r"_+", "_", s)
+
+        # Trim junk from ends
+        s = s.strip("._-")
+
+        if not s:
+            s = "figure"
+
+        # Clamp length to avoid OS/path limits
+        if len(s) > max_len:
+            s = s[:max_len].rstrip("._-")
+
+        return s
+
+    stem = _safe_stem(stem)
+
+    # --------------------------------------------------
+    # Activate provided figure if any
+    # --------------------------------------------------
     if fig is not None:
         plt.figure(fig.number)
 
     figdir = Path(figdir)
 
+    # --------------------------------------------------
+    # Save in all configured formats
+    # --------------------------------------------------
     for ext in FIGURE_FORMATS:
         outdir = ROOT_FIGDIR / ext / figdir
         outdir.mkdir(parents=True, exist_ok=True)
+
         outfile = outdir / f"{stem}.{ext}"
         LOGGER.info("Saving figure: %s", outfile)
         plt.savefig(outfile, dpi=300)
