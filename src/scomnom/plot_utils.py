@@ -194,6 +194,75 @@ def save_umap_multi(
 # -------------------------------------------------------------------------
 # Internal helpers
 # -------------------------------------------------------------------------
+def _is_categorical_series(s: pd.Series) -> bool:
+    return (
+        pd.api.types.is_categorical_dtype(s)
+        or pd.api.types.is_object_dtype(s)
+        or pd.api.types.is_string_dtype(s)
+    )
+
+
+def _umap_figsize_for_key(adata: ad.AnnData, key: str) -> tuple[float, float]:
+    """
+    Choose a wide enough figure size so large categorical legends don't squash the UMAP.
+    """
+    base_w, base_h = 6.5, 5.5
+    if key not in adata.obs:
+        return base_w, base_h
+
+    s = adata.obs[key]
+    if _is_categorical_series(s):
+        try:
+            n = int(s.astype("category").cat.categories.size)
+        except Exception:
+            n = int(s.nunique(dropna=True))
+
+        # widen with number of categories, but cap to keep things sane
+        w = min(22.0, max(base_w, 7.5 + 0.35 * min(n, 50)))
+        # a bit taller if legend becomes multi-row
+        h = min(10.0, max(base_h, 5.5 + 0.06 * max(0, n - 20)))
+        return float(w), float(h)
+
+    return base_w, base_h
+
+
+def _tune_umap_legend(fig: plt.Figure, n_cats: int) -> None:
+    """
+    Scanpy draws the legend on the main axis; move it to a right margin area and
+    split into columns if it's tall.
+    """
+    if not fig.axes:
+        return
+    ax = fig.axes[0]
+    leg = ax.get_legend()
+    if leg is None:
+        return
+
+    # Choose columns to reduce legend height
+    if n_cats <= 18:
+        ncol = 1
+    elif n_cats <= 40:
+        ncol = 2
+    else:
+        ncol = 3
+
+    try:
+        leg.set_ncols(ncol)
+    except Exception:
+        try:
+            leg._ncols = ncol  # older mpl
+        except Exception:
+            pass
+
+    # Put legend in the right margin, vertically centered
+    leg.set_bbox_to_anchor((1.02, 0.5))
+    leg._loc = 6  # "center left" (works across mpl versions)
+    try:
+        leg.set_loc("center left")
+    except Exception:
+        pass
+
+
 def _nice_gmt_name(gmt_path_or_name: str) -> str | None:
     """
     Try to convert an MSigDB GMT filename into a nice label.
@@ -469,21 +538,72 @@ def hvgs_and_pca_plots(adata, max_pcs_plot: int, cfg):
 
 
 def umap_by(adata, keys, figdir: Path | None = None, stem: str | None = None):
+    """
+    Plot UMAP colored by one or more keys.
+    Fixes squishing by allocating enough width for large legends.
+    """
+    import matplotlib.pyplot as plt
+
     if isinstance(keys, str):
         keys = [keys]
 
-    name = stem or f"QC_umap_{'_'.join(keys)}"
-    figdir = figdir or Path("QC_plots") / "overview"
+    if stem is None:
+        name = f"QC_umap_{'_'.join(keys)}"
+    else:
+        name = stem
 
-    fig = sc.pl.umap(
-        adata,
-        color=keys,
-        use_raw=False,
-        show=False,
-        return_fig=True,
-        legend_loc="right margin",
-    )
-    save_umap_multi(name, figdir, fig, right=0.78)
+    if figdir is None:
+        figdir = ROOT_FIGDIR
+
+    # Plot each key separately so we can size per-legend and save cleanly.
+    for key in keys:
+        if key not in adata.obs:
+            LOGGER.warning("umap_by: key '%s' not in adata.obs; skipping.", key)
+            continue
+
+        # Decide legend behavior
+        s = adata.obs[key]
+        is_cat = _is_categorical_series(s)
+        if is_cat:
+            try:
+                n_cats = int(s.astype("category").cat.categories.size)
+            except Exception:
+                n_cats = int(s.nunique(dropna=True))
+        else:
+            n_cats = 0
+
+        fig_w, fig_h = _umap_figsize_for_key(adata, key)
+
+        fig = sc.pl.umap(
+            adata,
+            color=key,
+            use_raw=False,
+            show=False,
+            return_fig=True,
+            figsize=(fig_w, fig_h),
+            # For categorical, keep a readable right-margin legend:
+            legend_loc=("right margin" if is_cat else "none"),
+            legend_fontsize=(10 if is_cat else None),
+        )
+
+        # If scanpy returned a Figure
+        if hasattr(fig, "axes"):
+            # Make sure axes isn't squeezed by constrained_layout
+            try:
+                fig.set_constrained_layout(False)
+            except Exception:
+                pass
+
+            if is_cat and n_cats > 0:
+                _tune_umap_legend(fig, n_cats)
+                # Reserve a generous right margin for multi-column legends
+                fig.subplots_adjust(left=0.06, right=0.72, top=0.92, bottom=0.08)
+            else:
+                fig.subplots_adjust(left=0.08, right=0.98, top=0.92, bottom=0.08)
+
+        save_multi(f"{name}_{key}", figdir, fig)
+        plt.close(fig)
+
 
 
 
@@ -2732,18 +2852,19 @@ def plot_ssgsea_cluster_topn_barplots(
     cluster_key: str = "cluster_label",
     figdir: Path | None = None,
     n: int = 5,
-    gmt_label: str | None = None,  # GMT filename or keyword if you have it
-    library_prefix: str | None = None,  # optional explicit "HALLMARK"/"REACTOME"
+    gmt_label: str | None = None,     # pass the GMT filename or keyword if you have it (optional)
+    score_col: str = "ES",            # kept for API compatibility (ssGSEA uses ES)
+    library_prefix: str | None = None # optional explicit "HALLMARK"/"REACTOME"
 ) -> None:
     """
     Per-cluster Top-N ssGSEA pathways as horizontal bar plots.
 
     Expects:
       adata.uns["ssgsea_cluster_means"] : DataFrame (clusters x pathways)
-        with columns like "<prefix>::<TERM>" from ssGSEA code.
+        with columns like "<prefix>::<TERM>" from your ssGSEA code.
 
     Saves into:
-      figures/<fmt>/.../<figdir>/ssgsea_pathways/
+      figures/<fmt>/.../<figdir>/  (you'll pass figdir=Path("cluster_and_annotate")/"ssgsea_pathways")
     """
     import numpy as np
     import pandas as pd
@@ -2752,7 +2873,7 @@ def plot_ssgsea_cluster_topn_barplots(
 
     if figdir is None:
         raise ValueError("figdir must be provided.")
-    outdir = _ssgsea_pathways_figdir(figdir)
+    figdir = _ssgsea_pathways_figdir(figdir)
 
     if "ssgsea_cluster_means" not in adata.uns:
         LOGGER.warning("No ssGSEA cluster means found; skipping top-N barplots.")
@@ -2765,98 +2886,106 @@ def plot_ssgsea_cluster_topn_barplots(
         LOGGER.warning("ssgsea_cluster_means has no '<prefix>::<term>' columns; skipping.")
         return
 
-    # Decide subtitle label (nice GMT)
-    if library_prefix is not None:
-        nice_lib = str(library_prefix)
-    else:
-        nice_lib = _nice_gmt_name(gmt_label) if gmt_label else None
-
     for prefix in prefixes:
         cols = [c for c in df.columns if c.startswith(prefix + "::")]
         if not cols:
             continue
 
         sub = df[cols].copy()
-        # keep long labels; no wrapping; just replace underscores
+
+        # Keep long labels, no wrapping; just spacing.
         sub.columns = [c.split("::", 1)[1].replace("_", " ") for c in sub.columns]
+
+        # subtitle: prefer explicit library_prefix; else infer from gmt_label; else infer from prefix
+        nice_lib = None
+        if library_prefix is not None:
+            nice_lib = str(library_prefix)
+        elif gmt_label:
+            nice_lib = _nice_gmt_name(gmt_label)
+        else:
+            nice_lib = _nice_gmt_name(prefix)
 
         for cl in sub.index.astype(str):
             s = sub.loc[cl]
-
             top = s.sort_values(ascending=False).head(int(n))
             if top.empty:
                 continue
 
-            # We want BEST (largest) at TOP in barh:
-            # barh draws first item at bottom, so sort ascending and let largest be last.
+            # best on TOP:
+            # use ascending for barh (bottom->top), then invert_yaxis
             top_plot = top.sort_values(ascending=True)
 
-            fig_h = max(2.8, 0.62 * len(top_plot) + 1.4)
-            fig_w = 10.5
+            # dynamic margins based on longest label
+            max_len = int(max(len(str(t)) for t in top_plot.index))
+            left = float(np.clip(0.18 + 0.010 * max_len, 0.30, 0.70))
+
+            fig_h = max(2.8, 0.70 * len(top_plot) + 1.8)
+            fig_w = 11.5
             fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
+            # leave space on right (even though no legends, looks nicer/consistent)
+            fig.subplots_adjust(left=left, right=0.96, top=0.82, bottom=0.14)
+
+            y = np.arange(len(top_plot))
             ax.barh(
-                y=np.arange(len(top_plot)),
+                y=y,
                 width=top_plot.values,
                 color="#3b84a8",
                 edgecolor="#1f2d3a",
                 linewidth=0.6,
+                zorder=3,
             )
 
-            ax.set_yticks(np.arange(len(top_plot)))
-            ax.set_yticklabels(top_plot.index, fontsize=11)
+            ax.set_yticks(y)
+            ax.set_yticklabels(top_plot.index, fontsize=12)
 
-            ax.set_xlabel("ssGSEA ES", fontsize=12)
-            ax.set_ylabel("Pathway", fontsize=12)
+            ax.set_xlabel("ssGSEA ES", fontsize=13)
+            ax.set_ylabel("Pathway", fontsize=13)
 
-            # --- Title + subtitle (subtitle under title) ---
-            ax.set_title(str(cl), fontsize=18, fontweight="bold", pad=22)
+            # best on top
+            ax.invert_yaxis()
 
-            if nice_lib is not None:
-                ax.text(
-                    0.5,
-                    1.02,
-                    str(nice_lib),
-                    transform=ax.transAxes,
-                    ha="center",
-                    va="bottom",
-                    fontsize=13,
-                    color="#666666",
-                )
-
-            # --- remove vertical gridlines entirely ---
+            # kill vertical gridlines
             ax.grid(False)
             ax.xaxis.grid(False)
             ax.yaxis.grid(False)
 
-            # spines
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
 
-            # ---- AUTO left margin: measure widest ytick label ----
-            # draw once so renderer knows text sizes
-            fig.canvas.draw()
-            renderer = fig.canvas.get_renderer()
+            # Title + subtitle ABOVE axes in axes coords (robust)
+            title_y = 1.10
+            subtitle_y = 1.04
 
-            # widest tick label (in pixels)
-            tick_labels = ax.get_yticklabels()
-            if tick_labels:
-                max_px = max(t.get_window_extent(renderer=renderer).width for t in tick_labels)
-            else:
-                max_px = 0.0
+            ax.text(
+                0.5,
+                title_y,
+                str(cl),
+                transform=ax.transAxes,
+                ha="center",
+                va="bottom",
+                fontsize=22,
+                fontweight="bold",
+                clip_on=False,
+            )
 
-            fig_w_px = fig.get_size_inches()[0] * fig.dpi
-            # desired left margin = label width + a little padding, converted to figure fraction
-            left = (max_px + 16.0) / max(fig_w_px, 1.0)
-            # clamp so we don't destroy the plotting area
-            left = float(min(max(left, 0.20), 0.72))
-
-            # extra top space for title/subtitle
-            fig.subplots_adjust(left=left, right=0.98, top=0.86, bottom=0.12)
+            if nice_lib:
+                ax.text(
+                    0.5,
+                    subtitle_y,
+                    str(nice_lib),
+                    transform=ax.transAxes,
+                    ha="center",
+                    va="bottom",
+                    fontsize=14,
+                    color="#666666",
+                    clip_on=False,
+                )
 
             stem = f"{cluster_key}_{cl}__top{int(n)}_bar_{prefix}"
-            save_multi(stem, outdir, fig)
+            save_multi(stem, figdir, fig)
             plt.close(fig)
+
 
 
 def plot_ssgsea_cluster_topn_dotplots(
@@ -2871,8 +3000,6 @@ def plot_ssgsea_cluster_topn_dotplots(
     size_by: str = "gene_set_size",    # "gene_set_size" (from GMT) or "abs_score"
     prefix_filter: list[str] | None = None,
     max_clusters: int | None = None,
-    gmt_label: str | None = None,      # to show nice subtitle if available
-    library_prefix: str | None = None, # optional explicit "HALLMARK"/"REACTOME"
 ) -> None:
     """
     Dotplot for per-cluster Top-N ssGSEA pathways.
@@ -2891,12 +3018,15 @@ def plot_ssgsea_cluster_topn_dotplots(
     if df is None:
         return
 
+    if figdir is None:
+        raise ValueError("figdir must be provided.")
     outdir = _ssgsea_pathways_figdir(figdir)
 
+    # ranking matrix
     rank_df = _zscore_by_pathway(df) if use_zscore_for_ranking else df
     z_df = _zscore_by_pathway(df)
 
-    # GMT sizes (term -> n_genes), best-effort
+    # Gene-set sizes from GMTs (optional)
     gmt_sizes: dict[str, int] = {}
     try:
         cfg = adata.uns.get("ssgsea", {}).get("config", {})
@@ -2906,17 +3036,11 @@ def plot_ssgsea_cluster_topn_dotplots(
     except Exception:
         gmt_sizes = {}
 
-    # subtitle label (nice GMT)
-    if library_prefix is not None:
-        nice_lib = str(library_prefix)
-    else:
-        nice_lib = _nice_gmt_name(gmt_label) if gmt_label else None
-
     clusters = list(rank_df.index.astype(str))
     if max_clusters is not None and len(clusters) > max_clusters:
         clusters = clusters[: max_clusters]
 
-    prefixes = sorted({_split_prefix_term(c)[0] for c in rank_df.columns})
+    prefixes = sorted({_split_prefix_term(c)[0] for c in rank_df.columns if "::" in c})
     if prefix_filter:
         keep = set(prefix_filter)
         prefixes = [p for p in prefixes if p in keep]
@@ -2930,6 +3054,7 @@ def plot_ssgsea_cluster_topn_dotplots(
             if not cols:
                 continue
 
+            # choose top-N by ranking matrix
             top_cols = (
                 rank_df.loc[cl, cols]
                 .sort_values(ascending=False)
@@ -2943,23 +3068,25 @@ def plot_ssgsea_cluster_topn_dotplots(
             rows = []
             for col in top_cols:
                 _, term = _split_prefix_term(col)
-                term_short = _shorten_term(term)  # keep long labels; don't wrap
+                # keep long labels; just make them readable (spaces)
+                term_label = term.replace("_", " ")
+
                 score = float(df.loc[cl, col])
                 score_z = float(z_df.loc[cl, col])
 
                 if size_by == "gene_set_size":
-                    dot_size = float(gmt_sizes.get(term, np.nan))
+                    dot_size_raw = float(gmt_sizes.get(term, np.nan))
                 elif size_by == "abs_score":
-                    dot_size = float(abs(score))
+                    dot_size_raw = float(abs(score))
                 else:
-                    dot_size = float(gmt_sizes.get(term, np.nan))
+                    dot_size_raw = float(gmt_sizes.get(term, np.nan))
 
                 rows.append(
                     {
-                        "term": term_short,
+                        "term": term_label,
                         "score": score,
                         "score_z": score_z,
-                        "gene_set_size": dot_size,
+                        "gene_set_size": dot_size_raw,
                     }
                 )
 
@@ -2967,78 +3094,107 @@ def plot_ssgsea_cluster_topn_dotplots(
             if plot_df.empty:
                 continue
 
-            # If gene set sizes unavailable, fallback gracefully
+            # fallback if no GMT sizes
             if plot_df["gene_set_size"].isna().all():
                 plot_df["gene_set_size"] = np.abs(plot_df["score"].values)
                 size_by_used = "abs_score"
             else:
                 size_by_used = size_by
 
-            # order so best ends up at top visually:
-            # scatter with categorical y uses given order; easiest: sort ascending then invert y-axis.
+            # order: best on top -> barh/dot y-order needs ASC for bottom->top;
+            # so sort ASC and then invert y-axis (cleaner)
             plot_df = plot_df.sort_values("score", ascending=True)
 
-            fig_w = 8.0
+            # ---- adaptive sizing ----
+            fig_w = 10.5
             fig_h = max(3.0, 0.70 * len(plot_df) + 1.8)
             fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-            # size scaling
+            # ---- compute left margin from label length (prevents cutting/squish) ----
+            max_len = int(max(len(str(t)) for t in plot_df["term"].values))
+            # map length -> left margin, clamp to sane range
+            left = float(np.clip(0.18 + 0.010 * max_len, 0.28, 0.62))
+
+            # reserve right side for colorbar + size legend
+            # (avoid overlap by pushing axes left and keeping a fixed right margin)
+            fig.subplots_adjust(left=left, right=0.78, top=0.84, bottom=0.14)
+
+            # ---- size scaling ----
             size_vals = plot_df["gene_set_size"].to_numpy(dtype=float)
             s_min, s_max = np.nanmin(size_vals), np.nanmax(size_vals)
             if not np.isfinite(s_min) or not np.isfinite(s_max) or s_min == s_max:
-                sizes = np.full_like(size_vals, 140.0, dtype=float)
-                s_min = s_max = float(s_min) if np.isfinite(s_min) else 1.0
+                sizes = np.full_like(size_vals, 150.0, dtype=float)
             else:
                 sizes = 90.0 + (size_vals - s_min) / (s_max - s_min) * (380.0 - 90.0)
 
-            color_vals = plot_df[color_by].values if color_by in plot_df.columns else plot_df["score_z"].values
+            c_vals = (
+                plot_df[color_by].values
+                if color_by in plot_df.columns
+                else plot_df["score_z"].values
+            )
 
             sca = ax.scatter(
                 plot_df[x].values,
                 plot_df["term"].values,
                 s=sizes,
-                c=color_vals,
+                c=c_vals,
                 cmap="viridis",
                 edgecolors="black",
-                linewidths=0.3,
+                linewidths=0.35,
                 alpha=0.95,
                 zorder=3,
             )
 
+            # reference line at 0
             ax.axvline(0.0, linestyle=":", color="black", lw=1.2, alpha=0.8, zorder=2)
+
             ax.set_xlabel("ssGSEA ES", fontsize=12)
             ax.set_ylabel("Pathway", fontsize=12)
 
-            # --- Title + subtitle (avoid overlap by giving pad + moving title slightly up) ---
-            ax.set_title(str(cl), fontsize=18, fontweight="bold", pad=26)
+            # reverse y so "best" is on top
+            ax.invert_yaxis()
 
-            # nice subtitle if we can infer; otherwise omit
-            if nice_lib is not None:
-                ax.text(
-                    0.5,
-                    1.02,
-                    str(nice_lib),
-                    transform=ax.transAxes,
-                    ha="center",
-                    va="bottom",
-                    fontsize=13,
-                    color="#666666",
-                )
-
-            # no grids (clean look)
+            # remove gridlines (esp vertical)
             ax.grid(False)
             ax.xaxis.grid(False)
             ax.yaxis.grid(False)
 
-            # invert y so best/top is at top (since we sorted ascending)
-            ax.invert_yaxis()
+            # ---- title + subtitle above the axes (no overlap) ----
+            title_y = 1.10
+            subtitle_y = 1.04
 
-            # --- colorbar on the far right ---
-            cbar = fig.colorbar(sca, ax=ax, fraction=0.045, pad=0.02)
-            cbar.set_label("z-score" if color_by == "score_z" else str(color_by), fontsize=11)
+            ax.text(
+                0.5,
+                title_y,
+                str(cl),
+                transform=ax.transAxes,
+                ha="center",
+                va="bottom",
+                fontsize=20,
+                fontweight="bold",
+                clip_on=False,
+            )
 
-            # --- size legend: put OUTSIDE to the right, not on the axes ---
-            # build a few representative sizes
+            nice_lib = _nice_gmt_name(prefix)
+            if nice_lib:
+                ax.text(
+                    0.5,
+                    subtitle_y,
+                    nice_lib,
+                    transform=ax.transAxes,
+                    ha="center",
+                    va="bottom",
+                    fontsize=14,
+                    color="#666666",
+                    clip_on=False,
+                )
+
+            # ---- colorbar in its own axis (prevents legend overlap) ----
+            cax = fig.add_axes([0.80, 0.22, 0.025, 0.56])  # [left, bottom, width, height]
+            cbar = fig.colorbar(sca, cax=cax)
+            cbar.set_label("z-score" if (color_by == "score_z") else str(color_by), fontsize=12)
+
+            # ---- size legend to the RIGHT of the colorbar, never overlapping ----
             try:
                 reps = np.unique(np.nanpercentile(size_vals, [20, 50, 80]).round(0))
                 reps = [r for r in reps if np.isfinite(r)]
@@ -3046,7 +3202,7 @@ def plot_ssgsea_cluster_topn_dotplots(
                     handles = []
                     labels = []
                     for r in reps:
-                        if s_min == s_max:
+                        if not (np.isfinite(s_min) and np.isfinite(s_max)) or s_min == s_max:
                             s = 180.0
                         else:
                             s = 90.0 + (r - s_min) / (s_max - s_min) * (380.0 - 90.0)
@@ -3054,43 +3210,27 @@ def plot_ssgsea_cluster_topn_dotplots(
                             plt.Line2D(
                                 [0], [0],
                                 marker="o",
-                                linestyle="",
+                                color="w",
                                 markerfacecolor="gray",
                                 markeredgecolor="black",
-                                markersize=np.sqrt(s) / 2.0,
+                                markersize=np.sqrt(s) / 2.2,
+                                linewidth=0,
                             )
                         )
                         labels.append(f"{int(r)}")
 
-                    leg = ax.legend(
+                    # anchor legend in figure coords to the right of colorbar
+                    fig.legend(
                         handles,
                         labels,
                         title=("Genes" if size_by_used == "gene_set_size" else "|ES|"),
                         loc="center left",
-                        bbox_to_anchor=(1.14, 0.50),  # outside, to the right
+                        bbox_to_anchor=(0.835, 0.50),
                         frameon=False,
                         borderaxespad=0.0,
                     )
-                    if leg is not None:
-                        leg.set_zorder(10)
             except Exception:
                 pass
-
-            # ---- AUTO left margin (unsquish; keep labels) ----
-            fig.canvas.draw()
-            renderer = fig.canvas.get_renderer()
-            tick_labels = ax.get_yticklabels()
-            if tick_labels:
-                max_px = max(t.get_window_extent(renderer=renderer).width for t in tick_labels)
-            else:
-                max_px = 0.0
-
-            fig_w_px = fig.get_size_inches()[0] * fig.dpi
-            left = (max_px + 18.0) / max(fig_w_px, 1.0)
-            left = float(min(max(left, 0.18), 0.72))
-
-            # leave room on right for colorbar + legend
-            fig.subplots_adjust(left=left, right=0.82, top=0.86, bottom=0.12)
 
             stem = f"{cluster_key}_{cl}__top{int(n)}_dot_{prefix}"
             save_multi(stem, outdir, fig)
