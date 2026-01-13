@@ -16,6 +16,16 @@ micromamba activate scOmnom_env
 # Copy our stuff
 echo "Copying data to scratch..."
 cp -R results/adata.filtered.zarr $TMPDIR/.
+
+# Copy empty dir structure to preserve run info
+mkdir -p "$TMPDIR/results/figures"
+rsync -a \
+  --include='*/' \
+  --exclude='*' \
+  results/figures/ \
+  "$TMPDIR/results/figures/"
+
+#Tidy up
 PREVLOC=$(pwd)
 cd $TMPDIR
 pwd

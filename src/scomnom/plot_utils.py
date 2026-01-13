@@ -115,8 +115,8 @@ def save_multi(stem: str, figdir: Path, fig=None) -> None:
             run_name=RUN_KEY,
         )
         LOGGER.info(
-            "Figure run directory selected: %s/%s/<figdir>",
-            RUN_KEY,
+            "Figure run root: %s/<ext>/%s/",
+            ROOT_FIGDIR,
             RUN_FIG_SUBDIR,
         )
 
