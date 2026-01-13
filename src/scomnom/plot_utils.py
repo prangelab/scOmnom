@@ -86,6 +86,15 @@ def setup_scanpy_figs(figdir: Path, formats: Sequence[str] | None = None) -> Non
 
 
 def save_multi(stem: str, figdir: Path, fig=None) -> None:
+    """
+    Save the current matplotlib figure (or a provided figure) to multiple formats.
+
+    Output layout (Option B):
+      ROOT_FIGDIR/<ext>/<RUN_FIG_SUBDIR>/<rel_figdir>/<stem>.<ext>
+
+    Where RUN_FIG_SUBDIR is inferred from the first path component of `figdir`,
+    e.g. integration -> integration_roundN.
+    """
     import matplotlib.pyplot as plt
     global ROOT_FIGDIR, RUN_FIG_SUBDIR, RUN_KEY
 
@@ -97,7 +106,7 @@ def save_multi(stem: str, figdir: Path, fig=None) -> None:
 
     figdir = Path(figdir)
 
-    # Lazily infer run folder from first path component used in save_multi calls.
+    # Lazily infer run folder from the first save call
     if RUN_FIG_SUBDIR is None:
         RUN_KEY = _infer_run_key(figdir)
         RUN_FIG_SUBDIR = _next_round_subdir(
@@ -105,15 +114,20 @@ def save_multi(stem: str, figdir: Path, fig=None) -> None:
             formats=FIGURE_FORMATS,
             run_name=RUN_KEY,
         )
-        LOGGER.info("Figure run directory selected: %s/%s/<figdir>", RUN_KEY, RUN_FIG_SUBDIR)
+        LOGGER.info(
+            "Figure run directory selected: %s/%s/<figdir>",
+            RUN_KEY,
+            RUN_FIG_SUBDIR,
+        )
 
-        rel_figdir = figdir
-        if RUN_KEY is not None and rel_figdir.parts and rel_figdir.parts[0] == RUN_KEY:
-            rel_figdir = Path(*rel_figdir.parts[1:])
-
-        # Pre-create run dirs for each format
+        # Precreate per-format run dirs
         for ext in FIGURE_FORMATS:
             (ROOT_FIGDIR / ext / RUN_FIG_SUBDIR).mkdir(parents=True, exist_ok=True)
+
+    # Always compute rel_figdir (avoid duplicate integration/integration)
+    rel_figdir = figdir
+    if RUN_KEY and rel_figdir.parts and rel_figdir.parts[0] == RUN_KEY:
+        rel_figdir = Path(*rel_figdir.parts[1:])  # may become "."
 
     for ext in FIGURE_FORMATS:
         outdir = ROOT_FIGDIR / ext / RUN_FIG_SUBDIR / rel_figdir
@@ -123,6 +137,7 @@ def save_multi(stem: str, figdir: Path, fig=None) -> None:
         plt.savefig(outfile, dpi=300)
 
     plt.close()
+
 
 
 # -------------------------------------------------------------------------
