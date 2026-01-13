@@ -1648,11 +1648,35 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
     adata.uns["cluster_and_annotate"].setdefault("bio_mask", {})
     adata.uns["cluster_and_annotate"]["bio_mask"] = bio_mask_stats
 
-    if bio_mask is None and getattr(cfg, "bio_guided_clustering", False):
-        LOGGER.warning(
-            "Bio-guided clustering requested, but bio mask disabled: %s",
-            bio_mask_stats.get("disabled_reason"),
-        )
+    # --- summary of mask before sweep ---
+    if getattr(cfg, "bio_guided_clustering", False):
+        mode = bio_mask_stats.get("mode", "unknown")
+        disabled = bio_mask_stats.get("disabled_reason", None)
+
+        if bio_mask is None:
+            LOGGER.info(
+                "CellTypist bio mask: DISABLED (mode=%s) — %s",
+                mode,
+                disabled or "unknown reason",
+            )
+        else:
+            kept = int(bio_mask_stats.get("kept", int(np.sum(bio_mask))))
+            n_cells = int(bio_mask_stats.get("n_cells", bio_mask.size))
+            frac = float(bio_mask_stats.get("kept_frac", kept / max(1, n_cells)))
+
+            LOGGER.info(
+                "CellTypist bio mask: kept %d/%d cells (%.1f%%) "
+                "[mode=%s, entropy_cut=%.3f (abs=%.3f, q=%.2f→%.3f), margin_min=%.3f]",
+                kept,
+                n_cells,
+                100.0 * frac,
+                mode,
+                float(bio_mask_stats.get("entropy_cut_used", float("nan"))),
+                float(bio_mask_stats.get("entropy_abs_limit", float("nan"))),
+                float(bio_mask_stats.get("entropy_quantile", float("nan"))),
+                float(bio_mask_stats.get("entropy_q_value", float("nan"))),
+                float(bio_mask_stats.get("margin_min", float("nan"))),
+            )
 
     # Perform resolution sweep
     best_res, sweep, clusterings = _resolution_sweep(

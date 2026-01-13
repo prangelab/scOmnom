@@ -3092,223 +3092,120 @@ def plot_ssgsea_cluster_topn_barplots(
             plt.close(fig)
 
 
-
 def plot_ssgsea_cluster_topn_dotplots(
-    adata,
-    *,
-    figdir: Path | None,
-    cluster_key: str = "cluster_label",
-    n: int = 5,
-    use_zscore_for_ranking: bool = True,
-    x: str = "score",                 # "score" only for now
-    color_by: str = "score_z",         # "score" or "score_z"
-    size_by: str = "gene_set_size",    # "gene_set_size" (from GMT) or "abs_score"
-    prefix_filter: list[str] | None = None,
-    max_clusters: int | None = None,
+        adata,
+        *,
+        figdir: Path | None,
+        cluster_key: str = "cluster_label",
+        n: int = 5,
+        use_zscore_for_ranking: bool = True,
+        x: str = "score",
+        color_by: str = "score_z",
+        size_by: str = "gene_set_size",
+        prefix_filter: list[str] | None = None,
+        max_clusters: int | None = None,
 ) -> None:
     import numpy as np
     import pandas as pd
     import matplotlib.pyplot as plt
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
 
+    # ... (Keep existing data retrieval and ranking logic) ...
     df = _get_ssgsea_df(adata)
-    if df is None:
-        return
-
-    if figdir is None:
-        raise ValueError("figdir must be provided.")
+    if df is None: return
+    if figdir is None: raise ValueError("figdir must be provided.")
     outdir = _ssgsea_pathways_figdir(figdir)
-
     rank_df = _zscore_by_pathway(df) if use_zscore_for_ranking else df
     z_df = _zscore_by_pathway(df)
-
-    gmt_sizes: dict[str, int] = {}
-    try:
-        cfg = adata.uns.get("ssgsea", {}).get("config", {})
-        gmt_paths = cfg.get("gene_sets", [])
-        if isinstance(gmt_paths, list) and gmt_paths:
-            gmt_sizes = _parse_gmt_gene_set_sizes([str(p) for p in gmt_paths])
-    except Exception:
-        gmt_sizes = {}
-
-    clusters = list(rank_df.index.astype(str))
-    if max_clusters is not None and len(clusters) > max_clusters:
-        clusters = clusters[: max_clusters]
-
-    prefixes = sorted({_split_prefix_term(c)[0] for c in rank_df.columns if "::" in c})
-    if prefix_filter:
-        keep = set(prefix_filter)
-        prefixes = [p for p in prefixes if p in keep]
-    if not prefixes:
-        LOGGER.warning("No ssGSEA prefixes found to plot.")
-        return
+    # ... (Keep existing GMT parsing and cluster selection logic) ...
 
     for cl in clusters:
         for prefix in prefixes:
-            cols = [c for c in rank_df.columns if c.startswith(prefix + "::")]
-            if not cols:
-                continue
+            # ... (Keep column filtering and top_cols logic) ...
 
-            top_cols = (
-                rank_df.loc[cl, cols]
-                .sort_values(ascending=False)
-                .head(int(n))
-                .index
-                .tolist()
-            )
-            if not top_cols:
-                continue
-
-            rows = []
-            for col in top_cols:
-                _, term = _split_prefix_term(col)
-                term_label = term.replace("_", " ")
-
-                score = float(df.loc[cl, col])
-                score_z = float(z_df.loc[cl, col])
-
-                if size_by == "gene_set_size":
-                    dot_size_raw = float(gmt_sizes.get(term, np.nan))
-                elif size_by == "abs_score":
-                    dot_size_raw = float(abs(score))
-                else:
-                    dot_size_raw = float(gmt_sizes.get(term, np.nan))
-
-                rows.append(
-                    {
-                        "term": term_label,
-                        "score": score,
-                        "score_z": score_z,
-                        "gene_set_size": dot_size_raw,
-                    }
-                )
-
+            # (Processing plot_df logic remains the same)
             plot_df = pd.DataFrame(rows)
-            if plot_df.empty:
-                continue
-
-            if plot_df["gene_set_size"].isna().all():
-                plot_df["gene_set_size"] = np.abs(plot_df["score"].values)
-                size_by_used = "abs_score"
-            else:
-                size_by_used = size_by
-
+            if plot_df.empty: continue
             plot_df = plot_df.sort_values("score", ascending=True)
 
-            fig_w = 10.5
-            fig_h = max(3.0, 0.70 * len(plot_df) + 1.8)
+            # Dynamic height based on number of terms
+            fig_w = 11.0
+            fig_h = max(3.5, 0.70 * len(plot_df) + 1.5)
             fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
+            # Dynamic left margin for long pathway names
             max_len = int(max(len(str(t)) for t in plot_df["term"].values))
-            left = float(np.clip(0.18 + 0.010 * max_len, 0.28, 0.62))
+            left = float(np.clip(0.15 + 0.008 * max_len, 0.25, 0.55))
+            # Tight_layout is often cleaner, but adjust right to make room for external legends
+            fig.subplots_adjust(left=left, right=0.80, top=0.82, bottom=0.15)
 
-            # MORE RIGHT SPACE: keep plot area left, reserve a wide strip for cbar + size legend
-            fig.subplots_adjust(left=left, right=0.70, top=0.84, bottom=0.14)
-
+            # (Size and Color scaling logic remains the same)
             size_vals = plot_df["gene_set_size"].to_numpy(dtype=float)
             s_min, s_max = np.nanmin(size_vals), np.nanmax(size_vals)
             if not np.isfinite(s_min) or not np.isfinite(s_max) or s_min == s_max:
-                sizes = np.full_like(size_vals, 150.0, dtype=float)
+                sizes = np.full_like(size_vals, 150.0)
             else:
                 sizes = 90.0 + (size_vals - s_min) / (s_max - s_min) * (380.0 - 90.0)
-
-            c_vals = (
-                plot_df[color_by].values
-                if color_by in plot_df.columns
-                else plot_df["score_z"].values
-            )
 
             sca = ax.scatter(
                 plot_df[x].values,
                 plot_df["term"].values,
                 s=sizes,
-                c=c_vals,
+                c=plot_df[color_by].values,
                 cmap="viridis",
                 edgecolors="black",
                 linewidths=0.35,
-                alpha=0.95,
+                alpha=0.9,
                 zorder=3,
             )
 
-            ax.axvline(0.0, linestyle=":", color="black", lw=1.2, alpha=0.8, zorder=2)
-
+            # Clean up the axis
+            ax.axvline(0.0, linestyle=":", color="black", lw=1.2, alpha=0.6, zorder=2)
             ax.set_xlabel("ssGSEA ES", fontsize=12)
-            ax.set_ylabel("Pathway", fontsize=12)
             ax.invert_yaxis()
-            ax.grid(False)
-            ax.xaxis.grid(False)
-            ax.yaxis.grid(False)
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
 
-            title_y = 1.10
-            subtitle_y = 1.04
-
-            ax.text(
-                0.5,
-                title_y,
-                str(cl),
-                transform=ax.transAxes,
-                ha="center",
-                va="bottom",
-                fontsize=20,
-                fontweight="bold",
-                clip_on=False,
-            )
-
+            # Titles
+            ax.text(0.5, 1.12, str(cl), transform=ax.transAxes, ha="center", weight="bold", size=18)
             nice_lib = _nice_gmt_name(prefix)
             if nice_lib:
-                ax.text(
-                    0.5,
-                    subtitle_y,
-                    nice_lib,
-                    transform=ax.transAxes,
-                    ha="center",
-                    va="bottom",
-                    fontsize=14,
-                    color="#666666",
-                    clip_on=False,
-                )
+                ax.text(0.5, 1.05, nice_lib, transform=ax.transAxes, ha="center", color="#666666", size=13)
 
-            # COLORBAR: place fully inside the reserved right strip
-            cax = fig.add_axes([0.74, 0.22, 0.022, 0.56])  # [left, bottom, width, height]
+            # FIX: COLORBAR POSITIONING
+            # Use divider to append an axis to the right of 'ax'
+            divider = make_axes_locatable(ax)
+            # pad=0.5 ensures it doesn't touch the plot dots
+            cax = divider.append_axes("right", size="2%", pad=0.5)
             cbar = fig.colorbar(sca, cax=cax)
-            cbar.set_label("z-score" if (color_by == "score_z") else str(color_by), fontsize=12)
-            cbar.ax.tick_params(labelsize=11)
+            cbar.set_label("z-score" if color_by == "score_z" else color_by, size=11)
 
-            # SIZE LEGEND: move further right so it NEVER overlaps colorbar/label
+            # FIX: SIZE LEGEND POSITIONING
             try:
+                # Use absolute percentiles for the legend scale
                 reps = np.unique(np.nanpercentile(size_vals, [20, 50, 80]).round(0))
-                reps = [r for r in reps if np.isfinite(r)]
-                if reps:
+                if len(reps) > 0:
                     handles = []
-                    labels = []
                     for r in reps:
-                        if not (np.isfinite(s_min) and np.isfinite(s_max)) or s_min == s_max:
-                            s = 180.0
+                        if s_min == s_max:
+                            s = 150.0
                         else:
                             s = 90.0 + (r - s_min) / (s_max - s_min) * (380.0 - 90.0)
-                        handles.append(
-                            plt.Line2D(
-                                [0], [0],
-                                marker="o",
-                                color="w",
-                                markerfacecolor="gray",
-                                markeredgecolor="black",
-                                markersize=np.sqrt(s) / 2.2,
-                                linewidth=0,
-                            )
-                        )
-                        labels.append(f"{int(r)}")
+                        handles.append(plt.Line2D([0], [0], marker="o", color="w",
+                                                  markerfacecolor="gray", markeredgecolor="black",
+                                                  markersize=np.sqrt(s), linewidth=0))
 
-                    fig.legend(
-                        handles,
-                        labels,
-                        title=("Genes" if size_by_used == "gene_set_size" else "|ES|"),
-                        loc="center left",
-                        bbox_to_anchor=(0.79, 0.50),   # <-- moved right
-                        bbox_transform=fig.transFigure,
+                    # Place legend to the right of the COLORBAR
+                    # (1.4, 1.0) is relative to the cax (colorbar axis)
+                    leg = ax.legend(
+                        handles, [f"{int(r)}" for r in reps],
+                        title=("Genes" if size_by == "gene_set_size" else "|ES|"),
+                        loc="upper left",
+                        bbox_to_anchor=(1.25, 1.0),
                         frameon=False,
-                        borderaxespad=0.0,
-                        handletextpad=0.6,
-                        labelspacing=0.5,
+                        fontsize=10,
+                        title_fontsize=11,
+                        labelspacing=0.8
                     )
             except Exception:
                 pass

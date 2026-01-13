@@ -534,6 +534,35 @@ def cluster_and_annotate(
     ),
 
     # -----------------------------
+    # Bio-metrics mask (CellTypist confidence gate)
+    # -----------------------------
+    bio_mask_enabled: bool = typer.Option(
+        True,
+        "--bio-mask/--no-bio-mask",
+        help="[Bio] Enable confidence mask for bio metrics (hom/frag/bioARI). Clustering unchanged.",
+    ),
+    bio_mask_entropy_abs_limit: float = typer.Option(
+        0.5,
+        "--bio-mask-entropy-abs-limit",
+        help="[Bio] Absolute entropy ceiling. Cells with entropy <= this always pass.",
+    ),
+    bio_mask_entropy_quantile: float = typer.Option(
+        0.7,
+        "--bio-mask-entropy-quantile",
+        help="[Bio] Fallback entropy quantile. Effective entropy cutoff is max(abs_limit, quantile cutoff).",
+    ),
+    bio_mask_margin_min: float = typer.Option(
+        0.1,
+        "--bio-mask-margin-min",
+        help="[Bio] Minimum margin (top1 - top2) required to keep a cell for bio metrics.",
+    ),
+    bio_mask_min_frac: float = typer.Option(
+        0.10,
+        "--bio-mask-min-frac",
+        help="[Bio] Ensure at least this fraction of cells remain for bio metrics (0 disables).",
+    ),
+
+    # -----------------------------
     # Model management
     # -----------------------------
     list_models: bool = typer.Option(False, "--list-models"),
@@ -650,6 +679,12 @@ def cluster_and_annotate(
         celltypist_model=celltypist_model,
         celltypist_majority_voting=celltypist_majority_voting,
         annotation_csv=annotation_csv,
+
+        bio_mask_enabled=bio_mask_enabled,
+        bio_mask_entropy_abs_limit=bio_mask_entropy_abs_limit,
+        bio_mask_entropy_quantile=bio_mask_entropy_quantile,
+        bio_mask_margin_min=bio_mask_margin_min,
+        bio_mask_min_frac=bio_mask_min_frac,
 
         run_ssgsea=run_ssgsea,
         ssgsea_aggregate=ssgsea_aggregate,

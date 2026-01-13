@@ -185,18 +185,37 @@ class ClusterAnnotateConfig(BaseModel):
     w_hom: float = 0.15
     w_frag: float = 0.10
     w_bioari: float = 0.15
-    bio_mask_mode: Literal["none", "entropy_margin"] = "entropy_margin"
 
-    # Hybrid entropy gate: H <= max(abs_limit, quantile)
-    bio_entropy_abs_limit: float = 0.5
-    bio_entropy_quantile: float = 0.7
+    # ------------------------------------------------------------------
+    # Bio-metrics masking (CellTypist confidence gate)
+    # Applies ONLY to biological metrics (bio_hom/bio_frag/bio_ari),
+    # not to clustering itself.
+    # ------------------------------------------------------------------
+    bio_mask_enabled: bool = True
 
-    # Margin gate: (p1 - p2) >= margin_min
-    bio_margin_min: float = 0.10
+    # "Hybrid Entropy Gate" parameters
+    bio_mask_entropy_abs_limit: float = Field(
+        0.5,
+        description="Absolute entropy ceiling. Cells with entropy <= this always pass.",
+    )
+    bio_mask_entropy_quantile: float = Field(
+        0.7,
+        description="Fallback entropy quantile (relative). Used as max(abs_limit, q-threshold).",
+    )
 
-    # Safety: if too few cells pass, disable bio metrics for this run
-    bio_mask_min_cells: int = 500
-    bio_mask_min_frac: float = 0.05
+    # Margin gate (p1 - p2)
+    bio_mask_margin_min: float = Field(
+        0.1,
+        description="Minimum margin (top1 - top2) required to pass biomask.",
+    )
+
+    # Safety: if mask is too strict, relax to keep at least this fraction (0 disables)
+    bio_mask_min_frac: float = Field(
+        0.10,
+        ge=0.0,
+        le=1.0,
+        description="Ensure at least this fraction of cells remain for bio metrics; if fewer, relax entropy cutoff.",
+    )
 
     # ------------------------------------------------------------------
     # ssGSEA
@@ -320,4 +339,28 @@ class ClusterAnnotateConfig(BaseModel):
         v = str(v).lower().strip()
         if v not in {"mean", "median"}:
             raise ValueError("ssgsea_aggregate must be one of: 'mean', 'median'")
+        return v
+
+    @field_validator("bio_mask_entropy_abs_limit")
+    @classmethod
+    def _validate_bio_mask_entropy_abs(cls, v: float) -> float:
+        v = float(v)
+        if v < 0.0:
+            raise ValueError("bio_mask_entropy_abs_limit must be >= 0")
+        return v
+
+    @field_validator("bio_mask_entropy_quantile")
+    @classmethod
+    def _validate_bio_mask_entropy_quantile(cls, v: float) -> float:
+        v = float(v)
+        if not (0.0 < v <= 1.0):
+            raise ValueError("bio_mask_entropy_quantile must be in (0, 1]")
+        return v
+
+    @field_validator("bio_mask_margin_min")
+    @classmethod
+    def _validate_bio_mask_margin_min(cls, v: float) -> float:
+        v = float(v)
+        if not (0.0 <= v <= 1.0):
+            raise ValueError("bio_mask_margin_min must be in [0, 1]")
         return v
