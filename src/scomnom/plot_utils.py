@@ -7,6 +7,7 @@ import logging
 from sklearn.metrics import silhouette_samples
 
 import matplotlib as mpl
+import matplotlib.pyplot as plt
 import numpy as np
 import scanpy as sc
 import pandas as pd
