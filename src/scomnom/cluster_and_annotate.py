@@ -374,12 +374,12 @@ def _compute_bio_fragmentation(
 class ResolutionMetrics:
     resolutions: List[float]
     silhouette: Dict[float, float]
-    penalized: Optional[Dict[float, float]] = None
     cluster_counts: Dict[float, int]
     cluster_sizes: Dict[float, np.ndarray]
     labels_per_resolution: Dict[float, np.ndarray]
     ari_adjacent: Optional[Dict[Tuple[float, float], float]] = None
     # Optional biological metrics (per resolution)
+    penalized: Optional[Dict[float, float]] = None
     bio_homogeneity: Optional[Dict[float, float]] = None
     bio_fragmentation: Optional[Dict[float, float]] = None
     bio_ari: Optional[Dict[float, float]] = None
