@@ -7,11 +7,10 @@ import logging
 from sklearn.metrics import silhouette_samples
 
 import matplotlib as mpl
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import scanpy as sc
 import anndata as ad
+import re
 
 LOGGER = logging.getLogger(__name__)
 
@@ -37,6 +36,8 @@ mpl.rcParams["figure.subplot.right"] = 0.9
 
 FIGURE_FORMATS = ["png", "pdf"]
 ROOT_FIGDIR: Path | None = None
+RUN_FIG_SUBDIR: Path | None = None
+RUN_KEY: str | None = None
 
 
 # -------------------------------------------------------------------------
@@ -50,16 +51,23 @@ def set_figure_formats(formats: Sequence[str]) -> None:
 def setup_scanpy_figs(figdir: Path, formats: Sequence[str] | None = None) -> None:
     """
     Configure Scanpy and global figure settings for scOmnom.
+
+    figdir is the base root where per-format folders live, typically:
+      <output_dir>/figures
     """
-    global ROOT_FIGDIR
+    global ROOT_FIGDIR, RUN_FIG_SUBDIR, RUN_KEY
+
     figdir = Path(figdir)
     ROOT_FIGDIR = figdir.resolve()
 
     if formats is not None:
         set_figure_formats(formats)
 
-    sc.settings.figdir = ROOT_FIGDIR
+    # Reset run routing; it will be inferred lazily from first save_multi call.
+    RUN_FIG_SUBDIR = None
+    RUN_KEY = None
 
+    sc.settings.figdir = ROOT_FIGDIR
     sc.settings.autoshow = False
     sc.settings.autosave = False
 
@@ -74,37 +82,37 @@ def setup_scanpy_figs(figdir: Path, formats: Sequence[str] | None = None) -> Non
         format=FIGURE_FORMATS[0],
     )
 
-    figdir.mkdir(parents=True, exist_ok=True)
+    ROOT_FIGDIR.mkdir(parents=True, exist_ok=True)
 
 
 def save_multi(stem: str, figdir: Path, fig=None) -> None:
-    """
-    Save the current matplotlib figure (or a provided figure) to multiple formats
-    under ext / relative_path.
-
-    Parameters
-    ----------
-    stem : str
-        Base filename without extension.
-    figdir : Path
-        Directory where figures should be placed (subdirectories created automatically).
-    fig : matplotlib.figure.Figure, optional
-        If provided, activate and save this figure instead of the current active one.
-    """
     import matplotlib.pyplot as plt
-    global ROOT_FIGDIR
+    global ROOT_FIGDIR, RUN_FIG_SUBDIR, RUN_KEY
 
     if ROOT_FIGDIR is None:
         raise RuntimeError("ROOT_FIGDIR is not set. Call setup_scanpy_figs() first.")
 
-    # If a figure is provided, activate it
     if fig is not None:
         plt.figure(fig.number)
 
     figdir = Path(figdir)
 
+    # Lazily infer run folder from first path component used in save_multi calls.
+    if RUN_FIG_SUBDIR is None:
+        RUN_KEY = _infer_run_key(figdir)
+        RUN_FIG_SUBDIR = _next_round_subdir(
+            root_figdir=ROOT_FIGDIR,
+            formats=FIGURE_FORMATS,
+            run_name=RUN_KEY,
+        )
+        LOGGER.info("Figure run directory selected: %s/%s/<figdir>", RUN_KEY, RUN_FIG_SUBDIR)
+
+        # Precreate run dirs for each format
+        for ext in FIGURE_FORMATS:
+            (ROOT_FIGDIR / ext / RUN_FIG_SUBDIR).mkdir(parents=True, exist_ok=True)
+
     for ext in FIGURE_FORMATS:
-        outdir = ROOT_FIGDIR / ext / figdir
+        outdir = ROOT_FIGDIR / ext / RUN_FIG_SUBDIR / figdir
         outdir.mkdir(parents=True, exist_ok=True)
         outfile = outdir / f"{stem}.{ext}"
         LOGGER.info("Saving figure: %s", outfile)
@@ -116,6 +124,52 @@ def save_multi(stem: str, figdir: Path, fig=None) -> None:
 # -------------------------------------------------------------------------
 # Internal helpers
 # -------------------------------------------------------------------------
+def _next_round_subdir(root_figdir: Path, formats: Sequence[str], run_name: str) -> Path:
+    """
+    Pick next <run_name>_roundN by scanning *only* that module's folders:
+      <root_figdir>/<fmt>/<run_name>_roundN
+
+    Other modules' folders (e.g. qc_round*) are ignored.
+    """
+    root_figdir = Path(root_figdir)
+    rx = re.compile(rf"^{re.escape(run_name)}_round(\d+)$")
+
+    existing: set[int] = set()
+
+    for fmt in formats:
+        fmt_dir = root_figdir / fmt
+        if not fmt_dir.exists():
+            continue
+
+        for p in fmt_dir.iterdir():
+            if not p.is_dir():
+                continue
+            m = rx.match(p.name)
+            if m:
+                existing.add(int(m.group(1)))
+
+    n = 1
+    while n in existing:
+        n += 1
+
+    return Path(f"{run_name}_round{n}")
+
+
+def _infer_run_key(figdir: Path) -> str:
+    """
+    Infer module/run key from the first path component of figdir.
+    Examples:
+      Path("integration") -> "integration"
+      Path("integration/umaps") -> "integration"
+      Path("QC_plots/qc_metrics") -> "QC_plots"
+    """
+    figdir = Path(figdir)
+    parts = figdir.parts
+    if not parts:
+        return "figures"
+    return str(parts[0])
+
+
 def _clean_axes(ax):
     ax.grid(False)
     for spine in ["left", "bottom"]:

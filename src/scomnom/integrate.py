@@ -807,8 +807,6 @@ def _select_best_embedding(
     return str(best)
 
 
-
-
 def _load_scib_table_from_disk(output_dir: Path) -> pd.DataFrame:
     path = Path("integration_metrics_scaled.tsv")
     if not path.exists():
