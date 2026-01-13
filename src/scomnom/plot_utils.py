@@ -8,6 +8,7 @@ from sklearn.metrics import silhouette_samples
 
 import matplotlib as mpl
 import numpy as np
+import scanpy as sc
 import pandas as pd
 import anndata as ad
 import re
