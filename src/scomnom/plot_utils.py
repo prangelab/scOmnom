@@ -107,12 +107,16 @@ def save_multi(stem: str, figdir: Path, fig=None) -> None:
         )
         LOGGER.info("Figure run directory selected: %s/%s/<figdir>", RUN_KEY, RUN_FIG_SUBDIR)
 
-        # Precreate run dirs for each format
+        rel_figdir = figdir
+        if RUN_KEY is not None and rel_figdir.parts and rel_figdir.parts[0] == RUN_KEY:
+            rel_figdir = Path(*rel_figdir.parts[1:])
+
+        # Pre-create run dirs for each format
         for ext in FIGURE_FORMATS:
             (ROOT_FIGDIR / ext / RUN_FIG_SUBDIR).mkdir(parents=True, exist_ok=True)
 
     for ext in FIGURE_FORMATS:
-        outdir = ROOT_FIGDIR / ext / RUN_FIG_SUBDIR / figdir
+        outdir = ROOT_FIGDIR / ext / RUN_FIG_SUBDIR / rel_figdir
         outdir.mkdir(parents=True, exist_ok=True)
         outfile = outdir / f"{stem}.{ext}"
         LOGGER.info("Saving figure: %s", outfile)
