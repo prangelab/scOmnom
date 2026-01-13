@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import warnings
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Dict, List, Tuple, Sequence, Optional
@@ -1210,217 +1211,41 @@ def _ssgsea_on_cell_chunk(
 
     return pd.concat(all_scores, axis=1)
 
-
 def _run_ssgsea(adata: ad.AnnData, cfg: ClusterAnnotateConfig) -> None:
     """
-    Run ssGSEA on per-cell expression and store ES scores in adata.obsm.
+    Run ssGSEA on CLUSTER-AGGREGATED expression
 
-    Implementation notes
-    --------------------
-    - Uses gseapy.ssgsea under the hood.
-    - Parallelisation is implemented at the level of cell chunks using joblib:
-        * the expression matrix (genes x cells) is split by columns (cells)
-        * each chunk runs ssGSEA independently (threads=1 inside gseapy)
-        * results are concatenated back into a full (cells x pathways) matrix
-    - We keep ES (enrichment score) only; NES is less interpretable for
-      per-cell workflows and adds extra noise.
-    - Results are stored as:
-        * adata.obsm["ssgsea_scores"]  ->  (n_cells x n_pathways) numpy array
-        * adata.uns["ssgsea_scores_columns"] -> list of pathway names
-        * adata.uns["ssgsea_cluster_means"] -> DataFrame (clusters x pathways)
-        * adata.uns["ssgsea"]["config"] -> small config snapshot
+    Stores:
+      - adata.uns["ssgsea_cluster_means"] : DataFrame (clusters x pathways)
+      - adata.uns["ssgsea"]["config"]     : config snapshot
     """
     if not getattr(cfg, "run_ssgsea", False):
         LOGGER.info("ssGSEA disabled (run_ssgsea=False); skipping.")
         return
 
     try:
-        import gseapy as gp  # noqa: F401  (imported just to check availability)
+        import gseapy as gp  # noqa: F401
     except ImportError:
         LOGGER.warning(
-            "gseapy is not installed; cannot run ssGSEA. "
-            "Install with `pip install gseapy`."
+            "gseapy is not installed; cannot run ssGSEA. Install with `pip install gseapy`."
         )
         return
 
-    # ------------------------------------------------------------------
-    # 1) Resolve gene set GMT files (MSigDB + custom)
-    # ------------------------------------------------------------------
+    # --------------------------------------------------
+    # 1) Resolve gene set GMT files
+    # --------------------------------------------------
     try:
-        gmt_files, used_keywords = resolve_msigdb_gene_sets(cfg.ssgsea_gene_sets)
+        gmt_files, used_keywords, msigdb_release = resolve_msigdb_gene_sets(cfg.ssgsea_gene_sets)
     except Exception as e:
         LOGGER.warning("ssGSEA: failed to resolve gene sets: %s", e)
         return
-
     if not gmt_files:
-        LOGGER.warning("ssGSEA: no gene set files resolved; skipping ssGSEA.")
+        LOGGER.warning("ssGSEA: no gene set files resolved; skipping.")
         return
 
-    # ------------------------------------------------------------------
-    # 2) Expression matrix: choose source and build DataFrame (genes x cells)
-    # ------------------------------------------------------------------
-    from scipy import sparse
-
-    genes = adata.var_names
-    X = adata.X
-
-    if getattr(cfg, "ssgsea_use_raw", True):
-        if adata.raw is not None:
-            LOGGER.info(
-                "ssGSEA using adata.raw.X (genes=%d, cells=%d).",
-                adata.raw.n_vars,
-                adata.raw.n_obs,
-            )
-            X = adata.raw.X
-            genes = adata.raw.var_names
-        elif "X_raw" in adata.layers:
-            LOGGER.info(
-                "ssGSEA using adata.layers['X_raw'] (genes=%d, cells=%d).",
-                adata.n_vars,
-                adata.n_obs,
-            )
-            X = adata.layers["X_raw"]
-            genes = adata.var_names
-        else:
-            LOGGER.info(
-                "ssGSEA: ssgsea_use_raw=True but no adata.raw / 'X_raw' layer found; "
-                "falling back to adata.X."
-            )
-            X = adata.X
-            genes = adata.var_names
-    else:
-        LOGGER.info(
-            "ssGSEA using adata.X (genes=%d, cells=%d).",
-            adata.n_vars,
-            adata.n_obs,
-        )
-        X = adata.X
-        genes = adata.var_names
-
-    # Convert matrix to dense numpy array safely
-    try:
-        if sparse.issparse(X):
-            X_dense = X.toarray()
-        else:
-            X_dense = np.asarray(X)
-    except Exception as e:
-        LOGGER.error("ssGSEA: failed to densify expression matrix: %s", e)
-        return
-
-    # gseapy.ssgsea expects DataFrame with genes as index and samples as columns
-    expr_df = pd.DataFrame(
-        X_dense.T,  # genes x cells
-        index=genes,
-        columns=adata.obs_names,
-    )
-
-    n_cells = expr_df.shape[1]
-    n_genes = expr_df.shape[0]
-
-    # ------------------------------------------------------------------
-    # 3) Parallel ssGSEA over cell chunks
-    # ------------------------------------------------------------------
-    nproc = int(getattr(cfg, "ssgsea_nproc", 1) or 1)
-
-    # Try to import joblib if we intend to parallelize
-    Parallel = None
-    delayed = None
-    if nproc > 1:
-        try:
-            from joblib import Parallel as _Parallel, delayed as _delayed
-
-            Parallel = _Parallel
-            delayed = _delayed
-        except ImportError:
-            LOGGER.warning(
-                "joblib is not installed; falling back to sequential ssGSEA "
-                "(ssgsea_nproc=%d requested).",
-                nproc,
-            )
-            nproc = 1
-
-    LOGGER.info(
-        "Running ssGSEA on %d cells and %d genes for %d gene set file(s) "
-        "with nproc=%d (joblib-based parallelism).",
-        n_cells,
-        n_genes,
-        len(gmt_files),
-        nproc,
-    )
-
-    # Sequential path (no joblib or nproc == 1)
-    if nproc <= 1 or Parallel is None or delayed is None:
-        try:
-            ssgsea_mat = _ssgsea_on_cell_chunk(expr_df, gmt_files, cfg)
-        except RuntimeError as e:
-            LOGGER.warning("ssGSEA: no successful results (sequential run): %s", e)
-            return
-    else:
-        # Parallel over cell chunks
-        # Number of jobs cannot exceed number of cells
-        n_jobs = min(nproc, n_cells)
-
-        # Split columns into n_jobs chunks
-        all_cols = expr_df.columns.to_numpy()
-        col_indices = np.array_split(np.arange(n_cells), n_jobs)
-
-        chunk_exprs: list[pd.DataFrame] = []
-        for idx in col_indices:
-            if idx.size == 0:
-                continue
-            cols = all_cols[idx]
-            chunk_exprs.append(expr_df.loc[:, cols])
-
-        LOGGER.info(
-            "ssGSEA parallel: %d jobs over %d non-empty chunks (cells per chunk: ~%d).",
-            n_jobs,
-            len(chunk_exprs),
-            int(np.ceil(n_cells / max(1, len(chunk_exprs)))),
-        )
-
-        try:
-            chunk_results = Parallel(n_jobs=n_jobs)(
-                delayed(_ssgsea_on_cell_chunk)(chunk_df, gmt_files, cfg)
-                for chunk_df in chunk_exprs
-            )
-        except Exception as e:
-            LOGGER.warning(
-                "ssGSEA parallel execution failed (%s); falling back to sequential run.",
-                e,
-            )
-            try:
-                ssgsea_mat = _ssgsea_on_cell_chunk(expr_df, gmt_files, cfg)
-            except RuntimeError as e2:
-                LOGGER.warning("ssGSEA: no successful results (fallback sequential): %s", e2)
-                return
-        else:
-            # Concatenate cell chunks (rows are cells)
-            ssgsea_mat = pd.concat(chunk_results, axis=0)
-
-    if ssgsea_mat.empty:
-        LOGGER.warning("No successful ssGSEA results; skipping storage.")
-        return
-
-    # Ensure row order matches adata.obs_names
-    ssgsea_mat = ssgsea_mat.reindex(index=adata.obs_names)
-
-    ssgsea_mat = ssgsea_mat.astype(float)
-
-    # ------------------------------------------------------------------
-    # 4) Store ES matrices in AnnData
-    # ------------------------------------------------------------------
-    adata.obsm["ssgsea_scores"] = ssgsea_mat.to_numpy()
-    adata.uns["ssgsea_scores_columns"] = list(ssgsea_mat.columns)
-
-    LOGGER.info(
-        "Stored ssGSEA ES scores in adata.obsm['ssgsea_scores'] "
-        "with %d pathways.",
-        ssgsea_mat.shape[1],
-    )
-
-    # ------------------------------------------------------------------
-    # 5) Cluster-level means (using best available cluster identifier)
-    # ------------------------------------------------------------------
+    # --------------------------------------------------
+    # 2) Choose clustering key (must exist)
+    # --------------------------------------------------
     cluster_key = None
     if "cluster_label" in adata.obs:
         cluster_key = "cluster_label"
@@ -1429,36 +1254,200 @@ def _run_ssgsea(adata: ad.AnnData, cfg: ClusterAnnotateConfig) -> None:
     elif getattr(cfg, "label_key", None) and cfg.label_key in adata.obs:
         cluster_key = cfg.label_key
 
-    if cluster_key is not None:
-        cl = adata.obs[cluster_key]
-        cluster_means = ssgsea_mat.groupby(cl).mean()
-        adata.uns["ssgsea_cluster_means"] = cluster_means
-        LOGGER.info(
-            "Computed ssGSEA cluster means using '%s': %d clusters x %d pathways.",
-            cluster_key,
-            cluster_means.shape[0],
-            cluster_means.shape[1],
-        )
-    else:
-        LOGGER.warning(
-            "Could not compute ssGSEA cluster means: no suitable cluster key "
-            "found in adata.obs (looked for 'cluster_label', final_auto_idents_key, label_key)."
+    if cluster_key is None:
+        LOGGER.warning("ssGSEA: no cluster key found in adata.obs; skipping.")
+        return
+
+    # --------------------------------------------------
+    # 3) Pick expression source (raw counts layer if possible)
+    # --------------------------------------------------
+    from scipy import sparse
+
+    X = adata.X
+    genes = adata.var_names
+
+    if getattr(cfg, "ssgsea_use_raw", True):
+        if "counts_raw" in adata.layers:
+            LOGGER.info("ssGSEA using adata.layers['counts_raw'] (counts_raw layer).")
+            X = adata.layers["counts_raw"]
+            genes = adata.var_names
+        elif "counts_cb" in adata.layers:
+            LOGGER.info("ssGSEA using adata.layers['counts_cb'] (cellbender layer).")
+            X = adata.layers["counts_cb"]
+            genes = adata.var_names
+        elif adata.raw is not None:
+            LOGGER.info("ssGSEA using adata.raw.X.")
+            X = adata.raw.X
+            genes = adata.raw.var_names
+        else:
+            LOGGER.info(
+                "ssGSEA: requested raw, but no counts_raw/counts_cb/adata.raw; using adata.X."
+            )
+            X = adata.X
+            genes = adata.var_names
+
+    # --------------------------------------------------
+    # 4) Aggregate expression by cluster WITHOUT densifying full matrix
+    #    Output: genes x clusters DataFrame
+    # --------------------------------------------------
+    agg = getattr(cfg, "ssgsea_aggregate", "mean").lower().strip()
+    if agg not in {"mean", "median"}:
+        agg = "mean"
+
+    cl = adata.obs[cluster_key].astype(str).to_numpy()
+    clusters = pd.Index(pd.unique(cl), dtype=str)
+
+    X_csr = X.tocsr() if sparse.issparse(X) else np.asarray(X)
+
+    expr_cols = {}
+    LOGGER.info(
+        "ssGSEA: aggregating expression by '%s' using %s over %d clusters.",
+        cluster_key,
+        agg,
+        len(clusters),
+    )
+
+    for c in clusters:
+        idx = np.where(cl == c)[0]
+        if idx.size == 0:
+            continue
+
+        if sparse.issparse(X_csr):
+            sub = X_csr[idx, :]
+            if agg == "mean":
+                vec = np.asarray(sub.mean(axis=0)).ravel()
+            else:
+                vec = np.median(sub.toarray(), axis=0)
+        else:
+            sub = X_csr[idx, :]
+            vec = sub.mean(axis=0) if agg == "mean" else np.median(sub, axis=0)
+
+        expr_cols[c] = vec
+
+    if not expr_cols:
+        LOGGER.warning("ssGSEA: no clusters produced aggregated expression; skipping.")
+        return
+
+    expr_df = pd.DataFrame(expr_cols, index=pd.Index(genes, name="gene"))
+    LOGGER.info(
+        "ssGSEA: running on aggregated matrix: %d genes × %d clusters.",
+        expr_df.shape[0],
+        expr_df.shape[1],
+    )
+
+    # --------------------------------------------------
+    # 5) Run ssGSEA over GMTs in parallel (always) and concatenate pathways
+    # --------------------------------------------------
+    def _ssgsea_one_gmt(expr_df_: pd.DataFrame, gmt: str, *, threads: int) -> pd.DataFrame:
+        # Prevent oversubscription from BLAS/OpenMP inside each job
+        import os
+
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+        os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+        os.environ.setdefault("MKL_NUM_THREADS", "1")
+        os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+        os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
+        import gseapy as gp
+
+        ss = gp.ssgsea(
+            data=expr_df_,
+            gene_sets=str(gmt),
+            outdir=None,
+            sample_norm_method=getattr(cfg, "ssgsea_sample_norm_method", "rank"),
+            min_size=int(getattr(cfg, "ssgsea_min_size", 10)),
+            max_size=int(getattr(cfg, "ssgsea_max_size", 500)),
+            threads=int(max(1, threads)),
+            no_plot=True,
         )
 
-    # ------------------------------------------------------------------
-    # 6) Attach a small config snapshot
-    # ------------------------------------------------------------------
+        res2d = ss.res2d
+        if not isinstance(res2d, pd.DataFrame):
+            res2d = pd.DataFrame(res2d)
+
+        es = res2d.pivot(index="Term", columns="Name", values="ES")  # pathways x clusters
+        es = es.reindex(columns=expr_df_.columns)  # ensure cluster order
+        es = es.T  # clusters x pathways
+
+        lib_prefix = Path(str(gmt)).stem
+        es.columns = [f"{lib_prefix}::{term}" for term in es.columns]
+        return es
+
+    # Decide parallel shape
+    try:
+        from joblib import Parallel, delayed
+    except ImportError:
+        Parallel = None
+        delayed = None
+
+    nproc = int(getattr(cfg, "ssgsea_nproc", 1) or 1)
+    nproc_eff = max(1, nproc - 1)  # <-- your rule: avoid oversubscribing, leave 1 core
+    n_jobs = min(len(gmt_files), nproc_eff)
+    threads_per_job = max(1, nproc_eff // n_jobs)
+
+    LOGGER.info(
+        "ssGSEA parallel (over GMTs): G=%d, nproc=%d → nproc_eff=%d, n_jobs=%d, threads/job=%d",
+        len(gmt_files),
+        nproc,
+        nproc_eff,
+        n_jobs,
+        threads_per_job,
+    )
+
+    all_es: list[pd.DataFrame] = []
+
+    if Parallel is None or delayed is None or n_jobs <= 1:
+        # Fallback: sequential GMTs, but still use threads_per_job to exploit cores safely
+        for gmt in gmt_files:
+            try:
+                all_es.append(_ssgsea_one_gmt(expr_df, gmt, threads=threads_per_job))
+            except Exception as e:
+                LOGGER.warning("ssGSEA failed for gene_sets='%s': %s", gmt, e)
+    else:
+        # Always parallel over GMTs
+        results = Parallel(n_jobs=n_jobs, backend="loky")(
+            delayed(_ssgsea_one_gmt)(expr_df, gmt, threads=threads_per_job)
+            for gmt in gmt_files
+        )
+        # Filter any Nones (shouldn't happen unless you change worker)
+        all_es = [x for x in results if isinstance(x, pd.DataFrame) and not x.empty]
+
+    if not all_es:
+        LOGGER.warning("ssGSEA: no successful results; skipping.")
+        return
+
+    ssgsea_cluster = pd.concat(all_es, axis=1)
+
+    # --------------------------------------------------
+    # 6) Store only cluster-level results
+    # --------------------------------------------------
+    adata.uns["ssgsea_cluster_means"] = ssgsea_cluster
+
     adata.uns.setdefault("ssgsea", {})
     adata.uns["ssgsea"]["config"] = {
-        "run_ssgsea": bool(getattr(cfg, "run_ssgsea", False)),
+        "run_ssgsea": True,
+        "msigdb_release": msigdb_release,
+        "mode": "cluster",
+        "cluster_key": cluster_key,
+        "aggregate": agg,
         "gene_sets": [str(g) for g in gmt_files],
+        "used_keywords": used_keywords,
         "use_raw": bool(getattr(cfg, "ssgsea_use_raw", True)),
         "min_size": int(getattr(cfg, "ssgsea_min_size", 10)),
         "max_size": int(getattr(cfg, "ssgsea_max_size", 500)),
         "sample_norm_method": getattr(cfg, "ssgsea_sample_norm_method", "rank"),
-        "nproc": int(getattr(cfg, "ssgsea_nproc", 1)),
-        "backend": "gseapy_ssgsea_parallel_joblib",
+        "backend": "gseapy_ssgsea_cluster_aggregate_parallel_over_gmts",
+        "nproc": nproc,
+        "nproc_eff": nproc_eff,
+        "n_jobs": n_jobs,
+        "threads_per_job": threads_per_job,
     }
+
+    LOGGER.info(
+        "Stored ssGSEA cluster means in adata.uns['ssgsea_cluster_means']: %d clusters × %d pathways.",
+        ssgsea_cluster.shape[0],
+        ssgsea_cluster.shape[1],
+    )
 
 
 # -------------------------------------------------------------------------
@@ -1479,10 +1468,11 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
     - CellTypist annotation using precomputed labels
     - Plots + save outputs
     """
+    init_logging(cfg.logfile)
     LOGGER.info("Starting cluster_and_annotate")
 
-    in_path: Path = cfg.input_path
-    adata = sc.read_h5ad(str(in_path))
+    plot_utils.setup_scanpy_figs(cfg.figdir, cfg.figure_formats)
+    adata = io_utils.load_dataset(cfg.input_path)
 
     batch_key = io_utils.infer_batch_key(adata, cfg.batch_key)
     cfg.batch_key = batch_key
@@ -1498,7 +1488,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
 
     if cfg.make_figures:
         plot_utils.setup_scanpy_figs(cfg.figdir, cfg.figure_formats)
-    figdir_cluster = cfg.figdir / "cluster_and_annotate"
+    figdir_cluster = Path("cluster_and_annotate")
 
     best_res, sweep, clusterings = _resolution_sweep(
         adata,
@@ -1783,17 +1773,21 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
     except Exception as e:
         LOGGER.warning("ssGSEA step failed: %s", e)
 
-    if cfg.output_path is not None:
-        out_path = cfg.output_path
-    else:
-        out_path = in_path.with_name(f"{in_path.stem}.clustered.annotated.h5ad")
-
-    if getattr(cfg, "run_ssgsea", False) and "ssgsea_cluster_means" in adata.uns:
+    if cfg.make_figures and getattr(cfg, "run_ssgsea", False) and "ssgsea_cluster_means" in adata.uns:
         plot_utils.plot_ssgsea_cluster_topn_heatmap(
             adata,
-            cluster_key="cluster_label",
-            figdir=figdir_cluster,
-            top_n=5,
+            cluster_key = "cluster_label",
+            figdir = figdir_cluster,
+            n = cfg.ssgsea_plot_n,
+            z_score = True,
+        )
+        plot_utils.plot_ssgsea_cluster_topn_barplots(adata, cluster_key="cluster_label", figdir=figdir_cluster,
+                                                     n=cfg.ssgsea_plot_n)
+        plot_utils.plot_ssgsea_cluster_topn_dotplots(
+            adata,
+            figdir = figdir_cluster,
+            cluster_key = "cluster_label",
+            n = cfg.ssgsea_plot_n,
         )
 
     # Make 'plateaus' HDF5-safe: JSON-encode list of dicts if present
@@ -1805,7 +1799,22 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
         ca_uns["clustering"] = clustering
         adata.uns["cluster_and_annotate"] = ca_uns
 
-    io_utils.save_adata(adata, out_path)
-    LOGGER.info("Finished cluster_and_annotate. Wrote %s", out_path)
+    # ---------------------------------------------------------
+    # Save outputs
+    # ---------------------------------------------------------
+    out_zarr = cfg.resolved_output_dir / (cfg.output_name + ".zarr")
+    LOGGER.info("Saving clustered/annotated dataset as Zarr → %s", out_zarr)
+    io_utils.save_dataset(adata, out_zarr, fmt="zarr")
+
+    if getattr(cfg, "save_h5ad", False):
+        out_h5ad = cfg.resolved_output_dir / (cfg.output_name + ".h5ad")
+        LOGGER.warning(
+            "Writing additional H5AD output (loads full matrix into RAM): %s",
+            out_h5ad,
+        )
+        io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
+        LOGGER.info("Saved clustered/annotated H5AD → %s", out_h5ad)
+
+    LOGGER.info("Finished cluster_and_annotate")
 
     return adata

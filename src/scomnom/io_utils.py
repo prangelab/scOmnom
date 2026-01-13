@@ -1286,32 +1286,16 @@ def list_available_msigdb_keywords() -> List[str]:
 
 def resolve_msigdb_gene_sets(
     user_spec: List[str] | None,
-) -> Tuple[List[str], List[str]]:
+) -> Tuple[List[str], List[str], Optional[str]]:
     """
-    Resolve user-provided ssGSEA gene set specifiers into local .gmt file paths.
+    Returns (gmt_files, used_keywords, msigdb_release)
 
-    Parameters
-    ----------
-    user_spec : list[str] or None
-        - None or [] -> default ['HALLMARK', 'REACTOME'] (MSigDB collections)
-        - Each item can be:
-            * an MSigDB keyword (e.g. 'HALLMARK', 'REACTOME', 'C2_CP_REACTOME')
-            * a local/remote path to a .gmt file (endswith '.gmt')
-
-    Returns
-    -------
-    (gmt_files, used_keywords)
-        gmt_files     : list of file paths to feed into ssGSEA
-        used_keywords : list of resolved keywords (for logging / metadata)
-
-    Raises
-    ------
-    ValueError if no usable gene sets could be resolved.
+    msigdb_release is:
+      - a string like "2025.1.Hs" if MSigDB keywords were involved
+      - None if user provided only custom .gmt paths (optional semantics)
     """
     if not user_spec:
-        LOGGER.info(
-            "ssGSEA: no gene sets provided; defaulting to MSigDB HALLMARK + REACTOME."
-        )
+        LOGGER.info("ssGSEA: no gene sets provided; defaulting to MSigDB HALLMARK + REACTOME.")
         spec = ["HALLMARK", "REACTOME"]
     else:
         spec = [str(x).strip() for x in user_spec if str(x).strip()]
@@ -1326,14 +1310,14 @@ def resolve_msigdb_gene_sets(
     used_keywords: List[str] = []
     unresolved: List[str] = []
 
+    used_any_msigdb_keyword = False
+
     for item in spec:
         # Custom GMT file: user path
         if item.lower().endswith(".gmt"):
             path = Path(item)
             if not path.is_file():
-                LOGGER.warning(
-                    "Custom GMT file '%s' does not exist; skipping.", path
-                )
+                LOGGER.warning("Custom GMT file '%s' does not exist; skipping.", path)
                 unresolved.append(item)
                 continue
             gmt_files.append(str(path))
@@ -1351,6 +1335,7 @@ def resolve_msigdb_gene_sets(
             unresolved.append(item)
             continue
 
+        used_any_msigdb_keyword = True
         gmt_files.append(index[key])
         used_keywords.append(key)
 
@@ -1365,5 +1350,7 @@ def resolve_msigdb_gene_sets(
         ", ".join(f"{k} -> {p}" for k, p in zip(used_keywords, gmt_files)),
     )
 
-    return gmt_files, used_keywords
+    msigdb_release = release if used_any_msigdb_keyword else None
+    return gmt_files, used_keywords, msigdb_release
+
 
