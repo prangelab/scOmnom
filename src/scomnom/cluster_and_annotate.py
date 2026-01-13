@@ -150,6 +150,7 @@ def _maybe_build_bio_mask(
     stats["disabled_reason"] = None
     return mask, stats
 
+
 def _ensure_embedding(adata: ad.AnnData, embedding_key: str) -> str:
     """
     Ensure the chosen embedding exists; if not, try to recover from integration metadata.
@@ -373,6 +374,7 @@ def _compute_bio_fragmentation(
 class ResolutionMetrics:
     resolutions: List[float]
     silhouette: Dict[float, float]
+    penalized: Optional[Dict[float, float]] = None
     cluster_counts: Dict[float, int]
     cluster_sizes: Dict[float, np.ndarray]
     labels_per_resolution: Dict[float, np.ndarray]
@@ -381,6 +383,7 @@ class ResolutionMetrics:
     bio_homogeneity: Optional[Dict[float, float]] = None
     bio_fragmentation: Optional[Dict[float, float]] = None
     bio_ari: Optional[Dict[float, float]] = None
+    n_bio_labels: Optional[int] = None
 
 
 @dataclass
@@ -514,7 +517,7 @@ def _detect_plateaus(
         plateaus.append(
             Plateau(
                 resolutions=current_segment.copy(),
-                mean_stability=mean_stability,
+                mean_stability=mean_stab,
             )
         )
 
@@ -695,83 +698,195 @@ def select_best_resolution(
             bio_ari=metrics.bio_ari,
         )
 
-    # No plateau: fallback logic
+    # No plateau: parsimonious fallback logic
     sorted_res = sorted(metrics.resolutions)
     max_r = max(sorted_res)
     min_r = min(sorted_res)
 
+    # ------------------------------------------------------------------
+    #   Penalized-silhouette peak
+    #   candidate = argmax(metrics.penalized)
+    #   sanity: avoid "degenerate lowest-res" if stability is awful
+    # ------------------------------------------------------------------
+    candidate_pen = None
+    if metrics.penalized is not None and len(metrics.penalized) > 0:
+        candidate_pen = max(metrics.penalized, key=lambda r: float(metrics.penalized.get(r, -np.inf)))
+
+        # Optional sanity: if it picks extreme low res AND stability is terrible,
+        # don't accept it (forces us to look at stability knee).
+        min_stab_ok = 0.60
+        if float(candidate_pen) == float(min_r) and stability.get(candidate_pen, 0.0) < min_stab_ok:
+            LOGGER.info(
+                "No plateau: penalized-silhouette peak at min resolution %.3f but stability=%.3f < %.2f; "
+                "skipping penalized candidate.",
+                float(candidate_pen),
+                float(stability.get(candidate_pen, float("nan"))),
+                float(min_stab_ok),
+            )
+            candidate_pen = None
+
+    # ------------------------------------------------------------------
+    #   Stability knee (start of saturation)
+    #   knee = smallest r with stability[r] >= knee_frac * max_stability
+    # ------------------------------------------------------------------
+    knee_frac = 0.95
+    max_stab = max(float(v) for v in stability.values()) if stability else 0.0
+
+    candidate_knee = None
+    if max_stab > 0:
+        thr = knee_frac * max_stab
+        for r in sorted_res:
+            if float(stability.get(r, 0.0)) >= thr:
+                candidate_knee = float(r)
+                break
+
+    # ------------------------------------------------------------------
+    #   Max total composite
+    # ------------------------------------------------------------------
     best_r_by_score = max(all_scores, key=all_scores.get)
 
-    if (
-        float(best_r_by_score) == float(max_r)
-        and metrics.silhouette.get(max_r, -1.0) < 0.15
-    ):
-        LOGGER.info(
-            "Border guard: composite optimum at max resolution %.3f but silhouette=%.3f < 0.15. "
-            "Falling back to lowest resolution.",
-            max_r,
-            metrics.silhouette.get(max_r, float("nan")),
-        )
-        best_resolution = float(min_r)
-        return ResolutionSelectionResult(
-            best_resolution=best_resolution,
-            scores=all_scores,
-            stability=stability,
-            tiny_cluster_penalty=tiny_penalty,
-            plateaus=plateaus,
-            bio_homogeneity=metrics.bio_homogeneity,
-            bio_fragmentation=metrics.bio_fragmentation,
-            bio_ari=metrics.bio_ari,
-        )
-
-    scores_arr = np.array([all_scores[r] for r in sorted_res])
-    n = len(sorted_res)
-
-    local_max_idx = []
-    for i in range(1, n - 1):
-        if scores_arr[i] > scores_arr[i - 1] and scores_arr[i] > scores_arr[i + 1]:
-            local_max_idx.append(i)
-
-    local_max_idx = [i for i in local_max_idx if i not in (0, n - 1)]
-
-    if local_max_idx:
-        best_idx = max(local_max_idx, key=lambda k: scores_arr[k])
-        best_resolution = float(sorted_res[best_idx])
-
-        LOGGER.info(
-            "No plateau; selecting strongest local maximum at %.3f (score=%.3f).",
-            best_resolution,
-            scores_arr[best_idx],
-        )
-
-        return ResolutionSelectionResult(
-            best_resolution=best_resolution,
-            scores=all_scores,
-            stability=stability,
-            tiny_cluster_penalty=tiny_penalty,
-            plateaus=plateaus,
-            bio_homogeneity=metrics.bio_homogeneity,
-            bio_fragmentation=metrics.bio_fragmentation,
-            bio_ari=metrics.bio_ari,
-        )
-
-    if float(best_r_by_score) in (float(min_r), float(max_r)):
-        interior = sorted_res[1:-1]
-        interior_best = max(interior, key=lambda r: all_scores[r])
-        best_resolution = float(interior_best)
-
-        LOGGER.info(
-            "No plateau and no local maxima; global score peak was at border. "
-            "Selecting best interior resolution %.3f (score=%.3f).",
-            best_resolution,
-            all_scores[best_resolution],
-        )
+    # Choose candidate by hierarchy
+    if candidate_pen is not None:
+        candidate = float(candidate_pen)
+        candidate_reason = "penalized_silhouette_peak"
+    elif candidate_knee is not None:
+        candidate = float(candidate_knee)
+        candidate_reason = f"stability_knee(frac={knee_frac:.2f})"
     else:
-        best_resolution = float(best_r_by_score)
-        LOGGER.info(
-            "No plateau and no local maxima; selected %.3f by global composite score.",
-            best_resolution,
+        candidate = float(best_r_by_score)
+        candidate_reason = "max_total_composite"
+
+    LOGGER.info(
+        "No plateau candidates: penalized=%s, knee=%s, max_total=%s",
+        "None" if candidate_pen is None else f"{float(candidate_pen):.3f}",
+        "None" if candidate_knee is None else f"{float(candidate_knee):.3f}",
+        f"{float(best_r_by_score):.3f}",
+    )
+
+    LOGGER.info(
+        "No plateau: initial candidate %.3f chosen by %s (Total=%.3f, stability=%.3f).",
+        candidate,
+        candidate_reason,
+        float(all_scores.get(candidate, float("nan"))),
+        float(stability.get(candidate, float("nan"))),
+    )
+
+    # ------------------------------------------------------------------
+    # Bio complexity ratio veto
+    # ------------------------------------------------------------------
+    def _apply_bio_complexity_veto(r_pick: float) -> float:
+        if not use_bio_effective:
+            return float(r_pick)
+
+        n_bio = metrics.n_bio_labels
+        if n_bio is None or n_bio <= 0:
+            return float(r_pick)
+
+        ratio_max = 2.5  # safe default
+        n_clusters_pick = metrics.cluster_counts.get(r_pick, 0)
+
+        if n_clusters_pick <= ratio_max * n_bio:
+            return float(r_pick)
+
+        # restrict to resolutions that satisfy the ratio
+        allowed = [
+            r for r in metrics.resolutions
+            if metrics.cluster_counts.get(r, 0) <= ratio_max * n_bio
+        ]
+
+        if not allowed:
+            return float(r_pick)
+
+        # choose best composite among allowed
+        r_best_allowed = max(
+            allowed, key=lambda r: float(all_scores.get(r, -np.inf))
         )
+
+        LOGGER.info(
+            "Bio complexity veto: resolution %.3f has %d clusters but only %d bio labels "
+            "(ratio=%.2f > %.2f). Snapping to %.3f (%d clusters).",
+            float(r_pick),
+            int(n_clusters_pick),
+            int(n_bio),
+            float(n_clusters_pick / max(1, n_bio)),
+            float(ratio_max),
+            float(r_best_allowed),
+            int(metrics.cluster_counts.get(r_best_allowed, 0)),
+        )
+
+        return float(r_best_allowed)
+
+    # ------------------------------------------------------------------
+    # Bio-cliff veto (applies to whatever candidate we picked)
+    #   If candidate is post-cliff, snap back to best allowed pre-cliff.
+    #
+    # Allowed region:
+    #   bio_ari_norm[r] >= bio_ari_norm[r*] - drop
+    # where r* maximizes bio_ari_norm.
+    # ------------------------------------------------------------------
+    def _apply_bio_cliff_veto(r_pick: float) -> float:
+        if not use_bio_effective:
+            return float(r_pick)
+
+        bioari_norm_local = _normalize_scores(metrics.bio_ari or {})
+        if not bioari_norm_local:
+            return float(r_pick)
+
+        r_star = max(bioari_norm_local, key=lambda r: float(bioari_norm_local.get(r, -np.inf)))
+        v_star = float(bioari_norm_local.get(r_star, 0.0))
+
+        bioari_drop = 0.35
+        allowed = [r for r in sorted_res if float(bioari_norm_local.get(r, 0.0)) >= (v_star - bioari_drop)]
+
+        # If nothing allowed (shouldn't happen), do nothing
+        if not allowed:
+            return float(r_pick)
+
+        if float(r_pick) in [float(r) for r in allowed]:
+            return float(r_pick)
+
+        # Snap back: pick best composite within allowed set
+        r_best_allowed = max(allowed, key=lambda r: float(all_scores.get(float(r), -np.inf)))
+
+        LOGGER.info(
+            "Bio-cliff veto: candidate %.3f is post-cliff (bioARI_norm=%.3f; best=%.3f at %.3f; drop=%.2f). "
+            "Snapping to best allowed %.3f (bioARI_norm=%.3f, Total=%.3f).",
+            float(r_pick),
+            float(bioari_norm_local.get(float(r_pick), float("nan"))),
+            float(v_star),
+            float(r_star),
+            float(bioari_drop),
+            float(r_best_allowed),
+            float(bioari_norm_local.get(float(r_best_allowed), float("nan"))),
+            float(all_scores.get(float(r_best_allowed), float("nan"))),
+        )
+        return float(r_best_allowed)
+
+    candidate = _apply_bio_cliff_veto(candidate)
+    candidate = _apply_bio_complexity_veto(candidate)
+
+    # ------------------------------------------------------------------
+    # "border guard" as a final safety
+    # ------------------------------------------------------------------
+    if float(candidate) == float(max_r) and metrics.silhouette.get(max_r, -1.0) < 0.15:
+        LOGGER.info(
+            "Border guard: chosen resolution at max %.3f but silhouette=%.3f < 0.15; "
+            "falling back to best interior by composite.",
+            float(max_r),
+            float(metrics.silhouette.get(max_r, float("nan"))),
+        )
+        interior = sorted_res[1:-1]
+        if interior:
+            candidate = float(max(interior, key=lambda r: float(all_scores.get(float(r), -np.inf))))
+        else:
+            candidate = float(min_r)
+
+    best_resolution = float(candidate)
+    LOGGER.info(
+        "No plateau: final selected resolution %.3f (Total=%.3f).",
+        best_resolution,
+        float(all_scores.get(best_resolution, float("nan"))),
+    )
 
     return ResolutionSelectionResult(
         best_resolution=best_resolution,
@@ -834,6 +949,13 @@ def _resolution_sweep(
         LOGGER.warning(
             "bio_guided_clustering=True, but CellTypist labels are unavailable. "
             "Resolution sweep will use structural metrics only."
+        )
+
+    n_bio_labels_masked: Optional[int] = None
+    if use_bio:
+        # number of unique CellTypist labels among MASKED cells
+        n_bio_labels_masked = int(
+            pd.unique(celltypist_labels[bio_mask]).size
         )
 
     for res in resolutions:
@@ -911,9 +1033,11 @@ def _resolution_sweep(
     metrics = ResolutionMetrics(
         resolutions=res_list,
         silhouette={r: s for r, s in zip(res_list, silhouette_scores)},
+        penalized={r: p for r, p in zip(res_list, penalized_scores)},
         cluster_counts={r: n for r, n in zip(res_list, n_clusters_list)},
         cluster_sizes=cluster_sizes,
         labels_per_resolution=clusterings_float,
+        n_bio_labels=n_bio_labels_masked,
     )
 
     if bio_hom and bio_frag and bio_ari:
