@@ -29,6 +29,127 @@ CLUSTER_LABEL_KEY = "cluster_label"
 # -------------------------------------------------------------------------
 # Internal helpers
 # -------------------------------------------------------------------------
+def _celltypist_entropy_margin_mask(
+    prob_matrix: pd.DataFrame,
+    *,
+    entropy_abs_limit: float,
+    entropy_quantile: float,
+    margin_min: float,
+) -> tuple[np.ndarray, dict]:
+    """
+    Compute a boolean mask of "good" CellTypist predictions based on:
+      good = (H <= max(H_abs, H_q)) AND (margin >= margin_min)
+
+    where:
+      H = -sum(p log p)
+      margin = p1 - p2  (top1 minus top2 probabilities)
+
+    Returns:
+      mask (np.ndarray[bool]) aligned to prob_matrix rows
+      stats (dict) with thresholds and summary
+    """
+    P = prob_matrix.to_numpy(dtype=np.float64, copy=False)  # (n_cells, n_classes)
+    n = P.shape[0]
+    if n == 0:
+        return np.zeros((0,), dtype=bool), {"n_cells": 0}
+
+    # --- entropy ---
+    eps = 1e-12
+    P_clip = np.clip(P, eps, 1.0)
+    entropy = -np.sum(P_clip * np.log(P_clip), axis=1)
+
+    # --- margin via top-2 (O(n) per row using partition) ---
+    # top2: two largest values, unsorted
+    top2 = np.partition(P, kth=-2, axis=1)[:, -2:]  # (n, 2)
+    p1 = np.max(top2, axis=1)
+    p2 = np.min(top2, axis=1)
+    margin = p1 - p2
+
+    # hybrid entropy cutoff
+    H_q = float(np.quantile(entropy, float(entropy_quantile)))
+    H_abs = float(entropy_abs_limit)
+    H_cut = max(H_abs, H_q)
+
+    mask = (entropy <= H_cut) & (margin >= float(margin_min))
+
+    stats = {
+        "n_cells": int(n),
+        "kept": int(mask.sum()),
+        "kept_frac": float(mask.mean()),
+        "entropy_abs_limit": H_abs,
+        "entropy_quantile": float(entropy_quantile),
+        "entropy_q_value": H_q,
+        "entropy_cut_used": H_cut,
+        "margin_min": float(margin_min),
+        "entropy_summary": {
+            "min": float(np.min(entropy)),
+            "p10": float(np.percentile(entropy, 10)),
+            "median": float(np.median(entropy)),
+            "p90": float(np.percentile(entropy, 90)),
+            "max": float(np.max(entropy)),
+        },
+        "margin_summary": {
+            "min": float(np.min(margin)),
+            "p10": float(np.percentile(margin, 10)),
+            "median": float(np.median(margin)),
+            "p90": float(np.percentile(margin, 90)),
+            "max": float(np.max(margin)),
+        },
+    }
+    return mask, stats
+
+
+def _maybe_build_bio_mask(
+    cfg: ClusterAnnotateConfig,
+    celltypist_proba: Optional[pd.DataFrame],
+    n_obs: int,
+) -> tuple[Optional[np.ndarray], dict]:
+    """
+    Build a bio mask once per run. If unavailable or unsafe, returns (None, stats).
+    """
+    stats: dict = {"mode": getattr(cfg, "bio_mask_mode", "entropy_margin")}
+
+    if not getattr(cfg, "bio_guided_clustering", False):
+        stats["disabled_reason"] = "bio_guided_clustering=False"
+        return None, stats
+
+    mode = getattr(cfg, "bio_mask_mode", "entropy_margin")
+    if mode == "none":
+        stats["disabled_reason"] = "bio_mask_mode=none"
+        return None, stats
+
+    if celltypist_proba is None or celltypist_proba.empty:
+        stats["disabled_reason"] = "no_celltypist_probability_matrix"
+        return None, stats
+
+    if mode != "entropy_margin":
+        stats["disabled_reason"] = f"unknown_mode={mode}"
+        return None, stats
+
+    mask, mstats = _celltypist_entropy_margin_mask(
+        celltypist_proba,
+        entropy_abs_limit=float(getattr(cfg, "bio_entropy_abs_limit", 0.5)),
+        entropy_quantile=float(getattr(cfg, "bio_entropy_quantile", 0.7)),
+        margin_min=float(getattr(cfg, "bio_margin_min", 0.10)),
+    )
+    stats.update(mstats)
+
+    # safety gate: if too few pass, disable bio metrics
+    min_cells = int(getattr(cfg, "bio_mask_min_cells", 500))
+    min_frac = float(getattr(cfg, "bio_mask_min_frac", 0.05))
+    kept = int(stats.get("kept", 0))
+    kept_frac = float(stats.get("kept_frac", 0.0))
+
+    if kept < min_cells or kept_frac < min_frac:
+        stats["disabled_reason"] = (
+            f"too_few_cells_passed (kept={kept}, kept_frac={kept_frac:.3f}, "
+            f"min_cells={min_cells}, min_frac={min_frac})"
+        )
+        return None, stats
+
+    stats["disabled_reason"] = None
+    return mask, stats
+
 def _ensure_embedding(adata: ad.AnnData, embedding_key: str) -> str:
     """
     Ensure the chosen embedding exists; if not, try to recover from integration metadata.
@@ -672,6 +793,7 @@ def _resolution_sweep(
     cfg: ClusterAnnotateConfig,
     embedding_key: str,
     celltypist_labels: Optional[np.ndarray],
+    bio_mask: Optional[np.ndarray] = None,
 ) -> Tuple[float, Dict[str, object], Dict[str, np.ndarray]]:
     """
     Sweep over a range of Leiden resolutions and compute:
@@ -696,9 +818,18 @@ def _resolution_sweep(
 
     X = adata.obsm[embedding_key]
 
-    use_bio = bool(getattr(cfg, "bio_guided_clustering", False)) and (
-        celltypist_labels is not None
+    use_bio = (
+            bool(getattr(cfg, "bio_guided_clustering", False))
+            and (celltypist_labels is not None)
+            and (bio_mask is not None)
     )
+
+    if getattr(cfg, "bio_guided_clustering", False) and not use_bio:
+        LOGGER.warning(
+            "bio_guided_clustering=True, but biological metrics are unavailable "
+            "(missing CellTypist labels and/or bio_mask). Using structural metrics only."
+        )
+
     if getattr(cfg, "bio_guided_clustering", False) and celltypist_labels is None:
         LOGGER.warning(
             "bio_guided_clustering=True, but CellTypist labels are unavailable. "
@@ -738,21 +869,36 @@ def _resolution_sweep(
         )
 
         if use_bio:
-            hom = _compute_bio_homogeneity(labels, celltypist_labels)
-            frag = _compute_bio_fragmentation(labels, celltypist_labels)
-            ari_bio = adjusted_rand_score(labels, celltypist_labels)
+            m = bio_mask
+            # defensive alignment check
+            if m.shape[0] != labels.shape[0]:
+                raise ValueError("bio_mask length does not match number of cells.")
 
-            bio_hom[res_f] = hom
-            bio_frag[res_f] = frag
-            bio_ari[res_f] = float(ari_bio)
+            labels_m = labels[m]
+            bio_m = celltypist_labels[m]
 
-            LOGGER.info(
-                "Resolution %.2f: bio_homogeneity=%.3f, bio_fragmentation=%.3f, bio_ARI=%.3f",
-                res_f,
-                hom,
-                frag,
-                ari_bio,
-            )
+            # If mask makes this resolution unusable (should be rare), skip bio metrics
+            if labels_m.size < 2 or np.unique(labels_m).size < 2:
+                LOGGER.warning(
+                    "Resolution %.2f: bio mask leaves too few usable cells; skipping bio metrics.",
+                    res_f,
+                )
+            else:
+                hom = _compute_bio_homogeneity(labels_m, bio_m)
+                frag = _compute_bio_fragmentation(labels_m, bio_m)
+                ari_bio = adjusted_rand_score(labels_m, bio_m)
+
+                bio_hom[res_f] = float(hom)
+                bio_frag[res_f] = float(frag)
+                bio_ari[res_f] = float(ari_bio)
+
+                LOGGER.info(
+                    "Resolution %.2f (masked): bio_homogeneity=%.3f, bio_fragmentation=%.3f, bio_ARI=%.3f",
+                    res_f,
+                    hom,
+                    frag,
+                    ari_bio,
+                )
 
     # ARI across all resolutions
     col_names = [f"{r:.2f}" for r in res_list]
@@ -791,7 +937,7 @@ def _resolution_sweep(
         w_hom=getattr(cfg, "w_hom", 0.0),
         w_frag=getattr(cfg, "w_frag", 0.0),
         w_bioari=getattr(cfg, "w_bioari", 0.0),
-        use_bio=getattr(cfg, "bio_guided_clustering", False),
+        use_bio=use_bio,
     )
 
     selection = select_best_resolution(metrics, sel_cfg)
@@ -828,6 +974,11 @@ def _resolution_sweep(
         sweep["bio_homogeneity"] = None
         sweep["bio_fragmentation"] = None
         sweep["bio_ari"] = None
+
+    if use_bio:
+        sweep["bio_mask_stats"] = adata.uns.get("cluster_and_annotate", {}).get("bio_mask", None)
+    else:
+        sweep["bio_mask_stats"] = None
 
     clusterings_str: Dict[str, np.ndarray] = {
         _res_key(r): labs for r, labs in clusterings_float.items()
@@ -1490,11 +1641,26 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
         plot_utils.setup_scanpy_figs(cfg.figdir, cfg.figure_formats)
     figdir_cluster = Path("cluster_and_annotate")
 
+    # Build "good CellTypist" mask once (for bio metrics only)
+    bio_mask, bio_mask_stats = _maybe_build_bio_mask(cfg, celltypist_proba, adata.n_obs)
+
+    adata.uns.setdefault("cluster_and_annotate", {})
+    adata.uns["cluster_and_annotate"].setdefault("bio_mask", {})
+    adata.uns["cluster_and_annotate"]["bio_mask"] = bio_mask_stats
+
+    if bio_mask is None and getattr(cfg, "bio_guided_clustering", False):
+        LOGGER.warning(
+            "Bio-guided clustering requested, but bio mask disabled: %s",
+            bio_mask_stats.get("disabled_reason"),
+        )
+
+    # Perform resolution sweep
     best_res, sweep, clusterings = _resolution_sweep(
         adata,
         cfg,
         embedding_key,
         celltypist_labels=celltypist_labels,
+        bio_mask=bio_mask,
     )
 
     res_list = [float(r) for r in sweep["resolutions"]]

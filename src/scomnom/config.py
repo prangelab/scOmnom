@@ -185,6 +185,18 @@ class ClusterAnnotateConfig(BaseModel):
     w_hom: float = 0.15
     w_frag: float = 0.10
     w_bioari: float = 0.15
+    bio_mask_mode: Literal["none", "entropy_margin"] = "entropy_margin"
+
+    # Hybrid entropy gate: H <= max(abs_limit, quantile)
+    bio_entropy_abs_limit: float = 0.5
+    bio_entropy_quantile: float = 0.7
+
+    # Margin gate: (p1 - p2) >= margin_min
+    bio_margin_min: float = 0.10
+
+    # Safety: if too few cells pass, disable bio metrics for this run
+    bio_mask_min_cells: int = 500
+    bio_mask_min_frac: float = 0.05
 
     # ------------------------------------------------------------------
     # ssGSEA
