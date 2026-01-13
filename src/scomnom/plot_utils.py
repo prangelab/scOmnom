@@ -2645,22 +2645,25 @@ def plot_cluster_silhouette_by_cluster(
 
 
 def plot_cluster_batch_composition(
-        adata,
-        label_key: str,
-        batch_key: str,
-        figdir: Path,
-        stem: str = "cluster_batch_composition",
+    adata,
+    label_key: str,
+    batch_key: str,
+    figdir: Path,
+    stem: str = "cluster_batch_composition",
 ):
     """
     Stacked barplot showing fraction of each batch within each cluster.
+    Legend is placed to the right (outside axes) to avoid overlaying bars.
     """
+    import matplotlib.pyplot as plt
+
     if label_key not in adata.obs or batch_key not in adata.obs:
         LOGGER.warning("plot_cluster_batch_composition: required columns missing.")
         return
 
     df = (
         adata.obs[[label_key, batch_key]]
-        .groupby([label_key, batch_key])
+        .groupby([label_key, batch_key], observed=True)
         .size()
         .unstack(fill_value=0)
     )
@@ -2668,9 +2671,12 @@ def plot_cluster_batch_composition(
 
     fig, ax = plt.subplots(figsize=(max(8, 0.40 * len(df)), 4))
     _clean_axes(ax)
+
+    # Reserve bottom for rotated x tick labels
     _reserve_bottom_for_xticklabels(fig, ax, rotation=45, fontsize=9, ha="right")
     fig.subplots_adjust(bottom=max(fig.subplotpars.bottom, 0.36))
 
+    # Plot WITHOUT pandas legend (we'll add a clean one outside)
     frac.plot(
         kind="bar",
         stacked=True,
@@ -2678,16 +2684,37 @@ def plot_cluster_batch_composition(
         colormap="tab20",
         edgecolor="black",
         linewidth=0.3,
+        legend=False,
     )
 
     ax.set_ylabel("Fraction")
     ax.set_title("Batch composition per cluster")
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
 
-    fig.tight_layout()
+    # --- Legend to the right, outside the plotting area ---
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        # make room on the right for legend
+        fig.subplots_adjust(right=0.80)
+
+        ax.legend(
+            handles,
+            labels,
+            title=batch_key,
+            loc="upper left",
+            bbox_to_anchor=(1.01, 1.0),
+            borderaxespad=0.0,
+            frameon=True,
+            fontsize=9,
+            title_fontsize=10,
+        )
+
+    # Keep your existing final x-axis layout helper
     _finalize_categorical_x(fig, ax, rotate=45, ha="right", bottom=0.42)
-    save_multi(stem, figdir)
+
+    save_multi(stem, figdir, fig)
     plt.close(fig)
+
 
 
 def plot_ssgsea_cluster_topn_heatmap(
@@ -3079,15 +3106,6 @@ def plot_ssgsea_cluster_topn_dotplots(
     prefix_filter: list[str] | None = None,
     max_clusters: int | None = None,
 ) -> None:
-    """
-    Dotplot for per-cluster Top-N ssGSEA pathways.
-
-      - x-axis: score (ES)
-      - color: score_z (z-scored across clusters per pathway) by default
-      - size: gene set size (from GMT) if available, else abs(score)
-
-    One figure per cluster per prefix.
-    """
     import numpy as np
     import pandas as pd
     import matplotlib.pyplot as plt
@@ -3100,11 +3118,9 @@ def plot_ssgsea_cluster_topn_dotplots(
         raise ValueError("figdir must be provided.")
     outdir = _ssgsea_pathways_figdir(figdir)
 
-    # ranking matrix
     rank_df = _zscore_by_pathway(df) if use_zscore_for_ranking else df
     z_df = _zscore_by_pathway(df)
 
-    # Gene-set sizes from GMTs (optional)
     gmt_sizes: dict[str, int] = {}
     try:
         cfg = adata.uns.get("ssgsea", {}).get("config", {})
@@ -3132,7 +3148,6 @@ def plot_ssgsea_cluster_topn_dotplots(
             if not cols:
                 continue
 
-            # choose top-N by ranking matrix
             top_cols = (
                 rank_df.loc[cl, cols]
                 .sort_values(ascending=False)
@@ -3146,7 +3161,6 @@ def plot_ssgsea_cluster_topn_dotplots(
             rows = []
             for col in top_cols:
                 _, term = _split_prefix_term(col)
-                # keep long labels; just make them readable (spaces)
                 term_label = term.replace("_", " ")
 
                 score = float(df.loc[cl, col])
@@ -3172,32 +3186,24 @@ def plot_ssgsea_cluster_topn_dotplots(
             if plot_df.empty:
                 continue
 
-            # fallback if no GMT sizes
             if plot_df["gene_set_size"].isna().all():
                 plot_df["gene_set_size"] = np.abs(plot_df["score"].values)
                 size_by_used = "abs_score"
             else:
                 size_by_used = size_by
 
-            # order: best on top -> barh/dot y-order needs ASC for bottom->top;
-            # so sort ASC and then invert y-axis (cleaner)
             plot_df = plot_df.sort_values("score", ascending=True)
 
-            # ---- adaptive sizing ----
             fig_w = 10.5
             fig_h = max(3.0, 0.70 * len(plot_df) + 1.8)
             fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-            # ---- compute left margin from label length (prevents cutting/squish) ----
             max_len = int(max(len(str(t)) for t in plot_df["term"].values))
-            # map length -> left margin, clamp to sane range
             left = float(np.clip(0.18 + 0.010 * max_len, 0.28, 0.62))
 
-            # reserve right side for colorbar + size legend
-            # (avoid overlap by pushing axes left and keeping a fixed right margin)
-            fig.subplots_adjust(left=left, right=0.78, top=0.84, bottom=0.14)
+            # MORE RIGHT SPACE: keep plot area left, reserve a wide strip for cbar + size legend
+            fig.subplots_adjust(left=left, right=0.70, top=0.84, bottom=0.14)
 
-            # ---- size scaling ----
             size_vals = plot_df["gene_set_size"].to_numpy(dtype=float)
             s_min, s_max = np.nanmin(size_vals), np.nanmax(size_vals)
             if not np.isfinite(s_min) or not np.isfinite(s_max) or s_min == s_max:
@@ -3223,21 +3229,15 @@ def plot_ssgsea_cluster_topn_dotplots(
                 zorder=3,
             )
 
-            # reference line at 0
             ax.axvline(0.0, linestyle=":", color="black", lw=1.2, alpha=0.8, zorder=2)
 
             ax.set_xlabel("ssGSEA ES", fontsize=12)
             ax.set_ylabel("Pathway", fontsize=12)
-
-            # reverse y so "best" is on top
             ax.invert_yaxis()
-
-            # remove gridlines (esp vertical)
             ax.grid(False)
             ax.xaxis.grid(False)
             ax.yaxis.grid(False)
 
-            # ---- title + subtitle above the axes (no overlap) ----
             title_y = 1.10
             subtitle_y = 1.04
 
@@ -3267,12 +3267,13 @@ def plot_ssgsea_cluster_topn_dotplots(
                     clip_on=False,
                 )
 
-            # ---- colorbar in its own axis (prevents legend overlap) ----
-            cax = fig.add_axes([0.80, 0.22, 0.025, 0.56])  # [left, bottom, width, height]
+            # COLORBAR: place fully inside the reserved right strip
+            cax = fig.add_axes([0.74, 0.22, 0.022, 0.56])  # [left, bottom, width, height]
             cbar = fig.colorbar(sca, cax=cax)
             cbar.set_label("z-score" if (color_by == "score_z") else str(color_by), fontsize=12)
+            cbar.ax.tick_params(labelsize=11)
 
-            # ---- size legend to the RIGHT of the colorbar, never overlapping ----
+            # SIZE LEGEND: move further right so it NEVER overlaps colorbar/label
             try:
                 reps = np.unique(np.nanpercentile(size_vals, [20, 50, 80]).round(0))
                 reps = [r for r in reps if np.isfinite(r)]
@@ -3297,15 +3298,17 @@ def plot_ssgsea_cluster_topn_dotplots(
                         )
                         labels.append(f"{int(r)}")
 
-                    # anchor legend in figure coords to the right of colorbar
                     fig.legend(
                         handles,
                         labels,
                         title=("Genes" if size_by_used == "gene_set_size" else "|ES|"),
                         loc="center left",
-                        bbox_to_anchor=(0.835, 0.50),
+                        bbox_to_anchor=(0.79, 0.50),   # <-- moved right
+                        bbox_transform=fig.transFigure,
                         frameon=False,
                         borderaxespad=0.0,
+                        handletextpad=0.6,
+                        labelspacing=0.5,
                     )
             except Exception:
                 pass
