@@ -658,37 +658,31 @@ def umap_by(adata, keys, figdir: Path | None = None, stem: str | None = None):
 
         fig_w, fig_h = _umap_figsize_for_key(adata, key)
 
-        fig = sc.pl.umap(
+        # Create figure/axes explicitly (avoid Scanpy passing figsize to scatter)
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+        try:
+            fig.set_constrained_layout(False)
+        except Exception:
+            pass
+
+        sc.pl.umap(
             adata,
             color=key,
             use_raw=False,
             show=False,
-            return_fig=True,
-            figsize=(fig_w, fig_h),
-            # For categorical, keep a readable right-margin legend:
-            legend_loc=("right margin" if is_cat else "none"),
+            ax=ax,  # <- key change
+            legend_loc=("right margin" if is_cat else None),
             legend_fontsize=(10 if is_cat else None),
         )
 
-        # If scanpy returned a Figure
-        if hasattr(fig, "axes"):
-            # Make sure axes isn't squeezed by constrained_layout
-            try:
-                fig.set_constrained_layout(False)
-            except Exception:
-                pass
-
-            if is_cat and n_cats > 0:
-                _tune_umap_legend(fig, n_cats)
-                # Reserve a generous right margin for multi-column legends
-                fig.subplots_adjust(left=0.06, right=0.72, top=0.92, bottom=0.08)
-            else:
-                fig.subplots_adjust(left=0.08, right=0.98, top=0.92, bottom=0.08)
+        if is_cat and n_cats > 0:
+            _tune_umap_legend(fig, n_cats)
+            fig.subplots_adjust(left=0.06, right=0.72, top=0.92, bottom=0.08)
+        else:
+            fig.subplots_adjust(left=0.08, right=0.98, top=0.92, bottom=0.08)
 
         save_multi(f"{name}_{key}", figdir, fig)
         plt.close(fig)
-
-
 
 
 # -------------------------------------------------------------------------
