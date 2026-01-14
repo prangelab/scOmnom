@@ -2722,6 +2722,21 @@ def _decoupler_figdir(base: Path | None, net_name: str) -> Path:
     return base / "decoupler" / str(net_name).lower().strip()
 
 
+def _clean_feature_label(label: str, net_name: str) -> str:
+    """Removes prefixes and replaces underscores for cleaner display."""
+    label = str(label)
+    net_name_lower = net_name.lower()
+
+    # Remove MSigDB prefixes (e.g., HALLMARK_, REACTOME_)
+    if "_" in label:
+        parts = label.split("_", 1)
+        # Check if the first part is a known MSigDB prefix
+        if parts[0] in ["HALLMARK", "REACTOME", "KEGG", "BIOCARTA", "GOBP", "GOCC", "GOMF"]:
+            label = parts[1]
+
+    return label.replace("_", " ")
+
+
 def _zscore_cols(df: pd.DataFrame, eps: float = 1e-9) -> pd.DataFrame:
     """Z-score each column across rows (clusters)."""
     mu = df.mean(axis=0)
@@ -2890,8 +2905,8 @@ def plot_decoupler_activity_heatmap(
     fig_w = max(8.0, 2.5 + 0.35 * sub.shape[1])
     fig_h = max(4.5, 2.2 + 0.28 * sub.shape[0])
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    ax.grid(False)
 
-    # Remove cell borders / overlay gridlines
     sns.heatmap(
         sub,
         ax=ax,
@@ -2901,6 +2916,10 @@ def plot_decoupler_activity_heatmap(
         linecolor=None,
         square=False,
     )
+
+    ax.set_facecolor('white')
+    for spine in ax.spines.values():
+        spine.set_visible(True)
 
     ax.set_xlabel("Feature" if net_name.lower() != "dorothea" else "TF")
     ax.set_ylabel("Cluster")
@@ -2969,6 +2988,7 @@ def plot_decoupler_cluster_topn_barplots(
 
         vals = s.loc[top.index] if use_abs else top
         vals_plot = vals.sort_values(ascending=True)
+        clean_labels = [_clean_feature_label(l, net_name) for l in vals_plot.index]
 
         # Dynamic margins/width for long labels
         left = _dynamic_left_margin_from_labels(vals_plot.index, base=0.22)
@@ -2979,18 +2999,22 @@ def plot_decoupler_cluster_topn_barplots(
         fig.subplots_adjust(left=left, right=0.96, top=0.82, bottom=0.14)
 
         y = np.arange(len(vals_plot))
+
+        bar_colors = "#3b84a8"  # Default
+        if net_name.lower() == "progeny":
+            bar_colors = ["#d62728" if v < 0 else "#2ca02c" for v in vals_plot.values]
+
         ax.barh(
             y=y,
             width=vals_plot.values,
-            color="#3b84a8",
-            edgecolor="#1f2d3a",
-            linewidth=0.6,
+            color=bar_colors,
+            edgecolor="black",
+            linewidth=0.5,
             zorder=3,
         )
 
         ax.set_yticks(y)
-        ax.set_yticklabels(vals_plot.index, fontsize=12)
-
+        ax.set_yticklabels(clean_labels, fontsize=12)
         ax.set_xlabel("Activity", fontsize=13)
         ax.set_ylabel("Feature" if net_name.lower() != "dorothea" else "TF", fontsize=13)
         ax.invert_yaxis()
@@ -3097,10 +3121,12 @@ def plot_decoupler_dotplot(
     clusters = sub_raw.index.astype(str).tolist()
     features = sub_raw.columns.astype(str).tolist()
 
+    features_clean = [_clean_feature_label(f, net_name) for f in features]
+
     if wrap_labels:
-        features_disp = _wrap_labels(features, wrap_at=wrap_at)
+        features_disp = _wrap_labels(features_clean, wrap_at=wrap_at)
     else:
-        features_disp = features
+        features_disp = features_clean
 
     # build long table
     rows: list[dict] = []
@@ -3136,14 +3162,12 @@ def plot_decoupler_dotplot(
     sizes = np.array([size_scale(v) for v in svals], dtype=float)
 
     # figure sizing
-    fig_w = max(9.0, 2.8 + 0.35 * len(clusters))
-    fig_h = max(5.0, 2.2 + 0.28 * len(features))
+    # We increase the right margin and reduce dot scale slightly
+    fig_w = max(10.0, 3.5 + 0.4 * len(clusters))  # Slightly wider
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-    # dynamic left margin for long feature names
-    left = _dynamic_left_margin_from_labels(df["feature"].values, base=0.20)
-    fig.subplots_adjust(left=left, right=0.84, top=0.88, bottom=0.18)
-
+    # Move legends further right and use 'tight_layout' or specific adjusts
+    fig.subplots_adjust(left=left, right=0.75, top=0.88, bottom=0.18)
     sca = ax.scatter(
         x=df["cluster"].values,
         y=df["feature"].values,
@@ -3174,7 +3198,8 @@ def plot_decoupler_dotplot(
     ax.tick_params(axis="y", rotation=0, labelsize=9)
 
     # colorbar
-    cbar = fig.colorbar(sca, ax=ax, fraction=0.035, pad=0.02)
+    cax = fig.add_axes([0.82, 0.2, 0.02, 0.5])  # Custom position [left, bottom, width, height]
+    cbar = fig.colorbar(sca, cax=cax)
     cbar.set_label(cbar_label, fontsize=11)
 
     # --- size legend (quantile-based), placed near colorbar ---
@@ -3191,7 +3216,7 @@ def plot_decoupler_dotplot(
             handles=handles,
             title=size_label,
             loc="upper left",
-            bbox_to_anchor=(1.01, 0.65),
+            bbox_to_anchor=(1.15, 1),
             frameon=False,
             borderaxespad=0.0,
         )
