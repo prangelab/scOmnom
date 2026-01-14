@@ -3102,8 +3102,6 @@ def plot_ssgsea_cluster_topn_dotplots(
         x: str = "score",
         color_by: str = "score_z",
         size_by: str = "gene_set_size",
-        prefix_filter: list[str] | None = None,
-        max_clusters: int | None = None,
 ) -> None:
     import numpy as np
     import pandas as pd
@@ -3116,7 +3114,9 @@ def plot_ssgsea_cluster_topn_dotplots(
     if figdir is None: raise ValueError("figdir must be provided.")
     outdir = _ssgsea_pathways_figdir(figdir)
     rank_df = _zscore_by_pathway(df) if use_zscore_for_ranking else df
-    z_df = _zscore_by_pathway(df)
+
+    clusters = list(rank_df.index.astype(str))
+
     # ... (Keep existing GMT parsing and cluster selection logic) ...
 
     for cl in clusters:
