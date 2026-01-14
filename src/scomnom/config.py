@@ -283,6 +283,7 @@ class ClusterAnnotateConfig(BaseModel):
         "consensus",
         description="Decoupler method (default: consensus).",
     )
+    decoupler_consensus_methods: Optional[List[str]] = ["ulm", "mlm", "wsum"]
 
     # MSigDB (GMT-driven pathway nets)
     msigdb_gene_sets: List[str] = Field(

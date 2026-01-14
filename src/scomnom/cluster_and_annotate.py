@@ -1444,35 +1444,20 @@ def _dc_run_method(
     weight: str | None = "weight",
     min_n: int = 5,
     verbose: bool = False,
+    # optional consensus base methods
+    consensus_methods: list[str] | None = None,
 ) -> "pd.DataFrame":
     """
-    Run a decoupler method on an expression matrix + network and return activities.
+    Decoupler 2.x runner.
 
-    Parameters
-    ----------
-    method
-        Decoupler method name. Supports: "consensus" (default), "ulm", "mlm", "wsum", "aucell".
-        If an unsupported method is provided, falls back to "ulm".
-    mat
-        Expression matrix as a pandas DataFrame.
-        Can be either:
-          - genes x samples (your pseudobulk default), OR
-          - samples x genes
-        This helper auto-detects and converts to samples x genes for decoupler.
-    net
-        Network DataFrame with at least columns: [source, target] and optionally [weight].
-    source/target/weight
-        Column names in `net`.
-    min_n
-        Minimum number of targets per source to keep.
-    verbose
-        If True, let decoupler be chatty.
+    Input:
+      - mat can be genes×samples OR samples×genes (auto-detected)
+    Output:
+      - returns sources×samples (so caller can .T to samples×sources)
 
-    Returns
-    -------
-    pd.DataFrame
-        Activity estimates with shape (n_sources x n_samples).
-        Index = sources (pathways/TFs), columns = samples (clusters).
+    For method="consensus":
+      - runs dc.mt.decouple with a base method list
+      - combines using dc.mt.consensus
     """
     import numpy as np
     import pandas as pd
@@ -1480,15 +1465,12 @@ def _dc_run_method(
 
     if mat is None or not isinstance(mat, pd.DataFrame) or mat.empty:
         raise ValueError("decoupler: 'mat' must be a non-empty pandas DataFrame.")
-
     if net is None or not isinstance(net, pd.DataFrame) or net.empty:
         raise ValueError("decoupler: 'net' must be a non-empty pandas DataFrame.")
 
     method = (method or "consensus").lower().strip()
 
-    # -----------------------------
-    # Normalize / validate network
-    # -----------------------------
+    # ---- validate network columns ----
     for col in (source, target):
         if col not in net.columns:
             raise KeyError(f"decoupler: net missing required column '{col}'")
@@ -1500,151 +1482,66 @@ def _dc_run_method(
     else:
         weight_use = weight
 
-    # ensure string ids
     net_use[source] = net_use[source].astype(str)
     net_use[target] = net_use[target].astype(str)
 
-    # Filter sources with too few targets (after intersect with genes)
-    # -----------------------------
-    # Normalize expression to samples x genes
-    # -----------------------------
-    # Heuristic: if mat.index looks like genes (many overlaps with net targets) treat as genes x samples.
+    # ---- normalize mat to samples×genes ----
     genes_in_net = set(net_use[target].unique().tolist())
-
     idx_overlap = len(set(map(str, mat.index)).intersection(genes_in_net))
     col_overlap = len(set(map(str, mat.columns)).intersection(genes_in_net))
 
-    if idx_overlap >= col_overlap:
-        # genes x samples -> transpose to samples x genes
-        mat_sxg = mat.T.copy()
-    else:
-        # already samples x genes
-        mat_sxg = mat.copy()
+    mat_sxg = (mat.T if idx_overlap >= col_overlap else mat).copy()
 
-    # Force numeric, handle sparse-ish objects already densified upstream
+    # numeric + NaN safe
     mat_sxg = mat_sxg.apply(pd.to_numeric, errors="coerce").fillna(0.0)
 
-    # Intersect genes with network targets
+    # ---- intersect genes ----
     common_genes = [g for g in mat_sxg.columns.astype(str) if g in genes_in_net]
-    if len(common_genes) == 0:
+    if not common_genes:
         raise ValueError("decoupler: no overlap between mat genes and net targets.")
 
     mat_sxg = mat_sxg.loc[:, common_genes]
     net_use = net_use[net_use[target].isin(common_genes)].copy()
 
-    # Filter sources by min_n targets
+    # ---- filter sources by min targets ----
     tgt_counts = net_use.groupby(source)[target].nunique()
     keep_sources = tgt_counts[tgt_counts >= int(min_n)].index.astype(str).tolist()
     net_use = net_use[net_use[source].isin(keep_sources)].copy()
-
     if net_use.empty:
-        raise ValueError(f"decoupler: after min_n={min_n} filtering, net is empty.")
+        raise ValueError(f"decoupler: after min_n={min_n}, net is empty.")
 
-    # -----------------------------
-    # Run selected method(s)
-    # -----------------------------
-    def _run_one(m: str) -> pd.DataFrame:
-        m = m.lower().strip()
-
-        # ULM: fast + solid default
-        if m == "ulm":
-            dc.mt.ulm(
-                mat=mat_sxg,
-                net=net_use,
-                source=source,
-                target=target,
-                weight=weight_use,
-                verbose=verbose,
-            )
-            est = dc.get_acts(mat_sxg, obsm_key="ulm_estimate")
-            return est.T  # acts returns samples x sources -> transpose to sources x samples
-
-        # MLM: multivariate linear model (heavier)
-        if m == "mlm":
-            dc.mt.mlm(
-                mat=mat_sxg,
-                net=net_use,
-                source=source,
-                target=target,
-                weight=weight_use,
-                verbose=verbose,
-            )
-            est = dc.get_acts(mat_sxg, obsm_key="mlm_estimate")
-            return est.T
-
-        # WSUM: weighted sum
-        if m == "wsum":
-            dc.mt.wsum(
-                mat=mat_sxg,
-                net=net_use,
-                source=source,
-                target=target,
-                weight=weight_use,
-                verbose=verbose,
-            )
-            est = dc.get_acts(mat_sxg, obsm_key="wsum_estimate")
-            return est.T
-
-        # AUCell: rank-based scoring (often used single-cell; still usable on pseudobulk)
-        if m == "aucell":
-            dc.mt.aucell(
-                mat=mat_sxg,
-                net=net_use,
-                source=source,
-                target=target,
-                verbose=verbose,
-            )
-            est = dc.get_acts(mat_sxg, obsm_key="aucell_estimate")
-            return est.T
-
-        # Fallback
-        dc.mt.ulm(
-            mat=mat_sxg,
-            net=net_use,
+    # ---- run ----
+    if method == "consensus":
+        base = consensus_methods or ["ulm", "mlm", "wsum"]
+        res = dc.mt.decouple(
+            mat_sxg,
+            net_use,
             source=source,
             target=target,
             weight=weight_use,
-            verbose=verbose,
+            methods=base,
+            tmin=int(min_n),
+            verbose=bool(verbose),
         )
-        est = dc.get_acts(mat_sxg, obsm_key="ulm_estimate")
+        est, _pvals = dc.mt.consensus(res, verbose=bool(verbose))
+        # consensus returns samples×sources -> convert to sources×samples
         return est.T
 
-    if method == "consensus":
-        # Consensus = average of a small robust set
-        # (You can tweak this list later if you want.)
-        methods = ["ulm", "wsum", "mlm"]
-        ests = []
-        for m in methods:
-            try:
-                ests.append(_run_one(m))
-            except Exception:
-                # Keep going; consensus should be resilient
-                continue
-
-        if not ests:
-            # If everything failed, raise the last resort
-            raise RuntimeError("decoupler consensus: all constituent methods failed.")
-
-        # Align (sources x samples) and average
-        common_sources = set(ests[0].index)
-        common_samples = set(ests[0].columns)
-        for e in ests[1:]:
-            common_sources &= set(e.index)
-            common_samples &= set(e.columns)
-
-        if not common_sources or not common_samples:
-            raise RuntimeError("decoupler consensus: no common sources/samples across methods.")
-
-        common_sources = sorted(common_sources)
-        common_samples = sorted(common_samples)
-
-        stack = np.stack([e.loc[common_sources, common_samples].to_numpy() for e in ests], axis=0)
-        mean_est = np.nanmean(stack, axis=0)
-
-        return pd.DataFrame(mean_est, index=common_sources, columns=common_samples)
-
-    # single method
-    return _run_one(method)
+    res = dc.mt.decouple(
+        mat_sxg,
+        net_use,
+        source=source,
+        target=target,
+        weight=weight_use,
+        methods=[method],
+        tmin=int(min_n),
+        verbose=bool(verbose),
+    )
+    key = f"{method}_estimate"
+    if key not in res:
+        raise KeyError(f"decoupler: expected '{key}' in result dict, got {sorted(res.keys())}")
+    # method estimate is samples×sources -> convert to sources×samples
+    return res[key].T
 
 
 def _run_msigdb(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
@@ -1725,13 +1622,14 @@ def _run_msigdb(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
     try:
         est = _dc_run_method(
             method=method,
-            mat=expr.T,
+            mat=expr,
             net=net,
             source="source",
             target="target",
             weight="weight",
             min_n=min_n,
             verbose=False,
+            consensus_methods=getattr(cfg, "decoupler_consensus_methods", None),
         )
 
         activity = est.T      # clusters x pathways
@@ -1823,13 +1721,14 @@ def _run_progeny(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
     try:
         est = _dc_run_method(
             method=method,
-            mat=expr.T,
+            mat=expr,
             net=net,
             source="source",
             target="target",
             weight=wcol or "weight",
             min_n=min_n,
             verbose=False,
+            consensus_methods=getattr(cfg, "decoupler_consensus_methods", None),
         )
 
         activity = est.T
@@ -1875,7 +1774,6 @@ def _run_dorothea(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
       adata.uns["dorothea"]["activity"] -> DataFrame (clusters x TFs)
       adata.uns["dorothea"]["config"]   -> dict snapshot
     """
-    import pandas as pd
     import decoupler as dc
 
     # -----------------------------
@@ -1905,13 +1803,14 @@ def _run_dorothea(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
     if isinstance(conf, str):
         conf = [x.strip().upper() for x in conf.split(",") if x.strip()]
     conf = [str(x).upper() for x in conf]
+    organism = getattr(cfg, "dorothea_organism", "human") or "human"
+
 
     # -----------------------------
     # Load resource + filter
     # -----------------------------
     try:
-        # decoupler 2.x: OmniPath resources live under dc.op
-        net = dc.op.dorothea(organism="human", levels=conf)
+        net = dc.op.dorothea(organism=str(organism), levels=conf)
     except Exception as e:
         LOGGER.warning("DoRothEA: failed to load resource via dc.op.dorothea: %s", e)
         return
@@ -1932,13 +1831,15 @@ def _run_dorothea(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
         # mat must be genes x samples
         est = _dc_run_method(
             method=method,
-            mat=expr.T,
+            mat=expr,
             net=net,
             source="source",
             target="target",
             weight="weight" if "weight" in net.columns else "mor",
             min_n=min_n,
             verbose=False,
+            consensus_methods=getattr(cfg, "decoupler_consensus_methods", None),
+
         )
 
         # est is typically (sources x samples). We want samples x sources for plotting consistency.
@@ -1972,215 +1873,6 @@ def _run_dorothea(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
         ",".join(conf),
         int(min_n),
     )
-
-
-def resolve_msigdb_gene_sets(
-    gene_sets: Sequence[str | Path] | str | None,
-    *,
-    msigdb_root: Path | None = None,
-    allow_keywords: bool = True,
-    allow_paths: bool = True,
-) -> tuple[list[Path], list[str], str | None]:
-    """
-    Resolve a user-provided gene set selector (MSigDB keywords and/or .gmt paths)
-    into a concrete list of GMT files.
-
-    This is designed to match the "ssgsea_gene_sets" UX you had:
-      - Accepts a list like ["HALLMARK", "REACTOME"] (case-insensitive keywords)
-      - Accepts one or more explicit .gmt file paths
-      - Accepts mixed input: ["HALLMARK", "/path/to/custom.gmt"]
-      - Returns:
-          (gmt_files, used_keywords, msigdb_release)
-
-    Keyword matching policy (practical + robust):
-      - Keywords are matched against the GMT filename (stem + name), case-insensitive.
-      - For example keyword "HALLMARK" matches:
-          * "h.all.v2023.1.Hs.symbols.gmt"
-          * "HALLMARK.gmt"
-      - "REACTOME" matches:
-          * "c2.cp.reactome.v2023.1.Hs.symbols.gmt"
-          * any filename containing "reactome"
-
-    MSigDB release detection:
-      - Attempts to parse "vYYYY.M" patterns from filenames in resolved GMTs.
-      - If multiple releases are present, returns the most common one; if tie, the max.
-
-    Parameters
-    ----------
-    gene_sets
-        None, str, Path, or sequence of str/Path.
-        - If None: returns ([], [], None)
-        - If str containing commas: will be split like CLI "HALLMARK,REACTOME"
-    msigdb_root
-        Directory to search for MSigDB GMTs.
-        If None, tries (in order):
-          1) env var "SCOMNOM_MSIGDB_DIR"
-          2) env var "MSIGDB_DIR"
-          3) "./msigdb" (relative to CWD)
-          4) "~/.cache/scomnom/msigdb"
-    allow_keywords / allow_paths
-        For testing/strictness toggles.
-
-    Returns
-    -------
-    gmt_files : list[Path]
-        Resolved GMT files (deduped, sorted).
-    used_keywords : list[str]
-        Uppercased keywords that matched at least one GMT.
-    msigdb_release : str | None
-        Parsed MSigDB release like "2023.1", else None.
-    """
-    from pathlib import Path
-    from typing import Sequence
-    import os
-    import re
-
-    if gene_sets is None:
-        return [], [], None
-
-    # -----------------------------
-    # Normalize input into tokens
-    # -----------------------------
-    tokens: list[str | Path] = []
-    if isinstance(gene_sets, (str, Path)):
-        gene_sets = [gene_sets]  # type: ignore[list-item]
-
-    for x in gene_sets:  # type: ignore[union-attr]
-        if x is None:
-            continue
-        if isinstance(x, Path):
-            tokens.append(x)
-        else:
-            s = str(x).strip()
-            if not s:
-                continue
-            # allow comma-separated input (CLI style)
-            if "," in s:
-                parts = [p.strip() for p in s.split(",") if p.strip()]
-                tokens.extend(parts)
-            else:
-                tokens.append(s)
-
-    if not tokens:
-        return [], [], None
-
-    # -----------------------------
-    # Resolve root
-    # -----------------------------
-    if msigdb_root is None:
-        env1 = os.environ.get("SCOMNOM_MSIGDB_DIR")
-        env2 = os.environ.get("MSIGDB_DIR")
-        candidates = [
-            Path(env1) if env1 else None,
-            Path(env2) if env2 else None,
-            Path.cwd() / "msigdb",
-            Path.home() / ".cache" / "scomnom" / "msigdb",
-        ]
-        msigdb_root = next((p for p in candidates if p is not None and p.exists()), None)
-
-    # -----------------------------
-    # Collect explicit GMT paths
-    # -----------------------------
-    gmt_files: list[Path] = []
-    used_keywords: list[str] = []
-
-    def _add_gmt(p: Path) -> None:
-        if p.suffix.lower() == ".gmt" and p.exists() and p.is_file():
-            gmt_files.append(p)
-
-    if allow_paths:
-        for t in tokens:
-            if isinstance(t, Path):
-                _add_gmt(t.expanduser().resolve())
-            else:
-                s = str(t)
-                if s.lower().endswith(".gmt"):
-                    _add_gmt(Path(s).expanduser().resolve())
-
-    # -----------------------------
-    # Keyword search for GMTs
-    # -----------------------------
-    kw_tokens: list[str] = []
-    if allow_keywords:
-        for t in tokens:
-            if isinstance(t, Path):
-                continue
-            s = str(t).strip()
-            if not s or s.lower().endswith(".gmt"):
-                continue
-            kw_tokens.append(s)
-
-    if kw_tokens:
-        if msigdb_root is None or not msigdb_root.exists():
-            # If user gave only keywords but no root, we can't resolve.
-            # We deliberately do NOT error: caller can warn and skip.
-            return sorted(set(gmt_files)), [], None
-
-        # all GMTs under root
-        all_gmts = list(msigdb_root.rglob("*.gmt"))
-
-        for kw in kw_tokens:
-            kw_u = kw.strip().upper()
-            if not kw_u:
-                continue
-
-            # match keyword anywhere in filename (stem or name)
-            matched = []
-            for p in all_gmts:
-                name = p.name.upper()
-                stem = p.stem.upper()
-                if kw_u in name or kw_u in stem:
-                    matched.append(p)
-
-            if matched:
-                used_keywords.append(kw_u)
-                gmt_files.extend(matched)
-
-    # -----------------------------
-    # Dedup + sort
-    # -----------------------------
-    # Use resolved absolute paths to deduplicate reliably
-    uniq: dict[str, Path] = {}
-    for p in gmt_files:
-        try:
-            rp = p.expanduser().resolve()
-        except Exception:
-            rp = p
-        uniq[str(rp)] = rp
-
-    gmt_files_out = sorted(uniq.values(), key=lambda p: str(p))
-
-    # -----------------------------
-    # Infer MSigDB release from filenames
-    # -----------------------------
-    # Typical MSigDB: "*.v2023.1.Hs.symbols.gmt"
-    rel_pat = re.compile(r"\bv(\d{4}\.\d+)\b", flags=re.IGNORECASE)
-    releases: list[str] = []
-    for p in gmt_files_out:
-        m = rel_pat.search(p.name)
-        if m:
-            releases.append(m.group(1))
-
-    msigdb_release: str | None = None
-    if releases:
-        # choose most common; if tie pick max lexicographically (works for YYYY.M)
-        from collections import Counter
-
-        c = Counter(releases)
-        top_n = max(c.values())
-        top = sorted([r for r, n in c.items() if n == top_n])
-        msigdb_release = top[-1]
-
-    # Preserve keyword order but unique
-    seen = set()
-    used_keywords_out = []
-    for k in used_keywords:
-        if k not in seen:
-            used_keywords_out.append(k)
-            seen.add(k)
-
-    return gmt_files_out, used_keywords_out, msigdb_release
-
 
 
 # -------------------------------------------------------------------------
