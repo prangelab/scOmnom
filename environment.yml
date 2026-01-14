@@ -1,5 +1,7 @@
 name: scOmnom_env
+
 channels:
+  # Keep this ordering to make sure PyTorch + CUDA resolve cleanly
   - pytorch
   - nvidia
   - conda-forge
@@ -7,9 +9,12 @@ channels:
   - defaults
 
 dependencies:
-  # Python
+  # Python / tooling
   - python=3.11
+  - pip
   - setuptools
+  - wheel
+  - cython
 
   # Numeric stack
   - numpy
@@ -44,24 +49,20 @@ dependencies:
 
   # GPU acceleration:
   # On macOS: Metal/MPS enabled automatically. Comment out or remove the next line (pytorch-cuda)
-  # On Linux (NVIDIA GPU) keep the next line to install pytorch-cuda.
+  # On Linux (NVIDIA GPU) keep the next line to install pytorch-cuda. (adjust version as needed)
   - pytorch-cuda=12.4
 
   # Testing
   - pytest
 
-  # Pip packages
-  - pip
+  # These packages seem to install more stable from pip
   - pip:
-      - pip>=23
-      - setuptools>=69
-      - wheel>=0.42
-      - umap-learn
       - scvi-tools
       - scanorama
       - harmonypy
       - scib-metrics
-      - types-pytz
       - celltypist
-      - requests
       - decoupler
+      - umap-learn
+      - requests
+      - types-pytz
