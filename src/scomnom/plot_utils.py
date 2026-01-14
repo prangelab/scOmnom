@@ -87,7 +87,7 @@ def setup_scanpy_figs(figdir: Path, formats: Sequence[str] | None = None) -> Non
     ROOT_FIGDIR.mkdir(parents=True, exist_ok=True)
 
 
-def save_multi(stem: str, figdir: Path, fig=None) -> None:
+def save_multi(stem: str, figdir: Path, fig=None, *, savefig_kwargs: dict | None = None) -> None:
     """
     Save the current matplotlib figure (or a provided figure) to multiple formats.
 
@@ -177,13 +177,16 @@ def save_multi(stem: str, figdir: Path, fig=None) -> None:
     if RUN_KEY and rel_figdir.parts and rel_figdir.parts[0] == RUN_KEY:
         rel_figdir = Path(*rel_figdir.parts[1:])  # may become "."
 
+    kwargs = dict(dpi=300)
+    if savefig_kwargs:
+        kwargs.update(savefig_kwargs)
+
     for ext in FIGURE_FORMATS:
         outdir = ROOT_FIGDIR / ext / RUN_FIG_SUBDIR / rel_figdir
         outdir.mkdir(parents=True, exist_ok=True)
-
         outfile = outdir / f"{stem}.{ext}"
         LOGGER.info("Saving figure: %s", outfile)
-        plt.savefig(outfile, dpi=300)
+        plt.savefig(outfile, **kwargs)
 
     plt.close()
 
@@ -199,34 +202,25 @@ def save_umap_multi(
 ) -> None:
     """
     UMAP-only saver that prevents Scanpy legends / annotations from being clipped.
-    Does NOT affect other plotting functions.
+    Delegates actual saving to save_multi().
     """
-    global ROOT_FIGDIR
-
-    if ROOT_FIGDIR is None:
-        raise RuntimeError("ROOT_FIGDIR is not set. Call setup_scanpy_figs() first.")
-
     if right is not None:
-        # reserve space for legends on the right
         try:
             fig.subplots_adjust(right=right)
         except Exception:
             pass
 
-    figdir = Path(figdir)
+    savefig_kwargs = {}
+    if tight:
+        savefig_kwargs["bbox_inches"] = "tight"
+        savefig_kwargs["pad_inches"] = pad_inches
 
-    for ext in FIGURE_FORMATS:
-        outdir = ROOT_FIGDIR / ext / figdir
-        outdir.mkdir(parents=True, exist_ok=True)
-        outfile = outdir / f"{stem}.{ext}"
-        LOGGER.info("Saving figure: %s", outfile)
-
-        if tight:
-            fig.savefig(outfile, dpi=300, bbox_inches="tight", pad_inches=pad_inches)
-        else:
-            fig.savefig(outfile, dpi=300)
-    plt.close(fig)
-
+    save_multi(
+        stem=stem,
+        figdir=figdir,
+        fig=fig,
+        savefig_kwargs=savefig_kwargs,
+    )
 
 
 # -------------------------------------------------------------------------
