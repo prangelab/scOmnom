@@ -581,16 +581,19 @@ def select_best_resolution(
     """
     Main entry point for resolution selection.
 
-    Hierarchy:
-      1) Plateau (structural detection; selection within plateau uses composite score)
-      2) Stability knee (interior-only + stability floor)
-      3) Penalized peak (interior-only + stability floor)
-      4) Max composite (interior-only + stability floor; fallback to global max composite)
-
-    Then apply vetoes:
-      - bio cliff veto (snap-to-allowed)
-      - bio complexity veto (snap-to-allowed)
-    Then apply border guard.
+    Updated behavior (patch):
+      - Define a FEASIBLE set = interior ∩ {stability >= min_stab_ok}. All snapping/vetoing is constrained to FEASIBLE.
+      - Plateau handling:
+          * Structural plateaus still detected structurally.
+          * Selection *within* a plateau uses composite score, but filtered by FEASIBLE and (optionally) bio gates.
+      - Adds optional BIO PLATEAU:
+          * If structural plateau exists: prefer overlap (structural ∩ bio ∩ feasible), else structural ∩ feasible.
+          * If no structural plateau: try bio plateau ∩ feasible before falling back to knee/penalized/max-comp.
+      - Bio-cliff veto:
+          * Computes r* and allowed-by-cliff relative to FEASIBLE (not global), preventing 0.1 “gravity well”.
+          * Snaps only within (allowed_by_cliff ∩ FEASIBLE). If empty -> ignore cliff.
+      - Bio-complexity veto:
+          * Also snaps only within FEASIBLE.
     """
     if metrics.ari_adjacent is None:
         ari_adjacent = _compute_ari_adjacent(
@@ -610,8 +613,8 @@ def select_best_resolution(
     # --------------------------
     tiny_penalty: Dict[float, float] = {}
     for r in sorted(metrics.resolutions):
-        tiny_penalty[r] = compute_tiny_cluster_penalty(
-            metrics.cluster_sizes[r],
+        tiny_penalty[float(r)] = compute_tiny_cluster_penalty(
+            metrics.cluster_sizes[float(r)],
             config.tiny_cluster_size,
         )
 
@@ -668,7 +671,7 @@ def select_best_resolution(
     all_scores = {float(r): composite_score(float(r)) for r in metrics.resolutions}
 
     # --------------------------
-    # Resolution lists
+    # Resolution lists + feasibility
     # --------------------------
     sorted_res = sorted(float(r) for r in metrics.resolutions)
     min_r = float(sorted_res[0])
@@ -682,42 +685,117 @@ def select_best_resolution(
     def _stability_ok(r: float) -> bool:
         return float(stability.get(float(r), 0.0)) >= float(min_stab_ok)
 
-    # --------------------------
-    # Build set-level "allowed" regions for plateau filtering
-    # --------------------------
-    allowed_by_cliff: Optional[set[float]] = None
-    if use_bio_effective and metrics.bio_ari:
-        bioari_norm_local = _normalize_scores(metrics.bio_ari or {})
-        if bioari_norm_local:
-            r_star = max(bioari_norm_local, key=lambda r: float(bioari_norm_local.get(r, -np.inf)))
-            v_star = float(bioari_norm_local.get(r_star, 0.0))
-            bioari_drop = 0.35
-            allowed_by_cliff = {
-                float(r) for r in sorted_res
-                if float(bioari_norm_local.get(float(r), 0.0)) >= (v_star - bioari_drop)
-            }
+    feasible: List[float] = [r for r in interior if _stability_ok(r)]
+    feasible_set: set[float] = set(feasible)
 
-    allowed_by_complexity: Optional[set[float]] = None
-    if use_bio_effective and metrics.n_bio_labels and metrics.n_bio_labels > 0:
-        ratio_max = 2.5
-        n_bio = int(metrics.n_bio_labels)
-        allowed_by_complexity = {
-            float(r) for r in sorted_res
-            if int(metrics.cluster_counts.get(float(r), 0)) <= ratio_max * n_bio
+    if not feasible:
+        LOGGER.warning(
+            "Feasible set is empty (no interior resolutions with stability >= %.2f). "
+            "Selection will fall back to global composite and vetoes will be effectively disabled.",
+            float(min_stab_ok),
+        )
+
+    # --------------------------
+    # BIO PLATEAU (optional)
+    # --------------------------
+    bio_plateau: Optional[set[float]] = None
+    bio_plateau_stats: dict = {}
+
+    if use_bio_effective and feasible:
+        # Homogeneity floor relative to best within FEASIBLE
+        hom = metrics.bio_homogeneity or {}
+        frag = metrics.bio_fragmentation or {}
+
+        hom_vals = [float(hom.get(r, np.nan)) for r in feasible]
+        frag_vals = [float(frag.get(r, np.nan)) for r in feasible]
+
+        # Guard against NaNs
+        hom_vals_clean = [v for v in hom_vals if np.isfinite(v)]
+        frag_vals_clean = [v for v in frag_vals if np.isfinite(v)]
+
+        # Tunables (can later be put into config/cfg)
+        hom_floor_frac = 0.80  # keep r where hom >= 0.8 * max_hom(feasible)
+        frag_q = 0.80          # keep r where frag <= q80(frag(feasible))
+
+        if hom_vals_clean:
+            max_hom_feas = float(np.max(hom_vals_clean))
+            hom_floor = hom_floor_frac * max_hom_feas
+        else:
+            max_hom_feas = float("nan")
+            hom_floor = float("nan")
+
+        if frag_vals_clean:
+            frag_cap = float(np.quantile(frag_vals_clean, frag_q))
+        else:
+            frag_cap = float("nan")
+
+        # Build bio plateau set on FEASIBLE only
+        bp: set[float] = set()
+        for r in feasible:
+            h = float(hom.get(r, np.nan))
+            f = float(frag.get(r, np.nan))
+            ok_h = np.isfinite(h) and np.isfinite(hom_floor) and (h >= hom_floor)
+            ok_f = np.isfinite(f) and np.isfinite(frag_cap) and (f <= frag_cap)
+            if ok_h and ok_f:
+                bp.add(float(r))
+
+        bio_plateau = bp if bp else None
+        bio_plateau_stats = {
+            "hom_floor_frac": hom_floor_frac,
+            "frag_q": frag_q,
+            "max_hom_feasible": max_hom_feas,
+            "hom_floor": hom_floor,
+            "frag_cap": frag_cap,
+            "n_feasible": len(feasible),
+            "n_bio_plateau": 0 if bio_plateau is None else len(bio_plateau),
         }
 
-    def _apply_allowed_filters(cands: Sequence[float]) -> List[float]:
-        out = [float(r) for r in cands]
-        if allowed_by_cliff is not None:
-            out = [r for r in out if r in allowed_by_cliff]
-        if allowed_by_complexity is not None:
-            out = [r for r in out if r in allowed_by_complexity]
-        return out
+        if bio_plateau is not None:
+            LOGGER.info(
+                "Bio plateau detected on FEASIBLE set: %d/%d resolutions pass "
+                "(hom>=%.3f [%.0f%% of max_hom=%.3f], frag<=%.3f [q=%.2f]).",
+                int(len(bio_plateau)),
+                int(len(feasible)),
+                float(hom_floor),
+                float(100.0 * hom_floor_frac),
+                float(max_hom_feas),
+                float(frag_cap),
+                float(frag_q),
+            )
+        else:
+            LOGGER.info(
+                "No bio plateau detected on FEASIBLE set "
+                "(hom_floor_frac=%.2f, frag_q=%.2f).",
+                float(hom_floor_frac),
+                float(frag_q),
+            )
 
     # --------------------------
-    # Plateau detection (structural) + BIO-guided selection within plateau
+    # Structural plateau detection
     # --------------------------
     plateaus = _detect_plateaus(metrics, config, stability)
+
+    candidate: Optional[float] = None
+    candidate_reason: str = "unset"
+
+    # Helper: pick best by composite with optional “near-max then smallest-r” parsimony
+    def _pick_best_by_composite(cands: Sequence[float], *, prefer_smallest_near_max: bool = False) -> Optional[float]:
+        c = [float(r) for r in cands]
+        if not c:
+            return None
+        r_best = float(max(c, key=lambda r: float(all_scores.get(r, -np.inf))))
+        if not prefer_smallest_near_max:
+            return r_best
+        best_val = float(all_scores.get(r_best, -np.inf))
+        # within 1% of best, pick smallest r
+        eps = 0.01
+        near = [r for r in c if float(all_scores.get(r, -np.inf)) >= (1.0 - eps) * best_val]
+        return float(min(near)) if near else r_best
+
+    # ==========================================================
+    # 1) STRUCTURAL PLATEAU PATH (if exists)
+    #    Prefer overlap with bio plateau if available.
+    # ==========================================================
     if plateaus:
         plateaus_sorted = sorted(
             plateaus,
@@ -727,44 +805,59 @@ def select_best_resolution(
         best_plateau = plateaus_sorted[0]
         plateau_res = [float(r) for r in sorted(best_plateau.resolutions)]
 
-        # optional: enforce interior-only first; if that empties, relax back to plateau list
-        plateau_res_interior = [r for r in plateau_res if r in interior]
-        plateau_candidates = plateau_res_interior if plateau_res_interior else plateau_res
+        # Enforce FEASIBLE (interior + stability floor). If empty, relax to plateau_res (legacy behavior).
+        plateau_feasible = [r for r in plateau_res if r in feasible_set]
+        plateau_candidates = plateau_feasible if plateau_feasible else plateau_res
 
-        # filter by bio allowed-regions (pre-cliff, complexity), then stability floor
-        plateau_candidates = _apply_allowed_filters(plateau_candidates)
-        plateau_candidates = [r for r in plateau_candidates if _stability_ok(r)]
-
-        if plateau_candidates:
-            best_resolution = float(max(plateau_candidates, key=lambda r: float(all_scores.get(r, -np.inf))))
-            LOGGER.info(
-                "Selected resolution %.3f from plateau (bio-guided within plateau). "
-                "Plateau=[%s], mean_stability=%.3f, Total=%.3f, stability=%.3f, bio_ARI=%.3f",
-                best_resolution,
-                ", ".join(f"{r:.3f}" for r in plateau_res),
-                float(best_plateau.mean_stability),
-                float(all_scores.get(best_resolution, float("nan"))),
-                float(stability.get(best_resolution, float("nan"))),
-                float((metrics.bio_ari or {}).get(best_resolution, float("nan"))),
-            )
-
-            candidate = best_resolution
-            candidate_reason = "plateau_bio_guided"
+        # If we have a bio plateau, try intersection first
+        if bio_plateau is not None:
+            overlap = [r for r in plateau_candidates if r in bio_plateau]
+            if overlap:
+                cand = _pick_best_by_composite(overlap, prefer_smallest_near_max=True)
+                if cand is not None:
+                    candidate = float(cand)
+                    candidate_reason = "plateau_overlap(structural∩bio∩feasible)"
+            else:
+                # no overlap -> pick best within plateau_candidates
+                cand = _pick_best_by_composite(plateau_candidates, prefer_smallest_near_max=True)
+                if cand is not None:
+                    candidate = float(cand)
+                    candidate_reason = "plateau_structural(feasible; no bio overlap)"
         else:
-            LOGGER.warning(
-                "Plateau found but no plateau candidates survived filters (bio/cliff/complexity/stability). "
-                "Falling through to non-plateau fallback."
-            )
-            candidate = None
-            candidate_reason = "plateau_rejected"
-    else:
-        candidate = None
-        candidate_reason = "no_plateau"
+            cand = _pick_best_by_composite(plateau_candidates, prefer_smallest_near_max=True)
+            if cand is not None:
+                candidate = float(cand)
+                candidate_reason = "plateau_structural(feasible)"
 
-    # --------------------------
-    # No plateau: knee -> penalized -> max composite
-    # (interior-only + stability floor; max composite may fallback globally)
-    # --------------------------
+        LOGGER.info(
+            "Structural plateau found: Plateau=[%s], mean_stability=%.3f. "
+            "Initial candidate=%s (%s).",
+            ", ".join(f"{r:.3f}" for r in plateau_res),
+            float(best_plateau.mean_stability),
+            "None" if candidate is None else f"{float(candidate):.3f}",
+            candidate_reason,
+        )
+
+    # ==========================================================
+    # 2) NO STRUCTURAL PLATEAU: try BIO PLATEAU (if exists)
+    # ==========================================================
+    if candidate is None and bio_plateau is not None and feasible:
+        bio_cands = sorted([r for r in feasible if r in bio_plateau])
+        cand = _pick_best_by_composite(bio_cands, prefer_smallest_near_max=True)
+        if cand is not None:
+            candidate = float(cand)
+            candidate_reason = "bio_plateau(feasible)"
+            LOGGER.info(
+                "No structural plateau: selected initial candidate %.3f from bio plateau within FEASIBLE "
+                "(Total=%.3f, stability=%.3f).",
+                float(candidate),
+                float(all_scores.get(candidate, float("nan"))),
+                float(stability.get(candidate, float("nan"))),
+            )
+
+    # ==========================================================
+    # 3) FALLBACK: knee -> penalized -> max composite (FEASIBLE)
+    # ==========================================================
     def _best_by(
         candidates: Sequence[float],
         score_dict: Dict[float, float],
@@ -802,8 +895,11 @@ def select_best_resolution(
         return None
 
     if candidate is None:
+        # Use FEASIBLE candidates for knee/pen/comp if possible, else interior (legacy)
+        base = feasible if feasible else interior
+
         candidate_knee = _stability_knee(
-            interior,
+            base,
             stability,
             knee_fraction=knee_frac,
             min_stability=min_stab_ok,
@@ -812,13 +908,13 @@ def select_best_resolution(
         candidate_pen = None
         if metrics.penalized:
             candidate_pen = _best_by(
-                interior,
+                base,
                 metrics.penalized,
                 min_stability=min_stab_ok,
             )
 
         candidate_comp = _best_by(
-            interior,
+            base,
             all_scores,
             min_stability=min_stab_ok,
         )
@@ -827,36 +923,30 @@ def select_best_resolution(
 
         if candidate_knee is not None:
             candidate = float(candidate_knee)
-            candidate_reason = f"stability_knee(frac={knee_frac:.2f}, min_stab_ok={min_stab_ok:.2f}, interior_only=True)"
+            candidate_reason = f"stability_knee(frac={knee_frac:.2f}, min_stab_ok={min_stab_ok:.2f}, feasible={bool(feasible)})"
         elif candidate_pen is not None:
             candidate = float(candidate_pen)
-            candidate_reason = f"penalized_silhouette_peak(min_stab_ok={min_stab_ok:.2f}, interior_only=True)"
+            candidate_reason = f"penalized_silhouette_peak(min_stab_ok={min_stab_ok:.2f}, feasible={bool(feasible)})"
         else:
             candidate = float(candidate_comp)
             candidate_reason = (
-                f"max_total_composite(min_stab_ok={min_stab_ok:.2f}, interior_only=True)"
-                if candidate in interior
+                f"max_total_composite(min_stab_ok={min_stab_ok:.2f}, feasible={bool(feasible)})"
+                if candidate in base
                 else "max_total_composite(fallback_global)"
             )
 
         LOGGER.info(
-            "No plateau candidates (interior-only, min_stab_ok=%.2f): knee=%s, penalized=%s, max_comp=%s",
+            "Fallback candidates (min_stab_ok=%.2f): knee=%s, penalized=%s, max_comp=%s (base=%s, n_base=%d).",
             float(min_stab_ok),
             "None" if candidate_knee is None else f"{float(candidate_knee):.3f}",
             "None" if candidate_pen is None else f"{float(candidate_pen):.3f}",
             "None" if candidate_comp is None else f"{float(candidate_comp):.3f}",
+            "feasible" if feasible else "interior",
+            int(len(base)),
         )
 
         LOGGER.info(
-            "No plateau: initial candidate %.3f chosen by %s (Total=%.3f, stability=%.3f).",
-            float(candidate),
-            candidate_reason,
-            float(all_scores.get(float(candidate), float("nan"))),
-            float(stability.get(float(candidate), float("nan"))),
-        )
-    else:
-        LOGGER.info(
-            "Plateau path: initial candidate %.3f chosen by %s (Total=%.3f, stability=%.3f).",
+            "Initial candidate %.3f chosen by %s (Total=%.3f, stability=%.3f).",
             float(candidate),
             candidate_reason,
             float(all_scores.get(float(candidate), float("nan"))),
@@ -864,45 +954,62 @@ def select_best_resolution(
         )
 
     # ------------------------------------------------------------------
-    # Bio vetoes (snap logic)
+    # Bio vetoes (snap logic) — FEASIBLE-CONSTRAINED
     # ------------------------------------------------------------------
     def _apply_bio_cliff_veto(r_pick: float) -> float:
         if not use_bio_effective:
+            return float(r_pick)
+
+        if not feasible:
+            # No feasible set -> do not snap (prevents snapping to borders)
             return float(r_pick)
 
         bioari_norm_local = _normalize_scores(metrics.bio_ari or {})
         if not bioari_norm_local:
             return float(r_pick)
 
-        r_star = max(bioari_norm_local, key=lambda r: bioari_norm_local[r])
-        v_star = float(bioari_norm_local[r_star])
+        # Compute r* and allowed-by-cliff relative to FEASIBLE only (key fix)
+        r_star = max(feasible, key=lambda r: float(bioari_norm_local.get(r, -np.inf)))
+        v_star = float(bioari_norm_local.get(r_star, 0.0))
         bioari_drop = 0.35
 
-        allowed = [
-            r for r in sorted_res
-            if float(bioari_norm_local.get(r, 0.0)) >= (v_star - bioari_drop)
-        ]
-        if not allowed:
+        allowed_by_cliff = {
+            float(r) for r in feasible
+            if float(bioari_norm_local.get(float(r), 0.0)) >= (v_star - bioari_drop)
+        }
+
+        if float(r_pick) in allowed_by_cliff:
             return float(r_pick)
 
-        if float(r_pick) in allowed:
-            return float(r_pick)
+        if allowed_by_cliff:
+            r_best = float(max(allowed_by_cliff, key=lambda r: float(all_scores.get(r, -np.inf))))
+            LOGGER.info(
+                "Bio-cliff veto (feasible-constrained): %.3f → %.3f "
+                "(bioARI_norm=%.3f, best_feasible=%.3f@%.3f, drop=%.2f).",
+                float(r_pick),
+                float(r_best),
+                float(bioari_norm_local.get(float(r_pick), float("nan"))),
+                float(v_star),
+                float(r_star),
+                float(bioari_drop),
+            )
+            return float(r_best)
 
-        # snap to best composite among allowed
-        r_best = max(allowed, key=lambda r: float(all_scores.get(r, -np.inf)))
-
-        LOGGER.info(
-            "Bio-cliff veto: %.3f → %.3f (bioARI_norm=%.3f, best=%.3f@%.3f)",
-            float(r_pick),
-            float(r_best),
-            float(bioari_norm_local.get(r_pick, float("nan"))),
-            float(v_star),
+        # If cliff excludes all FEASIBLE resolutions, ignore it (per your spec)
+        LOGGER.warning(
+            "Bio-cliff (drop=%.2f) excludes all FEASIBLE resolutions; ignoring cliff. "
+            "r*=%.3f (bioARI_norm=%.3f).",
+            float(bioari_drop),
             float(r_star),
+            float(v_star),
         )
-        return float(r_best)
+        return float(r_pick)
 
     def _apply_bio_complexity_veto(r_pick: float) -> float:
         if not use_bio_effective:
+            return float(r_pick)
+
+        if not feasible:
             return float(r_pick)
 
         n_bio = metrics.n_bio_labels
@@ -910,25 +1017,24 @@ def select_best_resolution(
             return float(r_pick)
 
         ratio_max = 2.5
-        n_clusters = int(metrics.cluster_counts.get(r_pick, 0))
-        if n_clusters <= ratio_max * n_bio:
+        n_clusters = int(metrics.cluster_counts.get(float(r_pick), 0))
+        if n_clusters <= ratio_max * int(n_bio):
             return float(r_pick)
 
         allowed = [
-            r for r in sorted_res
-            if int(metrics.cluster_counts.get(r, 0)) <= ratio_max * n_bio
+            float(r) for r in feasible
+            if int(metrics.cluster_counts.get(float(r), 0)) <= ratio_max * int(n_bio)
         ]
         if not allowed:
             return float(r_pick)
 
-        r_best = max(allowed, key=lambda r: float(all_scores.get(r, -np.inf)))
-
+        r_best = float(max(allowed, key=lambda r: float(all_scores.get(r, -np.inf))))
         LOGGER.info(
-            "Bio-complexity veto: %.3f (%d clusters) → %.3f (%d clusters, %d bio labels)",
+            "Bio-complexity veto (feasible-constrained): %.3f (%d clusters) → %.3f (%d clusters, %d bio labels).",
             float(r_pick),
-            n_clusters,
+            int(n_clusters),
             float(r_best),
-            int(metrics.cluster_counts.get(r_best, 0)),
+            int(metrics.cluster_counts.get(float(r_best), 0)),
             int(n_bio),
         )
         return float(r_best)
@@ -958,6 +1064,14 @@ def select_best_resolution(
         float(all_scores.get(best_resolution, float("nan"))),
         float(stability.get(best_resolution, float("nan"))),
     )
+
+    # Optional extra debug line for why 0.1 can’t happen anymore
+    if best_resolution == min_r:
+        LOGGER.warning(
+            "Selected min resolution %.3f. Note: veto snapping is feasible-constrained; "
+            "this implies either FEASIBLE was empty or min_r was chosen by fallback_global.",
+            float(min_r),
+        )
 
     return ResolutionSelectionResult(
         best_resolution=best_resolution,
