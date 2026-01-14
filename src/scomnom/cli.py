@@ -631,119 +631,119 @@ def cluster_and_annotate(
         progeny_top_n: int = typer.Option(100, "--progeny-top-n"),
         progeny_organism: str = typer.Option("human", "--progeny-organism"),
 ):
-# ---------------------------------------------------------
-# Handle --list-models /considered in integration-style
-# ---------------------------------------------------------
-if list_models:
-        from .io_utils import get_available_celltypist_models
-        models = get_available_celltypist_models()
-        typer.echo("\nAvailable CellTypist models:\n")
-        for m in models:
-            typer.echo(f"  - {m['name']}")
+    # ---------------------------------------------------------
+    # Handle --list-models /considered in integration-style
+    # ---------------------------------------------------------
+    if list_models:
+            from .io_utils import get_available_celltypist_models
+            models = get_available_celltypist_models()
+            typer.echo("\nAvailable CellTypist models:\n")
+            for m in models:
+                typer.echo(f"  - {m['name']}")
+            raise typer.Exit()
+
+    if download_models:
+        from .io_utils import download_all_celltypist_models
+        download_all_celltypist_models()
         raise typer.Exit()
 
-if download_models:
-    from .io_utils import download_all_celltypist_models
-    download_all_celltypist_models()
-    raise typer.Exit()
+    # ---------------------------------------------------------
+    # Validate required input
+    # ---------------------------------------------------------
+    if input_path is None:
+        raise typer.BadParameter("Missing required option --input / -i")
 
-# ---------------------------------------------------------
-# Validate required input
-# ---------------------------------------------------------
-if input_path is None:
-    raise typer.BadParameter("Missing required option --input / -i")
+    # ---------------------------------------------------------
+    # Resolve output dir + logging
+    # ---------------------------------------------------------
+    out_dir = output_dir or input_path.parent
+    log_path = out_dir / "cluster-and-annotate.log"
+    init_logging(log_path)
 
-# ---------------------------------------------------------
-# Resolve output dir + logging
-# ---------------------------------------------------------
-out_dir = output_dir or input_path.parent
-log_path = out_dir / "cluster-and-annotate.log"
-init_logging(log_path)
+    # Parse MSigDB gene sets
+    if msigdb_gene_sets_cli is None:
+        gene_sets_list = None  # allow config defaults
+    else:
+        gene_sets_list = [x.strip() for x in msigdb_gene_sets_cli.split(",") if x.strip()]
 
-# Parse MSigDB gene sets
-if msigdb_gene_sets_cli is None:
-    gene_sets_list = None  # allow config defaults
-else:
-    gene_sets_list = [x.strip() for x in msigdb_gene_sets_cli.split(",") if x.strip()]
+    # ---------------------------------------------------------
+    # Build config (new ClusterAnnotateConfig fields)
+    # ---------------------------------------------------------
+    kwargs = dict(
+        input_path=input_path,
+        output_dir=out_dir,
+        output_name=output_name,
+        save_h5ad=save_h5ad,
 
-# ---------------------------------------------------------
-# Build config (new ClusterAnnotateConfig fields)
-# ---------------------------------------------------------
-kwargs = dict(
-    input_path=input_path,
-    output_dir=out_dir,
-    output_name=output_name,
-    save_h5ad=save_h5ad,
+        embedding_key=embedding_key,
+        batch_key=batch_key,
+        label_key=label_key,
 
-    embedding_key=embedding_key,
-    batch_key=batch_key,
-    label_key=label_key,
+        res_min=res_min,
+        res_max=res_max,
+        n_resolutions=n_resolutions,
+        penalty_alpha=penalty_alpha,
 
-    res_min=res_min,
-    res_max=res_max,
-    n_resolutions=n_resolutions,
-    penalty_alpha=penalty_alpha,
+        stability_repeats=stability_repeats,
+        subsample_frac=subsample_frac,
+        random_state=random_state,
+        tiny_cluster_size=tiny_cluster_size,
+        min_cluster_size=min_cluster_size,
+        min_plateau_len=min_plateau_len,
+        max_cluster_jump_frac=max_cluster_jump_frac,
+        stability_threshold=stability_threshold,
+        w_stab=w_stab,
+        w_sil=w_sil,
+        w_tiny=w_tiny,
 
-    stability_repeats=stability_repeats,
-    subsample_frac=subsample_frac,
-    random_state=random_state,
-    tiny_cluster_size=tiny_cluster_size,
-    min_cluster_size=min_cluster_size,
-    min_plateau_len=min_plateau_len,
-    max_cluster_jump_frac=max_cluster_jump_frac,
-    stability_threshold=stability_threshold,
-    w_stab=w_stab,
-    w_sil=w_sil,
-    w_tiny=w_tiny,
+        celltypist_model=celltypist_model,
+        celltypist_majority_voting=celltypist_majority_voting,
+        annotation_csv=annotation_csv,
 
-    celltypist_model=celltypist_model,
-    celltypist_majority_voting=celltypist_majority_voting,
-    annotation_csv=annotation_csv,
+        bio_mask_enabled=bio_mask_enabled,
+        bio_mask_entropy_abs_limit=bio_mask_entropy_abs_limit,
+        bio_mask_entropy_quantile=bio_mask_entropy_quantile,
+        bio_mask_margin_min=bio_mask_margin_min,
+        bio_mask_min_frac=bio_mask_min_frac,
 
-    bio_mask_enabled=bio_mask_enabled,
-    bio_mask_entropy_abs_limit=bio_mask_entropy_abs_limit,
-    bio_mask_entropy_quantile=bio_mask_entropy_quantile,
-    bio_mask_margin_min=bio_mask_margin_min,
-    bio_mask_min_frac=bio_mask_min_frac,
+        run_decoupler=run_decoupler,
 
-    run_decoupler=run_decoupler,
+        decoupler_pseudobulk_agg=decoupler_pseudobulk_agg,
+        decoupler_use_raw=decoupler_use_raw,
+        decoupler_method=decoupler_method,
+        decoupler_min_n_targets=decoupler_min_n_targets,
 
-    decoupler_pseudobulk_agg=decoupler_pseudobulk_agg,
-    decoupler_use_raw=decoupler_use_raw,
-    decoupler_method=decoupler_method,
-    decoupler_min_n_targets=decoupler_min_n_targets,
+        msigdb_method=msigdb_method,
+        msigdb_min_n_targets=msigdb_min_n_targets,
+        # (msigdb_gene_sets comes from gene_sets_list below)
 
-    msigdb_method=msigdb_method,
-    msigdb_min_n_targets=msigdb_min_n_targets,
-    # (msigdb_gene_sets comes from gene_sets_list below)
+        run_dorothea=run_dorothea,
+        dorothea_method=dorothea_method,
+        dorothea_min_n_targets=dorothea_min_n_targets,
+        dorothea_confidence=[x.strip() for x in dorothea_confidence.split(",") if x.strip()],
 
-    run_dorothea=run_dorothea,
-    dorothea_method=dorothea_method,
-    dorothea_min_n_targets=dorothea_min_n_targets,
-    dorothea_confidence=[x.strip() for x in dorothea_confidence.split(",") if x.strip()],
+        run_progeny=run_progeny,
+        progeny_method=progeny_method,
+        progeny_min_n_targets=progeny_min_n_targets,
+        progeny_top_n=progeny_top_n,
+        progeny_organism=progeny_organism,
 
-    run_progeny=run_progeny,
-    progeny_method=progeny_method,
-    progeny_min_n_targets=progeny_min_n_targets,
-    progeny_top_n=progeny_top_n,
-    progeny_organism=progeny_organism,
+        make_figures=make_figures,
+        figdir_name=figdir_name,
+        figure_formats=figure_formats,
 
-    make_figures=make_figures,
-    figdir_name=figdir_name,
-    figure_formats=figure_formats,
+        logfile=log_path,
+    )
 
-    logfile=log_path,
-)
+    if gene_sets_list is not None:
+        kwargs["msigdb_gene_sets"] = gene_sets_list
 
-if gene_sets_list is not None:
-    kwargs["msigdb_gene_sets"] = gene_sets_list
+    cfg = ClusterAnnotateConfig(**kwargs)
 
-cfg = ClusterAnnotateConfig(**kwargs)
-
-# ---------------------------------------------------------
-# Run
-# ---------------------------------------------------------
-run_clustering(cfg)
+    # ---------------------------------------------------------
+    # Run
+    # ---------------------------------------------------------
+    run_clustering(cfg)
 
 
 
