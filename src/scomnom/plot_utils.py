@@ -2856,37 +2856,24 @@ def _dynamic_fig_width_for_barplot(labels: Sequence[str], *, min_w: float = 12.0
 
 
 def plot_decoupler_activity_heatmap(
-    activity: pd.DataFrame,
-    *,
-    net_name: str,
-    figdir: Path | None,
-    top_k: int = 30,
-    rank_mode: str = "var",  # "var" or "mean_abs"
-    use_zscore: bool = True,
-    wrap_labels: bool = True,
-    wrap_at: int = 38,
-    cmap: str = "viridis",
-    stem: str = "heatmap_top",
-    title_prefix: Optional[str] = None,
+        activity: pd.DataFrame,
+        *,
+        net_name: str,
+        figdir: Path | None,
+        top_k: int = 30,
+        rank_mode: str = "var",
+        use_zscore: bool = True,
+        wrap_labels: bool = True,
+        wrap_at: int = 38,
+        cmap: str = "viridis",
+        stem: str = "heatmap_top",
+        title_prefix: Optional[str] = None,
 ) -> None:
-    """
-    Global heatmap: clusters (rows) x top-K features (cols).
-    Uses z-scored activity across clusters by default for comparability.
-
-    FIXES:
-      - No overlay line grid
-      - Dynamic margins
-    """
     if activity is None or activity.empty:
         return
 
-    import seaborn as sns
-
     outdir = _decoupler_figdir(figdir, net_name)
-
     A = activity.copy()
-    A.index = A.index.astype(str)
-    A.columns = A.columns.astype(str)
     A = A.apply(pd.to_numeric, errors="coerce").fillna(0.0)
 
     feats = _top_features_global(A, k=top_k, mode=rank_mode, signed=True)
@@ -2897,14 +2884,16 @@ def plot_decoupler_activity_heatmap(
     if use_zscore:
         sub = _zscore_cols(sub)
 
-    # Optional label wrapping (helps MSigDB)
+    # Clean and Wrap labels
+    sub.columns = [_clean_feature_label(c, net_name) for c in sub.columns]
     if wrap_labels:
         sub.columns = _wrap_labels(sub.columns, wrap_at=wrap_at)
 
-    # Figure sizing
     fig_w = max(8.0, 2.5 + 0.35 * sub.shape[1])
     fig_h = max(4.5, 2.2 + 0.28 * sub.shape[0])
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+    # FIX: Explicitly disable grid before drawing heatmap
     ax.grid(False)
 
     sns.heatmap(
@@ -2917,9 +2906,8 @@ def plot_decoupler_activity_heatmap(
         square=False,
     )
 
+    # FIX: Ensure background is clean
     ax.set_facecolor('white')
-    for spine in ax.spines.values():
-        spine.set_visible(True)
 
     ax.set_xlabel("Feature" if net_name.lower() != "dorothea" else "TF")
     ax.set_ylabel("Cluster")
@@ -2928,16 +2916,10 @@ def plot_decoupler_activity_heatmap(
     ttl = f"{ttl_prefix}{net_name}: top {int(top_k)} activity ({'z-score' if use_zscore else 'raw'})"
     ax.set_title(ttl, fontsize=14, pad=12)
 
-    # tick styling
     ax.tick_params(axis="x", rotation=60, labelsize=8, pad=6)
     ax.tick_params(axis="y", rotation=0, labelsize=9, pad=4)
-    for t in ax.get_xticklabels():
-        t.set_ha("right")
-        t.set_rotation_mode("anchor")
-        t.set_multialignment("right")
 
-    # Dynamic bottom margin based on max wrapped label line length
-    # (keeps long pathway names from colliding with the figure edge)
+    # Dynamic margin calculation
     try:
         max_lab_len = int(max(len(str(c)) for c in sub.columns))
     except Exception:
@@ -2951,282 +2933,179 @@ def plot_decoupler_activity_heatmap(
 
 
 def plot_decoupler_cluster_topn_barplots(
-    activity: pd.DataFrame,
-    *,
-    net_name: str,
-    figdir: Path | None,
-    n: int = 10,
-    use_abs: bool = False,
-    stem_prefix: str = "cluster",
-    title_prefix: Optional[str] = None,
+        activity: pd.DataFrame,
+        *,
+        net_name: str,
+        figdir: Path | None,
+        n: int = 10,
+        use_abs: bool = False,
+        stem_prefix: str = "cluster",
+        title_prefix: Optional[str] = None,
 ) -> None:
-    """
-    Per-cluster Top-N barplots (modeled after your ssGSEA barplots).
-    One figure per cluster.
-
-    FIXES:
-      - Dynamic left margin (already present) + improved
-      - Dynamic width to avoid MSigDB squishing
-    """
     if activity is None or activity.empty:
         return
 
     outdir = _decoupler_figdir(figdir, net_name)
-
     A = activity.copy()
-    A.index = A.index.astype(str)
-    A.columns = A.columns.astype(str)
     A = A.apply(pd.to_numeric, errors="coerce").fillna(0.0)
 
     for cl in A.index.astype(str):
         s = A.loc[cl].copy()
         s_rank = s.abs() if use_abs else s
-
         top = s_rank.sort_values(ascending=False).head(int(n))
+
         if top.empty:
             continue
 
         vals = s.loc[top.index] if use_abs else top
+
+        # FIX: Sort so highest is at the top when inverted
         vals_plot = vals.sort_values(ascending=True)
+
+        # FIX: Clean labels
         clean_labels = [_clean_feature_label(l, net_name) for l in vals_plot.index]
 
-        # Dynamic margins/width for long labels
-        left = _dynamic_left_margin_from_labels(vals_plot.index, base=0.22)
-        fig_w = _dynamic_fig_width_for_barplot(vals_plot.index, min_w=12.0, max_w=28.0)
+        left = _dynamic_left_margin_from_labels(clean_labels, base=0.22)
+        fig_w = _dynamic_fig_width_for_barplot(clean_labels, min_w=12.0, max_w=28.0)
         fig_h = max(2.8, 0.70 * len(vals_plot) + 1.8)
 
         fig, ax = plt.subplots(figsize=(fig_w, fig_h))
         fig.subplots_adjust(left=left, right=0.96, top=0.82, bottom=0.14)
 
-        y = np.arange(len(vals_plot))
-
-        bar_colors = "#3b84a8"  # Default
+        # FIX: Different colors for Progeny positive/negative
         if net_name.lower() == "progeny":
             bar_colors = ["#d62728" if v < 0 else "#2ca02c" for v in vals_plot.values]
+        else:
+            bar_colors = "#3b84a8"
 
+        y = np.arange(len(vals_plot))
         ax.barh(
             y=y,
             width=vals_plot.values,
             color=bar_colors,
-            edgecolor="black",
-            linewidth=0.5,
+            edgecolor="#1f2d3a",
+            linewidth=0.6,
             zorder=3,
         )
 
         ax.set_yticks(y)
         ax.set_yticklabels(clean_labels, fontsize=12)
-        ax.set_xlabel("Activity", fontsize=13)
-        ax.set_ylabel("Feature" if net_name.lower() != "dorothea" else "TF", fontsize=13)
-        ax.invert_yaxis()
+        ax.invert_yaxis()  # Put highest on top
 
         ax.grid(False)
-        ax.xaxis.grid(False)
-        ax.yaxis.grid(False)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
 
-        # Title + subtitle (ssGSEA style)
-        main_title = str(cl)
-        if title_prefix:
-            main_title = f"{title_prefix} • {main_title}"
-
-        ax.text(
-            0.5,
-            1.10,
-            main_title,
-            transform=ax.transAxes,
-            ha="center",
-            va="bottom",
-            fontsize=22,
-            fontweight="bold",
-            clip_on=False,
-        )
-        ax.text(
-            0.5,
-            1.04,
-            str(net_name).upper(),
-            transform=ax.transAxes,
-            ha="center",
-            va="bottom",
-            fontsize=14,
-            color="#666666",
-            clip_on=False,
-        )
+        # Title Logic
+        main_title = f"{title_prefix} • {cl}" if title_prefix else cl
+        ax.text(0.5, 1.10, main_title, transform=ax.transAxes, ha="center", weight="bold", fontsize=22)
+        ax.text(0.5, 1.04, str(net_name).upper(), transform=ax.transAxes, ha="center", color="#666666", fontsize=14)
 
         stem = f"{stem_prefix}_{cl}__top{int(n)}_bar"
-        if use_abs:
-            stem += "_abs"
-
         save_multi(stem, outdir, fig)
         plt.close(fig)
 
 
 def plot_decoupler_dotplot(
-    activity: pd.DataFrame,
-    *,
-    net_name: str,
-    figdir: Path | None,
-    top_k: int = 30,
-    rank_mode: str = "var",  # "var" or "mean_abs"
-    color_by: str = "z",  # "z" or "raw"
-    size_by: str = "abs_raw",  # "abs_raw" or "abs_z"
-    wrap_labels: bool = True,
-    wrap_at: int = 38,
-    cmap: str = "viridis",
-    stem: str = "dotplot_top",
-    title_prefix: Optional[str] = None,
+        activity: pd.DataFrame,
+        *,
+        net_name: str,
+        figdir: Path | None,
+        top_k: int = 30,
+        rank_mode: str = "var",
+        color_by: str = "z",
+        size_by: str = "abs_raw",
+        wrap_labels: bool = True,
+        wrap_at: int = 38,
+        cmap: str = "viridis",
+        stem: str = "dotplot_top",
+        title_prefix: Optional[str] = None,
 ) -> None:
-    """
-    Dotplot matrix:
-      x = clusters, y = features (top-K global)
-      color = z-score (default) or raw
-      size  = abs(raw) (default) or abs(z)
-
-    FIXES:
-      - Add size legend
-      - Dynamic left margin for long feature names
-    """
     if activity is None or activity.empty:
         return
 
     outdir = _decoupler_figdir(figdir, net_name)
-
     A = activity.copy()
-    A.index = A.index.astype(str)
-    A.columns = A.columns.astype(str)
     A = A.apply(pd.to_numeric, errors="coerce").fillna(0.0)
 
     feats = _top_features_global(A, k=top_k, mode=rank_mode, signed=True)
     if not feats:
         return
 
-    sub_raw = A.loc[:, feats].copy()  # clusters x feats
+    sub_raw = A.loc[:, feats].copy()
     sub_z = _zscore_cols(sub_raw)
 
-    # choose aesthetics
-    if color_by == "raw":
-        color_mat = sub_raw
-        cbar_label = "activity"
-    else:
-        color_mat = sub_z
-        cbar_label = "z-score"
-
-    if size_by == "abs_z":
-        size_mat = sub_z.abs()
-        size_label = "|z|"
-    else:
-        size_mat = sub_raw.abs()
-        size_label = "|raw|"
+    color_mat = sub_raw if color_by == "raw" else sub_z
+    cbar_label = "activity" if color_by == "raw" else "z-score"
+    size_mat = sub_z.abs() if size_by == "abs_z" else sub_raw.abs()
+    size_label = "|z|" if size_by == "abs_z" else "|raw|"
 
     clusters = sub_raw.index.astype(str).tolist()
     features = sub_raw.columns.astype(str).tolist()
 
+    # FIX: Clean and wrap labels
     features_clean = [_clean_feature_label(f, net_name) for f in features]
+    features_disp = _wrap_labels(features_clean, wrap_at=wrap_at) if wrap_labels else features_clean
 
-    if wrap_labels:
-        features_disp = _wrap_labels(features_clean, wrap_at=wrap_at)
-    else:
-        features_disp = features_clean
-
-    # build long table
-    rows: list[dict] = []
+    rows = []
     for j, feat in enumerate(features):
         for cl in clusters:
-            rows.append(
-                {
-                    "cluster": cl,
-                    "feature": features_disp[j],
-                    "color": float(color_mat.loc[cl, feat]),
-                    "size": float(size_mat.loc[cl, feat]),
-                }
-            )
+            rows.append({
+                "cluster": cl,
+                "feature": features_disp[j],
+                "color": float(color_mat.loc[cl, feat]),
+                "size": float(size_mat.loc[cl, feat]),
+            })
     df = pd.DataFrame(rows)
-    if df.empty:
-        return
 
-    # size scaling
-    svals = df["size"].to_numpy(dtype=float)
-    finite = np.isfinite(svals)
-    if not finite.any():
-        return
-    s_min = float(np.nanmin(svals[finite]))
-    s_max = float(np.nanmax(svals[finite]))
+    # Size scaling
+    svals = df["size"].to_numpy()
+    s_min, s_max = np.nanmin(svals), np.nanmax(svals)
 
-    def size_scale(v: float) -> float:
-        if not np.isfinite(v):
-            return 60.0
-        if s_max <= s_min:
-            return 120.0
-        return float(60.0 + (v - s_min) / (s_max - s_min) * (340.0 - 60.0))
+    def size_scale(v):
+        return 40.0 + (v - s_min) / (s_max - s_min) * 200.0 if s_max > s_min else 100.0
 
-    sizes = np.array([size_scale(v) for v in svals], dtype=float)
+    sizes = np.array([size_scale(v) for v in svals])
 
-    # figure sizing
-    # We increase the right margin and reduce dot scale slightly
-    fig_w = max(10.0, 3.5 + 0.4 * len(clusters))  # Slightly wider
+    # FIX: Define fig_h and increase fig_w for legend space
+    fig_w = max(11.0, 4.0 + 0.4 * len(clusters))
+    fig_h = max(5.0, 2.2 + 0.3 * len(features))
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-    # Move legends further right and use 'tight_layout' or specific adjusts
+    left = _dynamic_left_margin_from_labels(df["feature"].values, base=0.20)
+    # FIX: Increase right margin significantly (0.75) to house legends
     fig.subplots_adjust(left=left, right=0.75, top=0.88, bottom=0.18)
+
     sca = ax.scatter(
-        x=df["cluster"].values,
-        y=df["feature"].values,
-        s=sizes,
-        c=df["color"].values,
-        cmap=cmap,
-        edgecolors="black",
-        linewidths=0.25,
-        alpha=0.9,
-        zorder=3,
+        x=df["cluster"].values, y=df["feature"].values,
+        s=sizes, c=df["color"].values, cmap=cmap,
+        edgecolors="black", linewidths=0.25, alpha=0.9, zorder=3
     )
 
-    ax.set_xlabel("Cluster", fontsize=12)
-    ax.set_ylabel("Feature" if net_name.lower() != "dorothea" else "TF", fontsize=12)
+    ax.set_xlabel("Cluster")
+    ax.set_ylabel("Feature" if net_name.lower() != "dorothea" else "TF")
 
-    ttl_prefix = f"{title_prefix} • " if title_prefix else ""
-    ax.set_title(
-        f"{ttl_prefix}{net_name}: top {int(top_k)} dotplot ({cbar_label}, size={size_by})",
-        fontsize=14,
-        pad=10,
-    )
+    # Colorbar FIX: Use a dedicated axis to prevent it from squishing the plot
+    cbar_ax = fig.add_axes([0.80, 0.18, 0.02, 0.3])
+    cbar = fig.colorbar(sca, cax=cbar_ax)
+    cbar.set_label(cbar_label)
+
+    # Size Legend FIX: Move to the right of the colorbar
+    refs = np.unique(np.round(np.quantile(svals, [0.25, 0.50, 0.75]), 3))
+    refs = refs[refs > 0]
+    if refs.size > 0:
+        handles = [ax.scatter([], [], s=size_scale(v), color="gray", alpha=0.6, label=str(v)) for v in refs]
+        ax.legend(
+            handles=handles, title=size_label, loc="upper left",
+            bbox_to_anchor=(1.1, 1.0), transform=ax.transAxes, frameon=False
+        )
 
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.grid(False)
+    ax.tick_params(axis="x", rotation=45)
 
-    ax.tick_params(axis="x", rotation=45, labelsize=9)
-    ax.tick_params(axis="y", rotation=0, labelsize=9)
-
-    # colorbar
-    cax = fig.add_axes([0.82, 0.2, 0.02, 0.5])  # Custom position [left, bottom, width, height]
-    cbar = fig.colorbar(sca, cax=cax)
-    cbar.set_label(cbar_label, fontsize=11)
-
-    # --- size legend (quantile-based), placed near colorbar ---
-    # pick 3 reference sizes at 25/50/75% of finite sizes
-    refs = np.quantile(svals[finite], [0.25, 0.50, 0.75])
-    refs = np.unique(np.round(refs, 3))
-    refs = refs[refs > 0]
-    if refs.size > 0:
-        handles = [
-            ax.scatter([], [], s=size_scale(float(v)), color="gray", alpha=0.6, edgecolors="none", label=str(v))
-            for v in refs
-        ]
-        leg = ax.legend(
-            handles=handles,
-            title=size_label,
-            loc="upper left",
-            bbox_to_anchor=(1.15, 1),
-            frameon=False,
-            borderaxespad=0.0,
-        )
-        if leg and leg.get_title():
-            leg.get_title().set_fontsize(10)
-        for txt in leg.get_texts():
-            txt.set_fontsize(9)
-
-    sfx = f"{stem}{int(top_k)}_{cbar_label.replace('-', '')}_{size_by}"
-    save_multi(sfx, outdir, fig)
+    save_multi(f"{stem}{int(top_k)}_{cbar_label}_{size_by}", outdir, fig)
     plt.close(fig)
 
 
