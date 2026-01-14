@@ -14,6 +14,9 @@ import pandas as pd
 import anndata as ad
 import re
 
+import textwrap
+import seaborn as sns
+
 LOGGER = logging.getLogger(__name__)
 
 # -------------------------------------------------------------------------
@@ -2773,7 +2776,6 @@ def _top_features_global(
 
 
 def _wrap_labels(labels: Sequence[str], wrap_at: int = 38) -> list[str]:
-    import textwrap
 
     out: list[str] = []
     for s in labels:
