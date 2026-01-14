@@ -217,27 +217,6 @@ class ClusterAnnotateConfig(BaseModel):
         description="Ensure at least this fraction of cells remain for bio metrics; if fewer, relax entropy cutoff.",
     )
 
-    # ------------------------------------------------------------------
-    # ssGSEA
-    # ------------------------------------------------------------------
-    run_ssgsea: bool = True
-    ssgsea_gene_sets: List[str] = Field(
-        default_factory=lambda: ["HALLMARK", "REACTOME"],
-        description="Gene set collections to use for ssGSEA",
-    )
-    ssgsea_aggregate: str = Field(
-        "mean",
-        description="Aggregation for cluster-level ssGSEA. One of: 'mean', 'median'.",
-    )
-    ssgsea_use_raw: bool = True
-    ssgsea_min_size: int = 10
-    ssgsea_max_size: int = 500
-    ssgsea_sample_norm_method: str = "rank"
-    ssgsea_nproc: int = Field(
-        default_factory=lambda: max(1, multiprocessing.cpu_count() - 1),
-        description="Number of parallel worker processes for ssGSEA",
-    )
-    ssgsea_plot_n: int = 5
 
     # ------------------------------------------------------------------
     # Figures
@@ -284,6 +263,54 @@ class ClusterAnnotateConfig(BaseModel):
 
     annotation_csv: Optional[Path] = None
     available_models: Optional[List[Dict[str, str]]] = None
+
+    # ------------------------------------------------------------------
+    # Decoupler (cluster-level pseudobulk + nets)
+    # ------------------------------------------------------------------
+    run_decoupler: bool = True
+
+    # Pseudobulk settings (shared by msigdb / dorothea / progeny)
+    decoupler_pseudobulk_agg: str = Field(
+        "mean",
+        description="Aggregation for cluster-level pseudobulk. One of: 'mean', 'median'.",
+    )
+    decoupler_use_raw: bool = True
+    decoupler_min_n_targets: int = Field(
+        5,
+        description="Minimum targets per source for decoupler methods.",
+    )
+    decoupler_method: str = Field(
+        "consensus",
+        description="Decoupler method (default: consensus).",
+    )
+
+    # MSigDB (GMT-driven pathway nets)
+    msigdb_gene_sets: List[str] = Field(
+        default_factory=lambda: ["HALLMARK", "REACTOME"],
+        description="MSigDB collections/keywords and/or paths to .gmt files.",
+    )
+    msigdb_method: str = Field(
+        "consensus",
+        description="Decoupler method to use for MSigDB nets (default: consensus).",
+    )
+    msigdb_min_n_targets: int = Field(
+        5,
+        description="Minimum targets per pathway for MSigDB decoupler run.",
+    )
+
+    # PROGENy
+    run_progeny: bool = True
+    progeny_method: str = Field("consensus")
+    progeny_min_n_targets: int = Field(5)
+    progeny_top_n: int = Field(100)
+    progeny_organism: str = Field("human")
+
+    # DoRothEA
+    run_dorothea: bool = True
+    dorothea_method: str = Field("consensus")
+    dorothea_min_n_targets: int = Field(5)
+    dorothea_confidence: List[str] = Field(default_factory=lambda: ["A", "B", "C"])
+    dorothea_organism: str = Field("human")
 
     # ------------------------------------------------------------------
     # Logging
@@ -333,12 +360,12 @@ class ClusterAnnotateConfig(BaseModel):
             out.append(fmt_l)
         return out
 
-    @field_validator("ssgsea_aggregate")
+    @field_validator("decoupler_pseudobulk_agg")
     @classmethod
-    def _validate_ssgsea_aggregate(cls, v: str) -> str:
+    def _validate_decoupler_pseudobulk_agg(cls, v: str) -> str:
         v = str(v).lower().strip()
         if v not in {"mean", "median"}:
-            raise ValueError("ssgsea_aggregate must be one of: 'mean', 'median'")
+            raise ValueError("decoupler_pseudobulk_agg must be one of: 'mean', 'median'")
         return v
 
     @field_validator("bio_mask_entropy_abs_limit")

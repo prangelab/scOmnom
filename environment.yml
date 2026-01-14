@@ -64,3 +64,4 @@ dependencies:
       - types-pytz
       - celltypist
       - requests
+      - decoupler

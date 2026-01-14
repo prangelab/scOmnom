@@ -417,199 +417,224 @@ def integrate(
 # ======================================================================
 @app.command(
     "cluster-and-annotate",
-    help="Clustering (resolution sweep + stability) and optional CellTypist + ssGSEA annotation.",
+    help="Clustering (resolution sweep + stability) and optional CellTypist + decoupler annotation (MSigDB/DoRothEA/PROGENy).",
 )
 def cluster_and_annotate(
-    # -----------------------------
-    # I/O (integrate-style)
-    # -----------------------------
-    input_path: Optional[Path] = typer.Option(
-        None,
-        "--input-path",
-        "-i",
-        help="[I/O] Integrated dataset produced by `scomnom integrate` (.zarr or .h5ad).",
-    ),
-    output_dir: Optional[Path] = typer.Option(
-        None,
-        "--output-dir",
-        "-o",
-        help="[I/O] Output directory (default = input parent).",
-    ),
-    output_name: str = typer.Option(
-        "adata.clustered.annotated",
-        "--output-name",
-        help="[I/O] Base name for clustered/annotated dataset.",
-    ),
-    save_h5ad: bool = typer.Option(
-        False,
-        "--save-h5ad/--no-save-h5ad",
-        help="[I/O] Optionally write an .h5ad copy (in addition to .zarr).",
-    ),
+        # -----------------------------
+        # I/O (integrate-style)
+        # -----------------------------
+        input_path: Optional[Path] = typer.Option(
+            None,
+            "--input-path",
+            "-i",
+            help="[I/O] Integrated dataset produced by `scomnom integrate` (.zarr or .h5ad).",
+        ),
+        output_dir: Optional[Path] = typer.Option(
+            None,
+            "--output-dir",
+            "-o",
+            help="[I/O] Output directory (default = input parent).",
+        ),
+        output_name: str = typer.Option(
+            "adata.clustered.annotated",
+            "--output-name",
+            help="[I/O] Base name for clustered/annotated dataset.",
+        ),
+        save_h5ad: bool = typer.Option(
+            False,
+            "--save-h5ad/--no-save-h5ad",
+            help="[I/O] Optionally write an .h5ad copy (in addition to .zarr).",
+        ),
 
-    # -----------------------------
-    # Figures (integrate-style)
-    # -----------------------------
-    figdir_name: str = typer.Option(
-        "figures",
-        "--figdir-name",
-        help="[Figures] Name of figure directory.",
-    ),
-    figure_formats: List[str] = typer.Option(
-        ["png", "pdf"],
-        "--figure-formats",
-        "-F",
-        help="[Figures] Output figure formats.",
-    ),
-    make_figures: bool = typer.Option(
-        True,
-        "--make-figures/--no-make-figures",
-        help="[Figures] Enable/disable figure generation.",
-    ),
+        # -----------------------------
+        # Figures (integrate-style)
+        # -----------------------------
+        figdir_name: str = typer.Option(
+            "figures",
+            "--figdir-name",
+            help="[Figures] Name of figure directory.",
+        ),
+        figure_formats: List[str] = typer.Option(
+            ["png", "pdf"],
+            "--figure-formats",
+            "-F",
+            help="[Figures] Output figure formats.",
+        ),
+        make_figures: bool = typer.Option(
+            True,
+            "--make-figures/--no-make-figures",
+            help="[Figures] Enable/disable figure generation.",
+        ),
 
-    # -----------------------------
-    # Embeddings / keys
-    # -----------------------------
-    embedding_key: str = typer.Option(
-        "X_integrated",
-        "--embedding-key",
-        "-e",
-        help="[Clustering] Embedding key in .obsm for neighbors + scoring.",
-    ),
-    batch_key: Optional[str] = typer.Option(
-        None,
-        "--batch-key",
-        "-b",
-        help="[Clustering] Batch/sample column in adata.obs (default: auto-detect).",
-    ),
-    label_key: str = typer.Option(
-        "leiden",
-        "--label-key",
-        "-l",
-        help="[Clustering] Final cluster key stored in adata.obs.",
-    ),
+        # -----------------------------
+        # Embeddings / keys
+        # -----------------------------
+        embedding_key: str = typer.Option(
+            "X_integrated",
+            "--embedding-key",
+            "-e",
+            help="[Clustering] Embedding key in .obsm for neighbors + scoring.",
+        ),
+        batch_key: Optional[str] = typer.Option(
+            None,
+            "--batch-key",
+            "-b",
+            help="[Clustering] Batch/sample column in adata.obs (default: auto-detect).",
+        ),
+        label_key: str = typer.Option(
+            "leiden",
+            "--label-key",
+            "-l",
+            help="[Clustering] Final cluster key stored in adata.obs.",
+        ),
 
-    # -----------------------------
-    # Resolution sweep
-    # -----------------------------
-    res_min: float = typer.Option(0.1, "--res-min"),
-    res_max: float = typer.Option(2.5, "--res-max"),
-    n_resolutions: int = typer.Option(25, "--n-resolutions"),
-    penalty_alpha: float = typer.Option(0.02, "--penalty-alpha"),
+        # -----------------------------
+        # Resolution sweep
+        # -----------------------------
+        res_min: float = typer.Option(0.1, "--res-min"),
+        res_max: float = typer.Option(2.5, "--res-max"),
+        n_resolutions: int = typer.Option(25, "--n-resolutions"),
+        penalty_alpha: float = typer.Option(0.02, "--penalty-alpha"),
 
-    # -----------------------------
-    # Stability / selection
-    # -----------------------------
-    stability_repeats: int = typer.Option(5, "--stability-repeats"),
-    subsample_frac: float = typer.Option(0.8, "--subsample-frac"),
-    random_state: int = typer.Option(42, "--random-state"),
-    tiny_cluster_size: int = typer.Option(20, "--tiny-cluster-size"),
-    min_cluster_size: int = typer.Option(20, "--min-cluster-size"),
-    min_plateau_len: int = typer.Option(3, "--min-plateau-len"),
-    max_cluster_jump_frac: float = typer.Option(0.4, "--max-cluster-jump-frac"),
-    stability_threshold: float = typer.Option(0.85, "--stability-threshold"),
-    w_stab: float = typer.Option(0.50, "--w-stab"),
-    w_sil: float = typer.Option(0.35, "--w-sil"),
-    w_tiny: float = typer.Option(0.15, "--w-tiny"),
+        # -----------------------------
+        # Stability / selection
+        # -----------------------------
+        stability_repeats: int = typer.Option(5, "--stability-repeats"),
+        subsample_frac: float = typer.Option(0.8, "--subsample-frac"),
+        random_state: int = typer.Option(42, "--random-state"),
+        tiny_cluster_size: int = typer.Option(20, "--tiny-cluster-size"),
+        min_cluster_size: int = typer.Option(20, "--min-cluster-size"),
+        min_plateau_len: int = typer.Option(3, "--min-plateau-len"),
+        max_cluster_jump_frac: float = typer.Option(0.4, "--max-cluster-jump-frac"),
+        stability_threshold: float = typer.Option(0.85, "--stability-threshold"),
+        w_stab: float = typer.Option(0.50, "--w-stab"),
+        w_sil: float = typer.Option(0.35, "--w-sil"),
+        w_tiny: float = typer.Option(0.15, "--w-tiny"),
 
-    # -----------------------------
-    # CellTypist
-    # -----------------------------
-    celltypist_model: Optional[str] = typer.Option(
-        "Immune_All_Low.pkl",
-        "--celltypist-model",
-        "-M",
-        autocompletion=_celltypist_models_completion,
-        help="[CellTypist] Path or name of model. If None, skip annotation.",
-    ),
-    celltypist_majority_voting: bool = typer.Option(
-        True,
-        "--celltypist-majority-voting/--no-celltypist-majority-voting",
-        help="[CellTypist] Use majority voting.",
-    ),
-    annotation_csv: Optional[Path] = typer.Option(
-        None,
-        "--annotation-csv",
-        "-A",
-        help="[CellTypist] Optional CSV with per-cluster annotations.",
-    ),
+        # -----------------------------
+        # CellTypist
+        # -----------------------------
+        celltypist_model: Optional[str] = typer.Option(
+            "Immune_All_Low.pkl",
+            "--celltypist-model",
+            "-M",
+            autocompletion=_celltypist_models_completion,
+            help="[CellTypist] Path or name of model. If None, skip annotation.",
+        ),
+        celltypist_majority_voting: bool = typer.Option(
+            True,
+            "--celltypist-majority-voting/--no-celltypist-majority-voting",
+            help="[CellTypist] Use majority voting.",
+        ),
+        annotation_csv: Optional[Path] = typer.Option(
+            None,
+            "--annotation-csv",
+            "-A",
+            help="[CellTypist] Optional CSV with per-cluster annotations.",
+        ),
 
-    # -----------------------------
-    # Bio-metrics mask (CellTypist confidence gate)
-    # -----------------------------
-    bio_mask_enabled: bool = typer.Option(
-        True,
-        "--bio-mask/--no-bio-mask",
-        help="[Bio] Enable confidence mask for bio metrics (hom/frag/bioARI). Clustering unchanged.",
-    ),
-    bio_mask_entropy_abs_limit: float = typer.Option(
-        0.5,
-        "--bio-mask-entropy-abs-limit",
-        help="[Bio] Absolute entropy ceiling. Cells with entropy <= this always pass.",
-    ),
-    bio_mask_entropy_quantile: float = typer.Option(
-        0.7,
-        "--bio-mask-entropy-quantile",
-        help="[Bio] Fallback entropy quantile. Effective entropy cutoff is max(abs_limit, quantile cutoff).",
-    ),
-    bio_mask_margin_min: float = typer.Option(
-        0.1,
-        "--bio-mask-margin-min",
-        help="[Bio] Minimum margin (top1 - top2) required to keep a cell for bio metrics.",
-    ),
-    bio_mask_min_frac: float = typer.Option(
-        0.10,
-        "--bio-mask-min-frac",
-        help="[Bio] Ensure at least this fraction of cells remain for bio metrics (0 disables).",
-    ),
+        # -----------------------------
+        # Bio-metrics mask (CellTypist confidence gate)
+        # -----------------------------
+        bio_mask_enabled: bool = typer.Option(
+            True,
+            "--bio-mask/--no-bio-mask",
+            help="[Bio] Enable confidence mask for bio metrics (hom/frag/bioARI). Clustering unchanged.",
+        ),
+        bio_mask_entropy_abs_limit: float = typer.Option(
+            0.5,
+            "--bio-mask-entropy-abs-limit",
+            help="[Bio] Absolute entropy ceiling. Cells with entropy <= this always pass.",
+        ),
+        bio_mask_entropy_quantile: float = typer.Option(
+            0.7,
+            "--bio-mask-entropy-quantile",
+            help="[Bio] Fallback entropy quantile. Effective entropy cutoff is max(abs_limit, quantile cutoff).",
+        ),
+        bio_mask_margin_min: float = typer.Option(
+            0.1,
+            "--bio-mask-margin-min",
+            help="[Bio] Minimum margin (top1 - top2) required to keep a cell for bio metrics.",
+        ),
+        bio_mask_min_frac: float = typer.Option(
+            0.10,
+            "--bio-mask-min-frac",
+            help="[Bio] Ensure at least this fraction of cells remain for bio metrics (0 disables).",
+        ),
 
-    # -----------------------------
-    # Model management
-    # -----------------------------
-    list_models: bool = typer.Option(False, "--list-models"),
-    download_models: bool = typer.Option(False, "--download-models"),
+        # -----------------------------
+        # Model management
+        # -----------------------------
+        list_models: bool = typer.Option(False, "--list-models"),
+        download_models: bool = typer.Option(False, "--download-models"),
 
-    # -----------------------------
-    # ssGSEA
-    # -----------------------------
-    run_ssgsea: bool = typer.Option(
-        True,
-        "--run-ssgsea/--no-run-ssgsea",
-        help="[ssGSEA] Run ssGSEA enrichment per cell.",
-    ),
-    ssgsea_aggregate: str = typer.Option(
-        "mean",
-        "--ssgsea-aggregate",
-        help="[ssGSEA] Cluster aggregation: mean or median.",
-    ),
-    ssgsea_gene_sets_cli: Optional[str] = typer.Option(
-        None,
-        "--ssgsea-gene-sets",
-        help="[ssGSEA] Comma-separated MSigDB keywords (e.g. 'HALLMARK,REACTOME') or paths to .gmt files.",
-        autocompletion=_gene_sets_completion,
-    ),
-    ssgsea_use_raw: bool = typer.Option(
-        True,
-        "--ssgsea-use-raw/--no-ssgsea-use-raw",
-        help="[ssGSEA] Prefer adata.raw / raw-like source if present.",
-    ),
-    ssgsea_min_size: int = typer.Option(10, "--ssgsea-min-size"),
-    ssgsea_max_size: int = typer.Option(500, "--ssgsea-max-size"),
-    ssgsea_sample_norm_method: str = typer.Option("rank", "--ssgsea-sample-norm-method"),
-    ssgsea_nproc: Optional[int] = typer.Option(
-        None,
-        "--ssgsea-nproc",
-        help="[ssGSEA] Parallel workers. Default = CPU cores - 1.",
-    ),
-    ssgsea_plot_n: int = typer.Option(5, "--ssgsea-plot-n"),
+        # -----------------------------
+        # Decoupler (cluster-level nets)
+        # -----------------------------
+        run_decoupler: bool = typer.Option(
+            True,
+            "--run-decoupler/--no-run-decoupler",
+            help="[Decoupler] Run decoupler-based annotation (MSigDB, DoRothEA, PROGENy).",
+        ),
+
+        # Pseudobulk settings
+        decoupler_pseudobulk_agg: str = typer.Option(
+            "mean",
+            "--decoupler-pseudobulk-agg",
+            help="[Decoupler] Pseudobulk aggregation: mean or median.",
+        ),
+        decoupler_use_raw: bool = typer.Option(
+            True,
+            "--decoupler-use-raw/--no-decoupler-use-raw",
+            help="[Decoupler] Prefer adata.raw / raw-like source if present for pseudobulk.",
+        ),
+
+        # Global decoupler method defaults
+        decoupler_method: str = typer.Option(
+            "consensus",
+            "--decoupler-method",
+            help="[Decoupler] Default method for decoupler runs (can be overridden per net).",
+        ),
+        decoupler_min_n_targets: int = typer.Option(
+            5,
+            "--decoupler-min-n-targets",
+            help="[Decoupler] Minimum targets per source.",
+        ),
+
+        # MSigDB
+        msigdb_gene_sets_cli: Optional[str] = typer.Option(
+            None,
+            "--msigdb-gene-sets",
+            help="[MSigDB] Comma-separated MSigDB keywords (e.g. 'HALLMARK,REACTOME') or paths to .gmt files.",
+            autocompletion=_gene_sets_completion,
+        ),
+        msigdb_method: str = typer.Option(
+            "consensus",
+            "--msigdb-method",
+            help="[MSigDB] Method override for MSigDB nets.",
+        ),
+        msigdb_min_n_targets: int = typer.Option(
+            5,
+            "--msigdb-min-n-targets",
+            help="[MSigDB] Minimum targets per pathway.",
+        ),
+
+        # DoRothEA / PROGENy toggles + methods
+        run_dorothea: bool = typer.Option(True, "--run-dorothea/--no-run-dorothea"),
+        dorothea_method: str = typer.Option("consensus", "--dorothea-method"),
+        dorothea_min_n_targets: int = typer.Option(5, "--dorothea-min-n-targets"),
+        dorothea_confidence: str = typer.Option("A,B,C", "--dorothea-confidence"),
+
+        run_progeny: bool = typer.Option(True, "--run-progeny/--no-run-progeny"),
+        progeny_method: str = typer.Option("consensus", "--progeny-method"),
+        progeny_min_n_targets: int = typer.Option(5, "--progeny-min-n-targets"),
+        progeny_top_n: int = typer.Option(100, "--progeny-top-n"),
+        progeny_organism: str = typer.Option("human", "--progeny-organism"),
 ):
-    """
-    Run clustering + annotation (CellTypist + ssGSEA).
-    """
-
-    # ---------------------------------------------------------
-    # Handle --list-models /considered in integration-style
-    # ---------------------------------------------------------
-    if list_models:
+# ---------------------------------------------------------
+# Handle --list-models /considered in integration-style
+# ---------------------------------------------------------
+if list_models:
         from .io_utils import get_available_celltypist_models
         models = get_available_celltypist_models()
         typer.echo("\nAvailable CellTypist models:\n")
@@ -617,101 +642,108 @@ def cluster_and_annotate(
             typer.echo(f"  - {m['name']}")
         raise typer.Exit()
 
-    if download_models:
-        from .io_utils import download_all_celltypist_models
-        download_all_celltypist_models()
-        raise typer.Exit()
+if download_models:
+    from .io_utils import download_all_celltypist_models
+    download_all_celltypist_models()
+    raise typer.Exit()
 
-    # ---------------------------------------------------------
-    # Validate required input
-    # ---------------------------------------------------------
-    if input_path is None:
-        raise typer.BadParameter("Missing required option --input / -i")
+# ---------------------------------------------------------
+# Validate required input
+# ---------------------------------------------------------
+if input_path is None:
+    raise typer.BadParameter("Missing required option --input / -i")
 
-    # ---------------------------------------------------------
-    # Resolve output dir + logging
-    # ---------------------------------------------------------
-    out_dir = output_dir or input_path.parent
-    log_path = out_dir / "cluster-and-annotate.log"
-    init_logging(log_path)
+# ---------------------------------------------------------
+# Resolve output dir + logging
+# ---------------------------------------------------------
+out_dir = output_dir or input_path.parent
+log_path = out_dir / "cluster-and-annotate.log"
+init_logging(log_path)
 
-    # ---------------------------------------------------------
-    # Parse ssGSEA gene sets
-    # ---------------------------------------------------------
-    if ssgsea_gene_sets_cli is None:
-        gene_sets_list = None  # allow config defaults
-    else:
-        gene_sets_list = [x.strip() for x in ssgsea_gene_sets_cli.split(",") if x.strip()]
+# Parse MSigDB gene sets
+if msigdb_gene_sets_cli is None:
+    gene_sets_list = None  # allow config defaults
+else:
+    gene_sets_list = [x.strip() for x in msigdb_gene_sets_cli.split(",") if x.strip()]
 
-    import multiprocessing
-    nproc = max(1, multiprocessing.cpu_count() - 1) if ssgsea_nproc is None else int(ssgsea_nproc)
+# ---------------------------------------------------------
+# Build config (new ClusterAnnotateConfig fields)
+# ---------------------------------------------------------
+kwargs = dict(
+    input_path=input_path,
+    output_dir=out_dir,
+    output_name=output_name,
+    save_h5ad=save_h5ad,
 
-    # ---------------------------------------------------------
-    # Build config (new ClusterAnnotateConfig fields)
-    # ---------------------------------------------------------
-    kwargs = dict(
-        input_path=input_path,
-        output_dir=out_dir,
-        output_name=output_name,
-        save_h5ad=save_h5ad,
+    embedding_key=embedding_key,
+    batch_key=batch_key,
+    label_key=label_key,
 
-        embedding_key=embedding_key,
-        batch_key=batch_key,
-        label_key=label_key,
+    res_min=res_min,
+    res_max=res_max,
+    n_resolutions=n_resolutions,
+    penalty_alpha=penalty_alpha,
 
-        res_min=res_min,
-        res_max=res_max,
-        n_resolutions=n_resolutions,
-        penalty_alpha=penalty_alpha,
+    stability_repeats=stability_repeats,
+    subsample_frac=subsample_frac,
+    random_state=random_state,
+    tiny_cluster_size=tiny_cluster_size,
+    min_cluster_size=min_cluster_size,
+    min_plateau_len=min_plateau_len,
+    max_cluster_jump_frac=max_cluster_jump_frac,
+    stability_threshold=stability_threshold,
+    w_stab=w_stab,
+    w_sil=w_sil,
+    w_tiny=w_tiny,
 
-        stability_repeats=stability_repeats,
-        subsample_frac=subsample_frac,
-        random_state=random_state,
-        tiny_cluster_size=tiny_cluster_size,
-        min_cluster_size=min_cluster_size,
-        min_plateau_len=min_plateau_len,
-        max_cluster_jump_frac=max_cluster_jump_frac,
-        stability_threshold=stability_threshold,
-        w_stab=w_stab,
-        w_sil=w_sil,
-        w_tiny=w_tiny,
+    celltypist_model=celltypist_model,
+    celltypist_majority_voting=celltypist_majority_voting,
+    annotation_csv=annotation_csv,
 
-        celltypist_model=celltypist_model,
-        celltypist_majority_voting=celltypist_majority_voting,
-        annotation_csv=annotation_csv,
+    bio_mask_enabled=bio_mask_enabled,
+    bio_mask_entropy_abs_limit=bio_mask_entropy_abs_limit,
+    bio_mask_entropy_quantile=bio_mask_entropy_quantile,
+    bio_mask_margin_min=bio_mask_margin_min,
+    bio_mask_min_frac=bio_mask_min_frac,
 
-        bio_mask_enabled=bio_mask_enabled,
-        bio_mask_entropy_abs_limit=bio_mask_entropy_abs_limit,
-        bio_mask_entropy_quantile=bio_mask_entropy_quantile,
-        bio_mask_margin_min=bio_mask_margin_min,
-        bio_mask_min_frac=bio_mask_min_frac,
+    run_decoupler=run_decoupler,
 
-        run_ssgsea=run_ssgsea,
-        ssgsea_aggregate=ssgsea_aggregate,
-        ssgsea_gene_sets_cli=ssgsea_gene_sets_cli,
-        ssgsea_use_raw=ssgsea_use_raw,
-        ssgsea_min_size=ssgsea_min_size,
-        ssgsea_max_size=ssgsea_max_size,
-        ssgsea_sample_norm_method=ssgsea_sample_norm_method,
-        ssgsea_nproc=nproc,
-        ssgsea_plot_n=ssgsea_plot_n,
+    decoupler_pseudobulk_agg=decoupler_pseudobulk_agg,
+    decoupler_use_raw=decoupler_use_raw,
+    decoupler_method=decoupler_method,
+    decoupler_min_n_targets=decoupler_min_n_targets,
 
-        make_figures=make_figures,
-        figdir_name=figdir_name,
-        figure_formats=figure_formats,
+    msigdb_method=msigdb_method,
+    msigdb_min_n_targets=msigdb_min_n_targets,
+    # (msigdb_gene_sets comes from gene_sets_list below)
 
-        logfile=log_path,
-    )
+    run_dorothea=run_dorothea,
+    dorothea_method=dorothea_method,
+    dorothea_min_n_targets=dorothea_min_n_targets,
+    dorothea_confidence=[x.strip() for x in dorothea_confidence.split(",") if x.strip()],
 
-    if gene_sets_list is not None:
-        kwargs["ssgsea_gene_sets"] = gene_sets_list
+    run_progeny=run_progeny,
+    progeny_method=progeny_method,
+    progeny_min_n_targets=progeny_min_n_targets,
+    progeny_top_n=progeny_top_n,
+    progeny_organism=progeny_organism,
 
-    cfg = ClusterAnnotateConfig(**kwargs)
+    make_figures=make_figures,
+    figdir_name=figdir_name,
+    figure_formats=figure_formats,
 
-    # ---------------------------------------------------------
-    # Run
-    # ---------------------------------------------------------
-    run_clustering(cfg)
+    logfile=log_path,
+)
+
+if gene_sets_list is not None:
+    kwargs["msigdb_gene_sets"] = gene_sets_list
+
+cfg = ClusterAnnotateConfig(**kwargs)
+
+# ---------------------------------------------------------
+# Run
+# ---------------------------------------------------------
+run_clustering(cfg)
 
 
 

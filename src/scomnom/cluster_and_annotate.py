@@ -29,6 +29,160 @@ CLUSTER_LABEL_KEY = "cluster_label"
 # -------------------------------------------------------------------------
 # Internal helpers
 # -------------------------------------------------------------------------
+def _get_cluster_pseudobulk_df(
+    adata: ad.AnnData,
+    *,
+    store_key: str = "pseudobulk",
+) -> pd.DataFrame:
+    """
+    Reconstruct genes x clusters DataFrame from adata.uns[store_key].
+
+    Raises if missing or malformed.
+    """
+    pb = adata.uns.get(store_key, None)
+    if not isinstance(pb, dict):
+        raise KeyError(f"Missing pseudobulk store at adata.uns[{store_key!r}]")
+
+    required = {"genes", "clusters", "expr"}
+    missing = required.difference(pb.keys())
+    if missing:
+        raise KeyError(f"Malformed pseudobulk store at adata.uns[{store_key!r}]; missing: {sorted(missing)}")
+
+    genes = np.asarray(pb["genes"])
+    clusters = np.asarray(pb["clusters"])
+    expr = np.asarray(pb["expr"])
+
+    if expr.ndim != 2 or expr.shape[0] != genes.size or expr.shape[1] != clusters.size:
+        raise ValueError(
+            f"Malformed pseudobulk matrix: expr{expr.shape}, genes={genes.size}, clusters={clusters.size}"
+        )
+
+    return pd.DataFrame(
+        expr,
+        index=pd.Index(genes, name="gene"),
+        columns=pd.Index(clusters, name="cluster"),
+    )
+
+
+def _store_cluster_pseudobulk(
+    adata: ad.AnnData,
+    *,
+    cluster_key: str,
+    agg: str = "mean",
+    use_raw_like: bool = True,
+    prefer_layers: tuple[str, ...] = ("counts_raw", "counts_cb"),
+    store_key: str = "pseudobulk",
+) -> None:
+    """
+    Compute and store cluster-level pseudobulk expression (genes x clusters) in adata.uns[store_key].
+
+    Storage format is compact + reusable:
+      adata.uns[store_key] = {
+        "level": "cluster",
+        "cluster_key": ...,
+        "agg": ...,
+        "use_raw_like": ...,
+        "prefer_layers": [...],
+        "genes": np.ndarray[str],
+        "clusters": np.ndarray[str],
+        "expr": np.ndarray[float32]  # shape (n_genes, n_clusters)
+      }
+
+    This does NOT return anything; downstream consumers reconstruct a DataFrame via
+    `_get_cluster_pseudobulk_df()`.
+    """
+    from scipy import sparse
+
+    if cluster_key not in adata.obs:
+        raise KeyError(f"cluster_key '{cluster_key}' not found in adata.obs")
+
+    agg = (agg or "mean").lower().strip()
+    if agg not in {"mean", "median"}:
+        agg = "mean"
+
+    # -----------------------------
+    # Choose expression source
+    # -----------------------------
+    X = adata.X
+    genes = adata.var_names
+
+    if use_raw_like:
+        picked = None
+        for layer in prefer_layers:
+            if layer in adata.layers:
+                picked = layer
+                X = adata.layers[layer]
+                genes = adata.var_names
+                break
+
+        if picked is not None:
+            LOGGER.info("Pseudobulk using adata.layers[%r].", picked)
+        elif adata.raw is not None:
+            LOGGER.info("Pseudobulk using adata.raw.X.")
+            X = adata.raw.X
+            genes = adata.raw.var_names
+        else:
+            LOGGER.info("Pseudobulk requested raw-like but none found; using adata.X.")
+
+    cl = adata.obs[cluster_key].astype(str).to_numpy()
+    clusters = pd.Index(pd.unique(cl), dtype=str, name="cluster")
+
+    if sparse.issparse(X):
+        X_csr = X.tocsr()
+    else:
+        X_csr = np.asarray(X)
+
+    LOGGER.info(
+        "Computing cluster pseudobulk: cluster_key=%r, agg=%s over %d clusters.",
+        cluster_key,
+        agg,
+        len(clusters),
+    )
+
+    expr_cols: dict[str, np.ndarray] = {}
+
+    for c in clusters:
+        idx = np.where(cl == c)[0]
+        if idx.size == 0:
+            continue
+
+        if sparse.issparse(X_csr):
+            sub = X_csr[idx, :]
+            if agg == "mean":
+                vec = np.asarray(sub.mean(axis=0)).ravel()
+            else:
+                vec = np.median(sub.toarray(), axis=0)
+        else:
+            sub = X_csr[idx, :]
+            vec = sub.mean(axis=0) if agg == "mean" else np.median(sub, axis=0)
+
+        expr_cols[str(c)] = vec.astype(np.float32, copy=False)
+
+    if not expr_cols:
+        raise RuntimeError("Pseudobulk: no clusters produced aggregated expression.")
+
+    expr_mat = np.stack([expr_cols[c] for c in expr_cols.keys()], axis=1).astype(np.float32, copy=False)
+    clusters_out = np.array(list(expr_cols.keys()), dtype=object)
+
+    adata.uns[store_key] = {
+        "level": "cluster",
+        "cluster_key": cluster_key,
+        "agg": agg,
+        "use_raw_like": bool(use_raw_like),
+        "prefer_layers": list(prefer_layers),
+        "genes": np.asarray(genes, dtype=object),
+        "clusters": clusters_out,
+        "expr": expr_mat,  # (genes x clusters)
+    }
+
+    LOGGER.info(
+        "Stored pseudobulk in adata.uns[%r]: %d genes × %d clusters.",
+        store_key,
+        expr_mat.shape[0],
+        expr_mat.shape[1],
+    )
+
+
 def _celltypist_entropy_margin_mask(
     prob_matrix: pd.DataFrame,
     *,
@@ -1226,346 +1380,538 @@ def _final_real_silhouette_qc(
     return sil_mean
 
 
-def _ssgsea_single_gmt(
-    expr_df: pd.DataFrame,
-    gmt: Path | str,
-    cfg: ClusterAnnotateConfig,
-):
+def _run_msigdb(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
     """
-    Run ssGSEA for a single GMT file on the provided expression DataFrame.
+    Compute MSigDB pathway activity on CLUSTER-level pseudobulk expression using decoupler.
 
-    Parameters
-    ----------
-    expr_df
-        Expression matrix (genes x cells), columns are cell IDs.
-    gmt
-        Path or identifier of the GMT file.
-    cfg
-        ClusterAnnotateConfig with ssGSEA parameters.
+    Expects pseudobulk expression already stored in:
+      adata.uns["pseudobulk"]["expr"]  -> DataFrame (genes x clusters)
 
-    Returns
-    -------
-    pd.DataFrame
-        ES scores with shape (n_cells x n_pathways), columns are pathway names.
-    """
-    import gseapy as gp
-
-    gmt_str = str(gmt)
-    LOGGER.info(
-        "ssGSEA: running on gene_sets='%s' for %d cells and %d genes.",
-        gmt_str,
-        expr_df.shape[1],
-        expr_df.shape[0],
-    )
-
-    ss = gp.ssgsea(
-        data=expr_df,
-        gene_sets=gmt_str,
-        outdir=None,
-        sample_norm_method=getattr(cfg, "ssgsea_sample_norm_method", "rank"),
-        min_size=int(getattr(cfg, "ssgsea_min_size", 10)),
-        max_size=int(getattr(cfg, "ssgsea_max_size", 500)),
-        threads=1,  # we parallelize outside gseapy
-        no_plot=True,
-    )
-
-    res2d = ss.res2d
-    if not isinstance(res2d, pd.DataFrame):
-        res2d = pd.DataFrame(res2d)
-
-    # pathways x samples (ES only)
-    es = res2d.pivot(index="Term", columns="Name", values="ES")
-
-    # Ensure sample order matches expr_df columns (cells)
-    es = es.reindex(columns=expr_df.columns)
-
-    # Transpose to cells x pathways
-    es = es.T
-
-    # Prefix columns with library stem to avoid collisions
-    lib_prefix = Path(gmt_str).stem
-    es.columns = [f"{lib_prefix}::{term}" for term in es.columns]
-
-    return es
-
-
-def _ssgsea_on_cell_chunk(
-    expr_df: pd.DataFrame,
-    gmt_files: Sequence[Path | str],
-    cfg: ClusterAnnotateConfig,
-) -> pd.DataFrame:
-    """
-    Run ssGSEA on a subset of cells (columns) for all GMT files.
-
-    Parameters
-    ----------
-    expr_df
-        Expression matrix (genes x cells) for this chunk.
-    gmt_files
-        Sequence of GMT file paths.
-    cfg
-        ClusterAnnotateConfig.
-
-    Returns
-    -------
-    pd.DataFrame
-        ES scores with shape (cells_in_chunk x total_pathways).
-    """
-    all_scores: list[pd.DataFrame] = []
-
-    for gmt in gmt_files:
-        try:
-            es = _ssgsea_single_gmt(expr_df, gmt, cfg)
-            all_scores.append(es)
-        except Exception as e:
-            LOGGER.warning(
-                "ssGSEA failed for gene_sets='%s' on chunk: %s",
-                gmt,
-                e,
-            )
-
-    if not all_scores:
-        raise RuntimeError("No successful ssGSEA results for this chunk.")
-
-    return pd.concat(all_scores, axis=1)
-
-def _run_ssgsea(adata: ad.AnnData, cfg: ClusterAnnotateConfig) -> None:
-    """
-    Run ssGSEA on CLUSTER-AGGREGATED expression
+    Resolves GMTs using your resolve_msigdb_gene_sets(...).
 
     Stores:
-      - adata.uns["ssgsea_cluster_means"] : DataFrame (clusters x pathways)
-      - adata.uns["ssgsea"]["config"]     : config snapshot
+      adata.uns["msigdb"]["activity"] -> DataFrame (clusters x pathways)
+      adata.uns["msigdb"]["config"]   -> dict snapshot
     """
-    if not getattr(cfg, "run_ssgsea", False):
-        LOGGER.info("ssGSEA disabled (run_ssgsea=False); skipping.")
-        return
+    import pandas as pd
 
+    # -----------------------------
+    # Pull pseudobulk from .uns
+    # -----------------------------
     try:
-        import gseapy as gp  # noqa: F401
-    except ImportError:
-        LOGGER.warning(
-            "gseapy is not installed; cannot run ssGSEA. Install with `pip install gseapy`."
-        )
-        return
-
-    # --------------------------------------------------
-    # 1) Resolve gene set GMT files
-    # --------------------------------------------------
-    try:
-        gmt_files, used_keywords, msigdb_release = resolve_msigdb_gene_sets(cfg.ssgsea_gene_sets)
+        expr = _get_cluster_pseudobulk_df(adata, store_key="pseudobulk")  # genes x clusters (DataFrame)
     except Exception as e:
-        LOGGER.warning("ssGSEA: failed to resolve gene sets: %s", e)
+        LOGGER.warning("...: missing/invalid pseudobulk store; skipping. (%s)", e)
+        return
+    if expr.empty:
+        LOGGER.warning("...: pseudobulk expr is empty; skipping.")
+        return
+
+    # -----------------------------
+    # Resolve gene sets (GMT files)
+    # -----------------------------
+    gene_sets = getattr(cfg, "msigdb_gene_sets", None) or ["HALLMARK", "REACTOME"]
+
+    try:
+        gmt_files, used_keywords, msigdb_release = resolve_msigdb_gene_sets(gene_sets)
+    except Exception as e:
+        LOGGER.warning("MSigDB: failed to resolve gene sets: %s", e)
         return
     if not gmt_files:
-        LOGGER.warning("ssGSEA: no gene set files resolved; skipping.")
+        LOGGER.warning("MSigDB: no gene set files resolved; skipping.")
         return
 
-    # --------------------------------------------------
-    # 2) Choose clustering key (must exist)
-    # --------------------------------------------------
-    cluster_key = None
-    if "cluster_label" in adata.obs:
-        cluster_key = "cluster_label"
-    elif getattr(cfg, "final_auto_idents_key", None) and cfg.final_auto_idents_key in adata.obs:
-        cluster_key = cfg.final_auto_idents_key
-    elif getattr(cfg, "label_key", None) and cfg.label_key in adata.obs:
-        cluster_key = cfg.label_key
+    # -----------------------------
+    # Method config
+    # -----------------------------
+    method = getattr(cfg, "msigdb_method", None) or getattr(cfg, "decoupler_method", None) or "consensus"
+    min_n = int(getattr(cfg, "msigdb_min_n_targets", getattr(cfg, "decoupler_min_n_targets", 5)) or 5)
 
-    if cluster_key is None:
-        LOGGER.warning("ssGSEA: no cluster key found in adata.obs; skipping.")
+    # -----------------------------
+    # Build decoupler network from GMTs
+    # -----------------------------
+    # Network columns: source (pathway), target (gene), weight (1.0)
+    nets = []
+    for gmt in gmt_files:
+        try:
+            net_i = io_utils.gmt_to_decoupler_net(gmt)  # <- whatever helper you already added; must return source/target/weight
+            nets.append(net_i)
+        except Exception as e:
+            LOGGER.warning("MSigDB: failed to parse GMT '%s': %s", str(gmt), e)
+
+    if not nets:
+        LOGGER.warning("MSigDB: no GMTs could be parsed into a decoupler net; skipping.")
         return
 
-    # --------------------------------------------------
-    # 3) Pick expression source (raw counts layer if possible)
-    # --------------------------------------------------
-    from scipy import sparse
+    net = pd.concat(nets, axis=0, ignore_index=True)
 
-    X = adata.X
-    genes = adata.var_names
+    # Defensive: ensure required cols
+    for col in ("source", "target"):
+        if col not in net.columns:
+            raise KeyError(f"MSigDB net missing required column '{col}'")
+    if "weight" not in net.columns:
+        net["weight"] = 1.0
 
-    if getattr(cfg, "ssgsea_use_raw", True):
-        if "counts_raw" in adata.layers:
-            LOGGER.info("ssGSEA using adata.layers['counts_raw'] (counts_raw layer).")
-            X = adata.layers["counts_raw"]
-            genes = adata.var_names
-        elif "counts_cb" in adata.layers:
-            LOGGER.info("ssGSEA using adata.layers['counts_cb'] (cellbender layer).")
-            X = adata.layers["counts_cb"]
-            genes = adata.var_names
-        elif adata.raw is not None:
-            LOGGER.info("ssGSEA using adata.raw.X.")
-            X = adata.raw.X
-            genes = adata.raw.var_names
-        else:
-            LOGGER.info(
-                "ssGSEA: requested raw, but no counts_raw/counts_cb/adata.raw; using adata.X."
-            )
-            X = adata.X
-            genes = adata.var_names
-
-    # --------------------------------------------------
-    # 4) Aggregate expression by cluster WITHOUT densifying full matrix
-    #    Output: genes x clusters DataFrame
-    # --------------------------------------------------
-    agg = getattr(cfg, "ssgsea_aggregate", "mean").lower().strip()
-    if agg not in {"mean", "median"}:
-        agg = "mean"
-
-    cl = adata.obs[cluster_key].astype(str).to_numpy()
-    clusters = pd.Index(pd.unique(cl), dtype=str)
-
-    X_csr = X.tocsr() if sparse.issparse(X) else np.asarray(X)
-
-    expr_cols = {}
-    LOGGER.info(
-        "ssGSEA: aggregating expression by '%s' using %s over %d clusters.",
-        cluster_key,
-        agg,
-        len(clusters),
-    )
-
-    for c in clusters:
-        idx = np.where(cl == c)[0]
-        if idx.size == 0:
-            continue
-
-        if sparse.issparse(X_csr):
-            sub = X_csr[idx, :]
-            if agg == "mean":
-                vec = np.asarray(sub.mean(axis=0)).ravel()
-            else:
-                vec = np.median(sub.toarray(), axis=0)
-        else:
-            sub = X_csr[idx, :]
-            vec = sub.mean(axis=0) if agg == "mean" else np.median(sub, axis=0)
-
-        expr_cols[c] = vec
-
-    if not expr_cols:
-        LOGGER.warning("ssGSEA: no clusters produced aggregated expression; skipping.")
-        return
-
-    expr_df = pd.DataFrame(expr_cols, index=pd.Index(genes, name="gene"))
-    LOGGER.info(
-        "ssGSEA: running on aggregated matrix: %d genes × %d clusters.",
-        expr_df.shape[0],
-        expr_df.shape[1],
-    )
-
-    # --------------------------------------------------
-    # 5) Run ssGSEA over GMTs in parallel (always) and concatenate pathways
-    # --------------------------------------------------
-    def _ssgsea_one_gmt(expr_df_: pd.DataFrame, gmt: str, *, threads: int) -> pd.DataFrame:
-        # Prevent oversubscription from BLAS/OpenMP inside each job
-        import os
-
-        os.environ.setdefault("OMP_NUM_THREADS", "1")
-        os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-        os.environ.setdefault("MKL_NUM_THREADS", "1")
-        os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
-        os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
-
-        import gseapy as gp
-
-        ss = gp.ssgsea(
-            data=expr_df_,
-            gene_sets=str(gmt),
-            outdir=None,
-            sample_norm_method=getattr(cfg, "ssgsea_sample_norm_method", "rank"),
-            min_size=int(getattr(cfg, "ssgsea_min_size", 10)),
-            max_size=int(getattr(cfg, "ssgsea_max_size", 500)),
-            threads=int(max(1, threads)),
-            no_plot=True,
-        )
-
-        res2d = ss.res2d
-        if not isinstance(res2d, pd.DataFrame):
-            res2d = pd.DataFrame(res2d)
-
-        es = res2d.pivot(index="Term", columns="Name", values="ES")  # pathways x clusters
-        es = es.reindex(columns=expr_df_.columns)  # ensure cluster order
-        es = es.T  # clusters x pathways
-
-        lib_prefix = Path(str(gmt)).stem
-        es.columns = [f"{lib_prefix}::{term}" for term in es.columns]
-        return es
-
-    # Decide parallel shape
+    # -----------------------------
+    # Run decoupler via shared helper
+    # -----------------------------
     try:
-        from joblib import Parallel, delayed
-    except ImportError:
-        Parallel = None
-        delayed = None
-
-    nproc = int(getattr(cfg, "ssgsea_nproc", 1) or 1)
-    nproc_eff = max(1, nproc - 1)  # <-- your rule: avoid oversubscribing, leave 1 core
-    n_jobs = min(len(gmt_files), nproc_eff)
-    threads_per_job = max(1, nproc_eff // n_jobs)
-
-    LOGGER.info(
-        "ssGSEA parallel (over GMTs): G=%d, nproc=%d → nproc_eff=%d, n_jobs=%d, threads/job=%d",
-        len(gmt_files),
-        nproc,
-        nproc_eff,
-        n_jobs,
-        threads_per_job,
-    )
-
-    all_es: list[pd.DataFrame] = []
-
-    if Parallel is None or delayed is None or n_jobs <= 1:
-        # Fallback: sequential GMTs, but still use threads_per_job to exploit cores safely
-        for gmt in gmt_files:
-            try:
-                all_es.append(_ssgsea_one_gmt(expr_df, gmt, threads=threads_per_job))
-            except Exception as e:
-                LOGGER.warning("ssGSEA failed for gene_sets='%s': %s", gmt, e)
-    else:
-        # Always parallel over GMTs
-        results = Parallel(n_jobs=n_jobs, backend="loky")(
-            delayed(_ssgsea_one_gmt)(expr_df, gmt, threads=threads_per_job)
-            for gmt in gmt_files
+        est = _dc_run_method(
+            method=method,
+            mat=expr,          # genes x clusters
+            net=net,
+            source="source",
+            target="target",
+            weight="weight",
+            min_n=min_n,
+            verbose=False,
         )
-        # Filter any Nones (shouldn't happen unless you change worker)
-        all_es = [x for x in results if isinstance(x, pd.DataFrame) and not x.empty]
 
-    if not all_es:
-        LOGGER.warning("ssGSEA: no successful results; skipping.")
+        activity = est.T      # clusters x pathways
+        activity.index.name = "cluster"
+        activity.columns.name = "pathway"
+
+    except Exception as e:
+        LOGGER.warning("MSigDB: decoupler run failed (method=%s): %s", str(method), e)
         return
 
-    ssgsea_cluster = pd.concat(all_es, axis=1)
-
-    # --------------------------------------------------
-    # 6) Store only cluster-level results
-    # --------------------------------------------------
-    adata.uns["ssgsea_cluster_means"] = ssgsea_cluster
-
-    adata.uns.setdefault("ssgsea", {})
-    adata.uns["ssgsea"]["config"] = {
-        "run_ssgsea": True,
+    # -----------------------------
+    # Store
+    # -----------------------------
+    adata.uns.setdefault("msigdb", {})
+    adata.uns["msigdb"]["activity"] = activity
+    adata.uns["msigdb"]["config"] = {
+        "method": str(method),
+        "min_n_targets": int(min_n),
         "msigdb_release": msigdb_release,
-        "mode": "cluster",
-        "cluster_key": cluster_key,
-        "aggregate": agg,
         "gene_sets": [str(g) for g in gmt_files],
         "used_keywords": used_keywords,
-        "use_raw": bool(getattr(cfg, "ssgsea_use_raw", True)),
-        "min_size": int(getattr(cfg, "ssgsea_min_size", 10)),
-        "max_size": int(getattr(cfg, "ssgsea_max_size", 500)),
-        "sample_norm_method": getattr(cfg, "ssgsea_sample_norm_method", "rank"),
-        "backend": "gseapy_ssgsea_cluster_aggregate_parallel_over_gmts",
-        "nproc": nproc,
-        "nproc_eff": nproc_eff,
-        "n_jobs": n_jobs,
-        "threads_per_job": threads_per_job,
+        "input": "pseudobulk_expr(genes_x_clusters)",
+        "resource": "msigdb_gmt",
     }
 
     LOGGER.info(
-        "Stored ssGSEA cluster means in adata.uns['ssgsea_cluster_means']: %d clusters × %d pathways.",
-        ssgsea_cluster.shape[0],
-        ssgsea_cluster.shape[1],
+        "MSigDB stored: activity shape=%s using method=%s (min_n=%d; GMTs=%d).",
+        tuple(activity.shape),
+        str(method),
+        int(min_n),
+        len(gmt_files),
     )
+
+
+
+def _run_progeny(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
+    """
+    Compute PROGENy pathway activity on CLUSTER-level pseudobulk expression using decoupler.
+
+    Expects pseudobulk expression already stored in:
+      adata.uns["pseudobulk"]["expr"]  -> DataFrame (genes x clusters)
+
+    Stores:
+      adata.uns["progeny"]["activity"] -> DataFrame (clusters x pathways)
+      adata.uns["progeny"]["config"]   -> dict snapshot
+    """
+    import pandas as pd
+    import decoupler as dc
+
+    try:
+        expr = _get_cluster_pseudobulk_df(adata, store_key="pseudobulk")  # genes x clusters (DataFrame)
+    except Exception as e:
+        LOGGER.warning("...: missing/invalid pseudobulk store; skipping. (%s)", e)
+        return
+    if expr.empty:
+        LOGGER.warning("...: pseudobulk expr is empty; skipping.")
+        return
+
+    # -----------------------------
+    # Method config (NEW)
+    # -----------------------------
+    method = getattr(cfg, "progeny_method", None) or getattr(cfg, "decoupler_method", None) or "consensus"
+    min_n = int(getattr(cfg, "progeny_min_n_targets", getattr(cfg, "decoupler_min_n_targets", 5)) or 5)
+
+    # PROGENy-specific knobs
+    top_n = int(getattr(cfg, "progeny_top_n", 100) or 100)
+    organism = getattr(cfg, "progeny_organism", "human") or "human"
+
+    # -----------------------------
+    # Load resource
+    # -----------------------------
+    try:
+        # decoupler returns a "net" with pathway -> gene weights
+        net = dc.get_progeny(organism=str(organism), top=top_n)
+    except Exception as e:
+        LOGGER.warning("PROGENy: failed to load resource via decoupler.get_progeny: %s", e)
+        return
+
+    if net is None or len(net) == 0:
+        LOGGER.warning("PROGENy: resource empty; skipping.")
+        return
+
+    # Some dc versions use 'weight' column, others 'mor' (mode of regulation)
+    wcol = "weight" if "weight" in net.columns else ("mor" if "mor" in net.columns else None)
+
+    # -----------------------------
+    # Run decoupler
+    # -----------------------------
+    try:
+        est = _dc_run_method(
+            method=method,
+            mat=expr,
+            net=net,
+            source="source",
+            target="target",
+            weight=wcol or "weight",
+            min_n=min_n,
+            verbose=False,
+        )
+
+        activity = est.T
+        activity.index.name = "cluster"
+        activity.columns.name = "pathway"
+
+    except Exception as e:
+        LOGGER.warning("PROGENy: decoupler run failed (method=%s): %s", method, e)
+        return
+
+    # -----------------------------
+    # Store
+    # -----------------------------
+    adata.uns.setdefault("progeny", {})
+    adata.uns["progeny"]["activity"] = activity
+    adata.uns["progeny"]["config"] = {
+        "method": str(method),
+        "min_n_targets": int(min_n),
+        "top_n": int(top_n),
+        "input": "pseudobulk_expr(genes_x_clusters)",
+        "resource": "progeny",
+        "organism": str(organism),
+    }
+
+    LOGGER.info(
+        "PROGENy stored: activity shape=%s using method=%s (top_n=%d, min_n=%d).",
+        tuple(activity.shape),
+        str(method),
+        int(top_n),
+        int(min_n),
+    )
+
+
+
+def _run_dorothea(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
+    """
+    Compute DoRothEA TF activity on CLUSTER-level pseudobulk expression using decoupler.
+
+    Expects pseudobulk expression already stored in:
+      adata.uns["pseudobulk"]["expr"]  -> DataFrame (genes x clusters)
+
+    Stores:
+      adata.uns["dorothea"]["activity"] -> DataFrame (clusters x TFs)
+      adata.uns["dorothea"]["config"]   -> dict snapshot
+    """
+    import pandas as pd
+    import decoupler as dc
+
+    # -----------------------------
+    # Pull pseudobulk from .uns
+    # -----------------------------
+    try:
+        expr = _get_cluster_pseudobulk_df(adata, store_key="pseudobulk")  # genes x clusters (DataFrame)
+    except Exception as e:
+        LOGGER.warning("...: missing/invalid pseudobulk store; skipping. (%s)", e)
+        return
+    if expr.empty:
+        LOGGER.warning("...: pseudobulk expr is empty; skipping.")
+        return
+
+    # -----------------------------
+    # Method config (NEW)
+    # -----------------------------
+    method = getattr(cfg, "dorothea_method", None) or getattr(cfg, "decoupler_method", None) or "consensus"
+    min_n = int(getattr(cfg, "dorothea_min_n_targets", getattr(cfg, "decoupler_min_n_targets", 5)) or 5)
+
+    # Confidence filtering (common for DoRothEA)
+    # DoRothEA confidence levels are typically {"A","B","C","D","E"}.
+    # Default to A/B/C unless user overrides.
+    conf = getattr(cfg, "dorothea_confidence", None)
+    if conf is None:
+        conf = ["A", "B", "C"]
+    if isinstance(conf, str):
+        conf = [x.strip().upper() for x in conf.split(",") if x.strip()]
+    conf = [str(x).upper() for x in conf]
+
+    # -----------------------------
+    # Load resource + filter
+    # -----------------------------
+    try:
+        organism = getattr(cfg, "dorothea_organism", "human") or "human"
+        net = dc.get_dorothea(organism=str(organism))
+    except Exception as e:
+        LOGGER.warning("DoRothEA: failed to load resource via decoupler.get_dorothea: %s", e)
+        return
+
+    if "confidence" in net.columns and conf:
+        net = net[net["confidence"].astype(str).str.upper().isin(conf)].copy()
+
+    if net.empty:
+        LOGGER.warning("DoRothEA: resource empty after confidence filtering (%s); skipping.", conf)
+        return
+
+    # -----------------------------
+    # Run decoupler
+    # -----------------------------
+    try:
+        # mat must be genes x samples
+        est = _dc_run_method(
+            method=method,
+            mat=expr,
+            net=net,
+            source="source",
+            target="target",
+            weight="weight" if "weight" in net.columns else "mor",
+            min_n=min_n,
+            verbose=False,
+        )
+
+        # est is typically (sources x samples). We want samples x sources for plotting consistency.
+        # So: clusters x TFs
+        activity = est.T
+        activity.index.name = "cluster"
+        activity.columns.name = "TF"
+
+    except Exception as e:
+        LOGGER.warning("DoRothEA: decoupler run failed (method=%s): %s", method, e)
+        return
+
+    # -----------------------------
+    # Store
+    # -----------------------------
+    adata.uns.setdefault("dorothea", {})
+    adata.uns["dorothea"]["activity"] = activity
+    adata.uns["dorothea"]["config"] = {
+        "method": str(method),
+        "organism": str(organism),
+        "min_n_targets": int(min_n),
+        "confidence": list(conf),
+        "input": "pseudobulk_expr(genes_x_clusters)",
+        "resource": "dorothea",
+    }
+
+    LOGGER.info(
+        "DoRothEA stored: activity shape=%s using method=%s (conf=%s, min_n=%d).",
+        tuple(activity.shape),
+        str(method),
+        ",".join(conf),
+        int(min_n),
+    )
+
+
+def resolve_msigdb_gene_sets(
+    gene_sets: Sequence[str | Path] | str | None,
+    *,
+    msigdb_root: Path | None = None,
+    allow_keywords: bool = True,
+    allow_paths: bool = True,
+) -> tuple[list[Path], list[str], str | None]:
+    """
+    Resolve a user-provided gene set selector (MSigDB keywords and/or .gmt paths)
+    into a concrete list of GMT files.
+
+    This is designed to match the "ssgsea_gene_sets" UX you had:
+      - Accepts a list like ["HALLMARK", "REACTOME"] (case-insensitive keywords)
+      - Accepts one or more explicit .gmt file paths
+      - Accepts mixed input: ["HALLMARK", "/path/to/custom.gmt"]
+      - Returns:
+          (gmt_files, used_keywords, msigdb_release)
+
+    Keyword matching policy (practical + robust):
+      - Keywords are matched against the GMT filename (stem + name), case-insensitive.
+      - For example keyword "HALLMARK" matches:
+          * "h.all.v2023.1.Hs.symbols.gmt"
+          * "HALLMARK.gmt"
+      - "REACTOME" matches:
+          * "c2.cp.reactome.v2023.1.Hs.symbols.gmt"
+          * any filename containing "reactome"
+
+    MSigDB release detection:
+      - Attempts to parse "vYYYY.M" patterns from filenames in resolved GMTs.
+      - If multiple releases are present, returns the most common one; if tie, the max.
+
+    Parameters
+    ----------
+    gene_sets
+        None, str, Path, or sequence of str/Path.
+        - If None: returns ([], [], None)
+        - If str containing commas: will be split like CLI "HALLMARK,REACTOME"
+    msigdb_root
+        Directory to search for MSigDB GMTs.
+        If None, tries (in order):
+          1) env var "SCOMNOM_MSIGDB_DIR"
+          2) env var "MSIGDB_DIR"
+          3) "./msigdb" (relative to CWD)
+          4) "~/.cache/scomnom/msigdb"
+    allow_keywords / allow_paths
+        For testing/strictness toggles.
+
+    Returns
+    -------
+    gmt_files : list[Path]
+        Resolved GMT files (deduped, sorted).
+    used_keywords : list[str]
+        Uppercased keywords that matched at least one GMT.
+    msigdb_release : str | None
+        Parsed MSigDB release like "2023.1", else None.
+    """
+    from pathlib import Path
+    from typing import Sequence
+    import os
+    import re
+
+    if gene_sets is None:
+        return [], [], None
+
+    # -----------------------------
+    # Normalize input into tokens
+    # -----------------------------
+    tokens: list[str | Path] = []
+    if isinstance(gene_sets, (str, Path)):
+        gene_sets = [gene_sets]  # type: ignore[list-item]
+
+    for x in gene_sets:  # type: ignore[union-attr]
+        if x is None:
+            continue
+        if isinstance(x, Path):
+            tokens.append(x)
+        else:
+            s = str(x).strip()
+            if not s:
+                continue
+            # allow comma-separated input (CLI style)
+            if "," in s:
+                parts = [p.strip() for p in s.split(",") if p.strip()]
+                tokens.extend(parts)
+            else:
+                tokens.append(s)
+
+    if not tokens:
+        return [], [], None
+
+    # -----------------------------
+    # Resolve root
+    # -----------------------------
+    if msigdb_root is None:
+        env1 = os.environ.get("SCOMNOM_MSIGDB_DIR")
+        env2 = os.environ.get("MSIGDB_DIR")
+        candidates = [
+            Path(env1) if env1 else None,
+            Path(env2) if env2 else None,
+            Path.cwd() / "msigdb",
+            Path.home() / ".cache" / "scomnom" / "msigdb",
+        ]
+        msigdb_root = next((p for p in candidates if p is not None and p.exists()), None)
+
+    # -----------------------------
+    # Collect explicit GMT paths
+    # -----------------------------
+    gmt_files: list[Path] = []
+    used_keywords: list[str] = []
+
+    def _add_gmt(p: Path) -> None:
+        if p.suffix.lower() == ".gmt" and p.exists() and p.is_file():
+            gmt_files.append(p)
+
+    if allow_paths:
+        for t in tokens:
+            if isinstance(t, Path):
+                _add_gmt(t.expanduser().resolve())
+            else:
+                s = str(t)
+                if s.lower().endswith(".gmt"):
+                    _add_gmt(Path(s).expanduser().resolve())
+
+    # -----------------------------
+    # Keyword search for GMTs
+    # -----------------------------
+    kw_tokens: list[str] = []
+    if allow_keywords:
+        for t in tokens:
+            if isinstance(t, Path):
+                continue
+            s = str(t).strip()
+            if not s or s.lower().endswith(".gmt"):
+                continue
+            kw_tokens.append(s)
+
+    if kw_tokens:
+        if msigdb_root is None or not msigdb_root.exists():
+            # If user gave only keywords but no root, we can't resolve.
+            # We deliberately do NOT error: caller can warn and skip.
+            return sorted(set(gmt_files)), [], None
+
+        # all GMTs under root
+        all_gmts = list(msigdb_root.rglob("*.gmt"))
+
+        for kw in kw_tokens:
+            kw_u = kw.strip().upper()
+            if not kw_u:
+                continue
+
+            # match keyword anywhere in filename (stem or name)
+            matched = []
+            for p in all_gmts:
+                name = p.name.upper()
+                stem = p.stem.upper()
+                if kw_u in name or kw_u in stem:
+                    matched.append(p)
+
+            if matched:
+                used_keywords.append(kw_u)
+                gmt_files.extend(matched)
+
+    # -----------------------------
+    # Dedup + sort
+    # -----------------------------
+    # Use resolved absolute paths to deduplicate reliably
+    uniq: dict[str, Path] = {}
+    for p in gmt_files:
+        try:
+            rp = p.expanduser().resolve()
+        except Exception:
+            rp = p
+        uniq[str(rp)] = rp
+
+    gmt_files_out = sorted(uniq.values(), key=lambda p: str(p))
+
+    # -----------------------------
+    # Infer MSigDB release from filenames
+    # -----------------------------
+    # Typical MSigDB: "*.v2023.1.Hs.symbols.gmt"
+    rel_pat = re.compile(r"\bv(\d{4}\.\d+)\b", flags=re.IGNORECASE)
+    releases: list[str] = []
+    for p in gmt_files_out:
+        m = rel_pat.search(p.name)
+        if m:
+            releases.append(m.group(1))
+
+    msigdb_release: str | None = None
+    if releases:
+        # choose most common; if tie pick max lexicographically (works for YYYY.M)
+        from collections import Counter
+
+        c = Counter(releases)
+        top_n = max(c.values())
+        top = sorted([r for r, n in c.items() if n == top_n])
+        msigdb_release = top[-1]
+
+    # Preserve keyword order but unique
+    seen = set()
+    used_keywords_out = []
+    for k in used_keywords:
+        if k not in seen:
+            used_keywords_out.append(k)
+            seen.add(k)
+
+    return gmt_files_out, used_keywords_out, msigdb_release
+
 
 
 # -------------------------------------------------------------------------
@@ -1924,28 +2270,44 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
             out_path=cfg.annotation_csv,
         )
 
-    # Optional: per-cell ssGSEA enrichment (Hallmark/Reactome)
-    try:
-        _run_ssgsea(adata, cfg)
-    except Exception as e:
-        LOGGER.warning("ssGSEA step failed: %s", e)
+    # ------------------------------------------------------------------
+    # Decoupler nets (cluster-level) — gated by cfg.run_decoupler
+    # ------------------------------------------------------------------
+    if getattr(cfg, "run_decoupler", False):
+        # Store cluster pseudobulk once for all downstream nets
+        cluster_key = None
+        if "cluster_label" in adata.obs:
+            cluster_key = "cluster_label"
+        elif getattr(cfg, "final_auto_idents_key", None) and cfg.final_auto_idents_key in adata.obs:
+            cluster_key = cfg.final_auto_idents_key
+        elif getattr(cfg, "label_key", None) and cfg.label_key in adata.obs:
+            cluster_key = cfg.label_key
 
-    if cfg.make_figures and getattr(cfg, "run_ssgsea", False) and "ssgsea_cluster_means" in adata.uns:
-        plot_utils.plot_ssgsea_cluster_topn_heatmap(
-            adata,
-            cluster_key = "cluster_label",
-            figdir = figdir_cluster,
-            n = cfg.ssgsea_plot_n,
-            z_score = True,
-        )
-        plot_utils.plot_ssgsea_cluster_topn_barplots(adata, cluster_key="cluster_label", figdir=figdir_cluster,
-                                                     n=cfg.ssgsea_plot_n)
-        plot_utils.plot_ssgsea_cluster_topn_dotplots(
-            adata,
-            figdir = figdir_cluster,
-            cluster_key = "cluster_label",
-            n = cfg.ssgsea_plot_n,
-        )
+        if cluster_key is None:
+            LOGGER.warning("Decoupler: no cluster key found; skipping pseudobulk + nets.")
+        else:
+            _store_cluster_pseudobulk(
+                adata,
+                cluster_key=cluster_key,
+                agg=getattr(cfg, "decoupler_pseudobulk_agg", "mean"),
+                use_raw_like=bool(getattr(cfg, "decoupler_use_raw", True)),
+                prefer_layers=("counts_raw", "counts_cb"),
+                store_key="pseudobulk",
+            )
+
+            # Run selected nets (each function also reads cfg for method overrides)
+            _run_msigdb(adata, cfg)
+
+            if getattr(cfg, "run_dorothea", True):
+                _run_dorothea(adata, cfg)
+
+            if getattr(cfg, "run_progeny", True):
+                _run_progeny(adata, cfg)
+    else:
+        LOGGER.info("Decoupler: disabled (run_decoupler=False).")
+
+
+    ### INSERT decoupler net plots here
 
     # Make 'plateaus' HDF5-safe: JSON-encode list of dicts if present
     ca_uns = adata.uns.get("cluster_and_annotate", {})
