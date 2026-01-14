@@ -15,6 +15,7 @@ dependencies:
   - setuptools
   - wheel
   - cython
+  - pillow>=10.1
 
   # Numeric stack
   - numpy
