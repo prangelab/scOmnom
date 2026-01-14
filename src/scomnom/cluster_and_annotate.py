@@ -1443,8 +1443,8 @@ def _dc_run_method(
     target: str = "target",
     weight: str | None = "weight",
     min_n: int = 5,
-    verbose: bool = False,
     consensus_methods: Optional[Sequence[str]] = None,
+    verbose: bool = False,
 ) -> "pd.DataFrame":
     """
     Run a decoupler method on an expression matrix + network and return activities.
@@ -1453,7 +1453,6 @@ def _dc_run_method(
     """
     import numpy as np
     import pandas as pd
-    import anndata as ad
     import decoupler as dc
 
     if mat is None or not isinstance(mat, pd.DataFrame) or mat.empty:
@@ -1463,113 +1462,116 @@ def _dc_run_method(
 
     method = (method or "consensus").lower().strip()
 
-    # ---- validate method names against decoupler registry ----
-    avail = set(str(x).lower() for x in dc.mt.show()["name"].tolist())
+    # -----------------------------
+    # Normalize / validate network
+    # -----------------------------
+    for col in (source, target):
+        if col not in net.columns:
+            raise KeyError(f"decoupler: net missing required column '{col}'")
 
-    if method != "consensus" and method not in avail:
-        # fall back to a safe default
-        method = "ulm"
+    net_use = net.copy()
+    net_use[source] = net_use[source].astype(str)
+    net_use[target] = net_use[target].astype(str)
 
-    if consensus_methods is None:
-        consensus_methods = ["ulm", "mlm", "wsum"]
-    consensus_methods = [str(m).lower().strip() for m in consensus_methods if str(m).strip()]
-    consensus_methods = list(dict.fromkeys(consensus_methods))
-    consensus_methods = [m for m in consensus_methods if m in avail]
+    # decoupler 2.x expects standard column names: source/target/weight
+    if source != "source":
+        net_use = net_use.rename(columns={source: "source"})
+    if target != "target":
+        net_use = net_use.rename(columns={target: "target"})
+    if weight is None or weight not in net_use.columns:
+        net_use["weight"] = 1.0
+    elif weight != "weight":
+        net_use = net_use.rename(columns={weight: "weight"})
 
-    if method == "consensus" and not consensus_methods:
-        raise ValueError(
-            "decoupler: consensus requested but no valid consensus_methods remain after validation. "
-            "Check `decoupler.mt.show()`."
-        )
-
-    # ---- normalize expression orientation to samples x genes ----
-    genes_in_net = set(net[target].astype(str).unique().tolist())
+    # -----------------------------
+    # Normalize expression to samples x genes
+    # -----------------------------
+    genes_in_net = set(net_use["target"].unique().tolist())
     idx_overlap = len(set(map(str, mat.index)).intersection(genes_in_net))
     col_overlap = len(set(map(str, mat.columns)).intersection(genes_in_net))
-    mat_sxg = mat.T.copy() if idx_overlap >= col_overlap else mat.copy()
 
+    mat_sxg = mat.T.copy() if idx_overlap >= col_overlap else mat.copy()
     mat_sxg = mat_sxg.apply(pd.to_numeric, errors="coerce").fillna(0.0)
 
-    # ---- intersect genes with net targets ----
     common_genes = [g for g in mat_sxg.columns.astype(str) if g in genes_in_net]
     if not common_genes:
         raise ValueError("decoupler: no overlap between mat genes and net targets.")
 
     mat_sxg = mat_sxg.loc[:, common_genes]
+    net_use = net_use[net_use["target"].isin(common_genes)].copy()
 
-    net_use = net.copy()
-    net_use[source] = net_use[source].astype(str)
-    net_use[target] = net_use[target].astype(str)
-    net_use = net_use[net_use[target].isin(common_genes)].copy()
-
-    # ensure weight column exists if requested
-    if weight is None or weight not in net_use.columns:
-        net_use["weight"] = 1.0
-        weight = "weight"
-
-    # ---- filter sources by min_n targets ----
-    tgt_counts = net_use.groupby(source)[target].nunique()
+    # Filter sources by min_n targets
+    tgt_counts = net_use.groupby("source")["target"].nunique()
     keep_sources = tgt_counts[tgt_counts >= int(min_n)].index.astype(str).tolist()
-    net_use = net_use[net_use[source].isin(keep_sources)].copy()
+    net_use = net_use[net_use["source"].isin(keep_sources)].copy()
     if net_use.empty:
         raise ValueError(f"decoupler: after min_n={min_n} filtering, net is empty.")
 
-    # ---- build AnnData for decoupler (obs=samples, var=genes) ----
-    samples = mat_sxg.index.astype(str)
-    genes = mat_sxg.columns.astype(str)
+    # -----------------------------
+    # Available methods (decoupler 2.x)
+    # -----------------------------
+    try:
+        available = {m.lower() for m in dc.mt.show_methods()}
+    except Exception:
+        # Very defensive fallback
+        available = {m.lower() for m in dir(dc.mt) if not m.startswith("_")}
 
-    adata_run = ad.AnnData(
-        X=mat_sxg.to_numpy(dtype=np.float32, copy=False),
-        obs=pd.DataFrame(index=samples),
-        var=pd.DataFrame(index=genes),
-    )
+    def _run_one(m: str) -> pd.DataFrame:
+        m = (m or "").lower().strip()
+        if m not in available:
+            raise ValueError(
+                f"decoupler: method '{m}' not available. "
+                f"Use decoupler.mt.show_methods() to inspect available methods."
+            )
 
-    # ---- run ----
+        func = getattr(dc.mt, m)
+
+        # decoupler 2.x methods: func(data=..., net=...) -> (acts, pvals) or acts
+        out = func(data=mat_sxg, net=net_use, verbose=verbose)
+
+        acts = out[0] if isinstance(out, (tuple, list)) else out
+        if not isinstance(acts, pd.DataFrame) or acts.empty:
+            raise RuntimeError(f"decoupler: method '{m}' returned empty/invalid activities.")
+
+        # acts is samples x sources -> convert to sources x samples
+        return acts.T
+
     if method == "consensus":
-        # Run multiple methods and then consensus
-        dc.mt.decouple(
-            data=adata_run,
-            net=net_use,
-            methods=consensus_methods,
-            source=source,
-            target=target,
-            weight=weight,
-            tmin=int(min_n),
-            verbose=verbose,
-        )
-        dc.mt.consensus(result=adata_run)
+        methods = list(consensus_methods) if consensus_methods else ["ulm", "mlm", "wsum"]
+        methods = [m.lower().strip() for m in methods if m and str(m).strip()]
+        if not methods:
+            raise ValueError("decoupler consensus: consensus_methods is empty.")
 
-        score_key = "score_consensus"
-    else:
-        # Individual method
-        fn = getattr(dc.mt, method)
-        fn(
-            data=adata_run,
-            net=net_use,
-            source=source,
-            target=target,
-            weight=weight,
-            tmin=int(min_n),
-            verbose=verbose,
-        )
-        score_key = f"score_{method}"
+        ests: list[pd.DataFrame] = []
+        errs: list[str] = []
+        for m in methods:
+            try:
+                ests.append(_run_one(m))
+            except Exception as e:
+                errs.append(f"{m}: {e}")
 
-    if score_key not in adata_run.obsm:
-        raise RuntimeError(f"decoupler: expected {score_key!r} in adata_run.obsm, but it was not created.")
+        if not ests:
+            raise RuntimeError("decoupler consensus: all constituent methods failed: " + " | ".join(errs))
 
-    scores = adata_run.obsm[score_key]  # shape: (n_samples, n_sources)
+        # Align + average
+        common_sources = set(ests[0].index)
+        common_samples = set(ests[0].columns)
+        for e in ests[1:]:
+            common_sources &= set(e.index)
+            common_samples &= set(e.columns)
 
-    # sources names live in `uns[f"{score_key}_names"]` in decoupler 2.x
-    src_names_key = f"{score_key}_names"
-    if src_names_key in adata_run.uns:
-        sources = list(map(str, adata_run.uns[src_names_key]))
-    else:
-        # fallback: numeric columns
-        sources = [f"source_{i}" for i in range(scores.shape[1])]
+        if not common_sources or not common_samples:
+            raise RuntimeError("decoupler consensus: no common sources/samples across methods.")
 
-    df = pd.DataFrame(scores, index=samples, columns=sources)  # samples x sources
-    return df.T  # sources x samples
+        common_sources = sorted(common_sources)
+        common_samples = sorted(common_samples)
 
+        stack = np.stack([e.loc[common_sources, common_samples].to_numpy() for e in ests], axis=0)
+        mean_est = np.nanmean(stack, axis=0)
+
+        return pd.DataFrame(mean_est, index=common_sources, columns=common_samples)
+
+    return _run_one(method)
 
 
 def _run_msigdb(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
