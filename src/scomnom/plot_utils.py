@@ -3045,7 +3045,7 @@ def plot_decoupler_dotplot(
     clusters = sub_raw.index.astype(str).tolist()
     features = sub_raw.columns.astype(str).tolist()
 
-    # FIX: Clean and wrap labels
+    # Clean and wrap labels
     features_clean = [_clean_feature_label(f, net_name) for f in features]
     features_disp = _wrap_labels(features_clean, wrap_at=wrap_at) if wrap_labels else features_clean
 
@@ -3069,14 +3069,14 @@ def plot_decoupler_dotplot(
 
     sizes = np.array([size_scale(v) for v in svals])
 
-    # FIX: Define fig_h and increase fig_w for legend space
+    # Figure sizing
     fig_w = max(11.0, 4.0 + 0.4 * len(clusters))
     fig_h = max(5.0, 2.2 + 0.3 * len(features))
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
     left = _dynamic_left_margin_from_labels(df["feature"].values, base=0.20)
-    # FIX: Increase right margin significantly (0.75) to house legends
-    fig.subplots_adjust(left=left, right=0.75, top=0.88, bottom=0.18)
+    # Increase right margin to 0.72 to fit legends comfortably
+    fig.subplots_adjust(left=left, right=0.72, top=0.88, bottom=0.18)
 
     sca = ax.scatter(
         x=df["cluster"].values, y=df["feature"].values,
@@ -3087,19 +3087,32 @@ def plot_decoupler_dotplot(
     ax.set_xlabel("Cluster")
     ax.set_ylabel("Feature" if net_name.lower() != "dorothea" else "TF")
 
-    # Colorbar FIX: Use a dedicated axis to prevent it from squishing the plot
-    cbar_ax = fig.add_axes([0.80, 0.18, 0.02, 0.3])
+    # Colorbar placement using a dedicated axis
+    cbar_ax = fig.add_axes([0.78, 0.18, 0.02, 0.3])
     cbar = fig.colorbar(sca, cax=cbar_ax)
     cbar.set_label(cbar_label)
 
-    # Size Legend FIX: Move to the right of the colorbar
+    # Size Legend Correction
+    # Get reference values for the legend
     refs = np.unique(np.round(np.quantile(svals, [0.25, 0.50, 0.75]), 3))
     refs = refs[refs > 0]
+
     if refs.size > 0:
-        handles = [ax.scatter([], [], s=size_scale(v), color="gray", alpha=0.6, label=str(v)) for v in refs]
+        # Create handles using legend_elements style or dummy scatters
+        handles = [
+            plt.Line2D([0], [0], marker='o', color='w',
+                       markerfacecolor='gray', markersize=np.sqrt(size_scale(v)),
+                       label=str(v), alpha=0.6)
+            for v in refs
+        ]
+
+        # FIX: Remove 'transform' keyword. bbox_to_anchor uses axes coords by default
         ax.legend(
-            handles=handles, title=size_label, loc="upper left",
-            bbox_to_anchor=(1.1, 1.0), transform=ax.transAxes, frameon=False
+            handles=handles,
+            title=size_label,
+            loc="upper left",
+            bbox_to_anchor=(1.1, 1.0),
+            frameon=False
         )
 
     ax.spines["top"].set_visible(False)
@@ -3109,7 +3122,6 @@ def plot_decoupler_dotplot(
 
     save_multi(f"{stem}{int(top_k)}_{cbar_label}_{size_by}", outdir, fig)
     plt.close(fig)
-
 
 def plot_decoupler_all_styles(
     adata,
