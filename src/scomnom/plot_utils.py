@@ -3093,40 +3093,131 @@ def plot_ssgsea_cluster_topn_barplots(
 
 
 def plot_ssgsea_cluster_topn_dotplots(
-        adata,
-        *,
-        figdir: Path | None,
-        cluster_key: str = "cluster_label",
-        n: int = 5,
-        use_zscore_for_ranking: bool = True,
-        x: str = "score",
-        color_by: str = "score_z",
-        size_by: str = "gene_set_size",
+    adata,
+    *,
+    figdir: Path | None,
+    cluster_key: str = "cluster_label",
+    n: int = 5,
+    use_zscore_for_ranking: bool = True,
+    x: str = "score",
+    color_by: str = "score_z",
+    size_by: str = "gene_set_size",
+    prefix_filter: list[str] | str | None = None,
+    max_clusters: int | None = None,
 ) -> None:
+    import re
     import numpy as np
     import pandas as pd
     import matplotlib.pyplot as plt
     from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-    # ... (Keep existing data retrieval and ranking logic) ...
     df = _get_ssgsea_df(adata)
-    if df is None: return
-    if figdir is None: raise ValueError("figdir must be provided.")
+    if df is None:
+        return
+    if figdir is None:
+        raise ValueError("figdir must be provided.")
+
     outdir = _ssgsea_pathways_figdir(figdir)
+
+    # rank_df is used ONLY for choosing top terms; df keeps the raw ES "score"
     rank_df = _zscore_by_pathway(df) if use_zscore_for_ranking else df
 
     clusters = list(rank_df.index.astype(str))
+    if max_clusters is not None:
+        clusters = clusters[: int(max_clusters)]
 
-    # ... (Keep existing GMT parsing and cluster selection logic) ...
+    # Determine library prefixes from column names "<prefix>::<term>"
+    cols = pd.Index(df.columns.astype(str))
+    col_prefixes = cols.str.split("::").str[0]
 
+    if prefix_filter is None:
+        prefixes = sorted(pd.unique(col_prefixes))
+    else:
+        if isinstance(prefix_filter, str):
+            prefix_filter_list = [prefix_filter]
+        else:
+            prefix_filter_list = list(prefix_filter)
+
+        prefixes = sorted(
+            p for p in pd.unique(col_prefixes)
+            if any(frag in p for frag in prefix_filter_list)
+        )
+
+    if not prefixes:
+        prefixes = sorted(pd.unique(col_prefixes))
+
+    def _sanitize(s: str) -> str:
+        # safe for filenames
+        s = str(s)
+        s = re.sub(r"\s+", "_", s)
+        s = re.sub(r"[^A-Za-z0-9_.-]+", "", s)  # drop e.g. ":" "/" etc.
+        return s[:180]  # keep filenames reasonable
+
+    # Main loop
     for cl in clusters:
         for prefix in prefixes:
-            # ... (Keep column filtering and top_cols logic) ...
+            # columns for this prefix
+            col_mask = col_prefixes == prefix
+            cols_pref = cols[col_mask]
+            if len(cols_pref) == 0:
+                continue
 
-            # (Processing plot_df logic remains the same)
+            # pick top terms for this cluster using rank_df (zscore or raw)
+            if cl not in rank_df.index:
+                continue
+
+            rvals = rank_df.loc[cl, cols_pref]
+            rvals = pd.to_numeric(rvals, errors="coerce").dropna()
+            if rvals.empty:
+                continue
+
+            # choose top N by absolute ranking signal (common for enrichment)
+            top_terms = rvals.abs().sort_values(ascending=False).head(int(n)).index.tolist()
+            if not top_terms:
+                continue
+
+            # build rows (THIS was missing)
+            rows = []
+            for term_col in top_terms:
+                # raw ES score always from df (not from zscore matrix)
+                score = float(pd.to_numeric(df.loc[cl, term_col], errors="coerce"))
+                score_z = float(pd.to_numeric(rank_df.loc[cl, term_col], errors="coerce"))
+
+                # gene_set_size: try to parse from the term if you have metadata elsewhere.
+                # If you don't have sizes available, set to NaN and it will fallback to constant dot sizes.
+                gene_set_size = np.nan
+                # If your pipeline has a lookup like adata.uns["ssgsea"]["gene_set_sizes"], use it here.
+                # Example (optional):
+                # sizes_map = adata.uns.get("ssgsea", {}).get("gene_set_sizes", {})
+                # gene_set_size = float(sizes_map.get(term_col, np.nan))
+
+                # human-readable label: everything after "::"
+                term = str(term_col).split("::", 1)[-1]
+
+                rows.append(
+                    {
+                        "term": term,
+                        "term_col": str(term_col),
+                        "score": score,
+                        "score_z": score_z,
+                        "gene_set_size": gene_set_size,
+                    }
+                )
+
             plot_df = pd.DataFrame(rows)
-            if plot_df.empty: continue
-            plot_df = plot_df.sort_values("score", ascending=True)
+            if plot_df.empty:
+                continue
+
+            # ensure required columns exist
+            if x not in plot_df.columns:
+                continue
+            if color_by not in plot_df.columns:
+                continue
+            if size_by not in plot_df.columns:
+                # tolerate if caller changes size_by
+                plot_df[size_by] = np.nan
+
+            plot_df = plot_df.sort_values(x, ascending=True)
 
             # Dynamic height based on number of terms
             fig_w = 11.0
@@ -3136,14 +3227,14 @@ def plot_ssgsea_cluster_topn_dotplots(
             # Dynamic left margin for long pathway names
             max_len = int(max(len(str(t)) for t in plot_df["term"].values))
             left = float(np.clip(0.15 + 0.008 * max_len, 0.25, 0.55))
-            # Tight_layout is often cleaner, but adjust right to make room for external legends
             fig.subplots_adjust(left=left, right=0.80, top=0.82, bottom=0.15)
 
-            # (Size and Color scaling logic remains the same)
-            size_vals = plot_df["gene_set_size"].to_numpy(dtype=float)
+            # Size scaling
+            size_vals = pd.to_numeric(plot_df[size_by], errors="coerce").to_numpy(dtype=float)
             s_min, s_max = np.nanmin(size_vals), np.nanmax(size_vals)
-            if not np.isfinite(s_min) or not np.isfinite(s_max) or s_min == s_max:
-                sizes = np.full_like(size_vals, 150.0)
+
+            if (not np.isfinite(s_min)) or (not np.isfinite(s_max)) or (s_min == s_max):
+                sizes = np.full(len(size_vals), 150.0, dtype=float)
             else:
                 sizes = 90.0 + (size_vals - s_min) / (s_max - s_min) * (380.0 - 90.0)
 
@@ -3151,7 +3242,7 @@ def plot_ssgsea_cluster_topn_dotplots(
                 plot_df[x].values,
                 plot_df["term"].values,
                 s=sizes,
-                c=plot_df[color_by].values,
+                c=pd.to_numeric(plot_df[color_by], errors="coerce").values,
                 cmap="viridis",
                 edgecolors="black",
                 linewidths=0.35,
@@ -3159,57 +3250,54 @@ def plot_ssgsea_cluster_topn_dotplots(
                 zorder=3,
             )
 
-            # Clean up the axis
             ax.axvline(0.0, linestyle=":", color="black", lw=1.2, alpha=0.6, zorder=2)
-            ax.set_xlabel("ssGSEA ES", fontsize=12)
+            ax.set_xlabel(x, fontsize=12)  # reflect param
             ax.invert_yaxis()
-            ax.spines['top'].set_visible(False)
-            ax.spines['right'].set_visible(False)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
 
-            # Titles
             ax.text(0.5, 1.12, str(cl), transform=ax.transAxes, ha="center", weight="bold", size=18)
             nice_lib = _nice_gmt_name(prefix)
             if nice_lib:
                 ax.text(0.5, 1.05, nice_lib, transform=ax.transAxes, ha="center", color="#666666", size=13)
 
-            # FIX: COLORBAR POSITIONING
-            # Use divider to append an axis to the right of 'ax'
             divider = make_axes_locatable(ax)
-            # pad=0.5 ensures it doesn't touch the plot dots
             cax = divider.append_axes("right", size="2%", pad=0.5)
             cbar = fig.colorbar(sca, cax=cax)
             cbar.set_label("z-score" if color_by == "score_z" else color_by, size=11)
 
-            # FIX: SIZE LEGEND POSITIONING
+            # size legend (optional)
             try:
-                # Use absolute percentiles for the legend scale
-                reps = np.unique(np.nanpercentile(size_vals, [20, 50, 80]).round(0))
-                if len(reps) > 0:
+                if np.isfinite(s_min) and np.isfinite(s_max) and s_min != s_max:
+                    reps = np.unique(np.nanpercentile(size_vals, [20, 50, 80]).round(0))
+                else:
+                    reps = np.array([])
+
+                if reps.size > 0:
                     handles = []
                     for r in reps:
-                        if s_min == s_max:
-                            s = 150.0
-                        else:
-                            s = 90.0 + (r - s_min) / (s_max - s_min) * (380.0 - 90.0)
-                        handles.append(plt.Line2D([0], [0], marker="o", color="w",
-                                                  markerfacecolor="gray", markeredgecolor="black",
-                                                  markersize=np.sqrt(s), linewidth=0))
-
-                    # Place legend to the right of the COLORBAR
-                    # (1.4, 1.0) is relative to the cax (colorbar axis)
-                    leg = ax.legend(
+                        s = 90.0 + (r - s_min) / (s_max - s_min) * (380.0 - 90.0)
+                        handles.append(
+                            plt.Line2D(
+                                [0], [0],
+                                marker="o", color="w",
+                                markerfacecolor="gray", markeredgecolor="black",
+                                markersize=np.sqrt(s), linewidth=0
+                            )
+                        )
+                    ax.legend(
                         handles, [f"{int(r)}" for r in reps],
-                        title=("Genes" if size_by == "gene_set_size" else "|ES|"),
+                        title=("Genes" if size_by == "gene_set_size" else size_by),
                         loc="upper left",
                         bbox_to_anchor=(1.25, 1.0),
                         frameon=False,
                         fontsize=10,
                         title_fontsize=11,
-                        labelspacing=0.8
+                        labelspacing=0.8,
                     )
             except Exception:
                 pass
 
-            stem = f"{cluster_key}_{cl}__top{int(n)}_dot_{prefix}"
+            stem = f"{_sanitize(cluster_key)}_{_sanitize(cl)}__top{int(n)}_dot_{_sanitize(prefix)}"
             save_multi(stem, outdir, fig)
             plt.close(fig)
