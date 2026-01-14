@@ -2712,19 +2712,6 @@ def plot_cluster_batch_composition(
 # -------------------------------------------------------------------------
 # Decoupler net plots (msigdb / progeny / dorothea)
 # -------------------------------------------------------------------------
-from __future__ import annotations
-
-from pathlib import Path
-from typing import Optional, Sequence
-
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-
-# NOTE: assumes save_multi is in scope (same module as your other plotting funcs)
-# from .plot_utils import save_multi
-
-
 def _decoupler_figdir(base: Path | None, net_name: str) -> Path:
     """
     Put decoupler plots under:
