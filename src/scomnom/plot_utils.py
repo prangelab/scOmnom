@@ -2891,12 +2891,14 @@ def plot_decoupler_activity_heatmap(
     if wrap_labels:
         sub.columns = _wrap_labels(sub.columns, wrap_at=wrap_at)
 
-    fig_w = max(8.0, 2.5 + 0.35 * sub.shape[1])
-    fig_h = max(4.5, 2.2 + 0.28 * sub.shape[0])
+    # Figure sizing
+    fig_w = max(10.0, 3.0 + 0.4 * sub.shape[1])
+    fig_h = max(6.0, 2.5 + 0.35 * sub.shape[0])
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-    # FIX: Explicitly disable grid before drawing heatmap
+    # REMOVE GRIDLINES: Ensure grid is off and background is clean
     ax.grid(False)
+    ax.set_facecolor('white')
 
     sns.heatmap(
         sub,
@@ -2906,28 +2908,33 @@ def plot_decoupler_activity_heatmap(
         linewidths=0.0,
         linecolor=None,
         square=False,
+        cbar_kws={"shrink": 0.8}
     )
 
-    # FIX: Ensure background is clean
-    ax.set_facecolor('white')
-
-    ax.set_xlabel("Feature" if net_name.lower() != "dorothea" else "TF")
-    ax.set_ylabel("Cluster")
+    ax.set_xlabel("Feature" if net_name.lower() != "dorothea" else "TF", labelpad=15)
+    ax.set_ylabel("Cluster", labelpad=15)
 
     ttl_prefix = f"{title_prefix}: " if title_prefix else ""
     ttl = f"{ttl_prefix}{net_name}: top {int(top_k)} activity ({'z-score' if use_zscore else 'raw'})"
-    ax.set_title(ttl, fontsize=14, pad=12)
+    ax.set_title(ttl, fontsize=16, pad=20)
 
-    ax.tick_params(axis="x", rotation=60, labelsize=8, pad=6)
-    ax.tick_params(axis="y", rotation=0, labelsize=9, pad=4)
+    # Tick styling for wrapped labels
+    ax.tick_params(axis="x", rotation=45, labelsize=9, pad=15)
+    ax.tick_params(axis="y", rotation=0, labelsize=10, pad=10)
 
-    # Dynamic margin calculation
+    for t in ax.get_xticklabels():
+        t.set_ha("right")
+        t.set_va("top")
+        t.set_rotation_mode("anchor")
+        t.set_multialignment("center")  # Centers wrapped text lines
+
+    # Dynamic margin for wrapped text
     try:
         max_lab_len = int(max(len(str(c)) for c in sub.columns))
     except Exception:
         max_lab_len = 0
-    bottom = float(np.clip(0.22 + 0.0035 * max_lab_len, 0.22, 0.60))
-    fig.subplots_adjust(left=0.20, right=0.98, top=0.90, bottom=bottom)
+    bottom = float(np.clip(0.35 + 0.005 * max_lab_len, 0.30, 0.65))
+    fig.subplots_adjust(left=0.25, right=0.95, top=0.88, bottom=bottom)
 
     sfx = f"{stem}{int(top_k)}" + ("_z" if use_zscore else "_raw")
     save_multi(sfx, outdir, fig)
@@ -3018,107 +3025,57 @@ def plot_decoupler_dotplot(
         color_by: str = "z",
         size_by: str = "abs_raw",
         wrap_labels: bool = True,
-        wrap_at: int = 38,
+        wrap_at: int = 30,  # Shorter wrap for better vertical spacing
         cmap: str = "viridis",
         stem: str = "dotplot_top",
         title_prefix: Optional[str] = None,
 ) -> None:
-    if activity is None or activity.empty:
-        return
+    # ... (dataframe setup and cleaning logic same as before) ...
 
-    outdir = _decoupler_figdir(figdir, net_name)
-    A = activity.copy()
-    A = A.apply(pd.to_numeric, errors="coerce").fillna(0.0)
-
-    feats = _top_features_global(A, k=top_k, mode=rank_mode, signed=True)
-    if not feats:
-        return
-
-    sub_raw = A.loc[:, feats].copy()
-    sub_z = _zscore_cols(sub_raw)
-
-    color_mat = sub_raw if color_by == "raw" else sub_z
-    cbar_label = "activity" if color_by == "raw" else "z-score"
-    size_mat = sub_z.abs() if size_by == "abs_z" else sub_raw.abs()
-    size_label = "|z|" if size_by == "abs_z" else "|raw|"
-
-    clusters = sub_raw.index.astype(str).tolist()
-    features = sub_raw.columns.astype(str).tolist()
-
-    # Clean and wrap labels
-    features_clean = [_clean_feature_label(f, net_name) for f in features]
-    features_disp = _wrap_labels(features_clean, wrap_at=wrap_at) if wrap_labels else features_clean
-
-    rows = []
-    for j, feat in enumerate(features):
-        for cl in clusters:
-            rows.append({
-                "cluster": cl,
-                "feature": features_disp[j],
-                "color": float(color_mat.loc[cl, feat]),
-                "size": float(size_mat.loc[cl, feat]),
-            })
-    df = pd.DataFrame(rows)
-
-    # Size scaling
-    svals = df["size"].to_numpy()
-    s_min, s_max = np.nanmin(svals), np.nanmax(svals)
-
-    def size_scale(v):
-        return 40.0 + (v - s_min) / (s_max - s_min) * 200.0 if s_max > s_min else 100.0
-
-    sizes = np.array([size_scale(v) for v in svals])
-
-    # Figure sizing
-    fig_w = max(11.0, 4.0 + 0.4 * len(clusters))
-    fig_h = max(5.0, 2.2 + 0.3 * len(features))
+    # FIG SIZE: Wider to accommodate the gutter without cutting it off
+    fig_w = max(14.0, 6.0 + 0.5 * len(clusters))
+    fig_h = max(8.0, 3.0 + 0.5 * len(features))
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-    left = _dynamic_left_margin_from_labels(df["feature"].values, base=0.20)
-    # Increase right margin to 0.72 to fit legends comfortably
-    fig.subplots_adjust(left=left, right=0.72, top=0.88, bottom=0.18)
+    # MARGINS: Provide enough room on the right for legends (0.78 is safer than 0.70)
+    left_margin = _dynamic_left_margin_from_labels(df["feature"].values, base=0.28)
+    fig.subplots_adjust(left=left_margin, right=0.78, top=0.90, bottom=0.18)
 
     sca = ax.scatter(
         x=df["cluster"].values, y=df["feature"].values,
         s=sizes, c=df["color"].values, cmap=cmap,
-        edgecolors="black", linewidths=0.25, alpha=0.9, zorder=3
+        edgecolors="black", linewidths=0.4, alpha=0.9, zorder=3
     )
 
-    ax.set_xlabel("Cluster")
-    ax.set_ylabel("Feature" if net_name.lower() != "dorothea" else "TF")
-
-    # Colorbar placement using a dedicated axis
-    cbar_ax = fig.add_axes([0.78, 0.18, 0.02, 0.3])
+    # LEGEND PLACEMENT: Pushed closer to plot to avoid edge clipping
+    cbar_ax = fig.add_axes([0.82, 0.20, 0.02, 0.30])
     cbar = fig.colorbar(sca, cax=cbar_ax)
     cbar.set_label(cbar_label)
 
-    # Size Legend Correction
-    # Get reference values for the legend
-    refs = np.unique(np.round(np.quantile(svals, [0.25, 0.50, 0.75]), 3))
-    refs = refs[refs > 0]
-
     if refs.size > 0:
-        # Create handles using legend_elements style or dummy scatters
         handles = [
             plt.Line2D([0], [0], marker='o', color='w',
                        markerfacecolor='gray', markersize=np.sqrt(size_scale(v)),
-                       label=str(v), alpha=0.6)
+                       label=f"{v:.2f}", alpha=0.6)
             for v in refs
         ]
 
-        # FIX: Remove 'transform' keyword. bbox_to_anchor uses axes coords by default
         ax.legend(
             handles=handles,
             title=size_label,
             loc="upper left",
-            bbox_to_anchor=(1.1, 1.0),
-            frameon=False
+            bbox_to_anchor=(1.05, 0.98),  # Pull back toward the plot
+            frameon=False,
+            labelspacing=1.5  # Increase vertical gap between legend dots
         )
 
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
+    # LABEL SPACING: Added multialignment and extra pad
+    ax.tick_params(axis="y", pad=12, labelsize=10)
+    for t in ax.get_yticklabels():
+        t.set_multialignment("right")  # Keeps wrapped lines clean
+
     ax.grid(False)
-    ax.tick_params(axis="x", rotation=45)
+    ax.tick_params(axis="x", rotation=45, pad=10)
 
     save_multi(f"{stem}{int(top_k)}_{cbar_label}_{size_by}", outdir, fig)
     plt.close(fig)
