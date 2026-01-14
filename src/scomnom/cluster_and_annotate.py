@@ -864,8 +864,75 @@ def select_best_resolution(
         )
 
     # ------------------------------------------------------------------
-    # Vetoes (snap logic)
+    # Bio vetoes (snap logic)
     # ------------------------------------------------------------------
+    def _apply_bio_cliff_veto(r_pick: float) -> float:
+        if not use_bio_effective:
+            return float(r_pick)
+
+        bioari_norm_local = _normalize_scores(metrics.bio_ari or {})
+        if not bioari_norm_local:
+            return float(r_pick)
+
+        r_star = max(bioari_norm_local, key=lambda r: bioari_norm_local[r])
+        v_star = float(bioari_norm_local[r_star])
+        bioari_drop = 0.35
+
+        allowed = [
+            r for r in sorted_res
+            if float(bioari_norm_local.get(r, 0.0)) >= (v_star - bioari_drop)
+        ]
+        if not allowed:
+            return float(r_pick)
+
+        if float(r_pick) in allowed:
+            return float(r_pick)
+
+        # snap to best composite among allowed
+        r_best = max(allowed, key=lambda r: float(all_scores.get(r, -np.inf)))
+
+        LOGGER.info(
+            "Bio-cliff veto: %.3f → %.3f (bioARI_norm=%.3f, best=%.3f@%.3f)",
+            float(r_pick),
+            float(r_best),
+            float(bioari_norm_local.get(r_pick, float("nan"))),
+            float(v_star),
+            float(r_star),
+        )
+        return float(r_best)
+
+    def _apply_bio_complexity_veto(r_pick: float) -> float:
+        if not use_bio_effective:
+            return float(r_pick)
+
+        n_bio = metrics.n_bio_labels
+        if not n_bio or n_bio <= 0:
+            return float(r_pick)
+
+        ratio_max = 2.5
+        n_clusters = int(metrics.cluster_counts.get(r_pick, 0))
+        if n_clusters <= ratio_max * n_bio:
+            return float(r_pick)
+
+        allowed = [
+            r for r in sorted_res
+            if int(metrics.cluster_counts.get(r, 0)) <= ratio_max * n_bio
+        ]
+        if not allowed:
+            return float(r_pick)
+
+        r_best = max(allowed, key=lambda r: float(all_scores.get(r, -np.inf)))
+
+        LOGGER.info(
+            "Bio-complexity veto: %.3f (%d clusters) → %.3f (%d clusters, %d bio labels)",
+            float(r_pick),
+            n_clusters,
+            float(r_best),
+            int(metrics.cluster_counts.get(r_best, 0)),
+            int(n_bio),
+        )
+        return float(r_best)
+
     candidate = _apply_bio_cliff_veto(float(candidate))
     candidate = _apply_bio_complexity_veto(float(candidate))
 
