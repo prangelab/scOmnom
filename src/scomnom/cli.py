@@ -14,6 +14,7 @@ from .logging_utils import init_logging
 
 
 ALLOWED_METHODS = {"scVI", "scANVI", "scPoli", "Harmony", "Scanorama", "BBKNN"}
+ALLOWED_DECOUPLER_METHODS = {"ulm", "mlm", "wsum", "aucell"}
 app = typer.Typer(help="scOmnom CLI — high-throughput scRNA-seq preprocessing and analysis pipeline.")
 
 # Globally suppress noisy warnings
@@ -52,6 +53,43 @@ def _methods_completion(ctx: typer.Context, args: List[str], incomplete: str) ->
     prefix = incomplete.lower()
     return [m for m in sorted(ALLOWED_METHODS) if m.lower().startswith(prefix)]
 
+def validate_decoupler_consensus_methods(
+    value: Optional[List[str]],
+) -> Optional[List[str]]:
+    """
+    Validate and normalize --decoupler-consensus-methods.
+
+    - lowercases
+    - deduplicates (order-preserving)
+    - checks against supported decoupler methods
+    """
+    if value is None:
+        return None
+
+    seen = set()
+    methods: list[str] = []
+
+    for m in value:
+        if m is None:
+            continue
+        m_norm = m.strip().lower()
+        if not m_norm:
+            continue
+        if m_norm not in ALLOWED_DECOUPLER_METHODS:
+            raise typer.BadParameter(
+                f"Invalid decoupler consensus method '{m}'. "
+                f"Allowed methods: {sorted(ALLOWED_DECOUPLER_METHODS)}"
+            )
+        if m_norm not in seen:
+            seen.add(m_norm)
+            methods.append(m_norm)
+
+    if not methods:
+        raise typer.BadParameter(
+            "--decoupler-consensus-methods must contain at least one valid method."
+        )
+
+    return methods
 
 def _celltypist_models_completion(ctx: typer.Context, args: List[str], incomplete: str) -> List[str]:
     from .io_utils import get_available_celltypist_models
@@ -595,6 +633,12 @@ def cluster_and_annotate(
             "--decoupler-method",
             help="[Decoupler] Default method for decoupler runs (can be overridden per net).",
         ),
+        decoupler_consensus_methods: Optional[List[str]] = typer.Option(
+            ["ulm", "mlm", "wsum"],
+            "--decoupler-consensus-methods",
+            help= "[Decoupler] List of consensus methods.",
+            callback=validate_decoupler_consensus_methods,
+        ),
         decoupler_min_n_targets: int = typer.Option(
             5,
             "--decoupler-min-n-targets",
@@ -711,6 +755,7 @@ def cluster_and_annotate(
         decoupler_pseudobulk_agg=decoupler_pseudobulk_agg,
         decoupler_use_raw=decoupler_use_raw,
         decoupler_method=decoupler_method,
+        decoupler_consensus_methods=decoupler_consensus_methods,
         decoupler_min_n_targets=decoupler_min_n_targets,
 
         msigdb_method=msigdb_method,
