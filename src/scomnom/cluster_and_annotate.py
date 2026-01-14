@@ -2297,8 +2297,40 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
     else:
         LOGGER.info("Decoupler: disabled (run_decoupler=False).")
 
+    # ------------------------------------------------------------------
+    # Decoupler net plots (heatmap + per-cluster bars + dotplot)
+    # ------------------------------------------------------------------
+    if cfg.make_figures and getattr(cfg, "run_decoupler", False):
+        # Tune defaults per resource (PROGENy is small; DoRothEA can be large)
+        plot_utils.plot_decoupler_all_styles(
+            adata,
+            net_key="msigdb",
+            net_name="MSigDB",
+            figdir=Path("cluster_and_annotate"),
+            heatmap_top_k=30,
+            bar_top_n=10,
+            dotplot_top_k=30,
+        )
 
-    ### INSERT decoupler net plots here
+        plot_utils.plot_decoupler_all_styles(
+            adata,
+            net_key="progeny",
+            net_name="PROGENy",
+            figdir=Path("cluster_and_annotate"),
+            heatmap_top_k=14,   # PROGENy pathways are ~14 (human)
+            bar_top_n=8,
+            dotplot_top_k=14,
+        )
+
+        plot_utils.plot_decoupler_all_styles(
+            adata,
+            net_key="dorothea",
+            net_name="DoRothEA",
+            figdir=Path("cluster_and_annotate"),
+            heatmap_top_k=40,
+            bar_top_n=10,
+            dotplot_top_k=35,
+        )
 
     # Make 'plateaus' HDF5-safe: JSON-encode list of dicts if present
     ca_uns = adata.uns.get("cluster_and_annotate", {})
