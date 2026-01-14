@@ -2709,10 +2709,22 @@ def plot_cluster_batch_composition(
     save_multi(stem, figdir, fig)
     plt.close(fig)
 
-
 # -------------------------------------------------------------------------
 # Decoupler net plots (msigdb / progeny / dorothea)
 # -------------------------------------------------------------------------
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Optional, Sequence
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# NOTE: assumes save_multi is in scope (same module as your other plotting funcs)
+# from .plot_utils import save_multi
+
+
 def _decoupler_figdir(base: Path | None, net_name: str) -> Path:
     """
     Put decoupler plots under:
@@ -2735,8 +2747,8 @@ def _top_features_global(
     activity: pd.DataFrame,
     k: int,
     *,
-    mode: str = "var",         # "var" or "mean_abs"
-    signed: bool = True,       # if False, rank on abs
+    mode: str = "var",  # "var" or "mean_abs"
+    signed: bool = True,
 ) -> list[str]:
     """
     Pick top-k features globally. activity is clusters x features.
@@ -2760,7 +2772,8 @@ def _top_features_global(
 
 def _wrap_labels(labels: Sequence[str], wrap_at: int = 38) -> list[str]:
     import textwrap
-    out = []
+
+    out: list[str] = []
     for s in labels:
         s = str(s)
         out.append(
@@ -2776,22 +2789,91 @@ def _wrap_labels(labels: Sequence[str], wrap_at: int = 38) -> list[str]:
     return out
 
 
+def _msigdb_prefix(term: str) -> str:
+    """
+    Determine "GMT family" prefix for MSigDB-like pathway names.
+    Examples:
+      - "HALLMARK_TNFA_SIGNALING_VIA_NFKB" -> "HALLMARK"
+      - "REACTOME_SOMETHING"              -> "REACTOME"
+      - "PREFIX::TERM"                    -> "PREFIX"
+    """
+    term = str(term)
+    if "::" in term:
+        return term.split("::", 1)[0].strip() or "UNKNOWN"
+    # Default MSigDB style: PREFIX_REST
+    return (term.split("_", 1)[0].strip() or "UNKNOWN")
+
+
+def _split_activity_for_msigdb(
+    activity: pd.DataFrame,
+) -> dict[str, pd.DataFrame]:
+    """
+    Split MSigDB activity (clusters x pathways) into {prefix -> activity_sub}.
+    For non-MSigDB nets, caller should not use this.
+    """
+    if activity is None or activity.empty:
+        return {}
+    cols = activity.columns.astype(str)
+    prefixes = pd.Series(cols, index=cols).map(_msigdb_prefix)
+    out: dict[str, pd.DataFrame] = {}
+    for pfx, cols_idx in prefixes.groupby(prefixes).groups.items():
+        cols_list = list(cols_idx)
+        sub = activity.loc[:, cols_list].copy()
+        out[str(pfx)] = sub
+    return out
+
+
+def _dynamic_left_margin_from_labels(labels: Sequence[str], *, base: float = 0.22) -> float:
+    """
+    Compute a left margin fraction [0,1] based on the longest label length.
+    Tuned for horizontal barplots / dotplots with long y labels.
+    """
+    if labels is None:
+        return float(np.clip(base, 0.28, 0.72))
+    try:
+        max_len = int(max(len(str(x)) for x in labels)) if len(labels) else 0
+    except Exception:
+        max_len = 0
+    # ~120 chars -> ~0.70, ~20 chars -> ~0.34
+    left = base + 0.0040 * max_len
+    return float(np.clip(left, 0.28, 0.72))
+
+
+def _dynamic_fig_width_for_barplot(labels: Sequence[str], *, min_w: float = 12.0, max_w: float = 26.0) -> float:
+    """
+    Compute figure width in inches to accommodate long pathway names without squishing.
+    """
+    try:
+        max_len = int(max(len(str(x)) for x in labels)) if len(labels) else 0
+    except Exception:
+        max_len = 0
+    # Increase width with label length; MSigDB often needs a lot.
+    # 40 chars -> +2.4, 120 chars -> +9.6
+    w = float(min_w + 0.08 * max_len)
+    return float(np.clip(w, min_w, max_w))
+
+
 def plot_decoupler_activity_heatmap(
     activity: pd.DataFrame,
     *,
     net_name: str,
     figdir: Path | None,
     top_k: int = 30,
-    rank_mode: str = "var",     # "var" or "mean_abs"
+    rank_mode: str = "var",  # "var" or "mean_abs"
     use_zscore: bool = True,
     wrap_labels: bool = True,
     wrap_at: int = 38,
     cmap: str = "viridis",
     stem: str = "heatmap_top",
+    title_prefix: Optional[str] = None,
 ) -> None:
     """
     Global heatmap: clusters (rows) x top-K features (cols).
     Uses z-scored activity across clusters by default for comparability.
+
+    FIXES:
+      - No overlay line grid
+      - Dynamic margins
     """
     if activity is None or activity.empty:
         return
@@ -2822,18 +2904,22 @@ def plot_decoupler_activity_heatmap(
     fig_h = max(4.5, 2.2 + 0.28 * sub.shape[0])
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
+    # Remove cell borders / overlay gridlines
     sns.heatmap(
         sub,
         ax=ax,
         cmap=cmap,
         cbar=True,
-        linewidths=0,
+        linewidths=0.0,
         linecolor=None,
+        square=False,
     )
 
     ax.set_xlabel("Feature" if net_name.lower() != "dorothea" else "TF")
     ax.set_ylabel("Cluster")
-    ttl = f"{net_name}: top {int(top_k)} activity ({'z-score' if use_zscore else 'raw'})"
+
+    ttl_prefix = f"{title_prefix}: " if title_prefix else ""
+    ttl = f"{ttl_prefix}{net_name}: top {int(top_k)} activity ({'z-score' if use_zscore else 'raw'})"
     ax.set_title(ttl, fontsize=14, pad=12)
 
     # tick styling
@@ -2844,8 +2930,14 @@ def plot_decoupler_activity_heatmap(
         t.set_rotation_mode("anchor")
         t.set_multialignment("right")
 
-    # margins
-    fig.subplots_adjust(left=0.20, right=0.98, top=0.90, bottom=min(0.65, 0.25 + 0.01 * max(len(str(c)) for c in activity.columns)))
+    # Dynamic bottom margin based on max wrapped label line length
+    # (keeps long pathway names from colliding with the figure edge)
+    try:
+        max_lab_len = int(max(len(str(c)) for c in sub.columns))
+    except Exception:
+        max_lab_len = 0
+    bottom = float(np.clip(0.22 + 0.0035 * max_lab_len, 0.22, 0.60))
+    fig.subplots_adjust(left=0.20, right=0.98, top=0.90, bottom=bottom)
 
     sfx = f"{stem}{int(top_k)}" + ("_z" if use_zscore else "_raw")
     save_multi(sfx, outdir, fig)
@@ -2860,10 +2952,15 @@ def plot_decoupler_cluster_topn_barplots(
     n: int = 10,
     use_abs: bool = False,
     stem_prefix: str = "cluster",
+    title_prefix: Optional[str] = None,
 ) -> None:
     """
     Per-cluster Top-N barplots (modeled after your ssGSEA barplots).
     One figure per cluster.
+
+    FIXES:
+      - Dynamic left margin (already present) + improved
+      - Dynamic width to avoid MSigDB squishing
     """
     if activity is None or activity.empty:
         return
@@ -2875,32 +2972,23 @@ def plot_decoupler_cluster_topn_barplots(
     A.columns = A.columns.astype(str)
     A = A.apply(pd.to_numeric, errors="coerce").fillna(0.0)
 
-    # iterate clusters
     for cl in A.index.astype(str):
         s = A.loc[cl].copy()
-        if use_abs:
-            s_rank = s.abs()
-        else:
-            s_rank = s
+        s_rank = s.abs() if use_abs else s
 
-        # top positive if not abs, else top magnitude
         top = s_rank.sort_values(ascending=False).head(int(n))
         if top.empty:
             continue
 
-        # recover signed values for plotting if use_abs
         vals = s.loc[top.index] if use_abs else top
-
-        # barh needs ascending then invert_yaxis for "best on top"
         vals_plot = vals.sort_values(ascending=True)
 
-        max_len = int(max(len(str(t)) for t in vals_plot.index))
-        left = float(np.clip(0.18 + 0.010 * max_len, 0.30, 0.72))
-
+        # Dynamic margins/width for long labels
+        left = _dynamic_left_margin_from_labels(vals_plot.index, base=0.22)
+        fig_w = _dynamic_fig_width_for_barplot(vals_plot.index, min_w=12.0, max_w=28.0)
         fig_h = max(2.8, 0.70 * len(vals_plot) + 1.8)
-        fig_w = 11.5
-        fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h))
         fig.subplots_adjust(left=left, right=0.96, top=0.82, bottom=0.14)
 
         y = np.arange(len(vals_plot))
@@ -2918,21 +3006,23 @@ def plot_decoupler_cluster_topn_barplots(
 
         ax.set_xlabel("Activity", fontsize=13)
         ax.set_ylabel("Feature" if net_name.lower() != "dorothea" else "TF", fontsize=13)
-
         ax.invert_yaxis()
 
         ax.grid(False)
         ax.xaxis.grid(False)
         ax.yaxis.grid(False)
-
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
 
-        # Title + subtitle (same style as your ssGSEA code)
+        # Title + subtitle (ssGSEA style)
+        main_title = str(cl)
+        if title_prefix:
+            main_title = f"{title_prefix} • {main_title}"
+
         ax.text(
             0.5,
             1.10,
-            str(cl),
+            main_title,
             transform=ax.transAxes,
             ha="center",
             va="bottom",
@@ -2966,19 +3056,24 @@ def plot_decoupler_dotplot(
     net_name: str,
     figdir: Path | None,
     top_k: int = 30,
-    rank_mode: str = "var",          # "var" or "mean_abs"
-    color_by: str = "z",             # "z" or "raw"
-    size_by: str = "abs_raw",        # "abs_raw" or "abs_z"
+    rank_mode: str = "var",  # "var" or "mean_abs"
+    color_by: str = "z",  # "z" or "raw"
+    size_by: str = "abs_raw",  # "abs_raw" or "abs_z"
     wrap_labels: bool = True,
     wrap_at: int = 38,
     cmap: str = "viridis",
     stem: str = "dotplot_top",
+    title_prefix: Optional[str] = None,
 ) -> None:
     """
     Dotplot matrix:
       x = clusters, y = features (top-K global)
       color = z-score (default) or raw
       size  = abs(raw) (default) or abs(z)
+
+    FIXES:
+      - Add size legend
+      - Dynamic left margin for long feature names
     """
     if activity is None or activity.empty:
         return
@@ -2994,7 +3089,7 @@ def plot_decoupler_dotplot(
     if not feats:
         return
 
-    sub_raw = A.loc[:, feats].copy()          # clusters x feats
+    sub_raw = A.loc[:, feats].copy()  # clusters x feats
     sub_z = _zscore_cols(sub_raw)
 
     # choose aesthetics
@@ -3007,10 +3102,11 @@ def plot_decoupler_dotplot(
 
     if size_by == "abs_z":
         size_mat = sub_z.abs()
+        size_label = "|z|"
     else:
         size_mat = sub_raw.abs()
+        size_label = "|raw|"
 
-    # melt to long
     clusters = sub_raw.index.astype(str).tolist()
     features = sub_raw.columns.astype(str).tolist()
 
@@ -3020,9 +3116,9 @@ def plot_decoupler_dotplot(
         features_disp = features
 
     # build long table
-    rows = []
+    rows: list[dict] = []
     for j, feat in enumerate(features):
-        for i, cl in enumerate(clusters):
+        for cl in clusters:
             rows.append(
                 {
                     "cluster": cl,
@@ -3037,22 +3133,29 @@ def plot_decoupler_dotplot(
 
     # size scaling
     svals = df["size"].to_numpy(dtype=float)
-    s_min = float(np.nanmin(svals)) if np.isfinite(svals).any() else 0.0
-    s_max = float(np.nanmax(svals)) if np.isfinite(svals).any() else 1.0
-    if s_max <= s_min:
-        sizes = np.full(len(svals), 120.0, dtype=float)
-    else:
-        sizes = 60.0 + (svals - s_min) / (s_max - s_min) * (340.0 - 60.0)
+    finite = np.isfinite(svals)
+    if not finite.any():
+        return
+    s_min = float(np.nanmin(svals[finite]))
+    s_max = float(np.nanmax(svals[finite]))
 
-    # figure sizing (features drive height)
+    def size_scale(v: float) -> float:
+        if not np.isfinite(v):
+            return 60.0
+        if s_max <= s_min:
+            return 120.0
+        return float(60.0 + (v - s_min) / (s_max - s_min) * (340.0 - 60.0))
+
+    sizes = np.array([size_scale(v) for v in svals], dtype=float)
+
+    # figure sizing
     fig_w = max(9.0, 2.8 + 0.35 * len(clusters))
     fig_h = max(5.0, 2.2 + 0.28 * len(features))
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
     # dynamic left margin for long feature names
-    max_len = int(max(len(str(t)) for t in df["feature"].values))
-    left = float(np.clip(0.18 + 0.007 * max_len, 0.25, 0.60))
-    fig.subplots_adjust(left=left, right=0.86, top=0.88, bottom=0.18)
+    left = _dynamic_left_margin_from_labels(df["feature"].values, base=0.20)
+    fig.subplots_adjust(left=left, right=0.84, top=0.88, bottom=0.18)
 
     sca = ax.scatter(
         x=df["cluster"].values,
@@ -3068,7 +3171,13 @@ def plot_decoupler_dotplot(
 
     ax.set_xlabel("Cluster", fontsize=12)
     ax.set_ylabel("Feature" if net_name.lower() != "dorothea" else "TF", fontsize=12)
-    ax.set_title(f"{net_name}: top {int(top_k)} dotplot ({cbar_label}, size={size_by})", fontsize=14, pad=10)
+
+    ttl_prefix = f"{title_prefix} • " if title_prefix else ""
+    ax.set_title(
+        f"{ttl_prefix}{net_name}: top {int(top_k)} dotplot ({cbar_label}, size={size_by})",
+        fontsize=14,
+        pad=10,
+    )
 
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -3081,6 +3190,29 @@ def plot_decoupler_dotplot(
     cbar = fig.colorbar(sca, ax=ax, fraction=0.035, pad=0.02)
     cbar.set_label(cbar_label, fontsize=11)
 
+    # --- size legend (quantile-based), placed near colorbar ---
+    # pick 3 reference sizes at 25/50/75% of finite sizes
+    refs = np.quantile(svals[finite], [0.25, 0.50, 0.75])
+    refs = np.unique(np.round(refs, 3))
+    refs = refs[refs > 0]
+    if refs.size > 0:
+        handles = [
+            ax.scatter([], [], s=size_scale(float(v)), color="gray", alpha=0.6, edgecolors="none", label=str(v))
+            for v in refs
+        ]
+        leg = ax.legend(
+            handles=handles,
+            title=size_label,
+            loc="upper left",
+            bbox_to_anchor=(1.01, 0.65),
+            frameon=False,
+            borderaxespad=0.0,
+        )
+        if leg and leg.get_title():
+            leg.get_title().set_fontsize(10)
+        for txt in leg.get_texts():
+            txt.set_fontsize(9)
+
     sfx = f"{stem}{int(top_k)}_{cbar_label.replace('-', '')}_{size_by}"
     save_multi(sfx, outdir, fig)
     plt.close(fig)
@@ -3092,7 +3224,6 @@ def plot_decoupler_all_styles(
     net_key: str,
     net_name: Optional[str] = None,
     figdir: Path | None = None,
-    # defaults per resource can be passed from caller
     heatmap_top_k: int = 30,
     bar_top_n: int = 10,
     dotplot_top_k: int = 30,
@@ -3104,7 +3235,9 @@ def plot_decoupler_all_styles(
       2) per-cluster topN barplots
       3) dotplot
 
-    net_key: "msigdb" / "progeny" / "dorothea"
+    FIXES:
+      - MSigDB is split into one set of plots per GMT-family prefix
+        (e.g. HALLMARK, REACTOME, ...), dynamically discovered.
     """
     net_name = net_name or net_key
     block = adata.uns.get(net_key, {})
@@ -3112,7 +3245,60 @@ def plot_decoupler_all_styles(
     if activity is None or not isinstance(activity, pd.DataFrame) or activity.empty:
         return
 
-    # Heatmap (z-scored)
+    # MSigDB: split by GMT-family prefix and make all plot styles per prefix
+    if str(net_key).lower().strip() == "msigdb":
+        splits = _split_activity_for_msigdb(activity)
+        if not splits:
+            return
+
+        # Stable-ish ordering (HALLMARK first if present, then alphabetical)
+        ordered = sorted(splits.keys(), key=lambda x: (0 if x.upper() == "HALLMARK" else 1, x.upper()))
+
+        for pfx in ordered:
+            sub = splits[pfx]
+            if sub is None or sub.empty:
+                continue
+
+            title_prefix = str(pfx).upper()
+
+            plot_decoupler_activity_heatmap(
+                sub,
+                net_name=net_name,
+                figdir=figdir,
+                top_k=heatmap_top_k,
+                rank_mode="var",
+                use_zscore=True,
+                wrap_labels=True,
+                stem=f"heatmap_top_{pfx.lower()}_",
+                title_prefix=title_prefix,
+            )
+
+            plot_decoupler_cluster_topn_barplots(
+                sub,
+                net_name=net_name,
+                figdir=figdir,
+                n=bar_top_n,
+                use_abs=False,
+                stem_prefix=f"cluster_{pfx.lower()}",
+                title_prefix=title_prefix,
+            )
+
+            plot_decoupler_dotplot(
+                sub,
+                net_name=net_name,
+                figdir=figdir,
+                top_k=dotplot_top_k,
+                rank_mode="var",
+                color_by="z",
+                size_by="abs_raw",
+                wrap_labels=True,
+                stem=f"dotplot_top_{pfx.lower()}_",
+                title_prefix=title_prefix,
+            )
+
+        return
+
+    # Non-MSigDB nets: unchanged behavior (single set of plots)
     plot_decoupler_activity_heatmap(
         activity,
         net_name=net_name,
@@ -3123,7 +3309,6 @@ def plot_decoupler_all_styles(
         wrap_labels=True,
     )
 
-    # Barplots (raw activity, top positive)
     plot_decoupler_cluster_topn_barplots(
         activity,
         net_name=net_name,
@@ -3132,7 +3317,6 @@ def plot_decoupler_all_styles(
         use_abs=False,
     )
 
-    # Dotplot (color=z, size=abs_raw)
     plot_decoupler_dotplot(
         activity,
         net_name=net_name,
