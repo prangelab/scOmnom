@@ -396,6 +396,12 @@ def _precompute_celltypist(
     """
     Run CellTypist once to obtain per-cell predictions and probability matrix.
 
+    Policy (per your requirement):
+      - Only trust counts-like layers: "counts_raw" then "counts_cb".
+      - NEVER assume adata.raw is counts-like.
+      - If neither counts layer exists, fall back to adata.X *as-is* (no normalize/log),
+        because X is integrated and may already be log-transformed.
+
     Returns
     -------
     labels : np.ndarray or None
@@ -409,11 +415,46 @@ def _precompute_celltypist(
 
     try:
         LOGGER.info("Running CellTypist precompute (predictions + probabilities).")
-        adata_ct = adata.copy()
 
-        sc.pp.normalize_total(adata_ct, target_sum=1e4)
-        sc.pp.log1p(adata_ct)
+        # -----------------------------
+        # Select expression source
+        # -----------------------------
+        picked_layer: Optional[str] = None
+        X_src = None
 
+        for layer in ("counts_raw", "counts_cb"):
+            if layer in adata.layers:
+                picked_layer = layer
+                X_src = adata.layers[layer]
+                break
+
+        if picked_layer is not None:
+            LOGGER.info("CellTypist input: using counts-like layer adata.layers[%r].", picked_layer)
+            # Make a lightweight AnnData with the same obs/var but counts-like X
+            adata_ct = ad.AnnData(
+                X=X_src,
+                obs=adata.obs.copy(),
+                var=adata.var.copy(),
+            )
+            adata_ct.obs_names = adata.obs_names.copy()
+            adata_ct.var_names = adata.var_names.copy()
+
+            # Correct preprocessing for CellTypist (expects log1p normalized counts)
+            sc.pp.normalize_total(adata_ct, target_sum=1e4)
+            sc.pp.log1p(adata_ct)
+
+        else:
+            # Fall back to integrated assay (adata.X) WITHOUT reprocessing
+            LOGGER.warning(
+                "CellTypist input: no counts-like layers found ('counts_raw'/'counts_cb'). "
+                "Falling back to adata.X as-is (no normalize_total/log1p), since X is typically integrated/log space."
+            )
+            # Copy just enough to be safe; keep X as-is
+            adata_ct = adata.copy()
+
+        # -----------------------------
+        # Run CellTypist
+        # -----------------------------
         model_path = get_celltypist_model(cfg.celltypist_model)
         from celltypist.models import Model
         import celltypist
@@ -427,33 +468,46 @@ def _precompute_celltypist(
             majority_voting=False,
         )
 
+        # -----------------------------
+        # Extract labels
+        # -----------------------------
         raw = preds.predicted_labels
-
         if isinstance(raw, pd.DataFrame):
-            # usually a single column
             labels = raw.squeeze(axis=1).to_numpy().ravel()
         elif isinstance(raw, pd.Series):
             labels = raw.to_numpy().ravel()
         else:
-            # ndarray-like; flatten
             labels = np.asarray(raw).ravel()
 
         if labels.size != adata.n_obs:
             LOGGER.warning(
                 "CellTypist returned %d labels for %d cells; ignoring CellTypist outputs.",
-                labels.size,
-                adata.n_obs,
+                int(labels.size),
+                int(adata.n_obs),
             )
             return None, None
 
-        # probability_matrix: pd.DataFrame, index must match adata.obs_names
+        # -----------------------------
+        # Probability matrix (align to original adata)
+        # -----------------------------
         prob_matrix = preds.probability_matrix
-        prob_matrix = prob_matrix.loc[adata.obs_names]
+        if not isinstance(prob_matrix, pd.DataFrame) or prob_matrix.empty:
+            LOGGER.warning("CellTypist returned no/empty probability_matrix; returning labels only.")
+            return labels, None
+
+        # Ensure index alignment to original adata.obs_names
+        # (celltypist should preserve obs_names, but be defensive)
+        try:
+            prob_matrix = prob_matrix.loc[adata.obs_names]
+        except Exception:
+            # last resort: reindex (may introduce NaNs if mismatch)
+            prob_matrix = prob_matrix.reindex(adata.obs_names)
 
         LOGGER.info(
-            "CellTypist precompute completed: %d labels, probability_matrix shape=%s.",
-            labels.size,
-            prob_matrix.shape,
+            "CellTypist precompute completed: %d labels, probability_matrix shape=%s (input=%s).",
+            int(labels.size),
+            tuple(prob_matrix.shape),
+            f"layer:{picked_layer}" if picked_layer is not None else "adata.X(as-is)",
         )
         return labels, prob_matrix
 
@@ -1380,6 +1434,219 @@ def _final_real_silhouette_qc(
     return sil_mean
 
 
+def _dc_run_method(
+    *,
+    method: str,
+    mat: "pd.DataFrame",
+    net: "pd.DataFrame",
+    source: str = "source",
+    target: str = "target",
+    weight: str | None = "weight",
+    min_n: int = 5,
+    verbose: bool = False,
+) -> "pd.DataFrame":
+    """
+    Run a decoupler method on an expression matrix + network and return activities.
+
+    Parameters
+    ----------
+    method
+        Decoupler method name. Supports: "consensus" (default), "ulm", "mlm", "wsum", "aucell".
+        If an unsupported method is provided, falls back to "ulm".
+    mat
+        Expression matrix as a pandas DataFrame.
+        Can be either:
+          - genes x samples (your pseudobulk default), OR
+          - samples x genes
+        This helper auto-detects and converts to samples x genes for decoupler.
+    net
+        Network DataFrame with at least columns: [source, target] and optionally [weight].
+    source/target/weight
+        Column names in `net`.
+    min_n
+        Minimum number of targets per source to keep.
+    verbose
+        If True, let decoupler be chatty.
+
+    Returns
+    -------
+    pd.DataFrame
+        Activity estimates with shape (n_sources x n_samples).
+        Index = sources (pathways/TFs), columns = samples (clusters).
+    """
+    import numpy as np
+    import pandas as pd
+    import decoupler as dc
+
+    if mat is None or not isinstance(mat, pd.DataFrame) or mat.empty:
+        raise ValueError("decoupler: 'mat' must be a non-empty pandas DataFrame.")
+
+    if net is None or not isinstance(net, pd.DataFrame) or net.empty:
+        raise ValueError("decoupler: 'net' must be a non-empty pandas DataFrame.")
+
+    method = (method or "consensus").lower().strip()
+
+    # -----------------------------
+    # Normalize / validate network
+    # -----------------------------
+    for col in (source, target):
+        if col not in net.columns:
+            raise KeyError(f"decoupler: net missing required column '{col}'")
+
+    net_use = net.copy()
+    if weight is None or weight not in net_use.columns:
+        net_use["__weight__"] = 1.0
+        weight_use = "__weight__"
+    else:
+        weight_use = weight
+
+    # ensure string ids
+    net_use[source] = net_use[source].astype(str)
+    net_use[target] = net_use[target].astype(str)
+
+    # Filter sources with too few targets (after intersect with genes)
+    # -----------------------------
+    # Normalize expression to samples x genes
+    # -----------------------------
+    # Heuristic: if mat.index looks like genes (many overlaps with net targets) treat as genes x samples.
+    genes_in_net = set(net_use[target].unique().tolist())
+
+    idx_overlap = len(set(map(str, mat.index)).intersection(genes_in_net))
+    col_overlap = len(set(map(str, mat.columns)).intersection(genes_in_net))
+
+    if idx_overlap >= col_overlap:
+        # genes x samples -> transpose to samples x genes
+        mat_sxg = mat.T.copy()
+    else:
+        # already samples x genes
+        mat_sxg = mat.copy()
+
+    # Force numeric, handle sparse-ish objects already densified upstream
+    mat_sxg = mat_sxg.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+
+    # Intersect genes with network targets
+    common_genes = [g for g in mat_sxg.columns.astype(str) if g in genes_in_net]
+    if len(common_genes) == 0:
+        raise ValueError("decoupler: no overlap between mat genes and net targets.")
+
+    mat_sxg = mat_sxg.loc[:, common_genes]
+    net_use = net_use[net_use[target].isin(common_genes)].copy()
+
+    # Filter sources by min_n targets
+    tgt_counts = net_use.groupby(source)[target].nunique()
+    keep_sources = tgt_counts[tgt_counts >= int(min_n)].index.astype(str).tolist()
+    net_use = net_use[net_use[source].isin(keep_sources)].copy()
+
+    if net_use.empty:
+        raise ValueError(f"decoupler: after min_n={min_n} filtering, net is empty.")
+
+    # -----------------------------
+    # Run selected method(s)
+    # -----------------------------
+    def _run_one(m: str) -> pd.DataFrame:
+        m = m.lower().strip()
+
+        # ULM: fast + solid default
+        if m == "ulm":
+            dc.mt.ulm(
+                mat=mat_sxg,
+                net=net_use,
+                source=source,
+                target=target,
+                weight=weight_use,
+                verbose=verbose,
+            )
+            est = dc.get_acts(mat_sxg, obsm_key="ulm_estimate")
+            return est.T  # acts returns samples x sources -> transpose to sources x samples
+
+        # MLM: multivariate linear model (heavier)
+        if m == "mlm":
+            dc.mt.mlm(
+                mat=mat_sxg,
+                net=net_use,
+                source=source,
+                target=target,
+                weight=weight_use,
+                verbose=verbose,
+            )
+            est = dc.get_acts(mat_sxg, obsm_key="mlm_estimate")
+            return est.T
+
+        # WSUM: weighted sum
+        if m == "wsum":
+            dc.mt.wsum(
+                mat=mat_sxg,
+                net=net_use,
+                source=source,
+                target=target,
+                weight=weight_use,
+                verbose=verbose,
+            )
+            est = dc.get_acts(mat_sxg, obsm_key="wsum_estimate")
+            return est.T
+
+        # AUCell: rank-based scoring (often used single-cell; still usable on pseudobulk)
+        if m == "aucell":
+            dc.mt.aucell(
+                mat=mat_sxg,
+                net=net_use,
+                source=source,
+                target=target,
+                verbose=verbose,
+            )
+            est = dc.get_acts(mat_sxg, obsm_key="aucell_estimate")
+            return est.T
+
+        # Fallback
+        dc.mt.ulm(
+            mat=mat_sxg,
+            net=net_use,
+            source=source,
+            target=target,
+            weight=weight_use,
+            verbose=verbose,
+        )
+        est = dc.get_acts(mat_sxg, obsm_key="ulm_estimate")
+        return est.T
+
+    if method == "consensus":
+        # Consensus = average of a small robust set
+        # (You can tweak this list later if you want.)
+        methods = ["ulm", "wsum", "mlm"]
+        ests = []
+        for m in methods:
+            try:
+                ests.append(_run_one(m))
+            except Exception:
+                # Keep going; consensus should be resilient
+                continue
+
+        if not ests:
+            # If everything failed, raise the last resort
+            raise RuntimeError("decoupler consensus: all constituent methods failed.")
+
+        # Align (sources x samples) and average
+        common_sources = set(ests[0].index)
+        common_samples = set(ests[0].columns)
+        for e in ests[1:]:
+            common_sources &= set(e.index)
+            common_samples &= set(e.columns)
+
+        if not common_sources or not common_samples:
+            raise RuntimeError("decoupler consensus: no common sources/samples across methods.")
+
+        common_sources = sorted(common_sources)
+        common_samples = sorted(common_samples)
+
+        stack = np.stack([e.loc[common_sources, common_samples].to_numpy() for e in ests], axis=0)
+        mean_est = np.nanmean(stack, axis=0)
+
+        return pd.DataFrame(mean_est, index=common_sources, columns=common_samples)
+
+    # single method
+    return _run_one(method)
+
+
 def _run_msigdb(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
     """
     Compute MSigDB pathway activity on CLUSTER-level pseudobulk expression using decoupler.
@@ -1399,7 +1666,7 @@ def _run_msigdb(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
     # Pull pseudobulk from .uns
     # -----------------------------
     try:
-        expr = _get_cluster_pseudobulk_df(adata, store_key="pseudobulk")  # genes x clusters (DataFrame)
+        expr = _get_cluster_pseudobulk_df(adata, store_key="pseudobulk")  # genes x clusters DataFrame
     except Exception as e:
         LOGGER.warning("...: missing/invalid pseudobulk store; skipping. (%s)", e)
         return
@@ -1434,7 +1701,7 @@ def _run_msigdb(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
     nets = []
     for gmt in gmt_files:
         try:
-            net_i = io_utils.gmt_to_decoupler_net(gmt)  # <- whatever helper you already added; must return source/target/weight
+            net_i = io_utils.gmt_to_decoupler_net(gmt)
             nets.append(net_i)
         except Exception as e:
             LOGGER.warning("MSigDB: failed to parse GMT '%s': %s", str(gmt), e)
@@ -1458,7 +1725,7 @@ def _run_msigdb(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
     try:
         est = _dc_run_method(
             method=method,
-            mat=expr,          # genes x clusters
+            mat=expr.T,
             net=net,
             source="source",
             target="target",
@@ -1515,7 +1782,7 @@ def _run_progeny(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
     import decoupler as dc
 
     try:
-        expr = _get_cluster_pseudobulk_df(adata, store_key="pseudobulk")  # genes x clusters (DataFrame)
+        expr = _get_cluster_pseudobulk_df(adata, store_key="pseudobulk")  # genes x clusters DataFrame
     except Exception as e:
         LOGGER.warning("...: missing/invalid pseudobulk store; skipping. (%s)", e)
         return
@@ -1537,26 +1804,26 @@ def _run_progeny(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
     # Load resource
     # -----------------------------
     try:
-        # decoupler returns a "net" with pathway -> gene weights
-        net = dc.get_progeny(organism=str(organism), top=top_n)
+        net = dc.op.progeny(organism=str(organism), top=top_n)
     except Exception as e:
-        LOGGER.warning("PROGENy: failed to load resource via decoupler.get_progeny: %s", e)
+        LOGGER.warning("PROGENy: failed to load resource via dc.op.progeny: %s", e)
         return
 
     if net is None or len(net) == 0:
         LOGGER.warning("PROGENy: resource empty; skipping.")
         return
 
-    # Some dc versions use 'weight' column, others 'mor' (mode of regulation)
     wcol = "weight" if "weight" in net.columns else ("mor" if "mor" in net.columns else None)
-
+    if wcol is None:
+        LOGGER.warning("PROGENy: no usable weight column found (expected 'weight' or 'mor'); skipping.")
+        return
     # -----------------------------
     # Run decoupler
     # -----------------------------
     try:
         est = _dc_run_method(
             method=method,
-            mat=expr,
+            mat=expr.T,
             net=net,
             source="source",
             target="target",
@@ -1615,7 +1882,7 @@ def _run_dorothea(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
     # Pull pseudobulk from .uns
     # -----------------------------
     try:
-        expr = _get_cluster_pseudobulk_df(adata, store_key="pseudobulk")  # genes x clusters (DataFrame)
+        expr = _get_cluster_pseudobulk_df(adata, store_key="pseudobulk")  # genes x clusters DataFrame
     except Exception as e:
         LOGGER.warning("...: missing/invalid pseudobulk store; skipping. (%s)", e)
         return
@@ -1643,17 +1910,19 @@ def _run_dorothea(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
     # Load resource + filter
     # -----------------------------
     try:
-        organism = getattr(cfg, "dorothea_organism", "human") or "human"
-        net = dc.get_dorothea(organism=str(organism))
+        # decoupler 2.x: OmniPath resources live under dc.op
+        net = dc.op.dorothea(organism="human", levels=conf)
     except Exception as e:
-        LOGGER.warning("DoRothEA: failed to load resource via decoupler.get_dorothea: %s", e)
+        LOGGER.warning("DoRothEA: failed to load resource via dc.op.dorothea: %s", e)
         return
 
-    if "confidence" in net.columns and conf:
-        net = net[net["confidence"].astype(str).str.upper().isin(conf)].copy()
-
-    if net.empty:
+    if net is None or net.empty:
         LOGGER.warning("DoRothEA: resource empty after confidence filtering (%s); skipping.", conf)
+        return
+
+    wcol = "weight" if "weight" in net.columns else ("mor" if "mor" in net.columns else None)
+    if wcol is None:
+        LOGGER.warning("DoRothEA: no usable weight column found (expected 'weight' or 'mor'); skipping.")
         return
 
     # -----------------------------
@@ -1663,7 +1932,7 @@ def _run_dorothea(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
         # mat must be genes x samples
         est = _dc_run_method(
             method=method,
-            mat=expr,
+            mat=expr.T,
             net=net,
             source="source",
             target="target",

@@ -1077,7 +1077,7 @@ def download_all_celltypist_models() -> None:
 
 
 # =====================================================================
-# Export cluster annotations (unchanged)
+# Export cluster annotations
 # =====================================================================
 def export_cluster_annotations(adata: ad.AnnData, columns: List[str], out_path: Path) -> None:
     df = adata.obs[columns].copy()
@@ -1087,10 +1087,35 @@ def export_cluster_annotations(adata: ad.AnnData, columns: List[str], out_path: 
 
 
 # =====================================================================
-# ssGSEA IO helpers
+# MSigDB (Decoupler) IO helpers
 # =====================================================================
+
 MSIGDB_BASE_URL = "https://data.broadinstitute.org/gsea-msigdb/msigdb/release"
 MSIGDB_INDEX_FILENAME = "msigdb_index.json"
+
+def gmt_to_decoupler_net(gmt_path: str | Path) -> "pd.DataFrame":
+    """
+    Convert a GMT file into a decoupler net DataFrame.
+
+    Uses decoupler.pp.read_gmt which returns a network DataFrame.
+    Ensures columns: source, target, weight.
+    """
+    import pandas as pd
+    import decoupler as dc
+
+    net = dc.pp.read_gmt(str(gmt_path))
+    if net is None or len(net) == 0:
+        return pd.DataFrame(columns=["source", "target", "weight"])
+
+    # decoupler returns at least source/target
+    if "weight" not in net.columns:
+        net = net.copy()
+        net["weight"] = 1.0
+
+    # standardize col order
+    cols = [c for c in ["source", "target", "weight"] if c in net.columns]
+    return net[cols].drop_duplicates().reset_index(drop=True)
+
 
 
 def _get_msigdb_cache_dir() -> Path:
@@ -1285,50 +1310,60 @@ def list_available_msigdb_keywords() -> List[str]:
 
 
 def resolve_msigdb_gene_sets(
-    user_spec: List[str] | None,
-) -> Tuple[List[str], List[str], Optional[str]]:
+    user_spec: "list[str] | str | None",
+) -> tuple[list[Path], list[str], str | None]:
     """
-    Returns (gmt_files, used_keywords, msigdb_release)
+    Resolve a user-provided MSigDB selector into concrete GMT file paths.
+
+    Accepts:
+      - None -> defaults to ["HALLMARK", "REACTOME"]
+      - "HALLMARK,REACTOME" (comma-separated string)
+      - ["HALLMARK", "REACTOME"]
+      - explicit GMT paths mixed in
+
+    Returns:
+      (gmt_files, used_keywords, msigdb_release)
 
     msigdb_release is:
-      - a string like "2025.1.Hs" if MSigDB keywords were involved
-      - None if user provided only custom .gmt paths (optional semantics)
+      - a string like "2025.1.Hs" if MSigDB keywords were used
+      - None if ONLY explicit .gmt paths were provided
     """
-    if not user_spec:
-        LOGGER.info("ssGSEA: no gene sets provided; defaulting to MSigDB HALLMARK + REACTOME.")
-        spec = ["HALLMARK", "REACTOME"]
+    if user_spec is None:
+        spec_items: list[str] = ["HALLMARK", "REACTOME"]
+        LOGGER.info("MSigDB: no gene sets provided; defaulting to HALLMARK + REACTOME.")
+    elif isinstance(user_spec, str):
+        spec_items = [x.strip() for x in user_spec.split(",") if x.strip()]
     else:
-        spec = [str(x).strip() for x in user_spec if str(x).strip()]
+        spec_items = [str(x).strip() for x in user_spec if str(x).strip()]
 
-    if not spec:
-        raise ValueError("Empty ssGSEA gene-set specification.")
+    if not spec_items:
+        raise ValueError("Empty MSigDB gene-set specification.")
 
     release, index = _load_msigdb_index()
-    LOGGER.info("Resolving ssGSEA gene sets for MSigDB release %s", release)
+    LOGGER.info("Resolving MSigDB gene sets for release %s", release)
 
-    gmt_files: List[str] = []
-    used_keywords: List[str] = []
-    unresolved: List[str] = []
-
+    gmt_files: list[Path] = []
+    used_keywords: list[str] = []
+    unresolved: list[str] = []
     used_any_msigdb_keyword = False
 
-    for item in spec:
-        # Custom GMT file: user path
+    for item in spec_items:
+        # Custom GMT file path
         if item.lower().endswith(".gmt"):
-            path = Path(item)
-            if not path.is_file():
-                LOGGER.warning("Custom GMT file '%s' does not exist; skipping.", path)
+            p = Path(item).expanduser().resolve()
+            if not p.is_file():
+                LOGGER.warning("Custom GMT file does not exist: %s (skipping)", p)
                 unresolved.append(item)
                 continue
-            gmt_files.append(str(path))
-            used_keywords.append(str(path))
+            gmt_files.append(p)
+            used_keywords.append(str(p))
             continue
 
         # MSigDB keyword
         key = item.upper()
         if key not in index:
             LOGGER.warning(
-                "ssGSEA: unknown MSigDB keyword '%s'. Known examples: %s",
+                "MSigDB: unknown keyword '%s'. Known examples: %s",
                 key,
                 ", ".join(sorted(index.keys())[:10]),
             )
@@ -1336,21 +1371,26 @@ def resolve_msigdb_gene_sets(
             continue
 
         used_any_msigdb_keyword = True
-        gmt_files.append(index[key])
+        gmt_files.append(Path(index[key]))
         used_keywords.append(key)
 
-    if not gmt_files:
+    # Deduplicate resolved GMTs
+    uniq: dict[str, Path] = {}
+    for p in gmt_files:
+        uniq[str(p)] = p
+    gmt_files_out = list(uniq.values())
+
+    if not gmt_files_out:
         raise ValueError(
-            f"No resolvable MSigDB gene sets from spec: {spec}. "
+            f"No resolvable MSigDB gene sets from spec: {spec_items}. "
             f"Unresolved: {unresolved}"
         )
 
     LOGGER.info(
-        "Resolved ssGSEA gene sets: %s",
-        ", ".join(f"{k} -> {p}" for k, p in zip(used_keywords, gmt_files)),
+        "Resolved MSigDB gene sets: %s",
+        ", ".join(used_keywords),
     )
 
     msigdb_release = release if used_any_msigdb_keyword else None
-    return gmt_files, used_keywords, msigdb_release
-
+    return gmt_files_out, used_keywords, msigdb_release
 
