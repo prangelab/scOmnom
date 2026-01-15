@@ -2993,113 +2993,99 @@ def plot_decoupler_activity_heatmap(
     plt.close(fig)
 
 
-def plot_decoupler_dotplot(
-        activity: pd.DataFrame,
-        *,
-        net_name: str,
-        figdir: Path | None,
-        top_k: int = 30,
-        rank_mode: str = "var",
-        color_by: str = "z",
-        size_by: str = "abs_raw",
-        wrap_labels: bool = True,
-        wrap_at: int = 25,
-        cmap: str = "viridis",
-        stem: str = "dotplot_top",
-        title_prefix: Optional[str] = None,
-) -> None:
-    if activity is None or activity.empty:
-        return
+import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
+from matplotlib.lines import Line2D
 
-    from matplotlib.gridspec import GridSpec
-    outdir = _decoupler_figdir(figdir, net_name)
-    A = activity.copy().apply(pd.to_numeric, errors="coerce").fillna(0.0)
-    feats = _top_features_global(A, k=top_k, mode=rank_mode, signed=True)
-    if not feats: return
+# 1) Setup Figure with a TRUE side column for legends
+fig_w = max(22.0, 12.0 + 0.6 * len(clusters))
+fig_h = max(12.0, 5.0 + 0.5 * len(features_disp))
+fig = plt.figure(figsize=(fig_w, fig_h), constrained_layout=True)
 
-    sub_raw = A.loc[:, feats].copy()
-    sub_z = _zscore_cols(sub_raw)
-    color_mat = sub_raw if color_by == "raw" else sub_z
-    cbar_label = "activity" if color_by == "raw" else "z-score"
-    size_mat = sub_z.abs() if size_by == "abs_z" else sub_raw.abs()
-    size_label = "|raw|" if size_by == "abs_raw" else "|z|"
+# Outer grid: main plot + right legend column
+gs = GridSpec(1, 2, width_ratios=[1.0, 0.18], wspace=0.05, figure=fig)
+ax = fig.add_subplot(gs[0, 0])
 
-    clusters = sub_raw.index.astype(str).tolist()
-    features_disp = [_clean_feature_label(f, net_name) for f in sub_raw.columns]
+# Right column split into: (size legend) / (colorbar) / (spacer)
+gs_right = GridSpecFromSubplotSpec(
+    3, 1, subplot_spec=gs[0, 1],
+    height_ratios=[0.65, 0.30, 0.05],
+    hspace=0.15
+)
+ax_leg = fig.add_subplot(gs_right[0, 0])
+ax_cbar = fig.add_subplot(gs_right[1, 0])
+ax_sp = fig.add_subplot(gs_right[2, 0])
 
-    rows = []
-    for j, feat in enumerate(sub_raw.columns):
-        for cl in clusters:
-            rows.append({
-                "cluster": cl, "feature": features_disp[j],
-                "color": float(color_mat.loc[cl, feat]),
-                "size": float(size_mat.loc[cl, feat]),
-            })
-    df = pd.DataFrame(rows)
+for a in (ax_leg, ax_sp):
+    a.axis("off")
 
-    svals = df["size"].to_numpy()
-    s_min, s_max = float(np.nanmin(svals)), float(np.nanmax(svals))
+# 2) Plot Data
+sca = ax.scatter(
+    x=df["cluster"].values, y=df["feature"].values,
+    s=[size_scale(v) for v in df["size"]],
+    c=df["color"].values,
+    cmap=cmap,
+    edgecolors="black",
+    linewidths=0.5,
+    alpha=0.9,
+    zorder=3,
+)
 
-    def size_scale(v: float) -> float:
-        return 30.0 + (v - s_min) / (s_max - s_min) * 250.0 if s_max > s_min else 80.0
+# 3) Labels / title
+ax.tick_params(axis="x", rotation=45, pad=8)
+ax.set_title(
+    f"{(title_prefix + ' ') if title_prefix else ''}{net_name}",
+    pad=18, size=20, weight="bold"
+)
 
-    # 1. Setup Figure with GridSpec
-    fig_w = max(22.0, 12.0 + 0.6 * len(clusters))
-    fig_h = max(12.0, 5.0 + 0.5 * len(features_disp))
-    fig = plt.figure(figsize=(fig_w, fig_h))
-
-    # Define a 1-row, 2-column grid. Column 1 is significantly narrower.
-    gs = GridSpec(1, 2, width_ratios=[15, 1], figure=fig)
-    ax = fig.add_subplot(gs[0, 0])
-
-    # 2. Plot Data
-    sca = ax.scatter(
-        x=df["cluster"].values, y=df["feature"].values,
-        s=[size_scale(v) for v in df["size"]], c=df["color"].values,
-        cmap=cmap, edgecolors="black", linewidths=0.5, alpha=0.9, zorder=3
+# Optional: wrap y tick labels (safer than trying to subplots_adjust left)
+if wrap_labels and wrap_at and wrap_at > 5:
+    import textwrap
+    ax.set_yticklabels(
+        [textwrap.fill(str(t.get_text()), width=int(wrap_at)) for t in ax.get_yticklabels()]
     )
 
-    # 3. Dynamic Left Margin for the specific subplot
-    max_feat = max((len(str(x)) for x in features_disp), default=12)
-    # We use a more aggressive left margin based on the PROGENy/Reactome labels
-    left_pad = min(0.50, max(0.25, 0.25 + 0.008 * max(0, max_feat - 15)))
-    fig.subplots_adjust(left=left_pad, right=0.88, top=0.90, bottom=0.15)
-
-    ax.tick_params(axis="x", rotation=45, pad=8)
-    ax.set_title(f"{(title_prefix + ' ') if title_prefix else ''}{net_name}", pad=25, size=20, weight="bold")
-
-    # ------------------------------------------------------------------
-    # 4. RADICAL LEGEND PLACEMENT: Using a dedicated "Side Axes"
-    # This places the legend COMPLETELY outside the main 'ax'
-    # ------------------------------------------------------------------
-
-    # Create a wrapper axes for the legend on the far right
-    # This uses figure coordinates [left, bottom, width, height]
-    # We start it at 0.90 to ensure it is 2% clear of the plot even at its widest
-    leg_outer_ax = fig.add_axes([0.90, 0.15, 0.08, 0.75])
-    leg_outer_ax.axis("off")
-
-    # Add Size Legend to the top of the side axis
-    q = np.quantile(svals[np.isfinite(svals)], [0.25, 0.50, 0.75]) if np.isfinite(svals).any() else np.array([])
+# 4) Size legend (in dedicated side axis, never overlaps)
+svals = df["size"].to_numpy()
+finite = svals[np.isfinite(svals)]
+if finite.size > 0:
+    q = np.quantile(finite, [0.25, 0.50, 0.75])
     refs = np.unique(np.round(q, 2))
     refs = refs[refs > 0]
 
     if refs.size > 0:
-        handles = [plt.Line2D([0], [0], marker="o", linestyle="", color="w",
-                              markerfacecolor="gray", markeredgecolor="black",
-                              markersize=np.sqrt(size_scale(float(v))), alpha=0.7, label=f"{v:g}")
-                   for v in refs]
-        # Align legend to the top-right of the figure
-        leg_outer_ax.legend(handles=handles, title=size_label, loc="upper left",
-                            frameon=False, labelspacing=2.5, title_fontsize=14, fontsize=12)
+        handles = [
+            Line2D(
+                [0], [0],
+                marker="o", linestyle="",
+                markerfacecolor="gray",
+                markeredgecolor="black",
+                color="w",
+                markersize=float(np.sqrt(size_scale(float(v)))),
+                alpha=0.7,
+                label=f"{v:g}",
+            )
+            for v in refs
+        ]
+        ax_leg.legend(
+            handles=handles,
+            title=size_label,
+            loc="upper left",
+            frameon=False,
+            labelspacing=1.2,
+            handletextpad=0.8,
+            borderaxespad=0.0,
+            title_fontsize=14,
+            fontsize=12,
+        )
 
-    # Add Colorbar to the bottom of the side axis
-    cbar_ax = fig.add_axes([0.91, 0.20, 0.015, 0.25])
-    cbar = fig.colorbar(sca, cax=cbar_ax)
-    cbar.set_label(cbar_label, weight="bold", size=14)
+# 5) Colorbar (in dedicated side axis, never overlaps)
+cbar = fig.colorbar(sca, cax=ax_cbar)
+cbar.set_label(cbar_label, weight="bold", size=14)
 
-    save_multi(f"{stem}{int(top_k)}_{cbar_label}_{size_by}", outdir, fig)
-    plt.close(fig)
+save_multi(f"{stem}{int(top_k)}_{cbar_label}_{size_by}", outdir, fig)
+plt.close(fig)
+
 
 
 def plot_decoupler_all_styles(

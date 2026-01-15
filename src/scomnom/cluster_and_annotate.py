@@ -44,7 +44,8 @@ def set_active_round(
     Canonical linkage contract.
     - Sets active round
     - Mirrors round labels into canonical obs[cluster_key]
-    - Best-effort color sync
+    - Mirrors round pretty labels into canonical obs["cluster_label"]
+    - Best-effort color sync for both cluster_key and cluster_label
     - Publishes decoupler/pseudobulk into top-level uns for forward compatibility
     """
     _ensure_cluster_rounds(adata)
@@ -55,6 +56,9 @@ def set_active_round(
     r = rounds[round_id]
     adata.uns["active_cluster_round"] = round_id
 
+    # -----------------------------
+    # 1) Canonical clustering labels
+    # -----------------------------
     cluster_key = r.get("cluster_key", None)
     labels_obs_key = r.get("labels_obs_key", None)
 
@@ -74,10 +78,34 @@ def set_active_round(
                 src = f"{labels_obs_key}_colors"
                 dst = f"{cluster_key}_colors"
                 if src in adata.uns:
-                    adata.uns[dst] = adata.uns[src]
+                    adata.uns[dst] = list(adata.uns[src])
         except Exception:
             pass
 
+    # -----------------------------
+    # 2) Canonical pretty labels (cluster_label)
+    # -----------------------------
+    # Prefer the round-linked annotation key, else fallback to the conventional name.
+    ann = r.get("annotation", {}) if isinstance(r.get("annotation", {}), dict) else {}
+    pretty_key = ann.get("pretty_cluster_key", f"{CLUSTER_LABEL_KEY}__{round_id}")
+
+    if isinstance(pretty_key, str) and pretty_key in adata.obs:
+        adata.obs[CLUSTER_LABEL_KEY] = adata.obs[pretty_key]
+        if not pd.api.types.is_categorical_dtype(adata.obs[CLUSTER_LABEL_KEY]):
+            adata.obs[CLUSTER_LABEL_KEY] = adata.obs[CLUSTER_LABEL_KEY].astype("category")
+
+        # palette sync for cluster_label alias
+        try:
+            src = f"{pretty_key}_colors"
+            dst = f"{CLUSTER_LABEL_KEY}_colors"
+            if src in adata.uns:
+                adata.uns[dst] = list(adata.uns[src])
+        except Exception:
+            pass
+
+    # -----------------------------
+    # 3) Publish decoupler active view to top-level uns
+    # -----------------------------
     if publish_decoupler:
         _publish_decoupler_from_round_to_top_level(
             adata,
@@ -86,6 +114,7 @@ def set_active_round(
             publish_pseudobulk=True,
             clear_missing=True,
         )
+
 
 
 def _ensure_cluster_rounds(adata: ad.AnnData) -> None:
@@ -2597,7 +2626,7 @@ def run_BISC(
         adata,
         cfg,
         embedding_key,
-        Path("cluster_and_annotate") / round_id / "qc",
+        Path("cluster_and_annotate") / round_id / "clustering",
         cluster_key=cfg.label_key,
         round_id=round_id,
     )
