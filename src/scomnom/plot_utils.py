@@ -3002,8 +3002,8 @@ def plot_decoupler_dotplot(
         rank_mode: str = "var",
         color_by: str = "z",
         size_by: str = "abs_raw",
-        wrap_labels: bool = True,  # ignored
-        wrap_at: int = 25,  # ignored
+        wrap_labels: bool = True,
+        wrap_at: int = 25,
         cmap: str = "viridis",
         stem: str = "dotplot_top",
         title_prefix: Optional[str] = None,
@@ -3011,104 +3011,90 @@ def plot_decoupler_dotplot(
     if activity is None or activity.empty:
         return
 
+    from matplotlib.gridspec import GridSpec
     outdir = _decoupler_figdir(figdir, net_name)
     A = activity.copy().apply(pd.to_numeric, errors="coerce").fillna(0.0)
-
     feats = _top_features_global(A, k=top_k, mode=rank_mode, signed=True)
-    if not feats:
-        return
+    if not feats: return
 
     sub_raw = A.loc[:, feats].copy()
     sub_z = _zscore_cols(sub_raw)
-
     color_mat = sub_raw if color_by == "raw" else sub_z
     cbar_label = "activity" if color_by == "raw" else "z-score"
     size_mat = sub_z.abs() if size_by == "abs_z" else sub_raw.abs()
     size_label = "|raw|" if size_by == "abs_raw" else "|z|"
 
     clusters = sub_raw.index.astype(str).tolist()
-    features = sub_raw.columns.astype(str).tolist()
-    features_disp = [_clean_feature_label(f, net_name) for f in features]
+    features_disp = [_clean_feature_label(f, net_name) for f in sub_raw.columns]
 
     rows = []
-    for j, feat in enumerate(features):
+    for j, feat in enumerate(sub_raw.columns):
         for cl in clusters:
             rows.append({
-                "cluster": cl,
-                "feature": features_disp[j],
+                "cluster": cl, "feature": features_disp[j],
                 "color": float(color_mat.loc[cl, feat]),
                 "size": float(size_mat.loc[cl, feat]),
             })
     df = pd.DataFrame(rows)
 
-    import numpy as np
-    import matplotlib.pyplot as plt
-
     svals = df["size"].to_numpy()
     s_min, s_max = float(np.nanmin(svals)), float(np.nanmax(svals))
 
     def size_scale(v: float) -> float:
-        if not np.isfinite(v): return 30.0
         return 30.0 + (v - s_min) / (s_max - s_min) * 250.0 if s_max > s_min else 80.0
 
-    sizes = np.array([size_scale(v) for v in svals])
+    # 1. Setup Figure with GridSpec
+    fig_w = max(22.0, 12.0 + 0.6 * len(clusters))
+    fig_h = max(12.0, 5.0 + 0.5 * len(features_disp))
+    fig = plt.figure(figsize=(fig_w, fig_h))
 
-    # Canvas Setup - Increased width to accommodate the sidebar
-    fig_w = max(20.0, 12.0 + 0.6 * len(clusters))
-    fig_h = max(12.0, 5.0 + 0.5 * len(features))
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    # Define a 1-row, 2-column grid. Column 1 is significantly narrower.
+    gs = GridSpec(1, 2, width_ratios=[15, 1], figure=fig)
+    ax = fig.add_subplot(gs[0, 0])
 
-    # --- NEW MARGIN STRATEGY ---
-    # We pull the main plot area back to 0.70 to ensure a clear gutter.
-    max_feat = max((len(str(x)) for x in features_disp), default=12)
-    left_margin = min(0.55, max(0.22, 0.22 + 0.0075 * max(0, max_feat - 15)))
-
-    fig.subplots_adjust(left=left_margin, right=0.70, top=0.92, bottom=0.15)
-
+    # 2. Plot Data
     sca = ax.scatter(
-        x=df["cluster"].values,
-        y=df["feature"].values,
-        s=sizes,
-        c=df["color"].values,
-        cmap=cmap,
-        edgecolors="black",
-        linewidths=0.5,
-        alpha=0.9,
-        zorder=3,
+        x=df["cluster"].values, y=df["feature"].values,
+        s=[size_scale(v) for v in df["size"]], c=df["color"].values,
+        cmap=cmap, edgecolors="black", linewidths=0.5, alpha=0.9, zorder=3
     )
 
+    # 3. Dynamic Left Margin for the specific subplot
+    max_feat = max((len(str(x)) for x in features_disp), default=12)
+    # We use a more aggressive left margin based on the PROGENy/Reactome labels
+    left_pad = min(0.50, max(0.25, 0.25 + 0.008 * max(0, max_feat - 15)))
+    fig.subplots_adjust(left=left_pad, right=0.88, top=0.90, bottom=0.15)
+
     ax.tick_params(axis="x", rotation=45, pad=8)
-    ax.grid(False)
     ax.set_title(f"{(title_prefix + ' ') if title_prefix else ''}{net_name}", pad=25, size=20, weight="bold")
 
     # ------------------------------------------------------------------
-    # FIXED SIDEBAR: Absolute placement in the right gutter
+    # 4. RADICAL LEGEND PLACEMENT: Using a dedicated "Side Axes"
+    # This places the legend COMPLETELY outside the main 'ax'
     # ------------------------------------------------------------------
 
-    # 1) Size legend axis (Placed in the top right quadrant of the figure)
-    # [left, bottom, width, height]
-    leg_ax = fig.add_axes([0.80, 0.60, 0.15, 0.25])
-    leg_ax.axis("off")
+    # Create a wrapper axes for the legend on the far right
+    # This uses figure coordinates [left, bottom, width, height]
+    # We start it at 0.90 to ensure it is 2% clear of the plot even at its widest
+    leg_outer_ax = fig.add_axes([0.90, 0.15, 0.08, 0.75])
+    leg_outer_ax.axis("off")
 
+    # Add Size Legend to the top of the side axis
     q = np.quantile(svals[np.isfinite(svals)], [0.25, 0.50, 0.75]) if np.isfinite(svals).any() else np.array([])
     refs = np.unique(np.round(q, 2))
     refs = refs[refs > 0]
 
     if refs.size > 0:
-        handles = [
-            plt.Line2D([0], [0], marker="o", linestyle="", color="w",
-                       markerfacecolor="gray", markeredgecolor="black",
-                       markersize=np.sqrt(size_scale(float(v))), alpha=0.7, label=f"{v:g}")
-            for v in refs
-        ]
-        leg_ax.legend(
-            handles=handles, title=size_label, loc="upper left",
-            frameon=False, labelspacing=2.0, title_fontsize=14, fontsize=12
-        )
+        handles = [plt.Line2D([0], [0], marker="o", linestyle="", color="w",
+                              markerfacecolor="gray", markeredgecolor="black",
+                              markersize=np.sqrt(size_scale(float(v))), alpha=0.7, label=f"{v:g}")
+                   for v in refs]
+        # Align legend to the top-right of the figure
+        leg_outer_ax.legend(handles=handles, title=size_label, loc="upper left",
+                            frameon=False, labelspacing=2.5, title_fontsize=14, fontsize=12)
 
-    # 2) Colorbar axis (Placed in the bottom right quadrant)
-    # This is physically separated from leg_ax by the 'bottom' coordinate (0.20 vs 0.60)
-    cbar_ax = fig.add_axes([0.82, 0.20, 0.02, 0.30])
+    # Add Colorbar to the bottom of the side axis
+    cbar_ax = fig.add_axes([0.91, 0.20, 0.015, 0.25])
     cbar = fig.colorbar(sca, cax=cbar_ax)
     cbar.set_label(cbar_label, weight="bold", size=14)
 

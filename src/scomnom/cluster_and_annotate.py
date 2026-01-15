@@ -18,6 +18,7 @@ from .logging_utils import init_logging
 from . import io_utils, plot_utils
 from .io_utils import get_celltypist_model, resolve_msigdb_gene_sets
 from .plot_utils import _extract_series, _normalize_array
+from datetime import datetime, timezone
 
 
 LOGGER = logging.getLogger(__name__)
@@ -29,6 +30,64 @@ CLUSTER_LABEL_KEY = "cluster_label"
 # -------------------------------------------------------------------------
 # Internal helpers
 # -------------------------------------------------------------------------
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def set_active_round(
+    adata: ad.AnnData,
+    round_id: str,
+    *,
+    publish_decoupler: bool = True,
+) -> None:
+    """
+    Canonical linkage contract.
+    - Sets active round
+    - Mirrors round labels into canonical obs[cluster_key]
+    - Best-effort color sync
+    - Publishes decoupler/pseudobulk into top-level uns for forward compatibility
+    """
+    _ensure_cluster_rounds(adata)
+    rounds = adata.uns.get("cluster_rounds", {})
+    if not isinstance(rounds, dict) or round_id not in rounds:
+        raise KeyError(f"set_active_round: round_id {round_id!r} not found")
+
+    r = rounds[round_id]
+    adata.uns["active_cluster_round"] = round_id
+
+    cluster_key = r.get("cluster_key", None)
+    labels_obs_key = r.get("labels_obs_key", None)
+
+    if cluster_key and labels_obs_key and labels_obs_key in adata.obs:
+        adata.obs[str(cluster_key)] = adata.obs[str(labels_obs_key)]
+    elif cluster_key and cluster_key in adata.obs:
+        # already present
+        pass
+
+    if cluster_key and cluster_key in adata.obs:
+        if not pd.api.types.is_categorical_dtype(adata.obs[cluster_key]):
+            adata.obs[cluster_key] = adata.obs[cluster_key].astype("category")
+
+        # palette sync: if per-round colors exist, mirror to canonical cluster_key colors
+        try:
+            if labels_obs_key:
+                src = f"{labels_obs_key}_colors"
+                dst = f"{cluster_key}_colors"
+                if src in adata.uns:
+                    adata.uns[dst] = adata.uns[src]
+        except Exception:
+            pass
+
+    if publish_decoupler:
+        _publish_decoupler_from_round_to_top_level(
+            adata,
+            round_id=round_id,
+            resources=("msigdb", "progeny", "dorothea"),
+            publish_pseudobulk=True,
+            clear_missing=True,
+        )
+
+
 def _ensure_cluster_rounds(adata: ad.AnnData) -> None:
     """
     Ensure a minimal rounds scaffold exists in .uns.
@@ -73,23 +132,43 @@ def _register_round(
     *,
     round_id: str,
     cluster_key: str,
+    labels_obs_key: str,
     kind: str,
     best_resolution: float | None,
     sweep: dict | None,
     cfg_snapshot: dict | None,
+    parent_round_id: str | None = None,
+    notes: str | None = None,
 ) -> None:
     _ensure_cluster_rounds(adata)
 
     adata.uns["cluster_rounds"][round_id] = {
-        "cluster_key": cluster_key,
-        "kind": kind,
+        "round_id": str(round_id),
+        "parent_round_id": None if parent_round_id is None else str(parent_round_id),
+        "created_utc": _utc_now_iso(),
+        "notes": "" if notes is None else str(notes),
+
+        "cluster_key": str(cluster_key),
+        "labels_obs_key": str(labels_obs_key),
+
+        "kind": str(kind),
         "best_resolution": None if best_resolution is None else float(best_resolution),
         "sweep": sweep,
         "cfg": cfg_snapshot,
+
+        # precreate slots for later
+        "annotation": {},
+        "decoupler": {},
+        "qc": {},
+        "stability": {},
+        "diagnostics": {},
     }
+
     if round_id not in adata.uns["cluster_round_order"]:
         adata.uns["cluster_round_order"].append(round_id)
+
     adata.uns["active_cluster_round"] = round_id
+
 
 
 def _get_cluster_pseudobulk_df(
@@ -1772,24 +1851,112 @@ def _dc_run_method(
     return _run_one(method)
 
 
+def _get_round_id_default(adata: ad.AnnData, round_id: str | None) -> str:
+    if round_id is not None:
+        return str(round_id)
+    rid = adata.uns.get("active_cluster_round", None)
+    if rid is None:
+        raise KeyError("No round_id provided and adata.uns['active_cluster_round'] is None.")
+    return str(rid)
+
+
+def _round_put_decoupler(
+    adata: ad.AnnData,
+    *,
+    round_id: str,
+    resource: str,
+    payload: dict,
+) -> None:
+    """
+    Store decoupler outputs in the round dict:
+      adata.uns["cluster_rounds"][round_id]["decoupler"][resource] = payload
+    """
+    _ensure_cluster_rounds(adata)
+    rounds = adata.uns.get("cluster_rounds", {})
+    if not isinstance(rounds, dict) or round_id not in rounds:
+        raise KeyError(f"Round {round_id!r} not found in adata.uns['cluster_rounds'].")
+
+    r = rounds[round_id]
+    if not isinstance(r, dict):
+        raise TypeError(f"Round entry for {round_id!r} is not a dict.")
+
+    r.setdefault("decoupler", {})
+    if not isinstance(r["decoupler"], dict):
+        r["decoupler"] = {}
+
+    r["decoupler"][str(resource)] = payload
+    rounds[round_id] = r
+    adata.uns["cluster_rounds"] = rounds
+
+
+def _publish_decoupler_from_round_to_top_level(
+    adata: ad.AnnData,
+    *,
+    round_id: str,
+    resources: tuple[str, ...] = ("msigdb", "progeny", "dorothea"),
+    publish_pseudobulk: bool = True,
+    clear_missing: bool = True,
+) -> None:
+    """
+    Publish decoupler outputs from a round to top-level adata.uns so legacy code can find them:
+      adata.uns["msigdb"], adata.uns["progeny"], adata.uns["dorothea"], (optionally) adata.uns["pseudobulk"]
+
+    If clear_missing=True, deletes top-level keys for resources that are absent in the round.
+    """
+    _ensure_cluster_rounds(adata)
+    rounds = adata.uns.get("cluster_rounds", {})
+    if not isinstance(rounds, dict) or round_id not in rounds:
+        raise KeyError(f"Round {round_id!r} not found in adata.uns['cluster_rounds'].")
+
+    rinfo = rounds[round_id]
+    dec = rinfo.get("decoupler", {}) if isinstance(rinfo.get("decoupler", {}), dict) else {}
+
+    # Pseudobulk (optional publish)
+    if publish_pseudobulk:
+        pb_key = dec.get("pseudobulk_store_key", None)
+        if isinstance(pb_key, str) and pb_key in adata.uns:
+            adata.uns["pseudobulk"] = adata.uns[pb_key]
+        elif clear_missing and "pseudobulk" in adata.uns:
+            # Only clear if the round does not provide a usable pseudobulk pointer
+            del adata.uns["pseudobulk"]
+
+    # Nets
+    for res in resources:
+        payload = dec.get(res, None)
+        if isinstance(payload, dict) and "activity" in payload:
+            # Shallow copy is enough; activity is a DF
+            adata.uns[res] = payload
+        else:
+            if clear_missing and res in adata.uns:
+                del adata.uns[res]
+
+
+
 def _run_msigdb(
     adata: "ad.AnnData",
     cfg: "ClusterAnnotateConfig",
     *,
     store_key: str = "pseudobulk",
-    out_key: str = "msigdb",
+    round_id: str | None = None,
+    out_resource: str = "msigdb",
 ) -> None:
     """
-    Compute MSigDB pathway activity on CLUSTER-level pseudobulk expression using decoupler.
+    Round-native MSigDB decoupler run.
 
     Reads pseudobulk from:
-      adata.uns[store_key]
+      adata.uns[store_key]  (genes x clusters store dict)
 
-    Stores:
-      adata.uns[out_key]["activity"] -> DataFrame (clusters x pathways)
-      adata.uns[out_key]["config"]   -> dict snapshot
+    Stores into:
+      adata.uns["cluster_rounds"][round_id]["decoupler"][out_resource] = {
+          "activity": DataFrame (clusters x pathways),
+          "config": dict,
+      }
+
+    NOTE: Publishing to top-level adata.uns["msigdb"] is handled by set_active_round().
     """
     import pandas as pd
+
+    rid = _get_round_id_default(adata, round_id)
 
     # -----------------------------
     # Pull pseudobulk from .uns
@@ -1874,24 +2041,29 @@ def _run_msigdb(
         LOGGER.warning("MSigDB: decoupler run failed (method=%s): %s", str(method), e)
         return
 
-    # -----------------------------
-    # Store
-    # -----------------------------
-    adata.uns.setdefault(out_key, {})
-    adata.uns[out_key]["activity"] = activity
-    adata.uns[out_key]["config"] = {
-        "method": str(method),
-        "min_n_targets": int(min_n),
-        "msigdb_release": msigdb_release,
-        "gene_sets": [str(g) for g in gmt_files],
-        "used_keywords": used_keywords,
-        "input": f"{store_key}:pseudobulk_expr(genes_x_clusters)",
-        "resource": "msigdb_gmt",
+    payload = {
+        "activity": activity,
+        "config": {
+            "method": str(method),
+            "min_n_targets": int(min_n),
+            "msigdb_release": msigdb_release,
+            "gene_sets": [str(g) for g in gmt_files],
+            "used_keywords": used_keywords,
+            "input": f"{store_key}:pseudobulk_expr(genes_x_clusters)",
+            "resource": "msigdb_gmt",
+            "round_id": rid,
+        },
+        # forward slot for later (gmt-aware compaction): we'll fill this in a later patch
+        "activity_by_gmt": None,
+        "feature_meta": None,
     }
 
+    _round_put_decoupler(adata, round_id=rid, resource=out_resource, payload=payload)
+
     LOGGER.info(
-        "MSigDB stored at adata.uns[%r]: activity shape=%s using method=%s (min_n=%d; GMTs=%d).",
-        out_key,
+        "MSigDB stored in round '%s' decoupler[%r]: activity shape=%s using method=%s (min_n=%d; GMTs=%d).",
+        rid,
+        out_resource,
         tuple(activity.shape),
         str(method),
         int(min_n),
@@ -1904,19 +2076,18 @@ def _run_progeny(
     cfg: "ClusterAnnotateConfig",
     *,
     store_key: str = "pseudobulk",
-    out_key: str = "progeny",
+    round_id: str | None = None,
+    out_resource: str = "progeny",
 ) -> None:
     """
-    Compute PROGENy pathway activity on CLUSTER-level pseudobulk expression using decoupler.
+    Round-native PROGENy decoupler run.
 
-    Reads pseudobulk from:
-      adata.uns[store_key]
-
-    Stores:
-      adata.uns[out_key]["activity"] -> DataFrame (clusters x pathways)
-      adata.uns[out_key]["config"]   -> dict snapshot
+    Reads pseudobulk from adata.uns[store_key].
+    Stores into adata.uns["cluster_rounds"][round_id]["decoupler"][out_resource].
     """
     import decoupler as dc
+
+    rid = _get_round_id_default(adata, round_id)
 
     # -----------------------------
     # Pull pseudobulk from .uns
@@ -1984,23 +2155,26 @@ def _run_progeny(
         LOGGER.warning("PROGENy: decoupler run failed (method=%s): %s", str(method), e)
         return
 
-    # -----------------------------
-    # Store
-    # -----------------------------
-    adata.uns.setdefault(out_key, {})
-    adata.uns[out_key]["activity"] = activity
-    adata.uns[out_key]["config"] = {
-        "method": str(method),
-        "min_n_targets": int(min_n),
-        "top_n": int(top_n),
-        "input": f"{store_key}:pseudobulk_expr(genes_x_clusters)",
-        "resource": "progeny",
-        "organism": str(organism),
+    payload = {
+        "activity": activity,
+        "config": {
+            "method": str(method),
+            "min_n_targets": int(min_n),
+            "top_n": int(top_n),
+            "input": f"{store_key}:pseudobulk_expr(genes_x_clusters)",
+            "resource": "progeny",
+            "organism": str(organism),
+            "round_id": rid,
+        },
+        "feature_meta": None,
     }
 
+    _round_put_decoupler(adata, round_id=rid, resource=out_resource, payload=payload)
+
     LOGGER.info(
-        "PROGENy stored at adata.uns[%r]: activity shape=%s using method=%s (top_n=%d, min_n=%d).",
-        out_key,
+        "PROGENy stored in round '%s' decoupler[%r]: activity shape=%s using method=%s (top_n=%d, min_n=%d).",
+        rid,
+        out_resource,
         tuple(activity.shape),
         str(method),
         int(top_n),
@@ -2013,19 +2187,18 @@ def _run_dorothea(
     cfg: "ClusterAnnotateConfig",
     *,
     store_key: str = "pseudobulk",
-    out_key: str = "dorothea",
+    round_id: str | None = None,
+    out_resource: str = "dorothea",
 ) -> None:
     """
-    Compute DoRothEA TF activity on CLUSTER-level pseudobulk expression using decoupler.
+    Round-native DoRothEA decoupler run.
 
-    Reads pseudobulk from:
-      adata.uns[store_key]
-
-    Stores:
-      adata.uns[out_key]["activity"] -> DataFrame (clusters x TFs)
-      adata.uns[out_key]["config"]   -> dict snapshot
+    Reads pseudobulk from adata.uns[store_key].
+    Stores into adata.uns["cluster_rounds"][round_id]["decoupler"][out_resource].
     """
     import decoupler as dc
+
+    rid = _get_round_id_default(adata, round_id)
 
     # -----------------------------
     # Pull pseudobulk from .uns
@@ -2099,28 +2272,128 @@ def _run_dorothea(
         LOGGER.warning("DoRothEA: decoupler run failed (method=%s): %s", str(method), e)
         return
 
-    # -----------------------------
-    # Store
-    # -----------------------------
-    adata.uns.setdefault(out_key, {})
-    adata.uns[out_key]["activity"] = activity
-    adata.uns[out_key]["config"] = {
-        "method": str(method),
-        "organism": str(organism),
-        "min_n_targets": int(min_n),
-        "confidence": list(conf),
-        "input": f"{store_key}:pseudobulk_expr(genes_x_clusters)",
-        "resource": "dorothea",
+    payload = {
+        "activity": activity,
+        "config": {
+            "method": str(method),
+            "organism": str(organism),
+            "min_n_targets": int(min_n),
+            "confidence": list(conf),
+            "input": f"{store_key}:pseudobulk_expr(genes_x_clusters)",
+            "resource": "dorothea",
+            "round_id": rid,
+        },
+        "feature_meta": None,
     }
 
+    _round_put_decoupler(adata, round_id=rid, resource=out_resource, payload=payload)
+
     LOGGER.info(
-        "DoRothEA stored at adata.uns[%r]: activity shape=%s using method=%s (conf=%s, min_n=%d).",
-        out_key,
+        "DoRothEA stored in round '%s' decoupler[%r]: activity shape=%s using method=%s (conf=%s, min_n=%d).",
+        rid,
+        out_resource,
         tuple(activity.shape),
         str(method),
         ",".join(conf),
         int(min_n),
     )
+
+def run_decoupler_for_round(
+    adata: ad.AnnData,
+    cfg: ClusterAnnotateConfig,
+    *,
+    round_id: str | None = None,
+    prefer_pretty_labels_for_pb: bool = True,
+    publish_to_top_level_if_active: bool = True,
+) -> None:
+    """
+    Round-native decoupler orchestrator:
+
+    1) Computes round-scoped pseudobulk store: adata.uns[f"pseudobulk__{round_id}"]
+    2) Runs enabled decoupler resources and stores them in:
+         adata.uns["cluster_rounds"][round_id]["decoupler"][resource]
+    3) Records pseudobulk store key in round["decoupler"]["pseudobulk_store_key"]
+    4) If round_id is active and publish_to_top_level_if_active=True, publishes
+       the round's decoupler payloads to top-level adata.uns["msigdb"/"progeny"/"dorothea"/"pseudobulk"].
+
+    Contract:
+      - No direct storage of net results to top-level except via publishing.
+      - Round dict remains the source of truth.
+    """
+    if not getattr(cfg, "run_decoupler", False):
+        LOGGER.info("Decoupler: disabled (run_decoupler=False).")
+        return
+
+    _ensure_cluster_rounds(adata)
+    rid = _get_round_id_default(adata, round_id)
+
+    rounds = adata.uns.get("cluster_rounds", {})
+    if not isinstance(rounds, dict) or rid not in rounds:
+        raise KeyError(f"Decoupler: round {rid!r} not found in adata.uns['cluster_rounds'].")
+
+    rinfo = rounds[rid]
+    cluster_key = rinfo.get("cluster_key", None)
+    if not cluster_key or cluster_key not in adata.obs:
+        raise KeyError(
+            f"Decoupler: round {rid!r} has cluster_key={cluster_key!r} missing from adata.obs."
+        )
+
+    # Prefer pretty labels for pseudobulk if available (readability + stable naming)
+    cluster_key_for_pb = cluster_key
+    if prefer_pretty_labels_for_pb:
+        pretty_key = f"{CLUSTER_LABEL_KEY}__{rid}"
+        if pretty_key in adata.obs:
+            cluster_key_for_pb = pretty_key
+
+    pb_key = f"pseudobulk__{rid}"
+
+    LOGGER.info(
+        "Decoupler[%s]: computing pseudobulk using cluster_key=%r -> store_key=%r",
+        rid,
+        cluster_key_for_pb,
+        pb_key,
+    )
+
+    _store_cluster_pseudobulk(
+        adata,
+        cluster_key=cluster_key_for_pb,
+        agg=getattr(cfg, "decoupler_pseudobulk_agg", "mean"),
+        use_raw_like=bool(getattr(cfg, "decoupler_use_raw", True)),
+        prefer_layers=("counts_raw", "counts_cb"),
+        store_key=pb_key,
+    )
+
+    # Record pseudobulk pointer in the round (so set_active_round/publish can find it)
+    rinfo.setdefault("decoupler", {})
+    if not isinstance(rinfo["decoupler"], dict):
+        rinfo["decoupler"] = {}
+    rinfo["decoupler"]["pseudobulk_store_key"] = pb_key
+    rounds[rid] = rinfo
+    adata.uns["cluster_rounds"] = rounds
+
+    # ---- Run resources (round-native storage) ----
+    # MSigDB
+    _run_msigdb(adata, cfg, store_key=pb_key, round_id=rid, out_resource="msigdb")
+
+    # DoRothEA
+    if getattr(cfg, "run_dorothea", True):
+        _run_dorothea(adata, cfg, store_key=pb_key, round_id=rid, out_resource="dorothea")
+
+    # PROGENy
+    if getattr(cfg, "run_progeny", True):
+        _run_progeny(adata, cfg, store_key=pb_key, round_id=rid, out_resource="progeny")
+
+    # ---- Publish to top-level if this is the active round ----
+    active = adata.uns.get("active_cluster_round", None)
+    if publish_to_top_level_if_active and (active is not None) and (str(active) == rid):
+        _publish_decoupler_from_round_to_top_level(
+            adata,
+            round_id=rid,
+            resources=("msigdb", "progeny", "dorothea"),
+            publish_pseudobulk=True,
+            clear_missing=True,
+        )
+        LOGGER.info("Decoupler[%s]: published to top-level adata.uns for forward compatibility.", rid)
 
 
 # -------------------------------------------------------------------------
@@ -2210,15 +2483,29 @@ def run_BISC(
     _apply_final_clustering(adata, cfg, best_res)
 
     # --------------------------------------------------------------
-    # Register round
+    # Create round_id + round-scoped labels key
     # --------------------------------------------------------------
     idx = _next_round_index(adata)
     round_id = _make_round_id(idx, round_suffix)
 
+    labels_obs_key = f"{cfg.label_key}__{round_id}"
+    adata.obs[labels_obs_key] = adata.obs[cfg.label_key].astype(str).astype("category")
+
+    # Mirror colors to per-round obs key if present
+    try:
+        if f"{cfg.label_key}_colors" in adata.uns:
+            adata.uns[f"{labels_obs_key}_colors"] = list(adata.uns[f"{cfg.label_key}_colors"])
+    except Exception:
+        pass
+
+    # --------------------------------------------------------------
+    # Register round
+    # --------------------------------------------------------------
     _register_round(
         adata,
         round_id=round_id,
         cluster_key=cfg.label_key,
+        labels_obs_key=labels_obs_key,
         kind="BISC",
         best_resolution=float(best_res),
         sweep={
@@ -2237,7 +2524,12 @@ def run_BISC(
             # "ari_matrix": sweep.get("ari_matrix", None),
         },
         cfg_snapshot=asdict(cfg) if hasattr(cfg, "__dataclass_fields__") else None,
+        parent_round_id=None,
     )
+
+    # Ensure canonical view points at this round
+    set_active_round(adata, round_id, publish_decoupler=False)
+
 
     # --------------------------------------------------------------
     # Enrich round with plot-friendly diagnostics and stability/QC pointers
@@ -2633,61 +2925,9 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
 
     # ------------------------------------------------------------------
     # Decoupler nets (cluster-level) — ROUND-AWARE, gated by cfg.run_decoupler
-    # No shim: each net reads pseudobulk from store_key and writes to out_key.
     # ------------------------------------------------------------------
     if getattr(cfg, "run_decoupler", False):
-        _ensure_cluster_rounds(adata)
-
-        active_round_id = adata.uns.get("active_cluster_round", None)
-        active_round_id = str(active_round_id) if active_round_id else None
-
-        rounds = adata.uns.get("cluster_rounds", {})
-        if not active_round_id or active_round_id not in rounds:
-            LOGGER.warning("Decoupler: no active cluster round found; skipping pseudobulk + nets.")
-        else:
-            rinfo = rounds[active_round_id]
-            cluster_key = rinfo.get("cluster_key", None)
-
-            if not cluster_key or cluster_key not in adata.obs:
-                LOGGER.warning(
-                    "Decoupler: active round '%s' has cluster_key=%r missing in adata.obs; skipping.",
-                    active_round_id,
-                    cluster_key,
-                )
-            else:
-                # Round-scoped stores so multiple rounds can coexist
-                pb_key = f"pseudobulk__{active_round_id}"
-                msigdb_key = f"msigdb__{active_round_id}"
-                progeny_key = f"progeny__{active_round_id}"
-                dorothea_key = f"dorothea__{active_round_id}"
-
-                # Prefer pretty labels for readability IF you created them per-round
-                pretty_key = f"{CLUSTER_LABEL_KEY}__{active_round_id}"
-                cluster_key_for_pb = pretty_key if pretty_key in adata.obs else cluster_key
-
-                LOGGER.info(
-                    "Decoupler: using cluster_key=%r (round=%s) for pseudobulk.",
-                    cluster_key_for_pb,
-                    active_round_id,
-                )
-
-                _store_cluster_pseudobulk(
-                    adata,
-                    cluster_key=cluster_key_for_pb,
-                    agg=getattr(cfg, "decoupler_pseudobulk_agg", "mean"),
-                    use_raw_like=bool(getattr(cfg, "decoupler_use_raw", True)),
-                    prefer_layers=("counts_raw", "counts_cb"),
-                    store_key=pb_key,
-                )
-
-                # --- Run nets into round-scoped output keys ---
-                _run_msigdb(adata, cfg, store_key=pb_key, out_key=msigdb_key)
-
-                if getattr(cfg, "run_dorothea", True):
-                    _run_dorothea(adata, cfg, store_key=pb_key, out_key=dorothea_key)
-
-                if getattr(cfg, "run_progeny", True):
-                    _run_progeny(adata, cfg, store_key=pb_key, out_key=progeny_key)
+        run_decoupler_for_round(adata, cfg, round_id=None)  # uses active round
 
     else:
         LOGGER.info("Decoupler: disabled (run_decoupler=False).")
@@ -2703,18 +2943,12 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
         if not active_round_id or active_round_id not in rounds:
             LOGGER.warning("Decoupler plots: no active cluster round found; skipping.")
         else:
-            # Use round-scoped net keys
-            msigdb_key = f"msigdb__{active_round_id}"
-            progeny_key = f"progeny__{active_round_id}"
-            dorothea_key = f"dorothea__{active_round_id}"
-
             figdir_round = Path("cluster_and_annotate") / active_round_id
 
-            # MSigDB (usually large)
-            if msigdb_key in adata.uns:
+            if "msigdb" in adata.uns:
                 plot_utils.plot_decoupler_all_styles(
                     adata,
-                    net_key=msigdb_key,
+                    net_key="msigdb",
                     net_name="MSigDB",
                     figdir=figdir_round,
                     heatmap_top_k=30,
@@ -2722,11 +2956,10 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                     dotplot_top_k=30,
                 )
 
-            # PROGENy (small, ~14 pathways)
-            if progeny_key in adata.uns:
+            if "progeny" in adata.uns:
                 plot_utils.plot_decoupler_all_styles(
                     adata,
-                    net_key=progeny_key,
+                    net_key="progeny",
                     net_name="PROGENy",
                     figdir=figdir_round,
                     heatmap_top_k=14,
@@ -2734,17 +2967,17 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                     dotplot_top_k=14,
                 )
 
-            # DoRothEA (can be large)
-            if dorothea_key in adata.uns:
+            if "dorothea" in adata.uns:
                 plot_utils.plot_decoupler_all_styles(
                     adata,
-                    net_key=dorothea_key,
+                    net_key="dorothea",
                     net_name="DoRothEA",
                     figdir=figdir_round,
                     heatmap_top_k=40,
                     bar_top_n=10,
                     dotplot_top_k=35,
                 )
+
 
     # ------------------------------------------------------------------
     # Make 'plateaus' HDF5/Zarr-safe — ROUND-AWARE (encode IN PLACE)
