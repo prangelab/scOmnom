@@ -2886,17 +2886,17 @@ def plot_decoupler_activity_heatmap(
     if use_zscore:
         sub = _zscore_cols(sub)
 
-    # Clean and Wrap labels
+    # Clean and Wrap labels (Removes Hallmark/Reactome prefixes)
     sub.columns = [_clean_feature_label(c, net_name) for c in sub.columns]
     if wrap_labels:
         sub.columns = _wrap_labels(sub.columns, wrap_at=wrap_at)
 
-    # Figure sizing
+    # Figure sizing based on feature count
     fig_w = max(10.0, 3.0 + 0.4 * sub.shape[1])
     fig_h = max(6.0, 2.5 + 0.35 * sub.shape[0])
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-    # REMOVE GRIDLINES: Ensure grid is off and background is clean
+    # FIX: Remove gray gridlines and set background
     ax.grid(False)
     ax.set_facecolor('white')
 
@@ -2905,7 +2905,7 @@ def plot_decoupler_activity_heatmap(
         ax=ax,
         cmap=cmap,
         cbar=True,
-        linewidths=0.0,
+        linewidths=0.0,  # Ensures no line grid appears
         linecolor=None,
         square=False,
         cbar_kws={"shrink": 0.8}
@@ -2915,10 +2915,10 @@ def plot_decoupler_activity_heatmap(
     ax.set_ylabel("Cluster", labelpad=15)
 
     ttl_prefix = f"{title_prefix}: " if title_prefix else ""
-    ttl = f"{ttl_prefix}{net_name}: top {int(top_k)} activity ({'z-score' if use_zscore else 'raw'})"
+    ttl = f"{ttl_prefix}{net_name}: top {int(top_k)} activity"
     ax.set_title(ttl, fontsize=16, pad=20)
 
-    # Tick styling for wrapped labels
+    # Tick styling: Added padding to prevent label overlap
     ax.tick_params(axis="x", rotation=45, labelsize=9, pad=15)
     ax.tick_params(axis="y", rotation=0, labelsize=10, pad=10)
 
@@ -2926,9 +2926,9 @@ def plot_decoupler_activity_heatmap(
         t.set_ha("right")
         t.set_va("top")
         t.set_rotation_mode("anchor")
-        t.set_multialignment("center")  # Centers wrapped text lines
+        t.set_multialignment("center")
 
-    # Dynamic margin for wrapped text
+        # Dynamic margin for wrapped text
     try:
         max_lab_len = int(max(len(str(c)) for c in sub.columns))
     except Exception:
@@ -2966,26 +2966,29 @@ def plot_decoupler_cluster_topn_barplots(
         if top.empty:
             continue
 
+        # Get values for plotting
         vals = s.loc[top.index] if use_abs else top
 
-        # FIX: Sort so highest is at the top when inverted
+        # Sort so highest enrichment is at the TOP of the plot
         vals_plot = vals.sort_values(ascending=True)
 
-        # FIX: Clean labels
+        # Clean MSigDB/Network labels
         clean_labels = [_clean_feature_label(l, net_name) for l in vals_plot.index]
 
-        left = _dynamic_left_margin_from_labels(clean_labels, base=0.22)
+        # Dynamic layout adjustments
+        left = _dynamic_left_margin_from_labels(clean_labels, base=0.25)
         fig_w = _dynamic_fig_width_for_barplot(clean_labels, min_w=12.0, max_w=28.0)
-        fig_h = max(2.8, 0.70 * len(vals_plot) + 1.8)
+        fig_h = max(3.5, 0.75 * len(vals_plot) + 1.5)
 
         fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-        fig.subplots_adjust(left=left, right=0.96, top=0.82, bottom=0.14)
+        # Add space for the top header text
+        fig.subplots_adjust(left=left, right=0.96, top=0.80, bottom=0.15)
 
-        # FIX: Different colors for Progeny positive/negative
+        # Progeny specific color logic: Green (+) and Red (-)
         if net_name.lower() == "progeny":
             bar_colors = ["#d62728" if v < 0 else "#2ca02c" for v in vals_plot.values]
         else:
-            bar_colors = "#3b84a8"
+            bar_colors = "#3b84a8"  # Default blue
 
         y = np.arange(len(vals_plot))
         ax.barh(
@@ -2993,22 +2996,23 @@ def plot_decoupler_cluster_topn_barplots(
             width=vals_plot.values,
             color=bar_colors,
             edgecolor="#1f2d3a",
-            linewidth=0.6,
+            linewidth=0.8,
             zorder=3,
         )
 
         ax.set_yticks(y)
         ax.set_yticklabels(clean_labels, fontsize=12)
-        ax.invert_yaxis()  # Put highest on top
+        ax.set_xlabel("Activity Score", fontsize=12, labelpad=10)
 
+        # Remove chart junk
         ax.grid(False)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
 
-        # Title Logic
+        # Main Title and Subtitle
         main_title = f"{title_prefix} • {cl}" if title_prefix else cl
-        ax.text(0.5, 1.10, main_title, transform=ax.transAxes, ha="center", weight="bold", fontsize=22)
-        ax.text(0.5, 1.04, str(net_name).upper(), transform=ax.transAxes, ha="center", color="#666666", fontsize=14)
+        ax.text(0.5, 1.12, main_title, transform=ax.transAxes, ha="center", weight="bold", fontsize=22)
+        ax.text(0.5, 1.05, str(net_name).upper(), transform=ax.transAxes, ha="center", color="#666666", fontsize=14)
 
         stem = f"{stem_prefix}_{cl}__top{int(n)}_bar"
         save_multi(stem, outdir, fig)
@@ -3025,19 +3029,62 @@ def plot_decoupler_dotplot(
         color_by: str = "z",
         size_by: str = "abs_raw",
         wrap_labels: bool = True,
-        wrap_at: int = 30,  # Shorter wrap for better vertical spacing
+        wrap_at: int = 30,
         cmap: str = "viridis",
         stem: str = "dotplot_top",
         title_prefix: Optional[str] = None,
 ) -> None:
-    # ... (dataframe setup and cleaning logic same as before) ...
+    if activity is None or activity.empty:
+        return
 
-    # FIG SIZE: Wider to accommodate the gutter without cutting it off
+    outdir = _decoupler_figdir(figdir, net_name)
+    A = activity.copy()
+    A = A.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+
+    feats = _top_features_global(A, k=top_k, mode=rank_mode, signed=True)
+    if not feats:
+        return
+
+    sub_raw = A.loc[:, feats].copy()
+    sub_z = _zscore_cols(sub_raw)
+
+    color_mat = sub_raw if color_by == "raw" else sub_z
+    cbar_label = "activity" if color_by == "raw" else "z-score"
+    size_mat = sub_z.abs() if size_by == "abs_z" else sub_raw.abs()
+    size_label = "|z|" if size_by == "abs_z" else "|raw|"
+
+    # DEFINING CLUSTERS AND FEATURES HERE TO FIX NAMEERROR
+    clusters = sub_raw.index.astype(str).tolist()
+    features = sub_raw.columns.astype(str).tolist()
+
+    features_clean = [_clean_feature_label(f, net_name) for f in features]
+    features_disp = _wrap_labels(features_clean, wrap_at=wrap_at) if wrap_labels else features_clean
+
+    rows = []
+    for j, feat in enumerate(features):
+        for cl in clusters:
+            rows.append({
+                "cluster": cl,
+                "feature": features_disp[j],
+                "color": float(color_mat.loc[cl, feat]),
+                "size": float(size_mat.loc[cl, feat]),
+            })
+    df = pd.DataFrame(rows)
+
+    svals = df["size"].to_numpy()
+    s_min, s_max = np.nanmin(svals), np.nanmax(svals)
+
+    def size_scale(v):
+        return 30.0 + (v - s_min) / (s_max - s_min) * 180.0 if s_max > s_min else 80.0
+
+    sizes = np.array([size_scale(v) for v in svals])
+
+    # FIG SIZE: Wider to accommodate the gutter without cutting legends off
     fig_w = max(14.0, 6.0 + 0.5 * len(clusters))
     fig_h = max(8.0, 3.0 + 0.5 * len(features))
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-    # MARGINS: Provide enough room on the right for legends (0.78 is safer than 0.70)
+    # MARGINS: Provide room for legends (right=0.78)
     left_margin = _dynamic_left_margin_from_labels(df["feature"].values, base=0.28)
     fig.subplots_adjust(left=left_margin, right=0.78, top=0.90, bottom=0.18)
 
@@ -3047,11 +3094,14 @@ def plot_decoupler_dotplot(
         edgecolors="black", linewidths=0.4, alpha=0.9, zorder=3
     )
 
-    # LEGEND PLACEMENT: Pushed closer to plot to avoid edge clipping
+    # COLORBAR: Dedicated axis to prevent overlapping the plot
     cbar_ax = fig.add_axes([0.82, 0.20, 0.02, 0.30])
     cbar = fig.colorbar(sca, cax=cbar_ax)
     cbar.set_label(cbar_label)
 
+    # SIZE LEGEND: Pull anchor back slightly (1.05) to stay inside figure bounds
+    refs = np.unique(np.round(np.quantile(svals, [0.25, 0.50, 0.75]), 3))
+    refs = refs[refs > 0]
     if refs.size > 0:
         handles = [
             plt.Line2D([0], [0], marker='o', color='w',
@@ -3059,20 +3109,18 @@ def plot_decoupler_dotplot(
                        label=f"{v:.2f}", alpha=0.6)
             for v in refs
         ]
-
         ax.legend(
             handles=handles,
             title=size_label,
             loc="upper left",
-            bbox_to_anchor=(1.05, 0.98),  # Pull back toward the plot
+            bbox_to_anchor=(1.05, 0.98),
             frameon=False,
-            labelspacing=1.5  # Increase vertical gap between legend dots
+            labelspacing=1.5
         )
 
-    # LABEL SPACING: Added multialignment and extra pad
     ax.tick_params(axis="y", pad=12, labelsize=10)
     for t in ax.get_yticklabels():
-        t.set_multialignment("right")  # Keeps wrapped lines clean
+        t.set_multialignment("right")
 
     ax.grid(False)
     ax.tick_params(axis="x", rotation=45, pad=10)
