@@ -2866,11 +2866,15 @@ def plot_decoupler_activity_heatmap(
         rank_mode: str = "var",
         use_zscore: bool = True,
         wrap_labels: bool = True,
-        wrap_at: int = 38,
+        wrap_at: int = 30,  # Shorter wrap prevents collision between adjacent columns
         cmap: str = "viridis",
         stem: str = "heatmap_top",
         title_prefix: Optional[str] = None,
 ) -> None:
+    """
+    Plots a heatmap of decoupler activities with fixes for overlapping
+    wrapped X-axis labels and clean MSigDB naming.
+    """
     if activity is None or activity.empty:
         return
 
@@ -2878,6 +2882,7 @@ def plot_decoupler_activity_heatmap(
     A = activity.copy()
     A = A.apply(pd.to_numeric, errors="coerce").fillna(0.0)
 
+    # Select top features
     feats = _top_features_global(A, k=top_k, mode=rank_mode, signed=True)
     if not feats:
         return
@@ -2886,17 +2891,19 @@ def plot_decoupler_activity_heatmap(
     if use_zscore:
         sub = _zscore_cols(sub)
 
-    # Clean and Wrap labels (Removes Hallmark/Reactome prefixes)
+    # 1. CLEAN NAMES: Remove "HALLMARK_", "REACTOME_", etc.
     sub.columns = [_clean_feature_label(c, net_name) for c in sub.columns]
+
+    # 2. WRAP LABELS: Break long pathway names into multiple lines
     if wrap_labels:
         sub.columns = _wrap_labels(sub.columns, wrap_at=wrap_at)
 
-    # Figure sizing based on feature count
-    fig_w = max(10.0, 3.0 + 0.4 * sub.shape[1])
-    fig_h = max(6.0, 2.5 + 0.35 * sub.shape[0])
+    # 3. DYNAMIC FIGURE SIZING: Taller height and wider base for X-axis room
+    fig_w = max(12.0, 4.0 + 0.45 * sub.shape[1])
+    fig_h = max(8.0, 4.0 + 0.45 * sub.shape[0])
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-    # FIX: Remove gray gridlines and set background
+    # 4. REMOVE GRID: Ensure no gray lines interfere with the heatmap colors
     ax.grid(False)
     ax.set_facecolor('white')
 
@@ -2905,37 +2912,43 @@ def plot_decoupler_activity_heatmap(
         ax=ax,
         cmap=cmap,
         cbar=True,
-        linewidths=0.0,  # Ensures no line grid appears
+        linewidths=0.0,
         linecolor=None,
         square=False,
         cbar_kws={"shrink": 0.8}
     )
 
-    ax.set_xlabel("Feature" if net_name.lower() != "dorothea" else "TF", labelpad=15)
+    # Labeling
+    ax.set_xlabel("Feature" if net_name.lower() != "dorothea" else "TF", labelpad=20)
     ax.set_ylabel("Cluster", labelpad=15)
 
     ttl_prefix = f"{title_prefix}: " if title_prefix else ""
-    ttl = f"{ttl_prefix}{net_name}: top {int(top_k)} activity"
-    ax.set_title(ttl, fontsize=16, pad=20)
+    ttl = f"{ttl_prefix}{net_name}: top {int(top_k)} activity ({'z-score' if use_zscore else 'raw'})"
+    ax.set_title(ttl, fontsize=16, pad=25)
 
-    # Tick styling: Added padding to prevent label overlap
-    ax.tick_params(axis="x", rotation=45, labelsize=9, pad=15)
+    # 5. X-AXIS COLLISION FIX:
+    # Increased 'pad' (25) pushes the entire block of text down.
+    # 'multialignment' ensures lines within a single wrapped label stay together.
+    ax.tick_params(axis="x", rotation=45, labelsize=10, pad=25)
     ax.tick_params(axis="y", rotation=0, labelsize=10, pad=10)
 
     for t in ax.get_xticklabels():
         t.set_ha("right")
         t.set_va("top")
         t.set_rotation_mode("anchor")
-        t.set_multialignment("center")
+        t.set_multialignment("right")
 
-        # Dynamic margin for wrapped text
+        # 6. MARGIN ADJUSTMENT: Calculate bottom margin based on label length
     try:
         max_lab_len = int(max(len(str(c)) for c in sub.columns))
     except Exception:
         max_lab_len = 0
-    bottom = float(np.clip(0.35 + 0.005 * max_lab_len, 0.30, 0.65))
-    fig.subplots_adjust(left=0.25, right=0.95, top=0.88, bottom=bottom)
 
+    # More aggressive bottom margin to accommodate wrapped text
+    bottom = float(np.clip(0.40 + 0.006 * max_lab_len, 0.40, 0.70))
+    fig.subplots_adjust(left=0.25, right=0.92, top=0.88, bottom=bottom)
+
+    # Save logic
     sfx = f"{stem}{int(top_k)}" + ("_z" if use_zscore else "_raw")
     save_multi(sfx, outdir, fig)
     plt.close(fig)
@@ -3020,19 +3033,19 @@ def plot_decoupler_cluster_topn_barplots(
 
 
 def plot_decoupler_dotplot(
-        activity: pd.DataFrame,
-        *,
-        net_name: str,
-        figdir: Path | None,
-        top_k: int = 30,
-        rank_mode: str = "var",
-        color_by: str = "z",
-        size_by: str = "abs_raw",
-        wrap_labels: bool = True,
-        wrap_at: int = 30,
-        cmap: str = "viridis",
-        stem: str = "dotplot_top",
-        title_prefix: Optional[str] = None,
+    activity: pd.DataFrame,
+    *,
+    net_name: str,
+    figdir: Path | None,
+    top_k: int = 30,
+    rank_mode: str = "var",
+    color_by: str = "z",
+    size_by: str = "abs_raw",
+    wrap_labels: bool = True,
+    wrap_at: int = 25, # Shorter wrap helps vertical spacing
+    cmap: str = "viridis",
+    stem: str = "dotplot_top",
+    title_prefix: Optional[str] = None,
 ) -> None:
     if activity is None or activity.empty:
         return
@@ -3053,10 +3066,8 @@ def plot_decoupler_dotplot(
     size_mat = sub_z.abs() if size_by == "abs_z" else sub_raw.abs()
     size_label = "|z|" if size_by == "abs_z" else "|raw|"
 
-    # DEFINING CLUSTERS AND FEATURES HERE TO FIX NAMEERROR
     clusters = sub_raw.index.astype(str).tolist()
     features = sub_raw.columns.astype(str).tolist()
-
     features_clean = [_clean_feature_label(f, net_name) for f in features]
     features_disp = _wrap_labels(features_clean, wrap_at=wrap_at) if wrap_labels else features_clean
 
@@ -3073,20 +3084,18 @@ def plot_decoupler_dotplot(
 
     svals = df["size"].to_numpy()
     s_min, s_max = np.nanmin(svals), np.nanmax(svals)
-
     def size_scale(v):
         return 30.0 + (v - s_min) / (s_max - s_min) * 180.0 if s_max > s_min else 80.0
-
     sizes = np.array([size_scale(v) for v in svals])
 
-    # FIG SIZE: Wider to accommodate the gutter without cutting legends off
-    fig_w = max(14.0, 6.0 + 0.5 * len(clusters))
-    fig_h = max(8.0, 3.0 + 0.5 * len(features))
+    # FIG SIZE: Much wider to prevent clipping (W=16.0)
+    fig_w = max(16.0, 8.0 + 0.5 * len(clusters))
+    fig_h = max(10.0, 4.0 + 0.5 * len(features))
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-    # MARGINS: Provide room for legends (right=0.78)
-    left_margin = _dynamic_left_margin_from_labels(df["feature"].values, base=0.28)
-    fig.subplots_adjust(left=left_margin, right=0.78, top=0.90, bottom=0.18)
+    # MARGINS: Massive right margin (right=0.65) to house legends
+    left_margin = _dynamic_left_margin_from_labels(df["feature"].values, base=0.30)
+    fig.subplots_adjust(left=left_margin, right=0.65, top=0.90, bottom=0.20)
 
     sca = ax.scatter(
         x=df["cluster"].values, y=df["feature"].values,
@@ -3094,12 +3103,12 @@ def plot_decoupler_dotplot(
         edgecolors="black", linewidths=0.4, alpha=0.9, zorder=3
     )
 
-    # COLORBAR: Dedicated axis to prevent overlapping the plot
-    cbar_ax = fig.add_axes([0.82, 0.20, 0.02, 0.30])
+    # COLORBAR: Placed in the lower half of the sidebar
+    cbar_ax = fig.add_axes([0.72, 0.20, 0.02, 0.25])
     cbar = fig.colorbar(sca, cax=cbar_ax)
-    cbar.set_label(cbar_label)
+    cbar.set_label(cbar_label, fontsize=12)
 
-    # SIZE LEGEND: Pull anchor back slightly (1.05) to stay inside figure bounds
+    # SIZE LEGEND: Placed in the upper half of the sidebar
     refs = np.unique(np.round(np.quantile(svals, [0.25, 0.50, 0.75]), 3))
     refs = refs[refs > 0]
     if refs.size > 0:
@@ -3109,24 +3118,24 @@ def plot_decoupler_dotplot(
                        label=f"{v:.2f}", alpha=0.6)
             for v in refs
         ]
+        # Shift legend further right to 1.25 to prevent overlap with colorbar
         ax.legend(
             handles=handles,
             title=size_label,
             loc="upper left",
-            bbox_to_anchor=(1.05, 0.98),
+            bbox_to_anchor=(1.25, 1.0),
             frameon=False,
-            labelspacing=1.5
+            labelspacing=2.0
         )
 
-    ax.tick_params(axis="y", pad=12, labelsize=10)
-    for t in ax.get_yticklabels():
-        t.set_multialignment("right")
-
+    ax.set_ylabel("Feature", labelpad=20)
+    ax.tick_params(axis="y", pad=15)
+    ax.tick_params(axis="x", rotation=45, pad=12)
     ax.grid(False)
-    ax.tick_params(axis="x", rotation=45, pad=10)
 
     save_multi(f"{stem}{int(top_k)}_{cbar_label}_{size_by}", outdir, fig)
     plt.close(fig)
+
 
 def plot_decoupler_all_styles(
     adata,
