@@ -2857,62 +2857,6 @@ def _dynamic_fig_width_for_barplot(labels: Sequence[str], *, min_w: float = 12.0
     return float(np.clip(w, min_w, max_w))
 
 
-def plot_decoupler_activity_heatmap(
-        activity: pd.DataFrame,
-        *,
-        net_name: str,
-        figdir: Path | None,
-        top_k: int = 30,
-        rank_mode: str = "var",
-        use_zscore: bool = True,
-        wrap_labels: bool = True,
-        cmap: str = "viridis",
-        stem: str = "heatmap_top",
-        title_prefix: Optional[str] = None,
-) -> None:
-    if activity is None or activity.empty:
-        return
-
-    outdir = _decoupler_figdir(figdir, net_name)  # Fixed positional args
-    sub = activity.copy().apply(pd.to_numeric, errors="coerce").fillna(0.0)
-    feats = _top_features_global(sub, k=top_k, mode=rank_mode, signed=True)
-    sub = sub.loc[:, feats]
-
-    if use_zscore:
-        sub = _zscore_cols(sub)
-
-    # STRICT 2-LINE WRAP: Forces a break at the midpoint to keep labels narrow
-    def strict_wrap(name):
-        name = _clean_feature_label(name, net_name)
-        if ' ' not in name and '_' not in name: return name
-        mid = len(name) // 2
-        # Break at nearest space/underscore near middle
-        for i in range(mid, len(name)):
-            if name[i] in ' _':
-                return name[:i] + '\n' + name[i + 1:]
-        return name
-
-    sub.columns = [strict_wrap(c) for c in sub.columns]
-
-    fig_w = max(14.0, 5.0 + 0.5 * sub.shape[1])
-    fig_h = max(10.0, 4.0 + 0.4 * sub.shape[0])
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-
-    sns.heatmap(sub, ax=ax, cmap=cmap, cbar_kws={"shrink": 0.6})
-
-    # FIXED PADDING: Reduced from 40 to 12 to bring text closer to the axis
-    ax.tick_params(axis="x", rotation=45, pad=12, labelsize=9)
-    for t in ax.get_xticklabels():
-        t.set_ha("right")
-        t.set_va("top")
-        t.set_multialignment("right")
-
-    ax.grid(False)
-    fig.subplots_adjust(bottom=0.30, left=0.20, right=0.92)
-
-    save_multi(f"{stem}{int(top_k)}", outdir, fig)
-    plt.close(fig)
-
 def plot_decoupler_cluster_topn_barplots(
         activity: pd.DataFrame,
         *,
@@ -2990,6 +2934,64 @@ def plot_decoupler_cluster_topn_barplots(
         save_multi(stem, outdir, fig)
         plt.close(fig)
 
+def plot_decoupler_activity_heatmap(
+        activity: pd.DataFrame,
+        *,
+        net_name: str,
+        figdir: Path | None,
+        top_k: int = 30,
+        rank_mode: str = "var",
+        use_zscore: bool = True,
+        wrap_labels: bool = True,   # kept for API compat; ignored (no wrapping)
+        cmap: str = "viridis",
+        stem: str = "heatmap_top",
+        title_prefix: Optional[str] = None,
+) -> None:
+    if activity is None or activity.empty:
+        return
+
+    outdir = _decoupler_figdir(figdir, net_name)
+    sub = activity.copy().apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    feats = _top_features_global(sub, k=top_k, mode=rank_mode, signed=True)
+    sub = sub.loc[:, feats]
+
+    if use_zscore:
+        sub = _zscore_cols(sub)
+
+    # --- NO WRAP: keep single-line labels ---
+    sub.columns = [_clean_feature_label(c, net_name) for c in sub.columns]
+
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    fig_w = max(14.0, 6.0 + 0.45 * sub.shape[1])
+    fig_h = max(10.0, 4.0 + 0.40 * sub.shape[0])
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+    sns.heatmap(sub, ax=ax, cmap=cmap, cbar_kws={"shrink": 0.6})
+
+    # Ticks: single-line labels, angled. No multiline alignment needed.
+    ax.tick_params(axis="x", rotation=45, pad=8, labelsize=9)
+    for t in ax.get_xticklabels():
+        t.set_ha("right")
+        t.set_va("top")
+
+    ax.grid(False)
+
+    # --- Dynamic margins based on label lengths (bottom for x labels) ---
+    # Crude-but-effective heuristic: longer strings -> bigger bottom margin.
+    max_x = max((len(str(x)) for x in sub.columns), default=10)
+    # scale bottom within [0.22, 0.45]
+    bottom = min(0.45, max(0.22, 0.22 + 0.0045 * max(0, max_x - 18)))
+    # left margin for cluster names
+    max_y = max((len(str(y)) for y in sub.index), default=10)
+    left = min(0.35, max(0.18, 0.18 + 0.0030 * max(0, max_y - 18)))
+
+    fig.subplots_adjust(bottom=bottom, left=left, right=0.92, top=0.92)
+
+    save_multi(f"{stem}{int(top_k)}", outdir, fig)
+    plt.close(fig)
+
 
 def plot_decoupler_dotplot(
         activity: pd.DataFrame,
@@ -3000,8 +3002,8 @@ def plot_decoupler_dotplot(
         rank_mode: str = "var",
         color_by: str = "z",
         size_by: str = "abs_raw",
-        wrap_labels: bool = True,
-        wrap_at: int = 25,
+        wrap_labels: bool = True,   # kept for API compat; ignored (no wrapping)
+        wrap_at: int = 25,          # kept for API compat; ignored
         cmap: str = "viridis",
         stem: str = "dotplot_top",
         title_prefix: Optional[str] = None,
@@ -3010,8 +3012,7 @@ def plot_decoupler_dotplot(
         return
 
     outdir = _decoupler_figdir(figdir, net_name)
-    A = activity.copy()
-    A = A.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    A = activity.copy().apply(pd.to_numeric, errors="coerce").fillna(0.0)
 
     feats = _top_features_global(A, k=top_k, mode=rank_mode, signed=True)
     if not feats:
@@ -3027,67 +3028,116 @@ def plot_decoupler_dotplot(
 
     clusters = sub_raw.index.astype(str).tolist()
     features = sub_raw.columns.astype(str).tolist()
-    features_clean = [_clean_feature_label(f, net_name) for f in features]
-    features_disp = _wrap_labels(features_clean, wrap_at=wrap_at) if wrap_labels else features_clean
+
+    # --- NO WRAP: keep single-line y labels ---
+    features_disp = [_clean_feature_label(f, net_name) for f in features]
 
     rows = []
     for j, feat in enumerate(features):
         for cl in clusters:
             rows.append({
-                "cluster": cl, "feature": features_disp[j],
+                "cluster": cl,
+                "feature": features_disp[j],
                 "color": float(color_mat.loc[cl, feat]),
                 "size": float(size_mat.loc[cl, feat]),
             })
     df = pd.DataFrame(rows)
 
+    import numpy as np
+    import matplotlib.pyplot as plt
+
     svals = df["size"].to_numpy()
-    s_min, s_max = np.nanmin(svals), np.nanmax(svals)
+    s_min, s_max = float(np.nanmin(svals)), float(np.nanmax(svals))
 
-    def size_scale(v):
-        return 30.0 + (v - s_min) / (s_max - s_min) * 180.0 if s_max > s_min else 80.0
+    def size_scale(v: float) -> float:
+        if not np.isfinite(v):
+            return 30.0
+        if s_max > s_min:
+            return 30.0 + (v - s_min) / (s_max - s_min) * 180.0
+        return 80.0
 
-    sizes = np.array([size_scale(v) for v in svals])
+    sizes = np.array([size_scale(v) for v in svals], dtype=float)
 
     # Canvas Setup
     fig_w = max(18.0, 10.0 + 0.6 * len(clusters))
     fig_h = max(12.0, 5.0 + 0.5 * len(features))
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-    # STRATEGY: Create a large "Right Gutter" (right=0.75)
-    left_margin = min(0.35, _dynamic_left_margin_from_labels(df["feature"].values, base=0.25))
-    fig.subplots_adjust(left=left_margin, right=0.75, top=0.90, bottom=0.20)
+    # --- Dynamic left margin for long feature labels (y axis) ---
+    max_feat = max((len(str(x)) for x in features_disp), default=12)
+    # scale within [0.22, 0.55]
+    left_margin = min(0.55, max(0.22, 0.22 + 0.0060 * max(0, max_feat - 18)))
+
+    # --- Right gutter reserved for legends (stacked) ---
+    # main plot uses [left_margin, ..., right=0.78]
+    fig.subplots_adjust(left=left_margin, right=0.78, top=0.90, bottom=0.20)
 
     sca = ax.scatter(
-        x=df["cluster"].values, y=df["feature"].values,
-        s=sizes, c=df["color"].values, cmap=cmap,
-        edgecolors="black", linewidths=0.5, alpha=0.9, zorder=3
+        x=df["cluster"].values,
+        y=df["feature"].values,
+        s=sizes,
+        c=df["color"].values,
+        cmap=cmap,
+        edgecolors="black",
+        linewidths=0.5,
+        alpha=0.9,
+        zorder=3,
     )
 
-    # --- VERTICAL STACKED SIDEBAR ---
-    # 1. Size Legend (Placed at the TOP of the gutter)
-    # [left, bottom, width, height] in figure coordinates
-    leg_ax = fig.add_axes([0.82, 0.55, 0.10, 0.30])
-    leg_ax.axis('off')
+    # X ticks
+    ax.tick_params(axis="x", rotation=45, pad=8)
 
-    refs = np.unique(np.round(np.quantile(svals, [0.25, 0.50, 0.75]), 2))
-    refs = refs[refs > 0]
-    if refs.size > 0:
-        handles = [plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
-                              markersize=np.sqrt(size_scale(v)), label=f"{v}", alpha=0.6) for v in refs]
-        leg_ax.legend(handles=handles, title=size_label, loc="upper left",
-                      frameon=False, labelspacing=2.5, title_fontsize=14, fontsize=12)
-
-    # 2. Colorbar (Placed at the BOTTOM of the gutter)
-    cbar_ax = fig.add_axes([0.83, 0.15, 0.02, 0.30])
-    cbar = fig.colorbar(sca, cax=cbar_ax)
-    cbar.set_label(cbar_label, weight='bold', size=14)
-
-    ax.tick_params(axis="x", rotation=45, pad=10)
     ax.grid(False)
-    ax.set_title(f"{title_prefix or ''} {net_name}", pad=40, size=20, weight='bold')
+    ax.set_title(f"{(title_prefix + ' ') if title_prefix else ''}{net_name}", pad=18, size=18, weight="bold")
+
+    # ------------------------------------------------------------------
+    # Legends: VERTICALLY STACKED on the RIGHT, no overlap with plot
+    # ------------------------------------------------------------------
+
+    # 1) Size legend axis (top of gutter)
+    leg_ax = fig.add_axes([0.80, 0.55, 0.18, 0.32])  # [left, bottom, width, height]
+    leg_ax.axis("off")
+
+    # Pick 3 reference sizes (25/50/75th percentile), de-dup, positive only
+    q = np.quantile(svals[np.isfinite(svals)], [0.25, 0.50, 0.75]) if np.isfinite(svals).any() else np.array([])
+    refs = np.unique(np.round(q, 2))
+    refs = refs[refs > 0]
+
+    if refs.size > 0:
+        handles = [
+            plt.Line2D(
+                [0], [0],
+                marker="o",
+                linestyle="",
+                color="w",
+                markerfacecolor="gray",
+                markeredgecolor="black",
+                markersize=float(np.sqrt(size_scale(float(v)))),  # legend expects radius-ish
+                alpha=0.7,
+                label=f"{v:g}",
+            )
+            for v in refs
+        ]
+        leg_ax.legend(
+            handles=handles,
+            title=size_label,
+            loc="upper left",
+            frameon=False,
+            labelspacing=1.2,
+            handletextpad=0.8,
+            borderpad=0.2,
+            title_fontsize=12,
+            fontsize=10,
+        )
+
+    # 2) Colorbar axis (bottom of gutter) — aligned below size legend
+    cbar_ax = fig.add_axes([0.84, 0.20, 0.03, 0.28])
+    cbar = fig.colorbar(sca, cax=cbar_ax)
+    cbar.set_label(cbar_label, weight="bold", size=12)
 
     save_multi(f"{stem}{int(top_k)}_{cbar_label}_{size_by}", outdir, fig)
     plt.close(fig)
+
 
 
 def plot_decoupler_all_styles(

@@ -2547,10 +2547,10 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
     )
 
     if cfg.make_figures and ann_keys is not None:
-        # Put plots under: cluster_and_annotate/<round_id>/celltypist/
+        # Put plots under: cluster_and_annotate/<round_id>/clustering/
         figdir_cluster = Path("cluster_and_annotate")
         round_part = ann_keys.get("round_id", active_round_id) or "r0"
-        figdir_ct = figdir_cluster / str(round_part) / "celltypist"
+        figdir_ct = figdir_cluster / str(round_part) / "clustering"
 
         # UMAPs for CellTypist outputs
         plot_utils.umap_by(
@@ -2708,7 +2708,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
             progeny_key = f"progeny__{active_round_id}"
             dorothea_key = f"dorothea__{active_round_id}"
 
-            figdir_round = Path("cluster_and_annotate") / active_round_id / "decoupler"
+            figdir_round = Path("cluster_and_annotate") / active_round_id
 
             # MSigDB (usually large)
             if msigdb_key in adata.uns:
