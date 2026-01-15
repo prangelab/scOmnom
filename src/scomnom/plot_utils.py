@@ -3002,8 +3002,8 @@ def plot_decoupler_dotplot(
         rank_mode: str = "var",
         color_by: str = "z",
         size_by: str = "abs_raw",
-        wrap_labels: bool = True,   # kept for API compat; ignored (no wrapping)
-        wrap_at: int = 25,          # kept for API compat; ignored
+        wrap_labels: bool = True,  # ignored
+        wrap_at: int = 25,  # ignored
         cmap: str = "viridis",
         stem: str = "dotplot_top",
         title_prefix: Optional[str] = None,
@@ -3024,12 +3024,10 @@ def plot_decoupler_dotplot(
     color_mat = sub_raw if color_by == "raw" else sub_z
     cbar_label = "activity" if color_by == "raw" else "z-score"
     size_mat = sub_z.abs() if size_by == "abs_z" else sub_raw.abs()
-    size_label = "|z|" if size_by == "abs_z" else "|raw|"
+    size_label = "|raw|" if size_by == "abs_raw" else "|z|"
 
     clusters = sub_raw.index.astype(str).tolist()
     features = sub_raw.columns.astype(str).tolist()
-
-    # --- NO WRAP: keep single-line y labels ---
     features_disp = [_clean_feature_label(f, net_name) for f in features]
 
     rows = []
@@ -3050,27 +3048,22 @@ def plot_decoupler_dotplot(
     s_min, s_max = float(np.nanmin(svals)), float(np.nanmax(svals))
 
     def size_scale(v: float) -> float:
-        if not np.isfinite(v):
-            return 30.0
-        if s_max > s_min:
-            return 30.0 + (v - s_min) / (s_max - s_min) * 180.0
-        return 80.0
+        if not np.isfinite(v): return 30.0
+        return 30.0 + (v - s_min) / (s_max - s_min) * 250.0 if s_max > s_min else 80.0
 
-    sizes = np.array([size_scale(v) for v in svals], dtype=float)
+    sizes = np.array([size_scale(v) for v in svals])
 
-    # Canvas Setup
-    fig_w = max(18.0, 10.0 + 0.6 * len(clusters))
+    # Canvas Setup - Increased width to accommodate the sidebar
+    fig_w = max(20.0, 12.0 + 0.6 * len(clusters))
     fig_h = max(12.0, 5.0 + 0.5 * len(features))
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-    # --- Dynamic left margin for long feature labels (y axis) ---
+    # --- NEW MARGIN STRATEGY ---
+    # We pull the main plot area back to 0.70 to ensure a clear gutter.
     max_feat = max((len(str(x)) for x in features_disp), default=12)
-    # scale within [0.22, 0.55]
-    left_margin = min(0.55, max(0.22, 0.22 + 0.0060 * max(0, max_feat - 18)))
+    left_margin = min(0.55, max(0.22, 0.22 + 0.0075 * max(0, max_feat - 15)))
 
-    # --- Right gutter reserved for legends (stacked) ---
-    # main plot uses [left_margin, ..., right=0.78]
-    fig.subplots_adjust(left=left_margin, right=0.78, top=0.90, bottom=0.20)
+    fig.subplots_adjust(left=left_margin, right=0.70, top=0.92, bottom=0.15)
 
     sca = ax.scatter(
         x=df["cluster"].values,
@@ -3084,60 +3077,43 @@ def plot_decoupler_dotplot(
         zorder=3,
     )
 
-    # X ticks
     ax.tick_params(axis="x", rotation=45, pad=8)
-
     ax.grid(False)
-    ax.set_title(f"{(title_prefix + ' ') if title_prefix else ''}{net_name}", pad=18, size=18, weight="bold")
+    ax.set_title(f"{(title_prefix + ' ') if title_prefix else ''}{net_name}", pad=25, size=20, weight="bold")
 
     # ------------------------------------------------------------------
-    # Legends: VERTICALLY STACKED on the RIGHT, no overlap with plot
+    # FIXED SIDEBAR: Absolute placement in the right gutter
     # ------------------------------------------------------------------
 
-    # 1) Size legend axis (top of gutter)
-    leg_ax = fig.add_axes([0.80, 0.55, 0.18, 0.32])  # [left, bottom, width, height]
+    # 1) Size legend axis (Placed in the top right quadrant of the figure)
+    # [left, bottom, width, height]
+    leg_ax = fig.add_axes([0.80, 0.60, 0.15, 0.25])
     leg_ax.axis("off")
 
-    # Pick 3 reference sizes (25/50/75th percentile), de-dup, positive only
     q = np.quantile(svals[np.isfinite(svals)], [0.25, 0.50, 0.75]) if np.isfinite(svals).any() else np.array([])
     refs = np.unique(np.round(q, 2))
     refs = refs[refs > 0]
 
     if refs.size > 0:
         handles = [
-            plt.Line2D(
-                [0], [0],
-                marker="o",
-                linestyle="",
-                color="w",
-                markerfacecolor="gray",
-                markeredgecolor="black",
-                markersize=float(np.sqrt(size_scale(float(v)))),  # legend expects radius-ish
-                alpha=0.7,
-                label=f"{v:g}",
-            )
+            plt.Line2D([0], [0], marker="o", linestyle="", color="w",
+                       markerfacecolor="gray", markeredgecolor="black",
+                       markersize=np.sqrt(size_scale(float(v))), alpha=0.7, label=f"{v:g}")
             for v in refs
         ]
         leg_ax.legend(
-            handles=handles,
-            title=size_label,
-            loc="upper left",
-            frameon=False,
-            labelspacing=1.2,
-            handletextpad=0.8,
-            borderpad=0.2,
-            title_fontsize=12,
-            fontsize=10,
+            handles=handles, title=size_label, loc="upper left",
+            frameon=False, labelspacing=2.0, title_fontsize=14, fontsize=12
         )
 
-    # 2) Colorbar axis (bottom of gutter) — aligned below size legend
-    cbar_ax = fig.add_axes([0.84, 0.20, 0.03, 0.28])
+    # 2) Colorbar axis (Placed in the bottom right quadrant)
+    # This is physically separated from leg_ax by the 'bottom' coordinate (0.20 vs 0.60)
+    cbar_ax = fig.add_axes([0.82, 0.20, 0.02, 0.30])
     cbar = fig.colorbar(sca, cax=cbar_ax)
-    cbar.set_label(cbar_label, weight="bold", size=12)
+    cbar.set_label(cbar_label, weight="bold", size=14)
 
     save_multi(f"{stem}{int(top_k)}_{cbar_label}_{size_by}", outdir, fig)
     plt.close(fig)
-
 
 
 def plot_decoupler_all_styles(
