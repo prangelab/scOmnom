@@ -2993,67 +2993,121 @@ def plot_decoupler_activity_heatmap(
     plt.close(fig)
 
 
-import matplotlib.pyplot as plt
-from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
-from matplotlib.lines import Line2D
+def plot_decoupler_dotplot(
+    activity: pd.DataFrame,
+    *,
+    net_name: str,
+    figdir: Path | None,
+    top_k: int = 30,
+    rank_mode: str = "var",
+    color_by: str = "z",
+    size_by: str = "abs_raw",
+    wrap_labels: bool = True,
+    wrap_at: int = 25,
+    cmap: str = "viridis",
+    stem: str = "dotplot_top",
+    title_prefix: Optional[str] = None,
+) -> None:
+    if activity is None or activity.empty:
+        return
 
-# 1) Setup Figure with a TRUE side column for legends
-fig_w = max(22.0, 12.0 + 0.6 * len(clusters))
-fig_h = max(12.0, 5.0 + 0.5 * len(features_disp))
-fig = plt.figure(figsize=(fig_w, fig_h), constrained_layout=True)
+    import matplotlib.pyplot as plt
+    from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
+    from matplotlib.lines import Line2D
 
-# Outer grid: main plot + right legend column
-gs = GridSpec(1, 2, width_ratios=[1.0, 0.18], wspace=0.05, figure=fig)
-ax = fig.add_subplot(gs[0, 0])
+    outdir = _decoupler_figdir(figdir, net_name)
 
-# Right column split into: (size legend) / (colorbar) / (spacer)
-gs_right = GridSpecFromSubplotSpec(
-    3, 1, subplot_spec=gs[0, 1],
-    height_ratios=[0.65, 0.30, 0.05],
-    hspace=0.15
-)
-ax_leg = fig.add_subplot(gs_right[0, 0])
-ax_cbar = fig.add_subplot(gs_right[1, 0])
-ax_sp = fig.add_subplot(gs_right[2, 0])
+    A = activity.copy().apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    feats = _top_features_global(A, k=top_k, mode=rank_mode, signed=True)
+    if not feats:
+        return
 
-for a in (ax_leg, ax_sp):
-    a.axis("off")
+    sub_raw = A.loc[:, feats].copy()
+    sub_z = _zscore_cols(sub_raw)
 
-# 2) Plot Data
-sca = ax.scatter(
-    x=df["cluster"].values, y=df["feature"].values,
-    s=[size_scale(v) for v in df["size"]],
-    c=df["color"].values,
-    cmap=cmap,
-    edgecolors="black",
-    linewidths=0.5,
-    alpha=0.9,
-    zorder=3,
-)
+    color_mat = sub_raw if color_by == "raw" else sub_z
+    cbar_label = "activity" if color_by == "raw" else "z-score"
+    size_mat = sub_z.abs() if size_by == "abs_z" else sub_raw.abs()
+    size_label = "|raw|" if size_by == "abs_raw" else "|z|"
 
-# 3) Labels / title
-ax.tick_params(axis="x", rotation=45, pad=8)
-ax.set_title(
-    f"{(title_prefix + ' ') if title_prefix else ''}{net_name}",
-    pad=18, size=20, weight="bold"
-)
+    clusters = sub_raw.index.astype(str).tolist()
+    features_disp = [_clean_feature_label(f, net_name) for f in sub_raw.columns]
 
-# Optional: wrap y tick labels (safer than trying to subplots_adjust left)
-if wrap_labels and wrap_at and wrap_at > 5:
-    import textwrap
-    ax.set_yticklabels(
-        [textwrap.fill(str(t.get_text()), width=int(wrap_at)) for t in ax.get_yticklabels()]
+    # --------------------------------------------------
+    # FIGURE SETUP (THIS WAS THE PART THAT LEAKED OUT)
+    # --------------------------------------------------
+    fig_w = max(22.0, 12.0 + 0.6 * len(clusters))
+    fig_h = max(12.0, 5.0 + 0.5 * len(features_disp))
+    fig = plt.figure(figsize=(fig_w, fig_h), constrained_layout=True)
+
+    gs = GridSpec(1, 2, width_ratios=[1.0, 0.18], wspace=0.05, figure=fig)
+    ax = fig.add_subplot(gs[0, 0])
+
+    gs_right = GridSpecFromSubplotSpec(
+        3, 1, subplot_spec=gs[0, 1],
+        height_ratios=[0.65, 0.30, 0.05],
+        hspace=0.15
+    )
+    ax_leg = fig.add_subplot(gs_right[0, 0])
+    ax_cbar = fig.add_subplot(gs_right[1, 0])
+    ax_sp = fig.add_subplot(gs_right[2, 0])
+    ax_leg.axis("off")
+    ax_sp.axis("off")
+
+    # --------------------------------------------------
+    # SCATTER
+    # --------------------------------------------------
+    rows = []
+    for j, feat in enumerate(sub_raw.columns):
+        for cl in clusters:
+            rows.append({
+                "cluster": cl,
+                "feature": features_disp[j],
+                "color": float(color_mat.loc[cl, feat]),
+                "size": float(size_mat.loc[cl, feat]),
+            })
+    df = pd.DataFrame(rows)
+
+    svals = df["size"].to_numpy()
+    s_min, s_max = float(np.nanmin(svals)), float(np.nanmax(svals))
+
+    def size_scale(v: float) -> float:
+        return 30.0 + (v - s_min) / (s_max - s_min) * 250.0 if s_max > s_min else 80.0
+
+    sca = ax.scatter(
+        x=df["cluster"],
+        y=df["feature"],
+        s=[size_scale(v) for v in df["size"]],
+        c=df["color"],
+        cmap=cmap,
+        edgecolors="black",
+        linewidths=0.5,
+        alpha=0.9,
+        zorder=3,
     )
 
-# 4) Size legend (in dedicated side axis, never overlaps)
-svals = df["size"].to_numpy()
-finite = svals[np.isfinite(svals)]
-if finite.size > 0:
-    q = np.quantile(finite, [0.25, 0.50, 0.75])
-    refs = np.unique(np.round(q, 2))
-    refs = refs[refs > 0]
+    ax.tick_params(axis="x", rotation=45, pad=8)
+    ax.set_title(
+        f"{(title_prefix + ' ') if title_prefix else ''}{net_name}",
+        pad=18, size=20, weight="bold",
+    )
 
-    if refs.size > 0:
+    # Optional label wrapping
+    if wrap_labels and wrap_at and wrap_at > 5:
+        import textwrap
+        ax.set_yticklabels(
+            [textwrap.fill(str(t.get_text()), width=wrap_at) for t in ax.get_yticklabels()]
+        )
+
+    # --------------------------------------------------
+    # SIZE LEGEND
+    # --------------------------------------------------
+    finite = svals[np.isfinite(svals)]
+    if finite.size > 0:
+        q = np.quantile(finite, [0.25, 0.50, 0.75])
+        refs = np.unique(np.round(q, 2))
+        refs = refs[refs > 0]
+
         handles = [
             Line2D(
                 [0], [0],
@@ -3061,7 +3115,7 @@ if finite.size > 0:
                 markerfacecolor="gray",
                 markeredgecolor="black",
                 color="w",
-                markersize=float(np.sqrt(size_scale(float(v)))),
+                markersize=float(np.sqrt(size_scale(v))),
                 alpha=0.7,
                 label=f"{v:g}",
             )
@@ -3073,18 +3127,18 @@ if finite.size > 0:
             loc="upper left",
             frameon=False,
             labelspacing=1.2,
-            handletextpad=0.8,
-            borderaxespad=0.0,
             title_fontsize=14,
             fontsize=12,
         )
 
-# 5) Colorbar (in dedicated side axis, never overlaps)
-cbar = fig.colorbar(sca, cax=ax_cbar)
-cbar.set_label(cbar_label, weight="bold", size=14)
+    # --------------------------------------------------
+    # COLORBAR
+    # --------------------------------------------------
+    cbar = fig.colorbar(sca, cax=ax_cbar)
+    cbar.set_label(cbar_label, weight="bold", size=14)
 
-save_multi(f"{stem}{int(top_k)}_{cbar_label}_{size_by}", outdir, fig)
-plt.close(fig)
+    save_multi(f"{stem}{int(top_k)}_{cbar_label}_{size_by}", outdir, fig)
+    plt.close(fig)
 
 
 
