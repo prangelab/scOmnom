@@ -2866,7 +2866,6 @@ def plot_decoupler_activity_heatmap(
         rank_mode: str = "var",
         use_zscore: bool = True,
         wrap_labels: bool = True,
-        wrap_at: int = 20, # Shorter wrap for heatmaps
         cmap: str = "viridis",
         stem: str = "heatmap_top",
         title_prefix: Optional[str] = None,
@@ -2874,54 +2873,42 @@ def plot_decoupler_activity_heatmap(
     if activity is None or activity.empty:
         return
 
-    outdir = _decoupler_figdir(figdir, net_name)
-    A = activity.copy()
-    A = A.apply(pd.to_numeric, errors="coerce").fillna(0.0)
-
-    feats = _top_features_global(A, k=top_k, mode=rank_mode, signed=True)
-    if not feats:
-        return
-    sub = A.loc[:, feats].copy()
+    outdir = _decoupler_figdir(net_name=net_name, figdir=figdir)
+    sub = activity.copy().apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    feats = _top_features_global(sub, k=top_k, mode=rank_mode, signed=True)
+    sub = sub.loc[:, feats]
 
     if use_zscore:
         sub = _zscore_cols(sub)
 
-    sub.columns = [_clean_feature_label(c, net_name) for c in sub.columns]
-    if wrap_labels:
-        sub.columns = _wrap_labels(sub.columns, wrap_at=wrap_at)
+    # STRICT 2-LINE WRAP
+    def strict_wrap(name):
+        name = _clean_feature_label(name, net_name)
+        words = name.split(' ')
+        if len(words) <= 2: return name
+        mid = len(words) // 2
+        return ' '.join(words[:mid]) + '\n' + ' '.join(words[mid:])
 
-    fig_w = max(16.0, 6.0 + 0.6 * sub.shape[1])
-    fig_h = max(12.0, 6.0 + 0.5 * sub.shape[0])
+    sub.columns = [strict_wrap(c) for c in sub.columns]
+
+    fig_w = max(14.0, 5.0 + 0.5 * sub.shape[1])
+    fig_h = max(10.0, 4.0 + 0.4 * sub.shape[0])
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-    ax.grid(False)
-    ax.set_facecolor('white')
+    sns.heatmap(sub, ax=ax, cmap=cmap, cbar_kws={"shrink": 0.6})
 
-    sns.heatmap(sub, ax=ax, cmap=cmap, cbar=True, linewidths=0.0, linecolor=None,
-                cbar_kws={"shrink": 0.5, "aspect": 30})
-
-    # X-axis Fix:
-    # rotation_mode="anchor" + ha="right" ensures the labels hang away from each other
-    ax.tick_params(axis="x", rotation=45, labelsize=9, pad=35)
-    ax.tick_params(axis="y", rotation=0, labelsize=10, pad=12)
-
+    # REDUCED OFFSET: pad=12 is much tighter than the previous 40
+    ax.tick_params(axis="x", rotation=45, pad=12, labelsize=9)
     for t in ax.get_xticklabels():
         t.set_ha("right")
         t.set_va("top")
-        t.set_rotation_mode("anchor")
-        t.set_multialignment("right") # Force internal wrap to right-align
+        t.set_multialignment("right")
 
-    try:
-        max_lab_len = int(max(len(str(c)) for c in sub.columns))
-    except:
-        max_lab_len = 0
+    ax.grid(False)
+    # Adjust bottom margin to reclaim space lost by the large offset
+    fig.subplots_adjust(bottom=0.30, left=0.20, right=0.92)
 
-    # Much larger bottom margin
-    bottom = float(np.clip(0.50 + 0.008 * max_lab_len, 0.45, 0.75))
-    fig.subplots_adjust(left=0.25, right=0.92, top=0.88, bottom=bottom)
-
-    sfx = f"{stem}{int(top_k)}" + ("_z" if use_zscore else "_raw")
-    save_multi(sfx, outdir, fig)
+    save_multi(f"{stem}{int(top_k)}", outdir, fig)
     plt.close(fig)
 
 def plot_decoupler_cluster_topn_barplots(
@@ -3012,7 +2999,7 @@ def plot_decoupler_dotplot(
         color_by: str = "z",
         size_by: str = "abs_raw",
         wrap_labels: bool = True,
-        wrap_at: int = 20,  # Tightened wrap
+        wrap_at: int = 25,
         cmap: str = "viridis",
         stem: str = "dotplot_top",
         title_prefix: Optional[str] = None,
@@ -3045,8 +3032,7 @@ def plot_decoupler_dotplot(
     for j, feat in enumerate(features):
         for cl in clusters:
             rows.append({
-                "cluster": cl,
-                "feature": features_disp[j],
+                "cluster": cl, "feature": features_disp[j],
                 "color": float(color_mat.loc[cl, feat]),
                 "size": float(size_mat.loc[cl, feat]),
             })
@@ -3060,44 +3046,43 @@ def plot_decoupler_dotplot(
 
     sizes = np.array([size_scale(v) for v in svals])
 
-    # WIDER CANVAS: Ensure 0.65 to 1.0 is a massive gutter for legends
+    # Canvas Setup
     fig_w = max(18.0, 10.0 + 0.6 * len(clusters))
     fig_h = max(12.0, 5.0 + 0.5 * len(features))
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-    # Capped Left Margin to avoid the ValueError you saw
-    left_margin = min(0.40, _dynamic_left_margin_from_labels(df["feature"].values, base=0.25))
-    fig.subplots_adjust(left=left_margin, right=0.70, top=0.92, bottom=0.20)
+    # STRATEGY: Create a large "Right Gutter" (right=0.75)
+    left_margin = min(0.35, _dynamic_left_margin_from_labels(df["feature"].values, base=0.25))
+    fig.subplots_adjust(left=left_margin, right=0.75, top=0.90, bottom=0.20)
 
     sca = ax.scatter(
         x=df["cluster"].values, y=df["feature"].values,
         s=sizes, c=df["color"].values, cmap=cmap,
-        edgecolors="black", linewidths=0.4, alpha=0.9, zorder=3
+        edgecolors="black", linewidths=0.5, alpha=0.9, zorder=3
     )
 
-    # --- THE LEGEND FIX ---
-    # 1. COLORBAR (Bottom Right Gutter)
-    cbar_ax = fig.add_axes([0.78, 0.20, 0.015, 0.25])
-    cbar = fig.colorbar(sca, cax=cbar_ax)
-    cbar.set_label(cbar_label, weight='bold', size=12)
+    # --- VERTICAL STACKED SIDEBAR ---
+    # 1. Size Legend (Placed at the TOP of the gutter)
+    # [left, bottom, width, height] in figure coordinates
+    leg_ax = fig.add_axes([0.82, 0.55, 0.10, 0.30])
+    leg_ax.axis('off')
 
-    # 2. SIZE LEGEND (Top Right Gutter - High up to avoid Colorbar)
-    refs = np.unique(np.round(np.quantile(svals, [0.25, 0.50, 0.75]), 3))
+    refs = np.unique(np.round(np.quantile(svals, [0.25, 0.50, 0.75]), 2))
     refs = refs[refs > 0]
     if refs.size > 0:
         handles = [plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
-                              markersize=np.sqrt(size_scale(v)), label=f"{v:.2f}", alpha=0.6) for v in refs]
-
-        # We use a dedicated legend axis to ensure it NEVER cuts off
-        leg_ax = fig.add_axes([0.76, 0.60, 0.15, 0.25])
-        leg_ax.axis('off')
+                              markersize=np.sqrt(size_scale(v)), label=f"{v}", alpha=0.6) for v in refs]
         leg_ax.legend(handles=handles, title=size_label, loc="upper left",
-                      frameon=False, labelspacing=1.8, title_fontsize=12, fontsize=11)
+                      frameon=False, labelspacing=2.5, title_fontsize=14, fontsize=12)
 
-    ax.tick_params(axis="y", pad=15, labelsize=10)
-    ax.tick_params(axis="x", rotation=45, pad=10, labelsize=10)
+    # 2. Colorbar (Placed at the BOTTOM of the gutter)
+    cbar_ax = fig.add_axes([0.83, 0.15, 0.02, 0.30])
+    cbar = fig.colorbar(sca, cax=cbar_ax)
+    cbar.set_label(cbar_label, weight='bold', size=14)
+
+    ax.tick_params(axis="x", rotation=45, pad=10)
     ax.grid(False)
-    ax.set_title(f"{title_prefix or ''} {net_name} Activity", pad=30, size=16, weight='bold')
+    ax.set_title(f"{title_prefix or ''} {net_name}", pad=40, size=20, weight='bold')
 
     save_multi(f"{stem}{int(top_k)}_{cbar_label}_{size_by}", outdir, fig)
     plt.close(fig)
