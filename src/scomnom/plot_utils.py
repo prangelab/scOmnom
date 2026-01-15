@@ -2866,7 +2866,7 @@ def plot_decoupler_activity_heatmap(
         rank_mode: str = "var",
         use_zscore: bool = True,
         wrap_labels: bool = True,
-        wrap_at: int = 25,
+        wrap_at: int = 20, # Shorter wrap for heatmaps
         cmap: str = "viridis",
         stem: str = "heatmap_top",
         title_prefix: Optional[str] = None,
@@ -2890,39 +2890,39 @@ def plot_decoupler_activity_heatmap(
     if wrap_labels:
         sub.columns = _wrap_labels(sub.columns, wrap_at=wrap_at)
 
-    fig_w = max(14.0, 5.0 + 0.5 * sub.shape[1])
-    fig_h = max(10.0, 5.0 + 0.5 * sub.shape[0])
+    fig_w = max(16.0, 6.0 + 0.6 * sub.shape[1])
+    fig_h = max(12.0, 6.0 + 0.5 * sub.shape[0])
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-    # Remove all grid lines
     ax.grid(False)
     ax.set_facecolor('white')
 
     sns.heatmap(sub, ax=ax, cmap=cmap, cbar=True, linewidths=0.0, linecolor=None,
-                cbar_kws={"shrink": 0.8})
+                cbar_kws={"shrink": 0.5, "aspect": 30})
 
-    # X-axis Fix: Large pad (30) and right alignment for wrapped labels
-    ax.tick_params(axis="x", rotation=45, labelsize=10, pad=30)
+    # X-axis Fix:
+    # rotation_mode="anchor" + ha="right" ensures the labels hang away from each other
+    ax.tick_params(axis="x", rotation=45, labelsize=9, pad=35)
     ax.tick_params(axis="y", rotation=0, labelsize=10, pad=12)
 
     for t in ax.get_xticklabels():
         t.set_ha("right")
         t.set_va("top")
-        t.set_multialignment("right")
+        t.set_rotation_mode("anchor")
+        t.set_multialignment("right") # Force internal wrap to right-align
 
     try:
         max_lab_len = int(max(len(str(c)) for c in sub.columns))
-    except Exception:
+    except:
         max_lab_len = 0
 
-    # Increase bottom margin for wrapped text
-    bottom = float(np.clip(0.45 + 0.007 * max_lab_len, 0.40, 0.70))
-    fig.subplots_adjust(left=0.25, right=0.90, top=0.88, bottom=bottom)
+    # Much larger bottom margin
+    bottom = float(np.clip(0.50 + 0.008 * max_lab_len, 0.45, 0.75))
+    fig.subplots_adjust(left=0.25, right=0.92, top=0.88, bottom=bottom)
 
     sfx = f"{stem}{int(top_k)}" + ("_z" if use_zscore else "_raw")
     save_multi(sfx, outdir, fig)
     plt.close(fig)
-
 
 def plot_decoupler_cluster_topn_barplots(
         activity: pd.DataFrame,
@@ -3003,19 +3003,19 @@ def plot_decoupler_cluster_topn_barplots(
 
 
 def plot_decoupler_dotplot(
-    activity: pd.DataFrame,
-    *,
-    net_name: str,
-    figdir: Path | None,
-    top_k: int = 30,
-    rank_mode: str = "var",
-    color_by: str = "z",
-    size_by: str = "abs_raw",
-    wrap_labels: bool = True,
-    wrap_at: int = 25,
-    cmap: str = "viridis",
-    stem: str = "dotplot_top",
-    title_prefix: Optional[str] = None,
+        activity: pd.DataFrame,
+        *,
+        net_name: str,
+        figdir: Path | None,
+        top_k: int = 30,
+        rank_mode: str = "var",
+        color_by: str = "z",
+        size_by: str = "abs_raw",
+        wrap_labels: bool = True,
+        wrap_at: int = 20,  # Tightened wrap
+        cmap: str = "viridis",
+        stem: str = "dotplot_top",
+        title_prefix: Optional[str] = None,
 ) -> None:
     if activity is None or activity.empty:
         return
@@ -3054,18 +3054,20 @@ def plot_decoupler_dotplot(
 
     svals = df["size"].to_numpy()
     s_min, s_max = np.nanmin(svals), np.nanmax(svals)
+
     def size_scale(v):
         return 30.0 + (v - s_min) / (s_max - s_min) * 180.0 if s_max > s_min else 80.0
+
     sizes = np.array([size_scale(v) for v in svals])
 
-    # INCREASE WIDTH: Provide more canvas to avoid left/right collision
-    fig_w = max(18.0, 10.0 + 0.5 * len(clusters))
-    fig_h = max(10.0, 4.0 + 0.5 * len(features))
+    # WIDER CANVAS: Ensure 0.65 to 1.0 is a massive gutter for legends
+    fig_w = max(18.0, 10.0 + 0.6 * len(clusters))
+    fig_h = max(12.0, 5.0 + 0.5 * len(features))
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-    # FIX: Cap the left margin at 0.45 so it never crosses the right=0.65 margin
-    left_margin = min(0.45, _dynamic_left_margin_from_labels(df["feature"].values, base=0.30))
-    fig.subplots_adjust(left=left_margin, right=0.65, top=0.90, bottom=0.20)
+    # Capped Left Margin to avoid the ValueError you saw
+    left_margin = min(0.40, _dynamic_left_margin_from_labels(df["feature"].values, base=0.25))
+    fig.subplots_adjust(left=left_margin, right=0.70, top=0.92, bottom=0.20)
 
     sca = ax.scatter(
         x=df["cluster"].values, y=df["feature"].values,
@@ -3073,23 +3075,29 @@ def plot_decoupler_dotplot(
         edgecolors="black", linewidths=0.4, alpha=0.9, zorder=3
     )
 
-    # Legends: Using explicit figure coordinates for stability
-    cbar_ax = fig.add_axes([0.70, 0.20, 0.015, 0.25])
+    # --- THE LEGEND FIX ---
+    # 1. COLORBAR (Bottom Right Gutter)
+    cbar_ax = fig.add_axes([0.78, 0.20, 0.015, 0.25])
     cbar = fig.colorbar(sca, cax=cbar_ax)
-    cbar.set_label(cbar_label)
+    cbar.set_label(cbar_label, weight='bold', size=12)
 
+    # 2. SIZE LEGEND (Top Right Gutter - High up to avoid Colorbar)
     refs = np.unique(np.round(np.quantile(svals, [0.25, 0.50, 0.75]), 3))
     refs = refs[refs > 0]
     if refs.size > 0:
         handles = [plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
-                               markersize=np.sqrt(size_scale(v)), label=f"{v:.2f}", alpha=0.6) for v in refs]
-        # Anchor the size legend relative to the cbar_ax or far right
-        ax.legend(handles=handles, title=size_label, loc="upper left",
-                  bbox_to_anchor=(1.15, 1.0), frameon=False, labelspacing=2.0)
+                              markersize=np.sqrt(size_scale(v)), label=f"{v:.2f}", alpha=0.6) for v in refs]
 
-    ax.tick_params(axis="y", pad=15)
-    ax.tick_params(axis="x", rotation=45, pad=12)
+        # We use a dedicated legend axis to ensure it NEVER cuts off
+        leg_ax = fig.add_axes([0.76, 0.60, 0.15, 0.25])
+        leg_ax.axis('off')
+        leg_ax.legend(handles=handles, title=size_label, loc="upper left",
+                      frameon=False, labelspacing=1.8, title_fontsize=12, fontsize=11)
+
+    ax.tick_params(axis="y", pad=15, labelsize=10)
+    ax.tick_params(axis="x", rotation=45, pad=10, labelsize=10)
     ax.grid(False)
+    ax.set_title(f"{title_prefix or ''} {net_name} Activity", pad=30, size=16, weight='bold')
 
     save_multi(f"{stem}{int(top_k)}_{cbar_label}_{size_by}", outdir, fig)
     plt.close(fig)
