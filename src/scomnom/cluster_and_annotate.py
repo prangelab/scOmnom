@@ -1410,21 +1410,78 @@ def _run_celltypist_annotation(
 
     # --------------------------------------------------------------
     # B) Cluster-level majority CellTypist label (ROUND-SCOPED)
+    #    Mask-aware: only use "good" cells (high-confidence CellTypist)
+    #    to decide the cluster label; otherwise mark as Unknown.
     # --------------------------------------------------------------
-    cluster_majority = (
-        adata.obs[[cluster_key, cell_key]]
-        .groupby(cluster_key)[cell_key]
-        .agg(lambda x: x.value_counts().idxmax())
+    # Rebuild mask from stored proba if available; fall back to "all True".
+    bio_mask = None
+    bio_mask_stats = None
+    try:
+        # If probabilities were stored (either from precompute or fallback), reconstruct a DataFrame
+        # so we can apply the exact same entropy+margin rule used during BISC.
+        if "celltypist_proba" in adata.obsm and "celltypist_proba_columns" in adata.uns:
+            pm = pd.DataFrame(
+                adata.obsm["celltypist_proba"],
+                index=adata.obs_names,
+                columns=list(adata.uns["celltypist_proba_columns"]),
+            )
+            bio_mask, bio_mask_stats = _celltypist_entropy_margin_mask(
+                pm,
+                entropy_abs_limit=float(getattr(cfg, "bio_entropy_abs_limit", 0.5)),
+                entropy_quantile=float(getattr(cfg, "bio_entropy_quantile", 0.7)),
+                margin_min=float(getattr(cfg, "bio_margin_min", 0.10)),
+            )
+    except Exception as e:
+        LOGGER.warning("CellTypist mask reconstruction failed; proceeding unmasked. (%s)", e)
+        bio_mask = None
+        bio_mask_stats = None
+
+    if bio_mask is None or bio_mask.shape[0] != adata.n_obs:
+        bio_mask = np.ones((adata.n_obs,), dtype=bool)
+
+    # Cluster-wise label: majority over masked cells only.
+    # If a cluster has too few masked cells, assign Unknown.
+    min_masked_cells = int(getattr(cfg, "pretty_label_min_masked_cells", 25) or 25)
+    min_masked_frac = float(getattr(cfg, "pretty_label_min_masked_frac", 0.10) or 0.10)
+
+    clust_vals = adata.obs[cluster_key].astype(str)
+    ct_vals = adata.obs[cell_key].astype(str)
+
+    tmp = pd.DataFrame(
+        {
+            "cluster": clust_vals.to_numpy(),
+            "ct": ct_vals.to_numpy(),
+            "masked": bio_mask,
+        },
+        index=adata.obs_names,
     )
 
-    adata.obs[cluster_ct_key] = adata.obs[cluster_key].map(cluster_majority)
+    # Precompute cluster sizes to enforce min fraction
+    cluster_sizes = tmp.groupby("cluster").size().to_dict()
+
+    majority_map: dict[str, str] = {}
+    for c, g in tmp.groupby("cluster", sort=False):
+        g_masked = g[g["masked"]]
+        n_total = int(cluster_sizes.get(c, len(g)))
+        n_masked = int(g_masked.shape[0])
+
+        if n_masked < min_masked_cells or (n_total > 0 and (n_masked / n_total) < min_masked_frac):
+            majority_map[str(c)] = "Unknown"
+            continue
+
+        vc = g_masked["ct"].value_counts()
+        majority_map[str(c)] = str(vc.idxmax()) if not vc.empty else "Unknown"
+
+    adata.obs[cluster_ct_key] = clust_vals.map(majority_map).astype("category")
+
     # Alias for "latest" behavior
     adata.obs[cluster_ct_base] = adata.obs[cluster_ct_key]
 
     # --------------------------------------------------------------
     # C) Pretty labels (ROUND-SCOPED), also keep CLUSTER_LABEL_KEY alias
+    #    Cluster name becomes Unknown if its masked-majority is Unknown.
     # --------------------------------------------------------------
-    cl_ids = adata.obs[cluster_key].astype(str)
+    cl_ids = clust_vals
     maj = adata.obs[cluster_ct_key].astype(str).fillna("Unknown")
 
     pretty_labels = "C" + cl_ids.str.zfill(2) + ": " + maj
@@ -1439,6 +1496,31 @@ def _run_celltypist_annotation(
         adata.uns[f"{CLUSTER_LABEL_KEY}_colors"] = adata.uns[f"{pretty_key}_colors"]
     except Exception as e:
         LOGGER.warning("Could not set pretty-label palette: %s", e)
+
+    # --------------------------------------------------------------
+    # D) Store linkage + mask stats into the round dict (if present)
+    # --------------------------------------------------------------
+    try:
+        rounds = adata.uns.get("cluster_rounds", {})
+        if isinstance(rounds, dict) and round_id in rounds and isinstance(rounds[round_id], dict):
+            rounds[round_id].setdefault("annotation", {})
+            rounds[round_id]["annotation"].update(
+                {
+                    "celltypist_cell_key": cell_key,
+                    "celltypist_cluster_key": cluster_ct_key,
+                    "pretty_cluster_key": pretty_key,
+                    "cluster_key_used": cluster_key,
+                    "pretty_label_masked": True,
+                    "pretty_label_min_masked_cells": int(min_masked_cells),
+                    "pretty_label_min_masked_frac": float(min_masked_frac),
+                }
+            )
+            if bio_mask_stats is not None:
+                rounds[round_id].setdefault("bio_mask", {})
+                rounds[round_id]["bio_mask"]["annotation_mask_stats"] = bio_mask_stats
+            adata.uns["cluster_rounds"] = rounds
+    except Exception as e:
+        LOGGER.warning("Failed to store round annotation linkage/mask stats: %s", e)
 
     # --------------------------------------------------------------
     # D) Store linkage into the round dict (if present)

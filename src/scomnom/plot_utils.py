@@ -2873,7 +2873,7 @@ def plot_decoupler_activity_heatmap(
     if activity is None or activity.empty:
         return
 
-    outdir = _decoupler_figdir(net_name=net_name, figdir=figdir)
+    outdir = _decoupler_figdir(figdir, net_name)  # Fixed positional args
     sub = activity.copy().apply(pd.to_numeric, errors="coerce").fillna(0.0)
     feats = _top_features_global(sub, k=top_k, mode=rank_mode, signed=True)
     sub = sub.loc[:, feats]
@@ -2881,13 +2881,16 @@ def plot_decoupler_activity_heatmap(
     if use_zscore:
         sub = _zscore_cols(sub)
 
-    # STRICT 2-LINE WRAP
+    # STRICT 2-LINE WRAP: Forces a break at the midpoint to keep labels narrow
     def strict_wrap(name):
         name = _clean_feature_label(name, net_name)
-        words = name.split(' ')
-        if len(words) <= 2: return name
-        mid = len(words) // 2
-        return ' '.join(words[:mid]) + '\n' + ' '.join(words[mid:])
+        if ' ' not in name and '_' not in name: return name
+        mid = len(name) // 2
+        # Break at nearest space/underscore near middle
+        for i in range(mid, len(name)):
+            if name[i] in ' _':
+                return name[:i] + '\n' + name[i + 1:]
+        return name
 
     sub.columns = [strict_wrap(c) for c in sub.columns]
 
@@ -2897,7 +2900,7 @@ def plot_decoupler_activity_heatmap(
 
     sns.heatmap(sub, ax=ax, cmap=cmap, cbar_kws={"shrink": 0.6})
 
-    # REDUCED OFFSET: pad=12 is much tighter than the previous 40
+    # FIXED PADDING: Reduced from 40 to 12 to bring text closer to the axis
     ax.tick_params(axis="x", rotation=45, pad=12, labelsize=9)
     for t in ax.get_xticklabels():
         t.set_ha("right")
@@ -2905,7 +2908,6 @@ def plot_decoupler_activity_heatmap(
         t.set_multialignment("right")
 
     ax.grid(False)
-    # Adjust bottom margin to reclaim space lost by the large offset
     fig.subplots_adjust(bottom=0.30, left=0.20, right=0.92)
 
     save_multi(f"{stem}{int(top_k)}", outdir, fig)
