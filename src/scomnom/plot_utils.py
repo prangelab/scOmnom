@@ -2866,15 +2866,11 @@ def plot_decoupler_activity_heatmap(
         rank_mode: str = "var",
         use_zscore: bool = True,
         wrap_labels: bool = True,
-        wrap_at: int = 30,  # Shorter wrap prevents collision between adjacent columns
+        wrap_at: int = 25,
         cmap: str = "viridis",
         stem: str = "heatmap_top",
         title_prefix: Optional[str] = None,
 ) -> None:
-    """
-    Plots a heatmap of decoupler activities with fixes for overlapping
-    wrapped X-axis labels and clean MSigDB naming.
-    """
     if activity is None or activity.empty:
         return
 
@@ -2882,7 +2878,6 @@ def plot_decoupler_activity_heatmap(
     A = activity.copy()
     A = A.apply(pd.to_numeric, errors="coerce").fillna(0.0)
 
-    # Select top features
     feats = _top_features_global(A, k=top_k, mode=rank_mode, signed=True)
     if not feats:
         return
@@ -2891,64 +2886,39 @@ def plot_decoupler_activity_heatmap(
     if use_zscore:
         sub = _zscore_cols(sub)
 
-    # 1. CLEAN NAMES: Remove "HALLMARK_", "REACTOME_", etc.
     sub.columns = [_clean_feature_label(c, net_name) for c in sub.columns]
-
-    # 2. WRAP LABELS: Break long pathway names into multiple lines
     if wrap_labels:
         sub.columns = _wrap_labels(sub.columns, wrap_at=wrap_at)
 
-    # 3. DYNAMIC FIGURE SIZING: Taller height and wider base for X-axis room
-    fig_w = max(12.0, 4.0 + 0.45 * sub.shape[1])
-    fig_h = max(8.0, 4.0 + 0.45 * sub.shape[0])
+    fig_w = max(14.0, 5.0 + 0.5 * sub.shape[1])
+    fig_h = max(10.0, 5.0 + 0.5 * sub.shape[0])
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-    # 4. REMOVE GRID: Ensure no gray lines interfere with the heatmap colors
+    # Remove all grid lines
     ax.grid(False)
     ax.set_facecolor('white')
 
-    sns.heatmap(
-        sub,
-        ax=ax,
-        cmap=cmap,
-        cbar=True,
-        linewidths=0.0,
-        linecolor=None,
-        square=False,
-        cbar_kws={"shrink": 0.8}
-    )
+    sns.heatmap(sub, ax=ax, cmap=cmap, cbar=True, linewidths=0.0, linecolor=None,
+                cbar_kws={"shrink": 0.8})
 
-    # Labeling
-    ax.set_xlabel("Feature" if net_name.lower() != "dorothea" else "TF", labelpad=20)
-    ax.set_ylabel("Cluster", labelpad=15)
-
-    ttl_prefix = f"{title_prefix}: " if title_prefix else ""
-    ttl = f"{ttl_prefix}{net_name}: top {int(top_k)} activity ({'z-score' if use_zscore else 'raw'})"
-    ax.set_title(ttl, fontsize=16, pad=25)
-
-    # 5. X-AXIS COLLISION FIX:
-    # Increased 'pad' (25) pushes the entire block of text down.
-    # 'multialignment' ensures lines within a single wrapped label stay together.
-    ax.tick_params(axis="x", rotation=45, labelsize=10, pad=25)
-    ax.tick_params(axis="y", rotation=0, labelsize=10, pad=10)
+    # X-axis Fix: Large pad (30) and right alignment for wrapped labels
+    ax.tick_params(axis="x", rotation=45, labelsize=10, pad=30)
+    ax.tick_params(axis="y", rotation=0, labelsize=10, pad=12)
 
     for t in ax.get_xticklabels():
         t.set_ha("right")
         t.set_va("top")
-        t.set_rotation_mode("anchor")
         t.set_multialignment("right")
 
-        # 6. MARGIN ADJUSTMENT: Calculate bottom margin based on label length
     try:
         max_lab_len = int(max(len(str(c)) for c in sub.columns))
     except Exception:
         max_lab_len = 0
 
-    # More aggressive bottom margin to accommodate wrapped text
-    bottom = float(np.clip(0.40 + 0.006 * max_lab_len, 0.40, 0.70))
-    fig.subplots_adjust(left=0.25, right=0.92, top=0.88, bottom=bottom)
+    # Increase bottom margin for wrapped text
+    bottom = float(np.clip(0.45 + 0.007 * max_lab_len, 0.40, 0.70))
+    fig.subplots_adjust(left=0.25, right=0.90, top=0.88, bottom=bottom)
 
-    # Save logic
     sfx = f"{stem}{int(top_k)}" + ("_z" if use_zscore else "_raw")
     save_multi(sfx, outdir, fig)
     plt.close(fig)
@@ -3042,7 +3012,7 @@ def plot_decoupler_dotplot(
     color_by: str = "z",
     size_by: str = "abs_raw",
     wrap_labels: bool = True,
-    wrap_at: int = 25, # Shorter wrap helps vertical spacing
+    wrap_at: int = 25,
     cmap: str = "viridis",
     stem: str = "dotplot_top",
     title_prefix: Optional[str] = None,
@@ -3088,13 +3058,13 @@ def plot_decoupler_dotplot(
         return 30.0 + (v - s_min) / (s_max - s_min) * 180.0 if s_max > s_min else 80.0
     sizes = np.array([size_scale(v) for v in svals])
 
-    # FIG SIZE: Much wider to prevent clipping (W=16.0)
-    fig_w = max(16.0, 8.0 + 0.5 * len(clusters))
+    # INCREASE WIDTH: Provide more canvas to avoid left/right collision
+    fig_w = max(18.0, 10.0 + 0.5 * len(clusters))
     fig_h = max(10.0, 4.0 + 0.5 * len(features))
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-    # MARGINS: Massive right margin (right=0.65) to house legends
-    left_margin = _dynamic_left_margin_from_labels(df["feature"].values, base=0.30)
+    # FIX: Cap the left margin at 0.45 so it never crosses the right=0.65 margin
+    left_margin = min(0.45, _dynamic_left_margin_from_labels(df["feature"].values, base=0.30))
     fig.subplots_adjust(left=left_margin, right=0.65, top=0.90, bottom=0.20)
 
     sca = ax.scatter(
@@ -3103,32 +3073,20 @@ def plot_decoupler_dotplot(
         edgecolors="black", linewidths=0.4, alpha=0.9, zorder=3
     )
 
-    # COLORBAR: Placed in the lower half of the sidebar
-    cbar_ax = fig.add_axes([0.72, 0.20, 0.02, 0.25])
+    # Legends: Using explicit figure coordinates for stability
+    cbar_ax = fig.add_axes([0.70, 0.20, 0.015, 0.25])
     cbar = fig.colorbar(sca, cax=cbar_ax)
-    cbar.set_label(cbar_label, fontsize=12)
+    cbar.set_label(cbar_label)
 
-    # SIZE LEGEND: Placed in the upper half of the sidebar
     refs = np.unique(np.round(np.quantile(svals, [0.25, 0.50, 0.75]), 3))
     refs = refs[refs > 0]
     if refs.size > 0:
-        handles = [
-            plt.Line2D([0], [0], marker='o', color='w',
-                       markerfacecolor='gray', markersize=np.sqrt(size_scale(v)),
-                       label=f"{v:.2f}", alpha=0.6)
-            for v in refs
-        ]
-        # Shift legend further right to 1.25 to prevent overlap with colorbar
-        ax.legend(
-            handles=handles,
-            title=size_label,
-            loc="upper left",
-            bbox_to_anchor=(1.25, 1.0),
-            frameon=False,
-            labelspacing=2.0
-        )
+        handles = [plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
+                               markersize=np.sqrt(size_scale(v)), label=f"{v:.2f}", alpha=0.6) for v in refs]
+        # Anchor the size legend relative to the cbar_ax or far right
+        ax.legend(handles=handles, title=size_label, loc="upper left",
+                  bbox_to_anchor=(1.15, 1.0), frameon=False, labelspacing=2.0)
 
-    ax.set_ylabel("Feature", labelpad=20)
     ax.tick_params(axis="y", pad=15)
     ax.tick_params(axis="x", rotation=45, pad=12)
     ax.grid(False)
