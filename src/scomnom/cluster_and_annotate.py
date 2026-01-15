@@ -29,6 +29,69 @@ CLUSTER_LABEL_KEY = "cluster_label"
 # -------------------------------------------------------------------------
 # Internal helpers
 # -------------------------------------------------------------------------
+def _ensure_cluster_rounds(adata: ad.AnnData) -> None:
+    """
+    Ensure a minimal rounds scaffold exists in .uns.
+
+    Layout:
+      adata.uns["cluster_rounds"] : dict[round_id -> metadata]
+      adata.uns["cluster_round_order"] : list[str]
+      adata.uns["active_cluster_round"] : str | None
+    """
+    adata.uns.setdefault("cluster_rounds", {})
+    adata.uns.setdefault("cluster_round_order", [])
+    adata.uns.setdefault("active_cluster_round", None)
+
+
+def _next_round_index(adata: ad.AnnData) -> int:
+    _ensure_cluster_rounds(adata)
+    existing = list(adata.uns["cluster_rounds"].keys())
+
+    idxs: list[int] = []
+    for rid in existing:
+        if not isinstance(rid, str) or not rid.startswith("r"):
+            continue
+        i = 1
+        while i < len(rid) and rid[i].isdigit():
+            i += 1
+        if i == 1:
+            continue
+        try:
+            idxs.append(int(rid[1:i]))
+        except Exception:
+            pass
+
+    return (max(idxs) + 1) if idxs else 0
+
+
+def _make_round_id(idx: int, suffix: str) -> str:
+    return f"r{idx}_{suffix}"
+
+
+def _register_round(
+    adata: ad.AnnData,
+    *,
+    round_id: str,
+    cluster_key: str,
+    kind: str,
+    best_resolution: float | None,
+    sweep: dict | None,
+    cfg_snapshot: dict | None,
+) -> None:
+    _ensure_cluster_rounds(adata)
+
+    adata.uns["cluster_rounds"][round_id] = {
+        "cluster_key": cluster_key,
+        "kind": kind,
+        "best_resolution": None if best_resolution is None else float(best_resolution),
+        "sweep": sweep,
+        "cfg": cfg_snapshot,
+    }
+    if round_id not in adata.uns["cluster_round_order"]:
+        adata.uns["cluster_round_order"].append(round_id)
+    adata.uns["active_cluster_round"] = round_id
+
+
 def _get_cluster_pseudobulk_df(
     adata: ad.AnnData,
     *,
@@ -1255,54 +1318,71 @@ def _apply_final_clustering(
 def _run_celltypist_annotation(
     adata: ad.AnnData,
     cfg: ClusterAnnotateConfig,
+    *,
+    cluster_key: str,
+    round_id: str | None = None,
     precomputed_labels: Optional[np.ndarray] = None,
     precomputed_proba: Optional[pd.DataFrame] = None,
-) -> str | None:
+) -> dict[str, str] | None:
     """
-    Attach CellTypist annotations to the main AnnData object.
+    Attach CellTypist annotations to AnnData, *round-aware*.
 
-    If `precomputed_labels`/`precomputed_proba` are provided (from _precompute_celltypist),
-    they are used directly; otherwise a fallback CellTypist run is performed on `adata`.
+    Writes:
+      - cell-level labels: adata.obs[cfg.celltypist_label_key]
+      - cluster-majority labels (round-scoped): adata.obs[f"{cfg.celltypist_cluster_label_key}__{round_id}"]
+        (also updates adata.obs[cfg.celltypist_cluster_label_key] as alias to latest)
+      - pretty cluster labels (round-scoped): adata.obs[f"{CLUSTER_LABEL_KEY}__{round_id}"]
+        (also updates adata.obs[CLUSTER_LABEL_KEY] as alias to latest)
 
-    Steps:
-    - set per-cell labels in adata.obs[cfg.celltypist_label_key]
-    - optionally store probabilities in adata.obsm["celltypist_proba"]
-    - perform cluster-level majority voting to derive cluster labels
-    - create pretty cluster labels in adata.obs[CLUSTER_LABEL_KEY]
+    Returns a dict of keys created (for plotting), or None if skipped.
     """
     if cfg.celltypist_model is None:
         LOGGER.info("No CellTypist model provided; skipping annotation.")
         return None
 
-    # Path A: use precomputed predictions
+    if cluster_key not in adata.obs:
+        raise KeyError(
+            f"_run_celltypist_annotation: cluster_key '{cluster_key}' not found in adata.obs"
+        )
+
+    # Determine round_id (best effort)
+    if round_id is None:
+        rid = adata.uns.get("active_cluster_round", None)
+        round_id = str(rid) if rid else "r0"
+
+    # Round-scoped keys (avoid overwriting across rounds)
+    cell_key = cfg.celltypist_label_key
+    cluster_ct_base = cfg.celltypist_cluster_label_key
+    cluster_ct_key = f"{cluster_ct_base}__{round_id}"
+    pretty_key = f"{CLUSTER_LABEL_KEY}__{round_id}"
+
+    # --------------------------------------------------------------
+    # A) CellTypist predictions (cell-level + probabilities)
+    # --------------------------------------------------------------
     if precomputed_labels is not None:
         if precomputed_labels.shape[0] != adata.n_obs:
-            raise ValueError(
-                "precomputed_labels length does not match number of cells in adata."
-            )
+            raise ValueError("precomputed_labels length does not match adata.n_obs.")
         LOGGER.info("Using precomputed CellTypist labels for final annotation.")
-        adata.obs[cfg.celltypist_label_key] = precomputed_labels
+        adata.obs[cell_key] = precomputed_labels
 
         if precomputed_proba is not None:
-            # Store probabilities as obsm + column names in uns for interpretability
-            adata.obsm["celltypist_proba"] = precomputed_proba.loc[
-                adata.obs_names
-            ].to_numpy()
-            adata.uns["celltypist_proba_columns"] = list(precomputed_proba.columns)
+            try:
+                pm = precomputed_proba.loc[adata.obs_names]
+            except Exception:
+                pm = precomputed_proba.reindex(adata.obs_names)
+            adata.obsm["celltypist_proba"] = pm.to_numpy()
+            adata.uns["celltypist_proba_columns"] = list(pm.columns)
 
-    # Path B: fallback -> run CellTypist on main adata
     else:
-        LOGGER.info("Running CellTypist on main AnnData for final annotation.")
+        # Fallback path (kept for safety; your pipeline usually uses precompute)
+        LOGGER.info("Running CellTypist on main AnnData for final annotation (fallback).")
         sc.pp.normalize_total(adata, target_sum=1e4)
         sc.pp.log1p(adata)
 
-        LOGGER.info("Resolving CellTypist model: %s", cfg.celltypist_model)
         model_path = get_celltypist_model(cfg.celltypist_model)
-
         from celltypist.models import Model
         import celltypist
 
-        LOGGER.info("Loading CellTypist model from %s", model_path)
         model = Model.load(str(model_path))
 
         predictions = celltypist.annotate(
@@ -1311,70 +1391,92 @@ def _run_celltypist_annotation(
             majority_voting=cfg.celltypist_majority_voting,
         )
 
-        if (
-            isinstance(predictions.predicted_labels, dict)
-            and "majority_voting" in predictions.predicted_labels
-        ):
-            cell_level_labels = predictions.predicted_labels["majority_voting"]
+        raw = predictions.predicted_labels
+        if isinstance(raw, dict) and "majority_voting" in raw:
+            cell_level_labels = raw["majority_voting"]
         else:
-            cell_level_labels = predictions.predicted_labels
+            cell_level_labels = raw
 
-        adata.obs[cfg.celltypist_label_key] = cell_level_labels
+        adata.obs[cell_key] = cell_level_labels
 
         if hasattr(predictions, "probability_matrix"):
             pm = predictions.probability_matrix
-            adata.obsm["celltypist_proba"] = pm.loc[adata.obs_names].to_numpy()
+            try:
+                pm = pm.loc[adata.obs_names]
+            except Exception:
+                pm = pm.reindex(adata.obs_names)
+            adata.obsm["celltypist_proba"] = pm.to_numpy()
             adata.uns["celltypist_proba_columns"] = list(pm.columns)
 
-    if cfg.label_key not in adata.obs:
-        raise KeyError(
-            f"label_key '{cfg.label_key}' not found in adata.obs; "
-            "cannot compute cluster-level CellTypist labels."
-        )
-
-    # Cluster-level majority CellTypist label
+    # --------------------------------------------------------------
+    # B) Cluster-level majority CellTypist label (ROUND-SCOPED)
+    # --------------------------------------------------------------
     cluster_majority = (
-        adata.obs[[cfg.label_key, cfg.celltypist_label_key]]
-        .groupby(cfg.label_key)[cfg.celltypist_label_key]
+        adata.obs[[cluster_key, cell_key]]
+        .groupby(cluster_key)[cell_key]
         .agg(lambda x: x.value_counts().idxmax())
     )
 
-    adata.obs[cfg.celltypist_cluster_label_key] = (
-        adata.obs[cfg.label_key].map(cluster_majority)
-    )
+    adata.obs[cluster_ct_key] = adata.obs[cluster_key].map(cluster_majority)
+    # Alias for "latest" behavior
+    adata.obs[cluster_ct_base] = adata.obs[cluster_ct_key]
 
-    # ------------------------------------------------------------------
-    # Pretty final cluster labels:
-    #   "C{leiden_id:02d}: {majority_celltypist_label}"
-    # This keeps the original Leiden cluster numbers as reference.
-    # ------------------------------------------------------------------
-    leiden_ids = adata.obs[cfg.label_key].astype(str)
-    maj_labels = adata.obs[cfg.celltypist_cluster_label_key].astype(str).fillna("Unknown")
+    # --------------------------------------------------------------
+    # C) Pretty labels (ROUND-SCOPED), also keep CLUSTER_LABEL_KEY alias
+    # --------------------------------------------------------------
+    cl_ids = adata.obs[cluster_key].astype(str)
+    maj = adata.obs[cluster_ct_key].astype(str).fillna("Unknown")
 
-    pretty_labels = "C" + leiden_ids.str.zfill(2) + ": " + maj_labels
-    adata.obs[CLUSTER_LABEL_KEY] = pretty_labels.astype("category")
+    pretty_labels = "C" + cl_ids.str.zfill(2) + ": " + maj
+    adata.obs[pretty_key] = pretty_labels.astype("category")
+    adata.obs[CLUSTER_LABEL_KEY] = adata.obs[pretty_key]  # alias to latest round
 
-    # Stable color palette for cluster_label
+    # Stable palette for round-scoped pretty labels + alias
     try:
         from scanpy.plotting.palettes import default_102
-
-        cats = adata.obs[CLUSTER_LABEL_KEY].cat.categories
-        adata.uns[f"{CLUSTER_LABEL_KEY}_colors"] = default_102[: len(cats)]
+        cats = adata.obs[pretty_key].cat.categories
+        adata.uns[f"{pretty_key}_colors"] = default_102[: len(cats)]
+        adata.uns[f"{CLUSTER_LABEL_KEY}_colors"] = adata.uns[f"{pretty_key}_colors"]
     except Exception as e:
-        LOGGER.warning("Could not set cluster_label color palette: %s", e)
+        LOGGER.warning("Could not set pretty-label palette: %s", e)
+
+    # --------------------------------------------------------------
+    # D) Store linkage into the round dict (if present)
+    # --------------------------------------------------------------
+    try:
+        rounds = adata.uns.get("cluster_rounds", {})
+        if isinstance(rounds, dict) and round_id in rounds and isinstance(rounds[round_id], dict):
+            rounds[round_id].setdefault("annotation", {})
+            rounds[round_id]["annotation"].update(
+                {
+                    "celltypist_cell_key": cell_key,
+                    "celltypist_cluster_key": cluster_ct_key,
+                    "pretty_cluster_key": pretty_key,
+                    "cluster_key_used": cluster_key,
+                }
+            )
+            adata.uns["cluster_rounds"] = rounds
+    except Exception as e:
+        LOGGER.warning("Failed to store round annotation linkage: %s", e)
 
     LOGGER.info(
-        "Added CellTypist labels to adata.obs['%s'] (cell level) and "
-        "cluster-level majority labels to adata.obs['%s'].",
-        cfg.celltypist_label_key,
-        cfg.celltypist_cluster_label_key,
-    )
-    LOGGER.info(
-        "Added pretty cluster labels to adata.obs['%s'] using Leiden IDs + majority CellTypist label.",
-        CLUSTER_LABEL_KEY,
+        "CellTypist annotation done for round '%s' using cluster_key='%s'. "
+        "Wrote: cell='%s', cluster='%s', pretty='%s' (+ aliases).",
+        round_id,
+        cluster_key,
+        cell_key,
+        cluster_ct_key,
+        pretty_key,
     )
 
-    return cfg.celltypist_label_key
+    return {
+        "round_id": str(round_id),
+        "cluster_key": str(cluster_key),
+        "celltypist_cell_key": str(cell_key),
+        "celltypist_cluster_key": str(cluster_ct_key),
+        "pretty_cluster_key": str(pretty_key),
+    }
+
 
 
 def _final_real_silhouette_qc(
@@ -1382,18 +1484,28 @@ def _final_real_silhouette_qc(
     cfg: ClusterAnnotateConfig,
     embedding_key: str,
     figdir: Path,
+    *,
+    cluster_key: str,
+    round_id: str | None = None,
 ) -> Optional[float]:
     """
     Compute true silhouette for the final clustering (QC only) and optionally plot histogram.
+
+    ROUNDS-ONLY:
+      Stores under adata.uns["cluster_rounds"][round_id]["qc"]["real_silhouette_*"].
     """
-    if cfg.label_key not in adata.obs:
+    if cluster_key not in adata.obs:
         LOGGER.warning(
-            "final_real_silhouette_qc: label_key '%s' not in adata.obs; skipping.",
-            cfg.label_key,
+            "final_real_silhouette_qc: cluster_key '%s' not in adata.obs; skipping.",
+            cluster_key,
         )
         return None
 
-    labels = adata.obs[cfg.label_key].to_numpy()
+    if round_id is None:
+        rid = adata.uns.get("active_cluster_round", None)
+        round_id = str(rid) if rid else None
+
+    labels = adata.obs[cluster_key].to_numpy()
     unique = np.unique(labels)
     if unique.size < 2:
         LOGGER.warning(
@@ -1406,15 +1518,19 @@ def _final_real_silhouette_qc(
     sil_values = silhouette_samples(X, labels, metric="euclidean")
     sil_mean = float(np.mean(sil_values))
 
-    adata.uns.setdefault("cluster_and_annotate", {})
-    ca_uns = adata.uns["cluster_and_annotate"]
-    ca_uns["real_silhouette_final"] = sil_mean
-    ca_uns["real_silhouette_summary"] = {
-        "mean": sil_mean,
-        "median": float(np.median(sil_values)),
-        "p10": float(np.percentile(sil_values, 10)),
-        "p90": float(np.percentile(sil_values, 90)),
-    }
+    # ---- store into round ----
+    if round_id:
+        rounds = adata.uns.get("cluster_rounds", {})
+        if isinstance(rounds, dict) and round_id in rounds and isinstance(rounds[round_id], dict):
+            rounds[round_id].setdefault("qc", {})
+            rounds[round_id]["qc"]["real_silhouette_final"] = sil_mean
+            rounds[round_id]["qc"]["real_silhouette_summary"] = {
+                "mean": sil_mean,
+                "median": float(np.median(sil_values)),
+                "p10": float(np.percentile(sil_values, 10)),
+                "p90": float(np.percentile(sil_values, 90)),
+            }
+            adata.uns["cluster_rounds"] = rounds
 
     LOGGER.info("Final true silhouette (mean) = %.3f", sil_mean)
 
@@ -1426,8 +1542,8 @@ def _final_real_silhouette_qc(
         ax.axvline(sil_mean, color="red", linestyle="--", linewidth=1.0)
         ax.set_xlabel("Silhouette value")
         ax.set_ylabel("Number of cells")
-        ax.set_title(f"Final clustering: true silhouette (mean = {sil_mean:.3f})")
-
+        title_key = f"{cluster_key}" + (f" [{round_id}]" if round_id else "")
+        ax.set_title(f"Final clustering: true silhouette ({title_key}, mean={sil_mean:.3f})")
         fig.tight_layout()
         plot_utils.save_multi("final_real_silhouette", figdir, fig)
 
@@ -1574,18 +1690,22 @@ def _dc_run_method(
     return _run_one(method)
 
 
-def _run_msigdb(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
+def _run_msigdb(
+    adata: "ad.AnnData",
+    cfg: "ClusterAnnotateConfig",
+    *,
+    store_key: str = "pseudobulk",
+    out_key: str = "msigdb",
+) -> None:
     """
     Compute MSigDB pathway activity on CLUSTER-level pseudobulk expression using decoupler.
 
-    Expects pseudobulk expression already stored in:
-      adata.uns["pseudobulk"]["expr"]  -> DataFrame (genes x clusters)
-
-    Resolves GMTs using your resolve_msigdb_gene_sets(...).
+    Reads pseudobulk from:
+      adata.uns[store_key]
 
     Stores:
-      adata.uns["msigdb"]["activity"] -> DataFrame (clusters x pathways)
-      adata.uns["msigdb"]["config"]   -> dict snapshot
+      adata.uns[out_key]["activity"] -> DataFrame (clusters x pathways)
+      adata.uns[out_key]["config"]   -> dict snapshot
     """
     import pandas as pd
 
@@ -1593,12 +1713,12 @@ def _run_msigdb(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
     # Pull pseudobulk from .uns
     # -----------------------------
     try:
-        expr = _get_cluster_pseudobulk_df(adata, store_key="pseudobulk")  # genes x clusters DataFrame
+        expr = _get_cluster_pseudobulk_df(adata, store_key=store_key)  # genes x clusters
     except Exception as e:
-        LOGGER.warning("...: missing/invalid pseudobulk store; skipping. (%s)", e)
+        LOGGER.warning("MSigDB: missing/invalid pseudobulk store '%s'; skipping. (%s)", store_key, e)
         return
     if expr.empty:
-        LOGGER.warning("...: pseudobulk expr is empty; skipping.")
+        LOGGER.warning("MSigDB: pseudobulk expr is empty; skipping.")
         return
 
     # -----------------------------
@@ -1618,13 +1738,16 @@ def _run_msigdb(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
     # -----------------------------
     # Method config
     # -----------------------------
-    method = getattr(cfg, "msigdb_method", None) or getattr(cfg, "decoupler_method", None) or "consensus"
+    method = (
+        getattr(cfg, "msigdb_method", None)
+        or getattr(cfg, "decoupler_method", None)
+        or "consensus"
+    )
     min_n = int(getattr(cfg, "msigdb_min_n_targets", getattr(cfg, "decoupler_min_n_targets", 5)) or 5)
 
     # -----------------------------
     # Build decoupler network from GMTs
     # -----------------------------
-    # Network columns: source (pathway), target (gene), weight (1.0)
     nets = []
     for gmt in gmt_files:
         try:
@@ -1639,10 +1762,10 @@ def _run_msigdb(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
 
     net = pd.concat(nets, axis=0, ignore_index=True)
 
-    # Defensive: ensure required cols
     for col in ("source", "target"):
         if col not in net.columns:
-            raise KeyError(f"MSigDB net missing required column '{col}'")
+            LOGGER.warning("MSigDB: net missing required column '%s'; skipping.", col)
+            return
     if "weight" not in net.columns:
         net["weight"] = 1.0
 
@@ -1661,8 +1784,7 @@ def _run_msigdb(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
             verbose=False,
             consensus_methods=getattr(cfg, "decoupler_consensus_methods", None),
         )
-
-        activity = est.T      # clusters x pathways
+        activity = est.T  # clusters x pathways
         activity.index.name = "cluster"
         activity.columns.name = "pathway"
 
@@ -1673,20 +1795,21 @@ def _run_msigdb(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
     # -----------------------------
     # Store
     # -----------------------------
-    adata.uns.setdefault("msigdb", {})
-    adata.uns["msigdb"]["activity"] = activity
-    adata.uns["msigdb"]["config"] = {
+    adata.uns.setdefault(out_key, {})
+    adata.uns[out_key]["activity"] = activity
+    adata.uns[out_key]["config"] = {
         "method": str(method),
         "min_n_targets": int(min_n),
         "msigdb_release": msigdb_release,
         "gene_sets": [str(g) for g in gmt_files],
         "used_keywords": used_keywords,
-        "input": "pseudobulk_expr(genes_x_clusters)",
+        "input": f"{store_key}:pseudobulk_expr(genes_x_clusters)",
         "resource": "msigdb_gmt",
     }
 
     LOGGER.info(
-        "MSigDB stored: activity shape=%s using method=%s (min_n=%d; GMTs=%d).",
+        "MSigDB stored at adata.uns[%r]: activity shape=%s using method=%s (min_n=%d; GMTs=%d).",
+        out_key,
         tuple(activity.shape),
         str(method),
         int(min_n),
@@ -1694,37 +1817,47 @@ def _run_msigdb(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
     )
 
 
-
-def _run_progeny(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
+def _run_progeny(
+    adata: "ad.AnnData",
+    cfg: "ClusterAnnotateConfig",
+    *,
+    store_key: str = "pseudobulk",
+    out_key: str = "progeny",
+) -> None:
     """
     Compute PROGENy pathway activity on CLUSTER-level pseudobulk expression using decoupler.
 
-    Expects pseudobulk expression already stored in:
-      adata.uns["pseudobulk"]["expr"]  -> DataFrame (genes x clusters)
+    Reads pseudobulk from:
+      adata.uns[store_key]
 
     Stores:
-      adata.uns["progeny"]["activity"] -> DataFrame (clusters x pathways)
-      adata.uns["progeny"]["config"]   -> dict snapshot
+      adata.uns[out_key]["activity"] -> DataFrame (clusters x pathways)
+      adata.uns[out_key]["config"]   -> dict snapshot
     """
-    import pandas as pd
     import decoupler as dc
 
+    # -----------------------------
+    # Pull pseudobulk from .uns
+    # -----------------------------
     try:
-        expr = _get_cluster_pseudobulk_df(adata, store_key="pseudobulk")  # genes x clusters DataFrame
+        expr = _get_cluster_pseudobulk_df(adata, store_key=store_key)  # genes x clusters
     except Exception as e:
-        LOGGER.warning("...: missing/invalid pseudobulk store; skipping. (%s)", e)
+        LOGGER.warning("PROGENy: missing/invalid pseudobulk store '%s'; skipping. (%s)", store_key, e)
         return
     if expr.empty:
-        LOGGER.warning("...: pseudobulk expr is empty; skipping.")
+        LOGGER.warning("PROGENy: pseudobulk expr is empty; skipping.")
         return
 
     # -----------------------------
-    # Method config (NEW)
+    # Method config
     # -----------------------------
-    method = getattr(cfg, "progeny_method", None) or getattr(cfg, "decoupler_method", None) or "consensus"
+    method = (
+        getattr(cfg, "progeny_method", None)
+        or getattr(cfg, "decoupler_method", None)
+        or "consensus"
+    )
     min_n = int(getattr(cfg, "progeny_min_n_targets", getattr(cfg, "decoupler_min_n_targets", 5)) or 5)
 
-    # PROGENy-specific knobs
     top_n = int(getattr(cfg, "progeny_top_n", 100) or 100)
     organism = getattr(cfg, "progeny_organism", "human") or "human"
 
@@ -1745,6 +1878,7 @@ def _run_progeny(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
     if wcol is None:
         LOGGER.warning("PROGENy: no usable weight column found (expected 'weight' or 'mor'); skipping.")
         return
+
     # -----------------------------
     # Run decoupler
     # -----------------------------
@@ -1755,36 +1889,36 @@ def _run_progeny(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
             net=net,
             source="source",
             target="target",
-            weight=wcol or "weight",
+            weight=wcol,
             min_n=min_n,
             verbose=False,
             consensus_methods=getattr(cfg, "decoupler_consensus_methods", None),
         )
-
-        activity = est.T
+        activity = est.T  # clusters x pathways
         activity.index.name = "cluster"
         activity.columns.name = "pathway"
 
     except Exception as e:
-        LOGGER.warning("PROGENy: decoupler run failed (method=%s): %s", method, e)
+        LOGGER.warning("PROGENy: decoupler run failed (method=%s): %s", str(method), e)
         return
 
     # -----------------------------
     # Store
     # -----------------------------
-    adata.uns.setdefault("progeny", {})
-    adata.uns["progeny"]["activity"] = activity
-    adata.uns["progeny"]["config"] = {
+    adata.uns.setdefault(out_key, {})
+    adata.uns[out_key]["activity"] = activity
+    adata.uns[out_key]["config"] = {
         "method": str(method),
         "min_n_targets": int(min_n),
         "top_n": int(top_n),
-        "input": "pseudobulk_expr(genes_x_clusters)",
+        "input": f"{store_key}:pseudobulk_expr(genes_x_clusters)",
         "resource": "progeny",
         "organism": str(organism),
     }
 
     LOGGER.info(
-        "PROGENy stored: activity shape=%s using method=%s (top_n=%d, min_n=%d).",
+        "PROGENy stored at adata.uns[%r]: activity shape=%s using method=%s (top_n=%d, min_n=%d).",
+        out_key,
         tuple(activity.shape),
         str(method),
         int(top_n),
@@ -1792,17 +1926,22 @@ def _run_progeny(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
     )
 
 
-
-def _run_dorothea(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
+def _run_dorothea(
+    adata: "ad.AnnData",
+    cfg: "ClusterAnnotateConfig",
+    *,
+    store_key: str = "pseudobulk",
+    out_key: str = "dorothea",
+) -> None:
     """
     Compute DoRothEA TF activity on CLUSTER-level pseudobulk expression using decoupler.
 
-    Expects pseudobulk expression already stored in:
-      adata.uns["pseudobulk"]["expr"]  -> DataFrame (genes x clusters)
+    Reads pseudobulk from:
+      adata.uns[store_key]
 
     Stores:
-      adata.uns["dorothea"]["activity"] -> DataFrame (clusters x TFs)
-      adata.uns["dorothea"]["config"]   -> dict snapshot
+      adata.uns[out_key]["activity"] -> DataFrame (clusters x TFs)
+      adata.uns[out_key]["config"]   -> dict snapshot
     """
     import decoupler as dc
 
@@ -1810,31 +1949,32 @@ def _run_dorothea(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
     # Pull pseudobulk from .uns
     # -----------------------------
     try:
-        expr = _get_cluster_pseudobulk_df(adata, store_key="pseudobulk")  # genes x clusters DataFrame
+        expr = _get_cluster_pseudobulk_df(adata, store_key=store_key)  # genes x clusters
     except Exception as e:
-        LOGGER.warning("...: missing/invalid pseudobulk store; skipping. (%s)", e)
+        LOGGER.warning("DoRothEA: missing/invalid pseudobulk store '%s'; skipping. (%s)", store_key, e)
         return
     if expr.empty:
-        LOGGER.warning("...: pseudobulk expr is empty; skipping.")
+        LOGGER.warning("DoRothEA: pseudobulk expr is empty; skipping.")
         return
 
     # -----------------------------
-    # Method config (NEW)
+    # Method config
     # -----------------------------
-    method = getattr(cfg, "dorothea_method", None) or getattr(cfg, "decoupler_method", None) or "consensus"
+    method = (
+        getattr(cfg, "dorothea_method", None)
+        or getattr(cfg, "decoupler_method", None)
+        or "consensus"
+    )
     min_n = int(getattr(cfg, "dorothea_min_n_targets", getattr(cfg, "decoupler_min_n_targets", 5)) or 5)
 
-    # Confidence filtering (common for DoRothEA)
-    # DoRothEA confidence levels are typically {"A","B","C","D","E"}.
-    # Default to A/B/C unless user overrides.
     conf = getattr(cfg, "dorothea_confidence", None)
     if conf is None:
         conf = ["A", "B", "C"]
     if isinstance(conf, str):
         conf = [x.strip().upper() for x in conf.split(",") if x.strip()]
     conf = [str(x).upper() for x in conf]
-    organism = getattr(cfg, "dorothea_organism", "human") or "human"
 
+    organism = getattr(cfg, "dorothea_organism", "human") or "human"
 
     # -----------------------------
     # Load resource + filter
@@ -1858,51 +1998,244 @@ def _run_dorothea(adata: "ad.AnnData", cfg: "ClusterAnnotateConfig") -> None:
     # Run decoupler
     # -----------------------------
     try:
-        # mat must be genes x samples
         est = _dc_run_method(
             method=method,
             mat=expr,
             net=net,
             source="source",
             target="target",
-            weight="weight" if "weight" in net.columns else "mor",
+            weight=wcol,
             min_n=min_n,
             verbose=False,
             consensus_methods=getattr(cfg, "decoupler_consensus_methods", None),
-
         )
-
-        # est is typically (sources x samples). We want samples x sources for plotting consistency.
-        # So: clusters x TFs
-        activity = est.T
+        activity = est.T  # clusters x TFs
         activity.index.name = "cluster"
         activity.columns.name = "TF"
 
     except Exception as e:
-        LOGGER.warning("DoRothEA: decoupler run failed (method=%s): %s", method, e)
+        LOGGER.warning("DoRothEA: decoupler run failed (method=%s): %s", str(method), e)
         return
 
     # -----------------------------
     # Store
     # -----------------------------
-    adata.uns.setdefault("dorothea", {})
-    adata.uns["dorothea"]["activity"] = activity
-    adata.uns["dorothea"]["config"] = {
+    adata.uns.setdefault(out_key, {})
+    adata.uns[out_key]["activity"] = activity
+    adata.uns[out_key]["config"] = {
         "method": str(method),
         "organism": str(organism),
         "min_n_targets": int(min_n),
         "confidence": list(conf),
-        "input": "pseudobulk_expr(genes_x_clusters)",
+        "input": f"{store_key}:pseudobulk_expr(genes_x_clusters)",
         "resource": "dorothea",
     }
 
     LOGGER.info(
-        "DoRothEA stored: activity shape=%s using method=%s (conf=%s, min_n=%d).",
+        "DoRothEA stored at adata.uns[%r]: activity shape=%s using method=%s (conf=%s, min_n=%d).",
+        out_key,
         tuple(activity.shape),
         str(method),
         ",".join(conf),
         int(min_n),
     )
+
+
+# -------------------------------------------------------------------------
+# Public: Biology Informed Structural Clustering (BISC)
+# -------------------------------------------------------------------------
+def run_BISC(
+    adata: ad.AnnData,
+    cfg: ClusterAnnotateConfig,
+    *,
+    embedding_key: str,
+    celltypist_labels: Optional[np.ndarray],
+    celltypist_proba: Optional[pd.DataFrame],
+    round_suffix: str = "initial_clustering",
+) -> ad.AnnData:
+    """
+    Biology Informed Structural Clustering (BISC) — ROUNDS-ONLY
+
+    Stores EVERYTHING needed for downstream plots/exports in the created round:
+      adata.uns["cluster_rounds"][round_id] = {
+        cluster_key, kind, best_resolution, sweep, cfg,
+        inputs, bio_mask, stability, diagnostics, qc (added later)
+      }
+    """
+    _ensure_cluster_rounds(adata)
+
+    # --------------------------------------------------------------
+    # Build neighbors/UMAP if missing (manual convenience)
+    # --------------------------------------------------------------
+    if "neighbors" not in adata.uns:
+        LOGGER.info("BISC: neighbors not found; computing neighbors using embedding_key=%r", embedding_key)
+        sc.pp.neighbors(adata, use_rep=embedding_key)
+
+    if "X_umap" not in adata.obsm:
+        LOGGER.info("BISC: UMAP not found; computing UMAP.")
+        sc.tl.umap(adata)
+
+    # --------------------------------------------------------------
+    # Bio mask (one-time) for bio metrics during sweep
+    # --------------------------------------------------------------
+    bio_mask, bio_mask_stats = _maybe_build_bio_mask(cfg, celltypist_proba, adata.n_obs)
+
+    if getattr(cfg, "bio_guided_clustering", False):
+        mode = bio_mask_stats.get("mode", "unknown")
+        disabled = bio_mask_stats.get("disabled_reason", None)
+
+        if bio_mask is None:
+            LOGGER.info(
+                "CellTypist bio mask: DISABLED (mode=%s) — %s",
+                mode,
+                disabled or "unknown reason",
+            )
+        else:
+            kept = int(bio_mask_stats.get("kept", int(np.sum(bio_mask))))
+            n_cells = int(bio_mask_stats.get("n_cells", bio_mask.size))
+            frac = float(bio_mask_stats.get("kept_frac", kept / max(1, n_cells)))
+            LOGGER.info(
+                "CellTypist bio mask: kept %d/%d cells (%.1f%%) [mode=%s]",
+                kept,
+                n_cells,
+                100.0 * frac,
+                mode,
+            )
+
+    # --------------------------------------------------------------
+    # Resolution sweep + best res selection
+    # --------------------------------------------------------------
+    best_res, sweep, _clusterings = _resolution_sweep(
+        adata,
+        cfg,
+        embedding_key,
+        celltypist_labels=celltypist_labels,
+        bio_mask=bio_mask,
+    )
+
+    # Make sweep fully round-self-contained (avoid reading any global state)
+    sweep = dict(sweep) if isinstance(sweep, dict) else {}
+    sweep["bio_mask_stats"] = bio_mask_stats
+
+    # --------------------------------------------------------------
+    # Subsampling stability (uses best_res)
+    # --------------------------------------------------------------
+    stability_aris = _subsampling_stability(adata, cfg, embedding_key, best_res)
+
+    # --------------------------------------------------------------
+    # Apply final clustering at best_res into cfg.label_key
+    # --------------------------------------------------------------
+    _apply_final_clustering(adata, cfg, best_res)
+
+    # --------------------------------------------------------------
+    # Register round
+    # --------------------------------------------------------------
+    idx = _next_round_index(adata)
+    round_id = _make_round_id(idx, round_suffix)
+
+    _register_round(
+        adata,
+        round_id=round_id,
+        cluster_key=cfg.label_key,
+        kind="BISC",
+        best_resolution=float(best_res),
+        sweep={
+            # compact sweep snapshot (HDF5-safe later)
+            "resolutions": [float(r) for r in sweep.get("resolutions", [])],
+            "silhouette_scores": [float(x) for x in sweep.get("silhouette_scores", [])],
+            "n_clusters": [int(x) for x in sweep.get("n_clusters", [])],
+            "penalized_scores": [float(x) for x in sweep.get("penalized_scores", [])],
+            "plateaus": sweep.get("plateaus", None),
+            "selection_config": sweep.get("selection_config", {}),
+            "bio_mask_stats": sweep.get("bio_mask_stats", None),
+            "bio_homogeneity": sweep.get("bio_homogeneity", None),
+            "bio_fragmentation": sweep.get("bio_fragmentation", None),
+            "bio_ari": sweep.get("bio_ari", None),
+            # optional: store ARI matrix if you want; it can be big.
+            # "ari_matrix": sweep.get("ari_matrix", None),
+        },
+        cfg_snapshot=asdict(cfg) if hasattr(cfg, "__dataclass_fields__") else None,
+    )
+
+    # --------------------------------------------------------------
+    # Enrich round with plot-friendly diagnostics and stability/QC pointers
+    # --------------------------------------------------------------
+    rounds = adata.uns.get("cluster_rounds", {})
+    rinfo = rounds.get(round_id, {}) if isinstance(rounds, dict) else {}
+
+    rinfo.setdefault("inputs", {})
+    rinfo["inputs"].update(
+        {
+            "embedding_key": str(embedding_key),
+            "batch_key": getattr(cfg, "batch_key", None),
+        }
+    )
+
+    rinfo.setdefault("bio_mask", {})
+    rinfo["bio_mask"] = bio_mask_stats
+
+    rinfo.setdefault("stability", {})
+    rinfo["stability"]["subsampling_ari"] = [float(x) for x in stability_aris]
+
+    # A single dict with everything plotting needs, already aligned + keyed
+    res_list = [float(r) for r in rinfo.get("sweep", {}).get("resolutions", [])]
+    sil_list = rinfo.get("sweep", {}).get("silhouette_scores", []) or []
+    n_list = rinfo.get("sweep", {}).get("n_clusters", []) or []
+    pen_list = rinfo.get("sweep", {}).get("penalized_scores", []) or []
+
+    rinfo.setdefault("diagnostics", {})
+    rinfo["diagnostics"]["tested_resolutions"] = res_list
+    rinfo["diagnostics"]["silhouette_centroid"] = {
+        _res_key(r): float(s) for r, s in zip(res_list, sil_list)
+    }
+    rinfo["diagnostics"]["cluster_counts"] = {
+        _res_key(r): int(n) for r, n in zip(res_list, n_list)
+    }
+    rinfo["diagnostics"]["penalized_scores"] = {
+        _res_key(r): float(p) for r, p in zip(res_list, pen_list)
+    }
+
+    # If your sweep stored these arrays, include them too
+    # (Note: your current sweep stores tiny penalties + composite + stability arrays)
+    comp_list = sweep.get("composite_scores", None)
+    stab_list = sweep.get("stability_scores", None)
+    tiny_list = sweep.get("tiny_cluster_penalty", None)
+    if isinstance(comp_list, list) and len(comp_list) == len(res_list):
+        rinfo["diagnostics"]["composite_scores"] = {
+            _res_key(r): float(v) for r, v in zip(res_list, comp_list)
+        }
+    if isinstance(stab_list, list) and len(stab_list) == len(res_list):
+        rinfo["diagnostics"]["resolution_stability"] = {
+            _res_key(r): float(v) for r, v in zip(res_list, stab_list)
+        }
+    if isinstance(tiny_list, list) and len(tiny_list) == len(res_list):
+        rinfo["diagnostics"]["tiny_cluster_penalty"] = {
+            _res_key(r): float(v) for r, v in zip(res_list, tiny_list)
+        }
+
+    rounds[round_id] = rinfo
+    adata.uns["cluster_rounds"] = rounds
+
+    # --------------------------------------------------------------
+    # QC silhouette -> store in round + optional plot
+    # --------------------------------------------------------------
+    _final_real_silhouette_qc(
+        adata,
+        cfg,
+        embedding_key,
+        Path("cluster_and_annotate") / round_id / "qc",
+        cluster_key=cfg.label_key,
+        round_id=round_id,
+    )
+
+    LOGGER.info(
+        "BISC complete: best_res=%.3f stored as round '%s' using cluster_key='%s'",
+        float(best_res),
+        round_id,
+        cfg.label_key,
+    )
+
+    return adata
 
 
 # -------------------------------------------------------------------------
@@ -1935,411 +2268,430 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
     embedding_key = _ensure_embedding(adata, cfg.embedding_key)
     LOGGER.info("Using embedding_key='%s', batch_key='%s'", embedding_key, batch_key)
 
-    # CellTypist precompute (may be None, None)
+    # CellTypist precompute (must happen BEFORE BISC for bioARI)
     celltypist_labels, celltypist_proba = _precompute_celltypist(adata, cfg)
 
+    # Build neighbors + UMAP (BISC will also defensively compute if missing,
+    # but we keep it here for the pipeline’s expected flow)
     sc.pp.neighbors(adata, use_rep=embedding_key)
     sc.tl.umap(adata)
 
-    if cfg.make_figures:
-        plot_utils.setup_scanpy_figs(cfg.figdir, cfg.figure_formats)
-    figdir_cluster = Path("cluster_and_annotate")
-
-    # Build "good CellTypist" mask once (for bio metrics only)
-    bio_mask, bio_mask_stats = _maybe_build_bio_mask(cfg, celltypist_proba, adata.n_obs)
-
-    adata.uns.setdefault("cluster_and_annotate", {})
-    adata.uns["cluster_and_annotate"].setdefault("bio_mask", {})
-    adata.uns["cluster_and_annotate"]["bio_mask"] = bio_mask_stats
-
-    # --- summary of mask before sweep ---
-    if getattr(cfg, "bio_guided_clustering", False):
-        mode = bio_mask_stats.get("mode", "unknown")
-        disabled = bio_mask_stats.get("disabled_reason", None)
-
-        if bio_mask is None:
-            LOGGER.info(
-                "CellTypist bio mask: DISABLED (mode=%s) — %s",
-                mode,
-                disabled or "unknown reason",
-            )
-        else:
-            kept = int(bio_mask_stats.get("kept", int(np.sum(bio_mask))))
-            n_cells = int(bio_mask_stats.get("n_cells", bio_mask.size))
-            frac = float(bio_mask_stats.get("kept_frac", kept / max(1, n_cells)))
-
-            LOGGER.info(
-                "CellTypist bio mask: kept %d/%d cells (%.1f%%) "
-                "[mode=%s, entropy_cut=%.3f (abs=%.3f, q=%.2f→%.3f), margin_min=%.3f]",
-                kept,
-                n_cells,
-                100.0 * frac,
-                mode,
-                float(bio_mask_stats.get("entropy_cut_used", float("nan"))),
-                float(bio_mask_stats.get("entropy_abs_limit", float("nan"))),
-                float(bio_mask_stats.get("entropy_quantile", float("nan"))),
-                float(bio_mask_stats.get("entropy_q_value", float("nan"))),
-                float(bio_mask_stats.get("margin_min", float("nan"))),
-            )
-
-    # Perform resolution sweep
-    best_res, sweep, clusterings = _resolution_sweep(
+    # --- BISC: resolution sweep + select best res + apply final clustering + store round ---
+    run_BISC(
         adata,
         cfg,
-        embedding_key,
+        embedding_key=embedding_key,
         celltypist_labels=celltypist_labels,
-        bio_mask=bio_mask,
+        celltypist_proba=celltypist_proba,
+        round_suffix="initial_clustering",
     )
 
-    res_list = [float(r) for r in sweep["resolutions"]]
+    # ------------------------------------------------------------------
+    # Figures for BISC + clustering diagnostics
+    # ------------------------------------------------------------------
+    def _plot_round_clustering_diagnostics(
+            adata: ad.AnnData,
+            cfg: ClusterAnnotateConfig,
+            *,
+            embedding_key: str,
+            batch_key: str | None,
+    ) -> None:
+        """
+        ROUNDS-ONLY plotting for the active round.
+        """
+        if not cfg.make_figures:
+            return
 
-    adata.uns.setdefault("cluster_and_annotate", {})
-    ca_uns = adata.uns["cluster_and_annotate"]
+        active_round_id = adata.uns.get("active_cluster_round", None)
+        active_round_id = str(active_round_id) if active_round_id else None
+        rounds = adata.uns.get("cluster_rounds", {})
+        if not active_round_id or not isinstance(rounds, dict) or active_round_id not in rounds:
+            LOGGER.warning("Plots: no active cluster round found; skipping clustering diagnostics.")
+            return
 
-    ca_uns.update(
-        {
-            "embedding_key": embedding_key,
-            "batch_key": batch_key,
-            "label_key": cfg.label_key,
-            "cluster_label_key": CLUSTER_LABEL_KEY,
-            "best_resolution": float(best_res),
-            "resolutions": [float(r) for r in sweep["resolutions"]],
-            "silhouette_scores": [float(x) for x in sweep["silhouette_scores"]],
-            "n_clusters": [int(x) for x in sweep["n_clusters"]],
-            "penalized_scores": [float(x) for x in sweep["penalized_scores"]],
-            "stability_ari": [],
-            "celltypist_model": cfg.celltypist_model,
-            "celltypist_label_key": None,
-            "celltypist_cluster_label_key": None,
-        }
-    )
+        rinfo = rounds[active_round_id]
+        sweep = rinfo.get("sweep", {}) if isinstance(rinfo.get("sweep", {}), dict) else {}
+        diag = rinfo.get("diagnostics", {}) if isinstance(rinfo.get("diagnostics", {}), dict) else {}
 
-    ca_uns["clustering"] = {
-        "tested_resolutions": res_list,
-        "best_resolution": float(best_res),
-        "silhouette_centroid": {
-            _res_key(r): float(s)
-            for r, s in zip(res_list, sweep["silhouette_scores"])
-        },
-        "cluster_counts": {
-            _res_key(r): int(n)
-            for r, n in zip(res_list, sweep["n_clusters"])
-        },
-        "cluster_sizes": {
-            _res_key(r): [int(x) for x in sweep["cluster_sizes"][float(r)]]
-            for r in res_list
-        },
-        "composite_scores": {
-            _res_key(r): float(s)
-            for r, s in zip(res_list, sweep["composite_scores"])
-        },
-        "resolution_stability": {
-            _res_key(r): float(s)
-            for r, s in zip(res_list, sweep["stability_scores"])
-        },
-        "tiny_cluster_penalty": {
-            _res_key(r): float(s)
-            for r, s in zip(res_list, sweep["tiny_cluster_penalty"])
-        },
-        "plateaus": sweep["plateaus"],
-        "selection_config": sweep["selection_config"],
-        "bio_homogeneity": None,
-        "bio_fragmentation": None,
-        "bio_ari": None,
-    }
+        figdir_cluster = Path("cluster_and_annotate") / active_round_id / "clustering"
 
-    if sweep.get("bio_homogeneity") is not None:
-        ca_uns["clustering"]["bio_homogeneity"] = {
-            _res_key(r): float(v)
-            for r, v in zip(res_list, sweep["bio_homogeneity"])
-        }
-        ca_uns["clustering"]["bio_fragmentation"] = {
-            _res_key(r): float(v)
-            for r, v in zip(res_list, sweep["bio_fragmentation"])
-        }
-        ca_uns["clustering"]["bio_ari"] = {
-            _res_key(r): float(v)
-            for r, v in zip(res_list, sweep["bio_ari"])
-        }
+        tested_res = diag.get("tested_resolutions", sweep.get("resolutions", [])) or []
+        res_sorted = sorted(float(r) for r in tested_res) if tested_res else []
+        if not res_sorted:
+            LOGGER.warning("Plots: no tested resolutions found in round '%s'.", active_round_id)
+            return
 
-    if cfg.make_figures:
+        best_res = rinfo.get("best_resolution", None)
+
+        # dicts keyed by _res_key (%.3f)
+        sil_dict = diag.get("silhouette_centroid", {}) or {}
+        n_dict = diag.get("cluster_counts", {}) or {}
+        comp_dict = diag.get("composite_scores", {}) or {}
+        stab_dict = diag.get("resolution_stability", {}) or {}
+        tiny_dict = diag.get("tiny_cluster_penalty", {}) or {}
+
+        # Arrays aligned to res_sorted
+        sil_arr = _extract_series(res_sorted, sil_dict)
+        n_arr = _extract_series(res_sorted, n_dict)
+
+        # Penalized: either stored as dict, or reconstruct
+        pen_dict = diag.get("penalized_scores", None)
+        if isinstance(pen_dict, dict) and pen_dict:
+            pen_arr = _extract_series(res_sorted, pen_dict)
+        else:
+            alpha = float(getattr(cfg, "penalty_alpha", 0.0))
+            pen_arr = np.array([float(s) - alpha * float(n) for s, n in zip(sil_arr, n_arr)], dtype=float)
+
         plot_utils.plot_clustering_resolution_sweep(
-            resolutions=sweep["resolutions"],
-            silhouette_scores=sweep["silhouette_scores"],
-            n_clusters=sweep["n_clusters"],
-            penalized_scores=sweep["penalized_scores"],
+            resolutions=np.array(res_sorted, dtype=float),
+            silhouette_scores=[float(x) for x in sil_arr],
+            n_clusters=[int(round(x)) if np.isfinite(x) else 0 for x in n_arr],
+            penalized_scores=[float(x) for x in pen_arr],
             figdir=figdir_cluster,
         )
-        plot_utils.plot_cluster_tree(
-            labels_per_resolution=clusterings,
-            resolutions=sweep["resolutions"],
-            figdir=figdir_cluster,
-            best_resolution=best_res,
-        )
 
-    stability_aris = _subsampling_stability(adata, cfg, embedding_key, best_res)
-    ca_uns["stability_ari"] = [float(x) for x in stability_aris]
+        # Cluster tree (rebuild from existing sweep-added obs keys)
+        labels_per_resolution: dict[str, np.ndarray] = {}
+        for r in res_sorted:
+            obs_key = f"{cfg.label_key}_{float(r):.2f}"
+            if obs_key in adata.obs:
+                labels_per_resolution[_res_key(r)] = adata.obs[obs_key].to_numpy()
 
-    _apply_final_clustering(adata, cfg, best_res)
-    _final_real_silhouette_qc(adata, cfg, embedding_key, figdir_cluster)
+        if len(labels_per_resolution) >= 2:
+            plot_utils.plot_cluster_tree(
+                labels_per_resolution=labels_per_resolution,
+                resolutions=res_sorted,
+                figdir=figdir_cluster,
+                best_resolution=float(best_res) if best_res is not None else None,
+            )
 
-    if cfg.make_figures:
-        # UMAP with raw Leiden clusters (reference)
+        # UMAPs for final clustering + batch
         plot_utils.plot_cluster_umaps(
             adata=adata,
             label_key=cfg.label_key,
             batch_key=batch_key,
             figdir=figdir_cluster,
         )
-        # Stability curves, composite metrics, etc.
-        clust = ca_uns["clustering"]
+
+        # Subsampling stability ARI curve (round-owned)
+        stability = rinfo.get("stability", {}) if isinstance(rinfo.get("stability", {}), dict) else {}
+        stability_aris = stability.get("subsampling_ari", []) or []
         plot_utils.plot_clustering_stability_ari(
-            stability_aris=stability_aris,
-            figdir=figdir_cluster,
-        )
-        plot_utils.plot_stability_curves(
-            resolutions=clust["tested_resolutions"],
-            silhouette=clust["silhouette_centroid"],
-            stability=clust["resolution_stability"],
-            composite=clust["composite_scores"],
-            tiny_cluster_penalty=clust["tiny_cluster_penalty"],
-            best_resolution=clust["best_resolution"],
-            plateaus=clust["plateaus"],
+            stability_aris=[float(x) for x in stability_aris],
             figdir=figdir_cluster,
         )
 
-        # Biological metrics plot (only when bio-guided clustering is enabled & metrics present)
+        # Stability curves if available
+        if best_res is not None and res_sorted and stab_dict and comp_dict and tiny_dict:
+            plateaus = sweep.get("plateaus", None)
+            if isinstance(plateaus, str):
+                # already JSON-encoded
+                try:
+                    plateaus = json.loads(plateaus)
+                except Exception:
+                    plateaus = None
+
+            plot_utils.plot_stability_curves(
+                resolutions=res_sorted,
+                silhouette=sil_dict,
+                stability=stab_dict,
+                composite=comp_dict,
+                tiny_cluster_penalty=tiny_dict,
+                best_resolution=float(best_res),
+                plateaus=plateaus if isinstance(plateaus, list) else None,
+                figdir=figdir_cluster,
+            )
+
+        # Biological metrics plot (if present in sweep arrays)
         if (
-            getattr(cfg, "bio_guided_clustering", False)
-            and clust.get("bio_homogeneity") is not None
-            and clust.get("bio_fragmentation") is not None
-            and clust.get("bio_ari") is not None
+                getattr(cfg, "bio_guided_clustering", False)
+                and sweep.get("bio_homogeneity") is not None
+                and sweep.get("bio_fragmentation") is not None
+                and sweep.get("bio_ari") is not None
+                and best_res is not None
+                and res_sorted
         ):
+            # Convert sweep arrays -> dict keyed by _res_key
+            bh = {_res_key(r): float(v) for r, v in zip(res_sorted, sweep["bio_homogeneity"])}
+            bf = {_res_key(r): float(v) for r, v in zip(res_sorted, sweep["bio_fragmentation"])}
+            ba = {_res_key(r): float(v) for r, v in zip(res_sorted, sweep["bio_ari"])}
+
+            plateaus = sweep.get("plateaus", None)
+            if isinstance(plateaus, str):
+                try:
+                    plateaus = json.loads(plateaus)
+                except Exception:
+                    plateaus = None
+
             plot_utils.plot_biological_metrics(
-                resolutions=clust["tested_resolutions"],
-                bio_homogeneity=clust["bio_homogeneity"],
-                bio_fragmentation=clust["bio_fragmentation"],
-                bio_ari=clust["bio_ari"],
-                selection_config=clust["selection_config"],
-                best_resolution=clust["best_resolution"],
-                plateaus=clust["plateaus"],
+                resolutions=res_sorted,
+                bio_homogeneity=bh,
+                bio_fragmentation=bf,
+                bio_ari=ba,
+                selection_config=sweep.get("selection_config", {}),
+                best_resolution=float(best_res),
+                plateaus=plateaus if isinstance(plateaus, list) else None,
                 figdir=figdir_cluster,
                 figure_formats=cfg.figure_formats,
             )
 
-        # === Build structural composite series ===
-        res_list = clust["tested_resolutions"]
-
-        sil_dict = clust["silhouette_centroid"]
-        stab_dict = clust["resolution_stability"]
-        tiny_dict = clust["tiny_cluster_penalty"]
-        cfg_sel = clust["selection_config"]
-
-        # Min–max normalize each metric using the existing helper
-        sil_norm_array = _normalize_array(_extract_series(res_list, sil_dict))
-        stab_norm_array = _normalize_array(_extract_series(res_list, stab_dict))
-        tiny_norm_array = _normalize_array(_extract_series(res_list, tiny_dict))
-
-        w_sil = float(cfg_sel.get("w_sil", 0.0))
-        w_stab = float(cfg_sel.get("w_stab", 0.0))
-        w_tiny = float(cfg_sel.get("w_tiny", 0.0))
-
-        structural_comp = {
-            _res_key(r): (
-                w_sil * sil_norm_array[i]
-                + w_stab * stab_norm_array[i]
-                + w_tiny * tiny_norm_array[i]
-            )
-            for i, r in enumerate(res_list)
-        }
-
-        # === Build biological composite if available ===
-        bio_comp = None
-        if (
-            clust.get("bio_homogeneity") is not None
-            and clust.get("bio_fragmentation") is not None
-            and clust.get("bio_ari") is not None
-        ):
-            hom = clust["bio_homogeneity"]
-            frag = clust["bio_fragmentation"]
-            bioari = clust["bio_ari"]
-
-            hom_norm = _normalize_array(_extract_series(res_list, hom))
-            frag_norm = _normalize_array(_extract_series(res_list, frag))
-            ari_norm = _normalize_array(_extract_series(res_list, bioari))
-
-            w_hom = float(cfg_sel.get("w_hom", 0.0))
-            w_frag = float(cfg_sel.get("w_frag", 0.0))
-            w_bioari = float(cfg_sel.get("w_bioari", 0.0))
-
-            bio_comp = {
-                _res_key(r): (
-                    w_hom * hom_norm[i]
-                    + w_frag * (1 - frag_norm[i])
-                    + w_bioari * ari_norm[i]
-                )
-                for i, r in enumerate(res_list)
-            }
-
-        # Composite-only diagnostic plot
-        plot_utils.plot_composite_only(
-            resolutions=clust["tested_resolutions"],
-            structural_comp=structural_comp,
-            biological_comp=bio_comp,
-            total_comp=clust["composite_scores"],
-            best_resolution=clust["best_resolution"],
-            plateaus=clust["plateaus"],
-            figdir=figdir_cluster,
-        )
-
-        # Plateau diagnostic plot
-        plot_utils.plot_plateau_highlights(
-            resolutions=clust["tested_resolutions"],
-            silhouette=clust["silhouette_centroid"],
-            stability=clust["resolution_stability"],
-            composite=clust["composite_scores"],
-            best_resolution=clust["best_resolution"],
-            plateaus=clust["plateaus"],
-            figdir=figdir_cluster,
-            figure_formats=cfg.figure_formats,
-        )
+    if cfg.make_figures:
+        _plot_round_clustering_diagnostics(adata, cfg, embedding_key=embedding_key, batch_key=batch_key)
 
     # ------------------------------------------------------------------
-    # CellTypist annotation + pretty cluster_label
+    # CellTypist annotation + pretty cluster labels (ROUND-AWARE)
     # ------------------------------------------------------------------
-    annotation_col = _run_celltypist_annotation(
+    active_round_id = adata.uns.get("active_cluster_round", None)
+    active_round_id = str(active_round_id) if active_round_id else None
+
+    # Determine which clustering to annotate: use active round's cluster_key if available
+    cluster_key_for_annotation = cfg.label_key
+    try:
+        rounds = adata.uns.get("cluster_rounds", {})
+        if active_round_id and isinstance(rounds, dict) and active_round_id in rounds:
+            rk = rounds[active_round_id].get("cluster_key", None)
+            if rk and rk in adata.obs:
+                cluster_key_for_annotation = str(rk)
+    except Exception:
+        pass
+
+    ann_keys = _run_celltypist_annotation(
         adata,
         cfg,
+        cluster_key=cluster_key_for_annotation,
+        round_id=active_round_id,
         precomputed_labels=celltypist_labels,
         precomputed_proba=celltypist_proba,
     )
 
-    if cfg.make_figures and annotation_col is not None:
+    if cfg.make_figures and ann_keys is not None:
+        # Put plots under: cluster_and_annotate/<round_id>/celltypist/
+        figdir_cluster = Path("cluster_and_annotate")
+        round_part = ann_keys.get("round_id", active_round_id) or "r0"
+        figdir_ct = figdir_cluster / str(round_part) / "celltypist"
+
         # UMAPs for CellTypist outputs
         plot_utils.umap_by(
             adata,
-            keys=cfg.celltypist_label_key,
-            figdir=figdir_cluster,
+            keys=ann_keys["celltypist_cell_key"],
+            figdir=figdir_ct,
             stem="umap_celltypist_celllevel",
         )
         plot_utils.umap_by(
             adata,
-            keys=cfg.celltypist_cluster_label_key,
-            figdir=figdir_cluster,
+            keys=ann_keys["celltypist_cluster_key"],
+            figdir=figdir_ct,
             stem="umap_celltypist_clusterlevel",
         )
-        # UMAP using pretty cluster labels
+
+        # UMAP using pretty cluster labels (round-scoped)
         plot_utils.umap_by(
             adata,
-            keys=CLUSTER_LABEL_KEY,
-            figdir=figdir_cluster,
-            stem="umap_cluster_label",
+            keys=ann_keys["pretty_cluster_key"],
+            figdir=figdir_ct,
+            stem="umap_pretty_cluster_label",
         )
 
-        # Cluster-level statistics using pretty cluster labels
-        id_key = CLUSTER_LABEL_KEY
-        plot_utils.plot_cluster_sizes(adata, id_key, figdir_cluster)
-        plot_utils.plot_cluster_qc_summary(adata, id_key, figdir_cluster)
-        plot_utils.plot_cluster_silhouette_by_cluster(
-            adata, id_key, embedding_key, figdir_cluster
-        )
+        # Cluster-level statistics using pretty cluster labels (round-scoped)
+        id_key = ann_keys["pretty_cluster_key"]
+        plot_utils.plot_cluster_sizes(adata, id_key, figdir_ct)
+        plot_utils.plot_cluster_qc_summary(adata, id_key, figdir_ct)
+        plot_utils.plot_cluster_silhouette_by_cluster(adata, id_key, embedding_key, figdir_ct)
         if batch_key is not None:
-            plot_utils.plot_cluster_batch_composition(
-                adata, id_key, batch_key, figdir_cluster
-            )
+            plot_utils.plot_cluster_batch_composition(adata, id_key, batch_key, figdir_ct)
 
-    if annotation_col is not None:
-        ca_uns["celltypist_label_key"] = cfg.celltypist_label_key
-        ca_uns["celltypist_cluster_label_key"] = cfg.celltypist_cluster_label_key
-        ca_uns["cluster_label_key"] = CLUSTER_LABEL_KEY
-
-    # Optional CSV with cluster annotations
-    if cfg.annotation_csv is not None and annotation_col is not None:
-        io_utils.export_cluster_annotations(
-            adata,
-            columns=[cfg.label_key, annotation_col],
-            out_path=cfg.annotation_csv,
-        )
+    # Store pointers in cluster_and_annotate uns (keep old keys as aliases)
+    ca_uns = adata.uns.get("cluster_and_annotate", {})
+    if ann_keys is not None:
+        ca_uns["celltypist_label_key"] = ann_keys["celltypist_cell_key"]
+        ca_uns["celltypist_cluster_label_key"] = ann_keys["celltypist_cluster_key"]
+        ca_uns["cluster_label_key"] = ann_keys["pretty_cluster_key"]
+        adata.uns["cluster_and_annotate"] = ca_uns
 
     # ------------------------------------------------------------------
-    # Decoupler nets (cluster-level) — gated by cfg.run_decoupler
+    # Optional CSV export of cluster annotations (ROUND-AWARE)
+    # ------------------------------------------------------------------
+    def _export_round_annotations_csv(adata: ad.AnnData, cfg: ClusterAnnotateConfig) -> None:
+        if cfg.annotation_csv is None:
+            return
+
+        active_round_id = adata.uns.get("active_cluster_round", None)
+        active_round_id = str(active_round_id) if active_round_id else None
+        rounds = adata.uns.get("cluster_rounds", {})
+
+        if not active_round_id or not isinstance(rounds, dict) or active_round_id not in rounds:
+            LOGGER.warning("annotation_csv requested but no active cluster round found; skipping export.")
+            return
+
+        # Prefer round-linked keys if present
+        rinfo = rounds[active_round_id]
+        ann = rinfo.get("annotation", {}) if isinstance(rinfo.get("annotation", {}), dict) else {}
+        cluster_key = rinfo.get("cluster_key", None)
+
+        cols: list[str] = []
+        if cluster_key and cluster_key in adata.obs:
+            cols.append(str(cluster_key))
+
+        ct_cluster_key = ann.get("celltypist_cluster_key", f"{cfg.celltypist_cluster_label_key}__{active_round_id}")
+        pretty_key = ann.get("pretty_cluster_key", f"{CLUSTER_LABEL_KEY}__{active_round_id}")
+
+        if ct_cluster_key in adata.obs:
+            cols.append(ct_cluster_key)
+        if pretty_key in adata.obs:
+            cols.append(pretty_key)
+
+        if not cols:
+            LOGGER.warning("annotation_csv requested, but no annotation columns found for round '%s'.", active_round_id)
+            return
+
+        LOGGER.info("Exporting cluster annotations for round '%s' with columns: %s", active_round_id, cols)
+        io_utils.export_cluster_annotations(adata, columns=cols, out_path=cfg.annotation_csv)
+
+    _export_round_annotations_csv(adata, cfg)
+
+    # ------------------------------------------------------------------
+    # Decoupler nets (cluster-level) — ROUND-AWARE, gated by cfg.run_decoupler
+    # No shim: each net reads pseudobulk from store_key and writes to out_key.
     # ------------------------------------------------------------------
     if getattr(cfg, "run_decoupler", False):
-        # Store cluster pseudobulk once for all downstream nets
-        cluster_key = None
-        if "cluster_label" in adata.obs:
-            cluster_key = "cluster_label"
-        elif getattr(cfg, "final_auto_idents_key", None) and cfg.final_auto_idents_key in adata.obs:
-            cluster_key = cfg.final_auto_idents_key
-        elif getattr(cfg, "label_key", None) and cfg.label_key in adata.obs:
-            cluster_key = cfg.label_key
+        _ensure_cluster_rounds(adata)
 
-        if cluster_key is None:
-            LOGGER.warning("Decoupler: no cluster key found; skipping pseudobulk + nets.")
+        active_round_id = adata.uns.get("active_cluster_round", None)
+        active_round_id = str(active_round_id) if active_round_id else None
+
+        rounds = adata.uns.get("cluster_rounds", {})
+        if not active_round_id or active_round_id not in rounds:
+            LOGGER.warning("Decoupler: no active cluster round found; skipping pseudobulk + nets.")
         else:
-            _store_cluster_pseudobulk(
-                adata,
-                cluster_key=cluster_key,
-                agg=getattr(cfg, "decoupler_pseudobulk_agg", "mean"),
-                use_raw_like=bool(getattr(cfg, "decoupler_use_raw", True)),
-                prefer_layers=("counts_raw", "counts_cb"),
-                store_key="pseudobulk",
-            )
+            rinfo = rounds[active_round_id]
+            cluster_key = rinfo.get("cluster_key", None)
 
-            # Run selected nets (each function also reads cfg for method overrides)
-            _run_msigdb(adata, cfg)
+            if not cluster_key or cluster_key not in adata.obs:
+                LOGGER.warning(
+                    "Decoupler: active round '%s' has cluster_key=%r missing in adata.obs; skipping.",
+                    active_round_id,
+                    cluster_key,
+                )
+            else:
+                # Round-scoped stores so multiple rounds can coexist
+                pb_key = f"pseudobulk__{active_round_id}"
+                msigdb_key = f"msigdb__{active_round_id}"
+                progeny_key = f"progeny__{active_round_id}"
+                dorothea_key = f"dorothea__{active_round_id}"
 
-            if getattr(cfg, "run_dorothea", True):
-                _run_dorothea(adata, cfg)
+                # Prefer pretty labels for readability IF you created them per-round
+                pretty_key = f"{CLUSTER_LABEL_KEY}__{active_round_id}"
+                cluster_key_for_pb = pretty_key if pretty_key in adata.obs else cluster_key
 
-            if getattr(cfg, "run_progeny", True):
-                _run_progeny(adata, cfg)
+                LOGGER.info(
+                    "Decoupler: using cluster_key=%r (round=%s) for pseudobulk.",
+                    cluster_key_for_pb,
+                    active_round_id,
+                )
+
+                _store_cluster_pseudobulk(
+                    adata,
+                    cluster_key=cluster_key_for_pb,
+                    agg=getattr(cfg, "decoupler_pseudobulk_agg", "mean"),
+                    use_raw_like=bool(getattr(cfg, "decoupler_use_raw", True)),
+                    prefer_layers=("counts_raw", "counts_cb"),
+                    store_key=pb_key,
+                )
+
+                # --- Run nets into round-scoped output keys ---
+                _run_msigdb(adata, cfg, store_key=pb_key, out_key=msigdb_key)
+
+                if getattr(cfg, "run_dorothea", True):
+                    _run_dorothea(adata, cfg, store_key=pb_key, out_key=dorothea_key)
+
+                if getattr(cfg, "run_progeny", True):
+                    _run_progeny(adata, cfg, store_key=pb_key, out_key=progeny_key)
+
     else:
         LOGGER.info("Decoupler: disabled (run_decoupler=False).")
 
     # ------------------------------------------------------------------
-    # Decoupler net plots (heatmap + per-cluster bars + dotplot)
+    # Decoupler net plots (heatmap + per-cluster bars + dotplot) — ROUND-AWARE
     # ------------------------------------------------------------------
     if cfg.make_figures and getattr(cfg, "run_decoupler", False):
-        # Tune defaults per resource (PROGENy is small; DoRothEA can be large)
-        plot_utils.plot_decoupler_all_styles(
-            adata,
-            net_key="msigdb",
-            net_name="MSigDB",
-            figdir=Path("cluster_and_annotate"),
-            heatmap_top_k=30,
-            bar_top_n=10,
-            dotplot_top_k=30,
-        )
+        active_round_id = adata.uns.get("active_cluster_round", None)
+        active_round_id = str(active_round_id) if active_round_id else None
 
-        plot_utils.plot_decoupler_all_styles(
-            adata,
-            net_key="progeny",
-            net_name="PROGENy",
-            figdir=Path("cluster_and_annotate"),
-            heatmap_top_k=14,   # PROGENy pathways are ~14 (human)
-            bar_top_n=8,
-            dotplot_top_k=14,
-        )
+        rounds = adata.uns.get("cluster_rounds", {})
+        if not active_round_id or active_round_id not in rounds:
+            LOGGER.warning("Decoupler plots: no active cluster round found; skipping.")
+        else:
+            # Use round-scoped net keys
+            msigdb_key = f"msigdb__{active_round_id}"
+            progeny_key = f"progeny__{active_round_id}"
+            dorothea_key = f"dorothea__{active_round_id}"
 
-        plot_utils.plot_decoupler_all_styles(
-            adata,
-            net_key="dorothea",
-            net_name="DoRothEA",
-            figdir=Path("cluster_and_annotate"),
-            heatmap_top_k=40,
-            bar_top_n=10,
-            dotplot_top_k=35,
-        )
+            figdir_round = Path("cluster_and_annotate") / active_round_id / "decoupler"
 
-    # Make 'plateaus' HDF5-safe: JSON-encode list of dicts if present
-    ca_uns = adata.uns.get("cluster_and_annotate", {})
-    clustering = ca_uns.get("clustering", {})
-    plateaus = clustering.get("plateaus", None)
-    if isinstance(plateaus, list):
-        clustering["plateaus"] = json.dumps(plateaus)
-        ca_uns["clustering"] = clustering
-        adata.uns["cluster_and_annotate"] = ca_uns
+            # MSigDB (usually large)
+            if msigdb_key in adata.uns:
+                plot_utils.plot_decoupler_all_styles(
+                    adata,
+                    net_key=msigdb_key,
+                    net_name="MSigDB",
+                    figdir=figdir_round,
+                    heatmap_top_k=30,
+                    bar_top_n=10,
+                    dotplot_top_k=30,
+                )
+
+            # PROGENy (small, ~14 pathways)
+            if progeny_key in adata.uns:
+                plot_utils.plot_decoupler_all_styles(
+                    adata,
+                    net_key=progeny_key,
+                    net_name="PROGENy",
+                    figdir=figdir_round,
+                    heatmap_top_k=14,
+                    bar_top_n=8,
+                    dotplot_top_k=14,
+                )
+
+            # DoRothEA (can be large)
+            if dorothea_key in adata.uns:
+                plot_utils.plot_decoupler_all_styles(
+                    adata,
+                    net_key=dorothea_key,
+                    net_name="DoRothEA",
+                    figdir=figdir_round,
+                    heatmap_top_k=40,
+                    bar_top_n=10,
+                    dotplot_top_k=35,
+                )
+
+    # ------------------------------------------------------------------
+    # Make 'plateaus' HDF5/Zarr-safe — ROUND-AWARE (encode IN PLACE)
+    # ------------------------------------------------------------------
+    def _json_encode_round_plateaus_in_place(adata: ad.AnnData) -> None:
+        """
+        Make plateaus HDF5/Zarr-safe by JSON encoding:
+          adata.uns["cluster_rounds"][round_id]["sweep"]["plateaus"]
+        """
+        active_round_id = adata.uns.get("active_cluster_round", None)
+        active_round_id = str(active_round_id) if active_round_id else None
+        rounds = adata.uns.get("cluster_rounds", {})
+
+        if not active_round_id or not isinstance(rounds, dict) or active_round_id not in rounds:
+            return
+
+        rinfo = rounds[active_round_id]
+        sweep = rinfo.get("sweep", None)
+        if not isinstance(sweep, dict):
+            return
+
+        plateaus = sweep.get("plateaus", None)
+        if isinstance(plateaus, list):
+            sweep["plateaus"] = json.dumps(plateaus)
+            rinfo["sweep"] = sweep
+            rounds[active_round_id] = rinfo
+            adata.uns["cluster_rounds"] = rounds
+
+    _json_encode_round_plateaus_in_place(adata)
 
     # ---------------------------------------------------------
     # Save outputs
