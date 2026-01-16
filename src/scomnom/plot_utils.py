@@ -3228,7 +3228,34 @@ def plot_decoupler_all_styles(
 
         return {}
 
+    def _get_display_order() -> list[str]:
+        # 1) Best: published into top-level resource payload by run_decoupler_for_round()
+        try:
+            cfg = block.get("config", {})
+            if isinstance(cfg, dict):
+                labels = cfg.get("cluster_display_labels", None)
+                if isinstance(labels, (list, tuple)) and labels:
+                    return [str(x) for x in labels]
+        except Exception:
+            pass
+
+        # 2) Next: round-owned ordering (active round)
+        try:
+            rid = adata.uns.get("active_cluster_round", None)
+            rid = str(rid) if rid is not None else None
+            rounds = adata.uns.get("cluster_rounds", {})
+            if rid and isinstance(rounds, dict) and rid in rounds:
+                r = rounds[rid]
+                labels = r.get("cluster_display_labels", None)
+                if isinstance(labels, (list, tuple)) and labels:
+                    return [str(x) for x in labels]
+        except Exception:
+            pass
+
+        return []
+
     display_map = _get_display_map()
+    display_order = _get_display_order()
 
     def _apply_display_index(df: pd.DataFrame) -> pd.DataFrame:
         if not display_map:
@@ -3236,10 +3263,20 @@ def plot_decoupler_all_styles(
         out = df.copy()
         old = out.index.astype(str)
         new = old.map(lambda x: display_map.get(str(x), str(x)))
+
         # If mapping creates duplicates, make them unique but readable
         if pd.Index(new).has_duplicates:
             new = [f"{lbl} [{cid}]" for lbl, cid in zip(new, old)]
+
         out.index = pd.Index(new, name=out.index.name)
+
+        # >>> KEY FIX: enforce intended row order if we have it
+        if display_order:
+            # keep only rows present; preserve order
+            want = [x for x in display_order if x in out.index]
+            if want:
+                out = out.reindex(want)
+
         return out
 
     # ------------------------------------------------------------------
