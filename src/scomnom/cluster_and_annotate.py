@@ -3132,29 +3132,30 @@ def compact_clusters_by_multiview_agreement(
     thr_msigdb_default: float = 0.98,
     thr_msigdb_by_gmt: Optional[Dict[str, float]] = None,
     msigdb_required: bool = True,
-    # NEW: gated by cfg at callsite (pass bool from cfg)
     skip_unknown_celltypist_groups: bool = False,
 ) -> CompactionOutputs:
     """
     Compaction decision engine.
 
-    Implements the full "robust strict" suite:
-      1) Adaptive thresholds per CellTypist label (90th percentile rule + hard floor)
-         - progeny: thr = clamp(max(floor_prog, q90(sim_prog within label)), cap=thr_progeny)
-         - dorothea: thr = clamp(max(floor_doro, q90(sim_doro within label)), cap=thr_dorothea)
-         - msigdb:   thr per GMT = clamp(max(floor_msig, q90(sim_msig_gmt within label)), cap=thr_msigdb_by_gmt[g] or thr_msigdb_default)
-         NOTE: configured thr_* values are treated as CAPS (max strictness) so adaptive can relax.
-      2) MSigDB majority across GMT blocks (instead of AND across all GMTs)
-         - pass_msigdb = (#GMTs passing) >= ceil(majority_frac * #GMTs)
-      3) MSigDB similarity uses Option-1 Top-K union per pair (K=50):
-         - For each pair (a,b) and each GMT block, compute cosine on the union of
-           top-K terms by abs(z) in a and abs(z) in b.
+    Patch implements Gemini + our agreed fixes:
 
-    Also keeps your existing behaviors:
-      - Groups clusters by round-scoped cluster-level CellTypist label if available
-      - Fallback to per-cell majority otherwise
-      - Optional skip of Unknown/UNKNOWN groups
-      - Returns CompactionOutputs with edges/adjs/decision_log/etc.
+    (1) Majority rule that doesn't become a veto machine with only 2 GMT blocks
+        - required_passes = 1 if n_gmts==2 (i.e. 1-of-2 is enough)
+        - otherwise required_passes = ceil(frac * n_gmts) with min 1
+
+    (2) Per-GMT MSigDB thresholds:
+        - Provide sane hard FLOORS (minimum strictness) per GMT:
+            HALLMARK: 0.60
+            REACTOME: 0.45  (noisier / larger)
+            default:  0.50  (for other libraries e.g. BIOCARTA)
+        - Keep user-supplied thr_msigdb_by_gmt and thr_msigdb_default as CAPS
+          (maximum strictness); adaptive thresholds can relax downward but not below floors.
+
+    (3) Use global z-scoring for the compaction decision regardless of configured zscore_scope.
+        - This avoids within-label z-scoring exaggerating tiny within-type differences.
+
+    Also:
+      - MSigDB Top-K union is reduced to K=25 (recommended; less tail-noise than 50).
     """
     import numpy as np
     import pandas as pd
@@ -3199,15 +3200,12 @@ def compact_clusters_by_multiview_agreement(
     else:
         msig_by_gmt = {}
 
-    if zscore_scope == "global":
-        prog_z_global = _zscore_cols(prog)
-        doro_z_global = _zscore_cols(doro)
-        msig_z_global = {g: _zscore_cols(df) for g, df in msig_by_gmt.items()}
-    elif zscore_scope == "within_celltypist_label":
-        prog_z_global = doro_z_global = None
-        msig_z_global = None
-    else:
-        raise ValueError("zscore_scope must be 'within_celltypist_label' or 'global'")
+    # ------------------------------------------------------------------
+    # (3) FORCE GLOBAL Z-SCORE for compaction decision
+    # ------------------------------------------------------------------
+    prog_z_global = _zscore_cols(prog)
+    doro_z_global = _zscore_cols(doro)
+    msig_z_global = {g: _zscore_cols(df) for g, df in msig_by_gmt.items()}
 
     # ------------------------------------------------------------------
     # Grouping label per cluster (CellTypist)
@@ -3255,15 +3253,21 @@ def compact_clusters_by_multiview_agreement(
     # ------------------------------------------------------------------
     # Robust thresholds + MSigDB majority + MSigDB top-K union
     # ------------------------------------------------------------------
-    TOPK_MSIGDB = 50
+    TOPK_MSIGDB = 25  # lowered from 50 (reduces tail noise; usually improves robustness)
     ADAPT_Q = 0.90
 
-    # Hard floors: do not become too lenient
+    # Floors (minimum strictness)
     FLOOR_PROG = 0.70
     FLOOR_DORO = 0.60
-    FLOOR_MSIG = 0.60
 
-    # Majority across GMTs
+    # (2) Per-GMT floors: Hallmark stricter, Reactome looser, generic default for other GMTs
+    MSIGDB_FLOOR_BY_GMT = {
+        "HALLMARK": 0.60,
+        "REACTOME": 0.45,
+    }
+    FLOOR_MSIG_DEFAULT = 0.50  # for any other GMT (biocarta, kegg, etc.)
+
+    # (1) Majority across GMTs: keep the configured frac, but apply a special rule for n=2
     MSIGDB_MAJORITY_FRAC = 0.67
 
     def _safe_quantile(vals: List[float], q: float, default: float) -> float:
@@ -3272,7 +3276,7 @@ def compact_clusters_by_multiview_agreement(
             return float(default)
         return float(np.quantile(v, q))
 
-    def _cosine_topk_union(v_a: np.ndarray, v_b: np.ndarray, k: int = 50) -> float:
+    def _cosine_topk_union(v_a: np.ndarray, v_b: np.ndarray, k: int = 25) -> float:
         a = np.asarray(v_a, dtype=float)
         b = np.asarray(v_b, dtype=float)
         if a.size == 0 or b.size == 0 or a.size != b.size:
@@ -3288,14 +3292,27 @@ def compact_clusters_by_multiview_agreement(
         return _cosine(a[idx], b[idx])
 
     def _cap_for_gmt(gmt: str) -> float:
-        # Per-GMT cap if provided, else default cap
+        # user-provided caps override defaults
         if gmt in thr_msigdb_by_gmt:
             return float(thr_msigdb_by_gmt[gmt])
         return float(thr_msigdb_default)
 
+    def _floor_for_gmt(gmt: str) -> float:
+        g = str(gmt).upper()
+        return float(MSIGDB_FLOOR_BY_GMT.get(g, FLOOR_MSIG_DEFAULT))
+
     def _msig_required_passes(n_gmts: int, frac: float) -> int:
+        """
+        (1) Fix majority math:
+          - if n_gmts == 2: require 1 (avoid turning majority into AND)
+          - else: ceil(frac*n_gmts), but at least 1 and at most n_gmts
+        """
         if n_gmts <= 0:
             return 0
+        if n_gmts == 1:
+            return 1
+        if n_gmts == 2:
+            return 1
         need = int(np.ceil(float(frac) * float(n_gmts)))
         return int(max(1, min(n_gmts, need)))
 
@@ -3307,19 +3324,13 @@ def compact_clusters_by_multiview_agreement(
         if len(clusters) < 2:
             continue
 
-        # z-scoring
-        if zscore_scope == "within_celltypist_label":
-            prog_z = _zscore_cols(prog.loc[clusters])
-            doro_z = _zscore_cols(doro.loc[clusters])
-            msig_z = {g: _zscore_cols(df.loc[clusters]) for g, df in msig_by_gmt.items()}
-        else:
-            prog_z = prog_z_global.loc[clusters]
-            doro_z = doro_z_global.loc[clusters]
-            msig_z = {g: msig_z_global[g].loc[clusters] for g in msig_by_gmt.keys()}
+        # GLOBAL z-scored views (sliced to clusters)
+        prog_z = prog_z_global.loc[clusters]
+        doro_z = doro_z_global.loc[clusters]
+        msig_z = {g: msig_z_global[g].loc[clusters] for g in msig_by_gmt.keys()}
 
         # --------------------------------------------------------------
         # 1) Adaptive thresholds per CellTypist label (distribution first)
-        #    IMPORTANT: avoid diagonals/self-similarity; use i<j pairs.
         # --------------------------------------------------------------
         prog_sims: List[float] = []
         doro_sims: List[float] = []
@@ -3341,13 +3352,14 @@ def compact_clusters_by_multiview_agreement(
                     )
                     msig_sims_by_gmt[gmt].append(float(ms))
 
-        # Compute adaptive thresholds (q90), then clamp with floors, then CAP at configured thr_*
+        # adaptive (q90) then apply floors then CAP at configured thr_*
         q_prog = _safe_quantile(prog_sims, ADAPT_Q, default=FLOOR_PROG)
         q_doro = _safe_quantile(doro_sims, ADAPT_Q, default=FLOOR_DORO)
 
         thr_prog_ct = max(FLOOR_PROG, float(q_prog))
         thr_doro_ct = max(FLOOR_DORO, float(q_doro))
 
+        # Caps: allow adaptive to relax below caps, but never exceed caps (i.e. don't get stricter than configured)
         if thr_progeny is not None:
             thr_prog_ct = min(float(thr_progeny), float(thr_prog_ct))
         if thr_dorothea is not None:
@@ -3355,10 +3367,11 @@ def compact_clusters_by_multiview_agreement(
 
         thr_msig_ct: Dict[str, float] = {}
         for gmt, sims in msig_sims_by_gmt.items():
-            q_m = _safe_quantile(sims, ADAPT_Q, default=FLOOR_MSIG)
-            thr_eff = max(FLOOR_MSIG, float(q_m))
+            floor_g = _floor_for_gmt(gmt)
+            q_m = _safe_quantile(sims, ADAPT_Q, default=floor_g)
+            thr_eff = max(float(floor_g), float(q_m))
             thr_eff = min(float(_cap_for_gmt(gmt)), float(thr_eff))
-            thr_msig_ct[gmt] = float(thr_eff)
+            thr_msig_ct[str(gmt)] = float(thr_eff)
 
         adaptive_thresholds_by_label[str(ct_label)] = {
             "thr_progeny": float(thr_prog_ct),
@@ -3370,7 +3383,8 @@ def compact_clusters_by_multiview_agreement(
             "floors": {
                 "floor_prog": float(FLOOR_PROG),
                 "floor_doro": float(FLOOR_DORO),
-                "floor_msig": float(FLOOR_MSIG),
+                "floor_msig_default": float(FLOOR_MSIG_DEFAULT),
+                "floor_msig_by_gmt": {k: float(v) for k, v in MSIGDB_FLOOR_BY_GMT.items()},
             },
             "caps": {
                 "cap_prog": None if thr_progeny is None else float(thr_progeny),
@@ -3378,6 +3392,7 @@ def compact_clusters_by_multiview_agreement(
                 "cap_msig_default": None if thr_msigdb_default is None else float(thr_msigdb_default),
                 "cap_msig_by_gmt": {str(g): float(v) for g, v in (thr_msigdb_by_gmt or {}).items()},
             },
+            "compaction_zscore_scope": "global",
         }
 
         passed_edges: List[Tuple[str, str]] = []
@@ -3409,13 +3424,13 @@ def compact_clusters_by_multiview_agreement(
                         k=TOPK_MSIGDB,
                     )
                     msig_sims[gmt] = float(s)
-                    thr_g = float(thr_msig_ct.get(gmt, _cap_for_gmt(gmt)))
+                    thr_g = float(thr_msig_ct.get(str(gmt), min(_cap_for_gmt(str(gmt)), max(_floor_for_gmt(str(gmt)), 0.0))))
                     ok = bool(s >= thr_g)
                     msig_pass_flags[gmt] = ok
                     if not ok:
-                        msig_fail_gmts.append(gmt)
+                        msig_fail_gmts.append(str(gmt))
 
-                # 2) Majority across GMTs
+                # (1) Majority across GMTs with n=2 special-case
                 if msigdb_required:
                     n_gmts = int(len(msig_z))
                     if n_gmts <= 0:
@@ -3455,18 +3470,20 @@ def compact_clusters_by_multiview_agreement(
                     "pass_msigdb_majority": bool(pass_msigdb),
                     "fail_msigdb_gmts": ",".join(msig_fail_gmts) if msig_fail_gmts else "",
                     "pass_all": bool(pass_all),
-                    "similarity_metric": f"{similarity_metric}+msigdb_topk_union+adaptive_q{ADAPT_Q}",
-                    "zscore_scope": zscore_scope,
+                    "similarity_metric": f"{similarity_metric}+msigdb_topk_union_k{TOPK_MSIGDB}+adaptive_q{ADAPT_Q}",
+                    # keep original arg for transparency, but compaction uses global
+                    "zscore_scope": str(zscore_scope),
+                    "compaction_zscore_scope": "global",
                     "grouping": grouping,
                 }
 
                 for gmt, s in msig_sims.items():
-                    thr_g = float(thr_msig_ct.get(gmt, _cap_for_gmt(gmt)))
+                    thr_g = float(thr_msig_ct.get(str(gmt), min(_cap_for_gmt(str(gmt)), max(_floor_for_gmt(str(gmt)), 0.0))))
                     row[f"sim_msigdb__{gmt}"] = float(s)
                     row[f"thr_msigdb__{gmt}"] = float(thr_g)
                     row[f"pass_msigdb__{gmt}"] = bool(s >= thr_g)
 
-                # backward-ish compatibility: this used to mean "all GMTs", but now it's majority.
+                # backward-ish compatibility: field name kept, semantics are "majority"
                 row["pass_msigdb_all_gmt"] = bool(pass_msigdb)
 
                 edge_rows.append(row)
@@ -3474,10 +3491,11 @@ def compact_clusters_by_multiview_agreement(
         pass_edges_by_label[ct_label] = passed_edges
         adjacency[ct_label] = passed_edges
 
-        # One-line per-label threshold log (helps tuning)
+        # One-line per-label threshold log
         try:
             LOGGER.info(
-                "Compaction[%s] adaptive thresholds: thr_prog=%.3f thr_doro=%.3f msig_gmts=%d (q=%.2f, topk=%d, msig_majority=%.2f)",
+                "Compaction[%s] adaptive thresholds: thr_prog=%.3f thr_doro=%.3f msig_gmts=%d "
+                "(q=%.2f, topk=%d, msig_majority=%.2f, compaction_z=global)",
                 str(ct_label),
                 float(thr_prog_ct),
                 float(thr_doro_ct),
@@ -3516,7 +3534,7 @@ def compact_clusters_by_multiview_agreement(
                     "celltypist_label": ct_label,
                     "members": list(comp),
                     "n_members": int(len(comp)),
-                    "reason": "adaptive multiview agreement within CellTypist label (progeny + dorothea + msigdb_majority(topK))",
+                    "reason": "adaptive multiview agreement within CellTypist label (progeny + dorothea + msigdb_majority(topK), compaction_z=global)",
                     "grouping": grouping,
                     "adaptive": adaptive_thresholds_by_label.get(str(ct_label), None),
                 }
@@ -3549,7 +3567,7 @@ def compact_clusters_by_multiview_agreement(
 
     cluster_renumbering = {k: k for k in reverse_map.keys()}
 
-    # Summary logging (keeps your diagnostics, updated labels)
+    # Summary logging (keeps your diagnostics)
     try:
         n_clusters_considered = sum(len(v) for v in label_to_clusters.values())
         n_labels = len(label_to_clusters)
@@ -3561,8 +3579,8 @@ def compact_clusters_by_multiview_agreement(
         LOGGER.info(
             "Compaction summary: considered=%d clusters across %d CellTypist groups; "
             "merge_groups=%d; clusters_in_merged_groups=%d; total_components=%d; "
-            "min_cells=%d; grouping=%s; zscore_scope=%s; msigdb_required=%s; skip_unknown_groups=%s; "
-            "adaptive_q=%.2f; msigdb_topk=%d; msigdb_majority=%.2f",
+            "min_cells=%d; grouping=%s; zscore_scope(arg)=%s; compaction_z=global; "
+            "msigdb_required=%s; skip_unknown_groups=%s; adaptive_q=%.2f; msigdb_topk=%d; msigdb_majority=%.2f",
             int(n_clusters_considered),
             int(n_labels),
             int(n_merge_groups),
@@ -3600,8 +3618,7 @@ def compact_clusters_by_multiview_agreement(
                 pass_rate = float(edges_df["pass_all"].mean())
                 n_edges = int(edges_df.shape[0])
                 LOGGER.info(
-                    "Compaction found no merges. Edge pass_all rate=%.3f over %d tested pairs. "
-                    "Likely thresholds still too strict or activity patterns are distinct.",
+                    "Compaction found no merges. Edge pass_all rate=%.3f over %d tested pairs.",
                     pass_rate,
                     n_edges,
                 )
@@ -3633,35 +3650,6 @@ def compact_clusters_by_multiview_agreement(
                         for c in sorted(msig_pass_cols):
                             rate = float(pd.to_numeric(edges_df[c], errors="coerce").fillna(False).mean())
                             LOGGER.info("Compaction pass rate %s: %.3f", c.replace("pass_", ""), rate)
-
-                    # "closest misses" using per-edge thresholds
-                    if all(col in edges_df.columns for col in ("sim_progeny", "sim_dorothea", "thr_progeny", "thr_dorothea")):
-                        df2 = edges_df.copy()
-                        df2["margin_progeny"] = pd.to_numeric(df2["sim_progeny"], errors="coerce") - pd.to_numeric(df2["thr_progeny"], errors="coerce")
-                        df2["margin_dorothea"] = pd.to_numeric(df2["sim_dorothea"], errors="coerce") - pd.to_numeric(df2["thr_dorothea"], errors="coerce")
-
-                        msig_sim_cols = [c for c in df2.columns if c.startswith("sim_msigdb__")]
-                        for c in msig_sim_cols:
-                            gmt = c.split("__", 1)[1]
-                            thr_col = f"thr_msigdb__{gmt}"
-                            if thr_col in df2.columns:
-                                df2[f"margin_msigdb__{gmt}"] = pd.to_numeric(df2[c], errors="coerce") - pd.to_numeric(df2[thr_col], errors="coerce")
-
-                        margin_cols = [c for c in df2.columns if c.startswith("margin_")]
-                        if margin_cols:
-                            df2["min_margin"] = df2[margin_cols].min(axis=1)
-                            closest = df2.sort_values("min_margin", ascending=False).head(5)
-                            for _, row in closest.iterrows():
-                                LOGGER.info(
-                                    "Compaction closest-miss: ct=%s a=%s b=%s min_margin=%.3f (prog=%.3f doro=%.3f msig_majority=%s)",
-                                    row.get("celltypist_label", ""),
-                                    row.get("a", ""),
-                                    row.get("b", ""),
-                                    float(row.get("min_margin", np.nan)),
-                                    float(row.get("sim_progeny", np.nan)),
-                                    float(row.get("sim_dorothea", np.nan)),
-                                    str(bool(row.get("pass_msigdb_majority", False))),
-                                )
 
                 except Exception as e:
                     LOGGER.warning("Compaction diagnostic logging failed: %s", e)
