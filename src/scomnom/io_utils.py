@@ -823,17 +823,45 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr") -> None:
 
     Automatically makes adata.uns (and nested structures) safe for H5AD/Zarr by:
       - converting any nested pandas.DataFrame into a tagged, json-compatible dict
-      - converting numpy arrays to lists where needed
+      - converting numpy arrays to lists where needed (
       - ensuring keys are strings
 
     This is done on a shallow copy of adata so the in-memory object remains unchanged.
+    Large numerical arrays should never be stored in .uns. Arrays found here are assumed to be small metadata.
+
+    Additionally:
+      - Emits WARNINGS (only) if adata.uns or individual entries are large.
     """
     import copy
+    import sys
     import numpy as np
     import pandas as pd
 
+    # ------------------------------------------------------------
+    # Size estimation (warn-only)
+    # ------------------------------------------------------------
+    def _estimate_size_bytes(obj) -> int:
+        try:
+            if isinstance(obj, np.ndarray):
+                return int(obj.nbytes)
+
+            if isinstance(obj, pd.DataFrame):
+                return int(obj.memory_usage(deep=True).sum())
+
+            if isinstance(obj, dict):
+                return sum(_estimate_size_bytes(v) for v in obj.values())
+
+            if isinstance(obj, (list, tuple)):
+                return sum(_estimate_size_bytes(v) for v in obj)
+
+            return int(sys.getsizeof(obj))
+        except Exception:
+            return 0
+
+    # ------------------------------------------------------------
+    # Sanitization helpers
+    # ------------------------------------------------------------
     def _df_to_tagged_payload(df: pd.DataFrame) -> dict:
-        # Use split format: compact + stable
         payload = df.to_dict(orient="split")  # keys: index, columns, data
         return {
             "__type__": "pandas.DataFrame",
@@ -853,11 +881,9 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr") -> None:
         """
         Recursively sanitize nested structures to be storage-friendly.
         """
-        # pandas DataFrame
         if isinstance(obj, pd.DataFrame):
             return _df_to_tagged_payload(obj)
 
-        # pandas Series (rare in your uns; still handle)
         if isinstance(obj, pd.Series):
             return {
                 "__type__": "pandas.Series",
@@ -866,49 +892,85 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr") -> None:
                 "data": obj.tolist(),
             }
 
-        # numpy arrays
         if isinstance(obj, np.ndarray):
-            # if it's a small-ish array in uns, store as list payload
-            # (your big matrices should not live in uns anyway)
             return _ndarray_to_payload(obj)
 
-        # numpy scalars
         if isinstance(obj, (np.generic,)):
             try:
                 return obj.item()
             except Exception:
                 return str(obj)
 
-        # dict-like
         if isinstance(obj, dict):
             out = {}
             for k, v in obj.items():
-                # keys must be strings for h5ad friendliness
-                ks = str(k)
-                out[ks] = _sanitize(v)
+                out[str(k)] = _sanitize(v)
             return out
 
-        # list/tuple
         if isinstance(obj, (list, tuple)):
             return [_sanitize(v) for v in obj]
 
-        # basic python scalars are fine
+        if isinstance(obj, pd.Index):
+            return obj.astype(str).tolist()
+
         if obj is None or isinstance(obj, (str, int, float, bool)):
             return obj
 
-        # fallback: stringify unknown objects
         return str(obj)
 
+    # ------------------------------------------------------------
+    # Prepare output path
+    # ------------------------------------------------------------
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # ------------------------------------------------------------
+    # Size warnings (before sanitization, warn-only)
+    # ------------------------------------------------------------
+    try:
+        uns = adata.uns if hasattr(adata, "uns") else {}
+        total_bytes = _estimate_size_bytes(uns)
+        total_mb = total_bytes / (1024 ** 2)
+
+        WARN_TOTAL_MB = 200.0
+        WARN_SINGLE_MB = 50.0
+
+        if total_mb >= WARN_TOTAL_MB:
+            LOGGER.warning(
+                "adata.uns is large (~%.1f MB). This is allowed, but save/load may be slow.",
+                total_mb,
+            )
+
+        if isinstance(uns, dict):
+            for k, v in uns.items():
+                sz = _estimate_size_bytes(v) / (1024 ** 2)
+                if sz >= WARN_SINGLE_MB:
+                    LOGGER.warning(
+                        "Large object in adata.uns['%s'] (~%.1f MB).",
+                        k,
+                        sz,
+                    )
+    except Exception as e:
+        LOGGER.warning(
+            "Could not estimate adata.uns size for warning purposes (continuing). (%s)",
+            e,
+        )
+
+    # ------------------------------------------------------------
     # Work on a copy so we don't mutate the user's adata in memory
+    # ------------------------------------------------------------
     adata_to_write = adata.copy()
     try:
         adata_to_write.uns = _sanitize(copy.deepcopy(adata_to_write.uns))
     except Exception as e:
-        LOGGER.warning("Failed to fully sanitize adata.uns; attempting best-effort write anyway. (%s)", e)
+        LOGGER.warning(
+            "Failed to fully sanitize adata.uns; attempting best-effort write anyway. (%s)",
+            e,
+        )
 
+    # ------------------------------------------------------------
+    # Write dataset
+    # ------------------------------------------------------------
     if fmt == "zarr":
         LOGGER.info(f"Saving dataset as Zarr → {out_path}")
         adata_to_write.write_zarr(str(out_path), chunks=None)
@@ -949,6 +1011,8 @@ def load_dataset(path: Path) -> ad.AnnData:
                             index=payload.get("index", []),
                             columns=payload.get("columns", []),
                         )
+                        df.index = df.index.astype(str)
+                        df.columns = df.columns.astype(str)
                         return df
                     except Exception:
                         return obj  # fallback: leave tagged payload
@@ -983,6 +1047,9 @@ def load_dataset(path: Path) -> ad.AnnData:
             return {str(k): _rehydrate(v) for k, v in obj.items()}
         if isinstance(obj, list):
             return [_rehydrate(v) for v in obj]
+        if isinstance(obj, tuple):
+            return tuple(_rehydrate(v) for v in obj)
+
         return obj
 
     path = Path(path)
