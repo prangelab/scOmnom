@@ -680,7 +680,7 @@ def cluster_and_annotate(
         help="[Compaction] Exclude clusters smaller than this from compaction decisions (0 disables).",
     ),
     compact_zscore_scope: Literal["within_celltypist_label", "global"] = typer.Option(
-        "within_celltypist_label",
+        "global",
         "--compact-zscore-scope",
         help="[Compaction] Z-score scope for similarity comparisons.",
     ),

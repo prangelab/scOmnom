@@ -345,7 +345,7 @@ class ClusterAnnotateConfig(BaseModel):
     )
 
     compact_zscore_scope: Literal["within_celltypist_label", "global"] = Field(
-        "within_celltypist_label",
+        "global",
         description="Z-score scope for similarity comparisons during compaction.",
     )
 
