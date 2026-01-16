@@ -14,8 +14,9 @@ import scanpy as sc
 from .config import ClusterAnnotateConfig
 from .logging_utils import init_logging
 from . import io_utils, plot_utils
+from .plot_utils import _extract_series
 
-# --- moved utilities ---
+
 from .clustering_utils import (
     CLUSTER_LABEL_KEY,
     _ensure_embedding,
@@ -24,7 +25,6 @@ from .clustering_utils import (
     _next_round_index,
     _make_round_id,
     _res_key,
-    _extract_series,  # if you kept these in plot_utils previously, remove from here
 )
 from .annotation_utils import (
     _precompute_celltypist,
