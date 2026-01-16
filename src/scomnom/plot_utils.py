@@ -3164,9 +3164,16 @@ def plot_decoupler_all_styles(
       - MSigDB: prefers adata.uns["msigdb"]["activity_by_gmt"] if present,
         otherwise falls back to prefix splitting of the activity columns.
     """
+    LOGGER.info("plot_decoupler_all_styles: net=%s activity_type=%s shape=%s",
+                net_key,
+                type(block.get("activity", None)).__name__,
+                getattr(block.get("activity", None), "shape", None))
+
+
     net_name = net_name or net_key
     block = adata.uns.get(net_key, {})
     activity = block.get("activity", None)
+
     if activity is None or not isinstance(activity, pd.DataFrame) or activity.empty:
         return
 
