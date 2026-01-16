@@ -18,6 +18,9 @@ from . import plot_utils
 
 LOGGER = logging.getLogger(__name__)
 
+# Canonical pretty cluster label column
+CLUSTER_LABEL_KEY = "cluster_label"
+
 
 # -------------------------------------------------------------------------
 # Rounds plumbing (cluster rounds scaffold + registration + activation helpers)
