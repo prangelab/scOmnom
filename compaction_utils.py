@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import anndata as ad
 import numpy as np
 import pandas as pd
 
-from .annotation_utils import ensure_round_msigdb_activity_by_gmt
+from scomnom.annotation_utils import ensure_round_msigdb_activity_by_gmt
 from .clustering_utils import _ensure_cluster_rounds, _register_round
 
 LOGGER = logging.getLogger(__name__)
