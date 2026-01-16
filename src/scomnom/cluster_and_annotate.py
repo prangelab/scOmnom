@@ -412,9 +412,17 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                     celltypist_obs_key=str(getattr(cfg, "celltypist_label_key", "")),
                     notes=f"Compacted from {parent_round_id}",
                     min_cells=int(getattr(cfg, "compact_min_cells", 0) or 0),
-                    zscore_scope=str(getattr(cfg, "compact_zscore_scope", "within_celltypist_label") or "within_celltypist_label"),
-                    grouping=str(getattr(cfg, "compact_grouping", "connected_components") or "connected_components"),
-                    skip_unknown_celltypist_groups=bool(getattr(cfg, "compact_skip_unknown_celltypist_groups", False)),
+                    zscore_scope=str(
+                        getattr(cfg, "compact_zscore_scope", "within_celltypist_label")
+                        or "within_celltypist_label"
+                    ),
+                    grouping=str(
+                        getattr(cfg, "compact_grouping", "connected_components")
+                        or "connected_components"
+                    ),
+                    skip_unknown_celltypist_groups=bool(
+                        getattr(cfg, "compact_skip_unknown_celltypist_groups", False)
+                    ),
                     thr_progeny=float(getattr(cfg, "thr_progeny", 0.98) or 0.98),
                     thr_dorothea=float(getattr(cfg, "thr_dorothea", 0.98) or 0.98),
                     thr_msigdb_default=float(getattr(cfg, "thr_msigdb_default", 0.98) or 0.98),
@@ -445,8 +453,20 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                 except Exception as e:
                     LOGGER.warning("Compaction: decoupler failed for compacted round '%s': %s", new_round_id, e)
 
+                # quick sanity log: did we publish resources?
+                try:
+                    LOGGER.info(
+                        "Compaction[%s] post-decoupler: active_round=%r uns_has=%s",
+                        new_round_id,
+                        adata.uns.get("active_cluster_round", None),
+                        {k: (k in adata.uns) for k in ("msigdb", "progeny", "dorothea")},
+                    )
+                except Exception:
+                    pass
+
                 # compacted round plots
                 if cfg.make_figures:
+                    # --- clustering/umap plots ---
                     try:
                         figdir_cluster = Path("cluster_and_annotate") / new_round_id / "clustering"
                         plot_utils.plot_cluster_umaps(
@@ -465,6 +485,49 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                             )
                     except Exception as e:
                         LOGGER.warning("Compaction: failed to plot compacted-round UMAPs: %s", e)
+
+                    # --- decoupler plots for the compacted round ---
+                    if getattr(cfg, "run_decoupler", False):
+                        try:
+                            figdir_round = Path("cluster_and_annotate") / new_round_id
+                            rid = str(adata.uns.get("active_cluster_round") or new_round_id)
+
+                            if "msigdb" in adata.uns:
+                                plot_utils.plot_decoupler_all_styles(
+                                    adata,
+                                    net_key="msigdb",
+                                    net_name=f"MSigDB [{rid}]",
+                                    figdir=figdir_round,
+                                    heatmap_top_k=30,
+                                    bar_top_n=10,
+                                    dotplot_top_k=30,
+                                )
+
+                            if "progeny" in adata.uns:
+                                plot_utils.plot_decoupler_all_styles(
+                                    adata,
+                                    net_key="progeny",
+                                    net_name=f"PROGENy [{rid}]",
+                                    figdir=figdir_round,
+                                    heatmap_top_k=14,
+                                    bar_top_n=8,
+                                    dotplot_top_k=14,
+                                )
+
+                            if "dorothea" in adata.uns:
+                                plot_utils.plot_decoupler_all_styles(
+                                    adata,
+                                    net_key="dorothea",
+                                    net_name=f"DoRothEA [{rid}]",
+                                    figdir=figdir_round,
+                                    heatmap_top_k=40,
+                                    bar_top_n=10,
+                                    dotplot_top_k=35,
+                                )
+
+                        except Exception as e:
+                            LOGGER.warning("Compaction: failed to plot decoupler for compacted round '%s': %s",
+                                           new_round_id, e)
 
     else:
         LOGGER.info("Compaction: disabled (enable_compacting=False).")
