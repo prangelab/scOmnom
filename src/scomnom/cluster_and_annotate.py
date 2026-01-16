@@ -3385,6 +3385,64 @@ def compact_clusters_by_multiview_agreement(
 
     cluster_renumbering = {k: k for k in reverse_map.keys()}
 
+    # Summary logging
+    try:
+        n_clusters_considered = sum(len(v) for v in label_to_clusters.values())
+        n_labels = len(label_to_clusters)
+
+        # How many merges actually happen? (components of size > 1)
+        merged_components = [c for c in reverse_map.values() if isinstance(c, list) and len(c) > 1]
+        n_merge_groups = len(merged_components)
+        n_merged_clusters = sum(len(c) for c in merged_components)
+
+        LOGGER.info(
+            "Compaction summary: considered=%d clusters across %d CellTypist groups; "
+            "merge_groups=%d; clusters_in_merged_groups=%d; total_components=%d; "
+            "min_cells=%d; grouping=%s; zscore_scope=%s; msigdb_required=%s; skip_unknown_groups=%s",
+            int(n_clusters_considered),
+            int(n_labels),
+            int(n_merge_groups),
+            int(n_merged_clusters),
+            int(len(reverse_map)),
+            int(min_cells),
+            str(grouping),
+            str(zscore_scope),
+            bool(msigdb_required),
+            bool(skip_unknown_celltypist_groups),
+        )
+
+        # Show top few merges with sizes
+        if merged_components:
+            # largest first
+            merged_components_sorted = sorted(
+                merged_components,
+                key=lambda comp: (-sum(int(cluster_sizes.get(m, 0)) for m in comp), -len(comp), [str(x) for x in comp]),
+            )
+            top_k = min(10, len(merged_components_sorted))
+            for i, comp in enumerate(merged_components_sorted[:top_k], start=1):
+                sz = int(sum(int(cluster_sizes.get(m, 0)) for m in comp))
+                LOGGER.info("Compaction merge[%d/%d]: members=%s (n=%d cells=%d)", i, top_k, list(map(str, comp)), len(comp), sz)
+
+        # If nothing merged, explain *why* at a glance
+        if not merged_components:
+            # edge-level pass rate (across all ct groups)
+            if isinstance(edges_df, pd.DataFrame) and not edges_df.empty and "pass_all" in edges_df.columns:
+                pass_rate = float(edges_df["pass_all"].mean())
+                n_edges = int(edges_df.shape[0])
+                LOGGER.info(
+                    "Compaction found no merges. Edge pass_all rate=%.3f over %d tested pairs. "
+                    "Likely thresholds too strict or activity patterns are distinct.",
+                    pass_rate,
+                    n_edges,
+                )
+            else:
+                LOGGER.info(
+                    "Compaction found no merges. (No edge table produced; likely no groups had >=2 clusters after filtering.)"
+                )
+
+    except Exception as e:
+        LOGGER.warning("Compaction summary logging failed: %s", e)
+
     return CompactionOutputs(
         components=[list(m) for m in reverse_map.values()],
         cluster_id_map=cluster_id_map,
@@ -3461,6 +3519,22 @@ def create_compacted_round_from_parent_round(
         msigdb_required=msigdb_required,
         skip_unknown_celltypist_groups=skip_unknown_celltypist_groups,
     )
+
+    try:
+        merged = sorted([c for c in outputs.components if isinstance(c, list) and len(c) > 1], key=lambda x: (-len(x), x))
+        LOGGER.info(
+            "Compaction outputs: new_round_id=%s parent_round_id=%s: total_components=%d merged_components=%d",
+            str(new_round_id),
+            str(parent_round_id),
+            int(len(outputs.components)),
+            int(len(merged)),
+        )
+        if merged:
+            top_k = min(10, len(merged))
+            for i, comp in enumerate(merged[:top_k], start=1):
+                LOGGER.info("Compaction merged_component[%d/%d]: %s", i, top_k, list(map(str, comp)))
+    except Exception as e:
+        LOGGER.warning("Compaction outputs logging failed: %s", e)
 
     # New obs key storing compacted cluster ids for this round
     if labels_obs_key_new is None:
@@ -3859,12 +3933,13 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
             LOGGER.warning("Decoupler plots: no active cluster round found; skipping.")
         else:
             figdir_round = Path("cluster_and_annotate") / active_round_id
+            rid = str(adata.uns.get("active_cluster_round") or "")
 
             if "msigdb" in adata.uns:
                 plot_utils.plot_decoupler_all_styles(
                     adata,
                     net_key="msigdb",
-                    net_name="MSigDB",
+                    net_name=f"MSigDB [{rid}]",
                     figdir=figdir_round,
                     heatmap_top_k=30,
                     bar_top_n=10,
@@ -3875,7 +3950,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                 plot_utils.plot_decoupler_all_styles(
                     adata,
                     net_key="progeny",
-                    net_name="PROGENy",
+                    net_name=f"PROGENy [{rid}]",
                     figdir=figdir_round,
                     heatmap_top_k=14,
                     bar_top_n=8,
@@ -3886,7 +3961,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                 plot_utils.plot_decoupler_all_styles(
                     adata,
                     net_key="dorothea",
-                    net_name="DoRothEA",
+                    net_name=f"DoRothEA [{rid}]",
                     figdir=figdir_round,
                     heatmap_top_k=40,
                     bar_top_n=10,
@@ -4012,15 +4087,45 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                                         e,
                                     )
 
+                                # Plot UMAP for the compacted round
+                                if cfg.make_figures:
+                                    try:
+                                        figdir_round = Path("cluster_and_annotate") / new_round_id / "clustering"
+
+                                        # UMAP by canonical cluster_key (after set_active_round, this is the compacted round)
+                                        plot_utils.plot_cluster_umaps(
+                                            adata=adata,
+                                            label_key=str(adata.uns["cluster_rounds"][new_round_id]["cluster_key"]),
+                                            batch_key=batch_key,
+                                            figdir=figdir_round,
+                                        )
+
+                                        # Also plot by pretty labels for the new round (if present)
+                                        pretty_key = f"{CLUSTER_LABEL_KEY}__{new_round_id}"
+                                        if pretty_key in adata.obs:
+                                            plot_utils.umap_by(
+                                                adata,
+                                                keys=pretty_key,
+                                                figdir=figdir_round,
+                                                stem="umap_pretty_cluster_label",
+                                            )
+
+                                        LOGGER.info("Compaction: wrote compacted-round UMAPs under %s",
+                                                    str(figdir_round))
+
+                                    except Exception as e:
+                                        LOGGER.warning("Compaction: failed to plot compacted-round UMAPs: %s", e)
+
                                 # Plot decoupler under the compacted round folder
                                 if cfg.make_figures and getattr(cfg, "run_decoupler", False):
                                     figdir_round = Path("cluster_and_annotate") / new_round_id
+                                    rid = str(adata.uns.get("active_cluster_round") or "")
 
                                     if "msigdb" in adata.uns:
                                         plot_utils.plot_decoupler_all_styles(
                                             adata,
                                             net_key="msigdb",
-                                            net_name="MSigDB",
+                                            net_name=f"MSigDB [{rid}]",
                                             figdir=figdir_round,
                                             heatmap_top_k=30,
                                             bar_top_n=10,
@@ -4031,7 +4136,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                                         plot_utils.plot_decoupler_all_styles(
                                             adata,
                                             net_key="progeny",
-                                            net_name="PROGENy",
+                                            net_name=f"PROGENy [{rid}]",
                                             figdir=figdir_round,
                                             heatmap_top_k=14,
                                             bar_top_n=8,
@@ -4042,7 +4147,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                                         plot_utils.plot_decoupler_all_styles(
                                             adata,
                                             net_key="dorothea",
-                                            net_name="DoRothEA",
+                                            net_name=f"DoRothEA [{rid}]",
                                             figdir=figdir_round,
                                             heatmap_top_k=40,
                                             bar_top_n=10,
