@@ -3140,16 +3140,15 @@ def compact_clusters_by_multiview_agreement(
 
     Implements the full "robust strict" suite:
       1) Adaptive thresholds per CellTypist label (90th percentile rule + hard floor)
-         - progeny: thr = max(min_floor_prog, q90(sim_prog within label))
-         - dorothea: thr = max(min_floor_doro, q90(sim_doro within label))
-         - msigdb:   thr per GMT = max(min_floor_msig, q90(sim_msig_gmt within label))
-         (NOTE: any user-provided thr_* values are treated as additional floors.)
+         - progeny: thr = clamp(max(floor_prog, q90(sim_prog within label)), cap=thr_progeny)
+         - dorothea: thr = clamp(max(floor_doro, q90(sim_doro within label)), cap=thr_dorothea)
+         - msigdb:   thr per GMT = clamp(max(floor_msig, q90(sim_msig_gmt within label)), cap=thr_msigdb_by_gmt[g] or thr_msigdb_default)
+         NOTE: configured thr_* values are treated as CAPS (max strictness) so adaptive can relax.
       2) MSigDB majority across GMT blocks (instead of AND across all GMTs)
-         - pass_msigdb = (#GMTs passing / #GMTs) >= majority_frac
+         - pass_msigdb = (#GMTs passing) >= ceil(majority_frac * #GMTs)
       3) MSigDB similarity uses Option-1 Top-K union per pair (K=50):
          - For each pair (a,b) and each GMT block, compute cosine on the union of
            top-K terms by abs(z) in a and abs(z) in b.
-         - This reduces tail-noise dilution from thousands of terms.
 
     Also keeps your existing behaviors:
       - Groups clusters by round-scoped cluster-level CellTypist label if available
@@ -3217,8 +3216,6 @@ def compact_clusters_by_multiview_agreement(
     ann = ann if isinstance(ann, dict) else {}
     ct_cluster_key = ann.get("celltypist_cluster_key", None)
 
-    majority_ct: Dict[str, str] = {}
-
     if isinstance(ct_cluster_key, str) and ct_cluster_key in adata.obs:
         tmp = pd.DataFrame(
             {
@@ -3226,7 +3223,7 @@ def compact_clusters_by_multiview_agreement(
                 "ct_cluster": adata.obs[ct_cluster_key].astype(str).values,
             }
         )
-        majority_ct = (
+        majority_ct: Dict[str, str] = (
             tmp.groupby("cluster", observed=True)["ct_cluster"]
             .agg(lambda x: str(x.iloc[0]) if len(x) else "UNKNOWN")
             .astype(str)
@@ -3256,19 +3253,18 @@ def compact_clusters_by_multiview_agreement(
     adjacency: Dict[str, List[Tuple[str, str]]] = {}
 
     # ------------------------------------------------------------------
-    # New: robust thresholds + MSigDB majority + MSigDB top-K union
+    # Robust thresholds + MSigDB majority + MSigDB top-K union
     # ------------------------------------------------------------------
     TOPK_MSIGDB = 50
     ADAPT_Q = 0.90
 
-    # Hard floors: keep strictness
-    # - user-provided thr_* values act as floors too
-    min_floor_prog = max(0.70, float(thr_progeny) if thr_progeny is not None else 0.70)
-    min_floor_doro = max(0.60, float(thr_dorothea) if thr_dorothea is not None else 0.60)
-    min_floor_msig = max(0.60, float(thr_msigdb_default) if thr_msigdb_default is not None else 0.60)
+    # Hard floors: do not become too lenient
+    FLOOR_PROG = 0.70
+    FLOOR_DORO = 0.60
+    FLOOR_MSIG = 0.60
 
-    # Majority rule across GMTs (avoid single-block veto)
-    MSIGDB_MAJORITY_FRAC = 0.67  # 2/3; if only 2 GMTs then both must pass
+    # Majority across GMTs
+    MSIGDB_MAJORITY_FRAC = 0.67
 
     def _safe_quantile(vals: List[float], q: float, default: float) -> float:
         v = np.array([x for x in vals if np.isfinite(x)], dtype=float)
@@ -3277,38 +3273,33 @@ def compact_clusters_by_multiview_agreement(
         return float(np.quantile(v, q))
 
     def _cosine_topk_union(v_a: np.ndarray, v_b: np.ndarray, k: int = 50) -> float:
-        """
-        Cosine on the union of top-k indices by abs() in each vector.
-        """
         a = np.asarray(v_a, dtype=float)
         b = np.asarray(v_b, dtype=float)
-
         if a.size == 0 or b.size == 0 or a.size != b.size:
             return 0.0
-
-        kk = int(min(k, a.size))
+        kk = int(min(int(k), int(a.size)))
         if kk <= 0:
             return 0.0
-
-        # indices of top-k abs entries (no full sort for speed)
         ia = np.argpartition(np.abs(a), -kk)[-kk:]
         ib = np.argpartition(np.abs(b), -kk)[-kk:]
         idx = np.unique(np.concatenate([ia, ib], axis=0))
         if idx.size == 0:
             return 0.0
+        return _cosine(a[idx], b[idx])
 
-        aa = a[idx]
-        bb = b[idx]
-        return _cosine(aa, bb)
+    def _cap_for_gmt(gmt: str) -> float:
+        # Per-GMT cap if provided, else default cap
+        if gmt in thr_msigdb_by_gmt:
+            return float(thr_msigdb_by_gmt[gmt])
+        return float(thr_msigdb_default)
 
-    # Helper for per-GMT floors
-    def _floor_for_gmt(gmt: str) -> float:
-        # user-specified per-GMT threshold acts as a floor
-        return float(thr_msigdb_by_gmt.get(gmt, min_floor_msig))
+    def _msig_required_passes(n_gmts: int, frac: float) -> int:
+        if n_gmts <= 0:
+            return 0
+        need = int(np.ceil(float(frac) * float(n_gmts)))
+        return int(max(1, min(n_gmts, need)))
 
     pass_edges_by_label: Dict[str, List[Tuple[str, str]]] = {}
-
-    # Store adaptive thresholds used (for audit)
     adaptive_thresholds_by_label: Dict[str, Dict[str, Any]] = {}
 
     for ct_label, clusters in sorted(label_to_clusters.items(), key=lambda kv: kv[0]):
@@ -3327,33 +3318,47 @@ def compact_clusters_by_multiview_agreement(
             msig_z = {g: msig_z_global[g].loc[clusters] for g in msig_by_gmt.keys()}
 
         # --------------------------------------------------------------
-        # 1) Adaptive thresholds per CellTypist label
-        #    Compute similarity distributions first (within this ct_label).
+        # 1) Adaptive thresholds per CellTypist label (distribution first)
+        #    IMPORTANT: avoid diagonals/self-similarity; use i<j pairs.
         # --------------------------------------------------------------
         prog_sims: List[float] = []
         doro_sims: List[float] = []
         msig_sims_by_gmt: Dict[str, List[float]] = {g: [] for g in msig_z.keys()}
 
-        for a, b in _pair_iter(clusters):
-            prog_sims.append(_cosine(prog_z.loc[a].to_numpy(), prog_z.loc[b].to_numpy()))
-            doro_sims.append(_cosine(doro_z.loc[a].to_numpy(), doro_z.loc[b].to_numpy()))
+        for i in range(len(clusters)):
+            a = clusters[i]
+            va_prog = prog_z.loc[a].to_numpy()
+            va_doro = doro_z.loc[a].to_numpy()
+            for j in range(i + 1, len(clusters)):
+                b = clusters[j]
+                prog_sims.append(_cosine(va_prog, prog_z.loc[b].to_numpy()))
+                doro_sims.append(_cosine(va_doro, doro_z.loc[b].to_numpy()))
+                for gmt, dfz in msig_z.items():
+                    ms = _cosine_topk_union(
+                        dfz.loc[a].to_numpy(),
+                        dfz.loc[b].to_numpy(),
+                        k=TOPK_MSIGDB,
+                    )
+                    msig_sims_by_gmt[gmt].append(float(ms))
 
-            for gmt, dfz in msig_z.items():
-                # MSigDB top-k union cosine
-                ms = _cosine_topk_union(
-                    dfz.loc[a].to_numpy(),
-                    dfz.loc[b].to_numpy(),
-                    k=TOPK_MSIGDB,
-                )
-                msig_sims_by_gmt[gmt].append(float(ms))
+        # Compute adaptive thresholds (q90), then clamp with floors, then CAP at configured thr_*
+        q_prog = _safe_quantile(prog_sims, ADAPT_Q, default=FLOOR_PROG)
+        q_doro = _safe_quantile(doro_sims, ADAPT_Q, default=FLOOR_DORO)
 
-        thr_prog_ct = max(min_floor_prog, _safe_quantile(prog_sims, ADAPT_Q, default=min_floor_prog))
-        thr_doro_ct = max(min_floor_doro, _safe_quantile(doro_sims, ADAPT_Q, default=min_floor_doro))
+        thr_prog_ct = max(FLOOR_PROG, float(q_prog))
+        thr_doro_ct = max(FLOOR_DORO, float(q_doro))
+
+        if thr_progeny is not None:
+            thr_prog_ct = min(float(thr_progeny), float(thr_prog_ct))
+        if thr_dorothea is not None:
+            thr_doro_ct = min(float(thr_dorothea), float(thr_doro_ct))
 
         thr_msig_ct: Dict[str, float] = {}
         for gmt, sims in msig_sims_by_gmt.items():
-            floor = _floor_for_gmt(gmt)
-            thr_msig_ct[gmt] = max(floor, _safe_quantile(sims, ADAPT_Q, default=floor))
+            q_m = _safe_quantile(sims, ADAPT_Q, default=FLOOR_MSIG)
+            thr_eff = max(FLOOR_MSIG, float(q_m))
+            thr_eff = min(float(_cap_for_gmt(gmt)), float(thr_eff))
+            thr_msig_ct[gmt] = float(thr_eff)
 
         adaptive_thresholds_by_label[str(ct_label)] = {
             "thr_progeny": float(thr_prog_ct),
@@ -3363,103 +3368,113 @@ def compact_clusters_by_multiview_agreement(
             "msigdb_topk": int(TOPK_MSIGDB),
             "msigdb_majority_frac": float(MSIGDB_MAJORITY_FRAC),
             "floors": {
-                "min_floor_prog": float(min_floor_prog),
-                "min_floor_doro": float(min_floor_doro),
-                "min_floor_msig": float(min_floor_msig),
+                "floor_prog": float(FLOOR_PROG),
+                "floor_doro": float(FLOOR_DORO),
+                "floor_msig": float(FLOOR_MSIG),
+            },
+            "caps": {
+                "cap_prog": None if thr_progeny is None else float(thr_progeny),
+                "cap_doro": None if thr_dorothea is None else float(thr_dorothea),
+                "cap_msig_default": None if thr_msigdb_default is None else float(thr_msigdb_default),
+                "cap_msig_by_gmt": {str(g): float(v) for g, v in (thr_msigdb_by_gmt or {}).items()},
             },
         }
 
         passed_edges: List[Tuple[str, str]] = []
 
         # --------------------------------------------------------------
-        # Edge evaluation with:
-        #  - adaptive thresholds for this ct_label
-        #  - MSigDB top-K union similarity
-        #  - MSigDB majority pass across GMT blocks
+        # Edge evaluation using adaptive thresholds for this ct_label
         # --------------------------------------------------------------
-        for a, b in _pair_iter(clusters):
-            sim_prog = _cosine(prog_z.loc[a].to_numpy(), prog_z.loc[b].to_numpy())
-            sim_doro = _cosine(doro_z.loc[a].to_numpy(), doro_z.loc[b].to_numpy())
+        for i in range(len(clusters)):
+            a = clusters[i]
+            va_prog = prog_z.loc[a].to_numpy()
+            va_doro = doro_z.loc[a].to_numpy()
+            for j in range(i + 1, len(clusters)):
+                b = clusters[j]
 
-            pass_prog = bool(sim_prog >= float(thr_prog_ct))
-            pass_doro = bool(sim_doro >= float(thr_doro_ct))
+                sim_prog = _cosine(va_prog, prog_z.loc[b].to_numpy())
+                sim_doro = _cosine(va_doro, doro_z.loc[b].to_numpy())
 
-            msig_sims: Dict[str, float] = {}
-            msig_pass_flags: Dict[str, bool] = {}
-            msig_fail_gmts: List[str] = []
+                pass_prog = bool(sim_prog >= float(thr_prog_ct))
+                pass_doro = bool(sim_doro >= float(thr_doro_ct))
 
-            for gmt, dfz in msig_z.items():
-                s = _cosine_topk_union(
-                    dfz.loc[a].to_numpy(),
-                    dfz.loc[b].to_numpy(),
-                    k=TOPK_MSIGDB,
-                )
-                msig_sims[gmt] = float(s)
-                thr_g = float(thr_msig_ct.get(gmt, _floor_for_gmt(gmt)))
-                ok = bool(s >= thr_g)
-                msig_pass_flags[gmt] = ok
-                if not ok:
-                    msig_fail_gmts.append(gmt)
+                msig_sims: Dict[str, float] = {}
+                msig_pass_flags: Dict[str, bool] = {}
+                msig_fail_gmts: List[str] = []
 
-            # 2) Majority across GMTs (if any GMT blocks exist)
-            if msigdb_required:
-                n_gmts = int(len(msig_z))
-                if n_gmts <= 0:
-                    # required but none available -> fail hard
-                    pass_msigdb = False
+                for gmt, dfz in msig_z.items():
+                    s = _cosine_topk_union(
+                        dfz.loc[a].to_numpy(),
+                        dfz.loc[b].to_numpy(),
+                        k=TOPK_MSIGDB,
+                    )
+                    msig_sims[gmt] = float(s)
+                    thr_g = float(thr_msig_ct.get(gmt, _cap_for_gmt(gmt)))
+                    ok = bool(s >= thr_g)
+                    msig_pass_flags[gmt] = ok
+                    if not ok:
+                        msig_fail_gmts.append(gmt)
+
+                # 2) Majority across GMTs
+                if msigdb_required:
+                    n_gmts = int(len(msig_z))
+                    if n_gmts <= 0:
+                        pass_msigdb = False
+                        n_pass = 0
+                        need = 0
+                    else:
+                        n_pass = int(sum(bool(v) for v in msig_pass_flags.values()))
+                        need = _msig_required_passes(n_gmts, MSIGDB_MAJORITY_FRAC)
+                        pass_msigdb = bool(n_pass >= need)
                 else:
+                    pass_msigdb = True
                     n_pass = int(sum(bool(v) for v in msig_pass_flags.values()))
-                    frac_pass = n_pass / max(1, n_gmts)
-                    # If only 1 GMT, majority rule reduces to that GMT.
-                    # If 2 GMTs and majority_frac=0.67, both must pass.
-                    pass_msigdb = bool(frac_pass >= float(MSIGDB_MAJORITY_FRAC))
-            else:
-                pass_msigdb = True  # MSigDB not required => don't veto
+                    need = _msig_required_passes(int(len(msig_z)), MSIGDB_MAJORITY_FRAC)
 
-            pass_all = bool(pass_prog and pass_doro and pass_msigdb)
+                pass_all = bool(pass_prog and pass_doro and pass_msigdb)
 
-            if pass_all:
-                passed_edges.append((a, b))
+                if pass_all:
+                    passed_edges.append((a, b))
 
-            row = {
-                "celltypist_label": ct_label,
-                "a": a,
-                "b": b,
-                "n_a": int(cluster_sizes.get(a, 0)),
-                "n_b": int(cluster_sizes.get(b, 0)),
-                "sim_progeny": float(sim_prog),
-                "thr_progeny": float(thr_prog_ct),  # ADAPTIVE
-                "pass_progeny": bool(pass_prog),
-                "sim_dorothea": float(sim_doro),
-                "thr_dorothea": float(thr_doro_ct),  # ADAPTIVE
-                "pass_dorothea": bool(pass_doro),
-                "msigdb_topk": int(TOPK_MSIGDB),
-                "msigdb_majority_frac": float(MSIGDB_MAJORITY_FRAC),
-                "pass_msigdb_majority": bool(pass_msigdb),
-                "fail_msigdb_gmts": ",".join(msig_fail_gmts) if msig_fail_gmts else "",
-                "pass_all": bool(pass_all),
-                "similarity_metric": f"{similarity_metric}+msigdb_topk_union+adaptive_q{ADAPT_Q}",
-                "zscore_scope": zscore_scope,
-                "grouping": grouping,
-            }
+                row = {
+                    "celltypist_label": ct_label,
+                    "a": a,
+                    "b": b,
+                    "n_a": int(cluster_sizes.get(a, 0)),
+                    "n_b": int(cluster_sizes.get(b, 0)),
+                    "sim_progeny": float(sim_prog),
+                    "thr_progeny": float(thr_prog_ct),  # adaptive (capped)
+                    "pass_progeny": bool(pass_prog),
+                    "sim_dorothea": float(sim_doro),
+                    "thr_dorothea": float(thr_doro_ct),  # adaptive (capped)
+                    "pass_dorothea": bool(pass_doro),
+                    "msigdb_topk": int(TOPK_MSIGDB),
+                    "msigdb_majority_frac": float(MSIGDB_MAJORITY_FRAC),
+                    "msigdb_majority_need": int(need),
+                    "msigdb_majority_passed": int(n_pass),
+                    "pass_msigdb_majority": bool(pass_msigdb),
+                    "fail_msigdb_gmts": ",".join(msig_fail_gmts) if msig_fail_gmts else "",
+                    "pass_all": bool(pass_all),
+                    "similarity_metric": f"{similarity_metric}+msigdb_topk_union+adaptive_q{ADAPT_Q}",
+                    "zscore_scope": zscore_scope,
+                    "grouping": grouping,
+                }
 
-            # per-GMT details (adaptive thresholds)
-            for gmt, s in msig_sims.items():
-                thr_g = float(thr_msig_ct.get(gmt, _floor_for_gmt(gmt)))
-                row[f"sim_msigdb__{gmt}"] = float(s)
-                row[f"thr_msigdb__{gmt}"] = float(thr_g)
-                row[f"pass_msigdb__{gmt}"] = bool(s >= thr_g)
+                for gmt, s in msig_sims.items():
+                    thr_g = float(thr_msig_ct.get(gmt, _cap_for_gmt(gmt)))
+                    row[f"sim_msigdb__{gmt}"] = float(s)
+                    row[f"thr_msigdb__{gmt}"] = float(thr_g)
+                    row[f"pass_msigdb__{gmt}"] = bool(s >= thr_g)
 
-            # keep old aggregate field name too (for backwards-compatible logging)
-            # but its meaning changed: now it's "majority", not "all gmt"
-            row["pass_msigdb_all_gmt"] = bool(pass_msigdb)
+                # backward-ish compatibility: this used to mean "all GMTs", but now it's majority.
+                row["pass_msigdb_all_gmt"] = bool(pass_msigdb)
 
-            edge_rows.append(row)
+                edge_rows.append(row)
 
         pass_edges_by_label[ct_label] = passed_edges
         adjacency[ct_label] = passed_edges
 
-        # Optional: one-line per-label threshold log (helps tuning)
+        # One-line per-label threshold log (helps tuning)
         try:
             LOGGER.info(
                 "Compaction[%s] adaptive thresholds: thr_prog=%.3f thr_doro=%.3f msig_gmts=%d (q=%.2f, topk=%d, msig_majority=%.2f)",
@@ -3534,7 +3549,7 @@ def compact_clusters_by_multiview_agreement(
 
     cluster_renumbering = {k: k for k in reverse_map.keys()}
 
-    # Summary logging (your existing block; updated to reflect majority/topK/adaptive)
+    # Summary logging (keeps your diagnostics, updated labels)
     try:
         n_clusters_considered = sum(len(v) for v in label_to_clusters.values())
         n_labels = len(label_to_clusters)
@@ -3569,11 +3584,11 @@ def compact_clusters_by_multiview_agreement(
                 key=lambda comp: (-sum(int(cluster_sizes.get(m, 0)) for m in comp), -len(comp), [str(x) for x in comp]),
             )
             top_k = min(10, len(merged_components_sorted))
-            for i, comp in enumerate(merged_components_sorted[:top_k], start=1):
+            for ii, comp in enumerate(merged_components_sorted[:top_k], start=1):
                 sz = int(sum(int(cluster_sizes.get(m, 0)) for m in comp))
                 LOGGER.info(
                     "Compaction merge[%d/%d]: members=%s (n=%d cells=%d)",
-                    i,
+                    ii,
                     top_k,
                     list(map(str, comp)),
                     len(comp),
@@ -3619,10 +3634,11 @@ def compact_clusters_by_multiview_agreement(
                             rate = float(pd.to_numeric(edges_df[c], errors="coerce").fillna(False).mean())
                             LOGGER.info("Compaction pass rate %s: %.3f", c.replace("pass_", ""), rate)
 
+                    # "closest misses" using per-edge thresholds
                     if all(col in edges_df.columns for col in ("sim_progeny", "sim_dorothea", "thr_progeny", "thr_dorothea")):
                         df2 = edges_df.copy()
-                        df2["margin_progeny"] = df2["sim_progeny"] - pd.to_numeric(df2["thr_progeny"], errors="coerce")
-                        df2["margin_dorothea"] = df2["sim_dorothea"] - pd.to_numeric(df2["thr_dorothea"], errors="coerce")
+                        df2["margin_progeny"] = pd.to_numeric(df2["sim_progeny"], errors="coerce") - pd.to_numeric(df2["thr_progeny"], errors="coerce")
+                        df2["margin_dorothea"] = pd.to_numeric(df2["sim_dorothea"], errors="coerce") - pd.to_numeric(df2["thr_dorothea"], errors="coerce")
 
                         msig_sim_cols = [c for c in df2.columns if c.startswith("sim_msigdb__")]
                         for c in msig_sim_cols:
@@ -3666,6 +3682,7 @@ def compact_clusters_by_multiview_agreement(
         adjacency=adjacency,
         decision_log=decision_log,
     )
+
 
 
 def _apply_cluster_id_map_to_obs(
