@@ -3435,6 +3435,74 @@ def compact_clusters_by_multiview_agreement(
                     pass_rate,
                     n_edges,
                 )
+                # Diagnostics: which constraint is killing merges?
+                try:
+                    # overall pass rates
+                    if "pass_progeny" in edges_df.columns:
+                        LOGGER.info("Compaction pass rate progeny: %.3f", float(edges_df["pass_progeny"].mean()))
+                    if "pass_dorothea" in edges_df.columns:
+                        LOGGER.info("Compaction pass rate dorothea: %.3f", float(edges_df["pass_dorothea"].mean()))
+                    if "pass_msigdb_all_gmt" in edges_df.columns:
+                        LOGGER.info("Compaction pass rate msigdb_all_gmt: %.3f", float(edges_df["pass_msigdb_all_gmt"].mean()))
+
+                    # similarity ranges (helpful for picking thresholds)
+                    for sim_col in ("sim_progeny", "sim_dorothea"):
+                        if sim_col in edges_df.columns:
+                            v = pd.to_numeric(edges_df[sim_col], errors="coerce")
+                            v = v[np.isfinite(v)]
+                            if len(v) > 0:
+                                LOGGER.info(
+                                    "Compaction %s range: min=%.3f p10=%.3f median=%.3f p90=%.3f max=%.3f",
+                                    sim_col,
+                                    float(v.min()),
+                                    float(np.percentile(v, 10)),
+                                    float(np.median(v)),
+                                    float(np.percentile(v, 90)),
+                                    float(v.max()),
+                                )
+
+                    # Per-GMT MSigDB pass rates (if present)
+                    msig_pass_cols = [c for c in edges_df.columns if c.startswith("pass_msigdb__")]
+                    if msig_pass_cols:
+                        # stable ordering
+                        for c in sorted(msig_pass_cols):
+                            rate = float(pd.to_numeric(edges_df[c], errors="coerce").fillna(False).mean())
+                            LOGGER.info("Compaction pass rate %s: %.3f", c.replace("pass_", ""), rate)
+
+                    # Optional: show a few "closest misses" by pass_all margin
+                    # (rank by min of sims relative to thresholds)
+                    if all(col in edges_df.columns for col in ("sim_progeny", "sim_dorothea")):
+                        df2 = edges_df.copy()
+                        df2["margin_progeny"] = df2["sim_progeny"] - float(thr_progeny)
+                        df2["margin_dorothea"] = df2["sim_dorothea"] - float(thr_dorothea)
+
+                        # include MSigDB margins if any
+                        msig_sim_cols = [c for c in df2.columns if c.startswith("sim_msigdb__")]
+                        for c in msig_sim_cols:
+                            gmt = c.split("__", 1)[1]
+                            thr = float(thr_msigdb_by_gmt.get(gmt, thr_msigdb_default))
+                            df2[f"margin_msigdb__{gmt}"] = df2[c] - thr
+
+                        margin_cols = [c for c in df2.columns if c.startswith("margin_")]
+                        if margin_cols:
+                            df2["min_margin"] = df2[margin_cols].min(axis=1)
+                            # closest to passing (highest min_margin, but still failing)
+                            closest = df2.sort_values("min_margin", ascending=False).head(5)
+                            for _, row in closest.iterrows():
+                                LOGGER.info(
+                                    "Compaction closest-miss: ct=%s a=%s b=%s min_margin=%.3f "
+                                    "(prog=%.3f doro=%.3f)",
+                                    row.get("celltypist_label", ""),
+                                    row.get("a", ""),
+                                    row.get("b", ""),
+                                    float(row.get("min_margin", np.nan)),
+                                    float(row.get("sim_progeny", np.nan)),
+                                    float(row.get("sim_dorothea", np.nan)),
+                                )
+
+                except Exception as e:
+                    LOGGER.warning("Compaction diagnostic logging failed: %s", e)
+
             else:
                 LOGGER.info(
                     "Compaction found no merges. (No edge table produced; likely no groups had >=2 clusters after filtering.)"
