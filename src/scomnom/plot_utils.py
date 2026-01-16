@@ -3141,7 +3141,6 @@ def plot_decoupler_dotplot(
     plt.close(fig)
 
 
-
 def plot_decoupler_all_styles(
     adata,
     *,
@@ -3159,9 +3158,11 @@ def plot_decoupler_all_styles(
       2) per-cluster topN barplots
       3) dotplot
 
-    FIXES:
-      - MSigDB is split into one set of plots per GMT-family prefix
-        (e.g. HALLMARK, REACTOME, ...), dynamically discovered.
+    Behavior:
+      - ALWAYS prefers pretty/display labels for plotting if available.
+        (display mapping is recorded by run_decoupler_for_round)
+      - MSigDB: prefers adata.uns["msigdb"]["activity_by_gmt"] if present,
+        otherwise falls back to prefix splitting of the activity columns.
     """
     net_name = net_name or net_key
     block = adata.uns.get(net_key, {})
@@ -3169,46 +3170,131 @@ def plot_decoupler_all_styles(
     if activity is None or not isinstance(activity, pd.DataFrame) or activity.empty:
         return
 
-    # MSigDB: split by GMT-family prefix and make all plot styles per prefix
+    # ------------------------------------------------------------------
+    # Display labels (pretty labels) for plotting
+    # ------------------------------------------------------------------
+    def _get_display_map() -> dict[str, str]:
+        # 1) Best: published into top-level resource payload by run_decoupler_for_round()
+        try:
+            cfg = block.get("config", {})
+            if isinstance(cfg, dict):
+                dm = cfg.get("cluster_display_map", None)
+                if isinstance(dm, dict) and dm:
+                    return {str(k): str(v) for k, v in dm.items()}
+        except Exception:
+            pass
+
+        # 2) Next: round-owned decoupler display map (active round)
+        try:
+            rid = adata.uns.get("active_cluster_round", None)
+            rid = str(rid) if rid is not None else None
+            rounds = adata.uns.get("cluster_rounds", {})
+            if rid and isinstance(rounds, dict) and rid in rounds:
+                dec = rounds[rid].get("decoupler", {})
+                if isinstance(dec, dict):
+                    dm = dec.get("cluster_display_map", None)
+                    if isinstance(dm, dict) and dm:
+                        return {str(k): str(v) for k, v in dm.items()}
+        except Exception:
+            pass
+
+        # 3) Fallback: if a pretty label column exists for the active round, derive mapping
+        try:
+            rid = adata.uns.get("active_cluster_round", None)
+            rid = str(rid) if rid is not None else None
+            if rid:
+                labels_obs_key = None
+                rounds = adata.uns.get("cluster_rounds", {})
+                if isinstance(rounds, dict) and rid in rounds:
+                    labels_obs_key = rounds[rid].get("labels_obs_key", None)
+                pretty_key = f"{CLUSTER_LABEL_KEY}__{rid}"
+                if labels_obs_key in adata.obs and pretty_key in adata.obs:
+                    tmp = pd.DataFrame(
+                        {
+                            "cluster": adata.obs[str(labels_obs_key)].astype(str).values,
+                            "pretty": adata.obs[str(pretty_key)].astype(str).values,
+                        }
+                    )
+                    dm = (
+                        tmp.groupby("cluster", observed=True)["pretty"]
+                        .agg(lambda x: str(x.iloc[0]) if len(x) else "")
+                        .to_dict()
+                    )
+                    dm = {str(k): str(v) for k, v in dm.items() if str(v)}
+                    if dm:
+                        return dm
+        except Exception:
+            pass
+
+        return {}
+
+    display_map = _get_display_map()
+
+    def _apply_display_index(df: pd.DataFrame) -> pd.DataFrame:
+        if not display_map:
+            return df
+        out = df.copy()
+        old = out.index.astype(str)
+        new = old.map(lambda x: display_map.get(str(x), str(x)))
+        # If mapping creates duplicates, make them unique but readable
+        if pd.Index(new).has_duplicates:
+            new = [f"{lbl} [{cid}]" for lbl, cid in zip(new, old)]
+        out.index = pd.Index(new, name=out.index.name)
+        return out
+
+    # ------------------------------------------------------------------
+    # MSigDB: split per GMT family (prefer round-precomputed activity_by_gmt)
+    # ------------------------------------------------------------------
     if str(net_key).lower().strip() == "msigdb":
-        splits = _split_activity_for_msigdb(activity)
+        splits = block.get("activity_by_gmt", None)
+        if isinstance(splits, dict) and splits:
+            # sanitize: keep only non-empty dataframes
+            splits = {
+                str(k): v for k, v in splits.items()
+                if isinstance(v, pd.DataFrame) and not v.empty
+            }
+        else:
+            splits = _split_activity_for_msigdb(activity)
+
         if not splits:
             return
 
         # Stable-ish ordering (HALLMARK first if present, then alphabetical)
-        ordered = sorted(splits.keys(), key=lambda x: (0 if x.upper() == "HALLMARK" else 1, x.upper()))
+        ordered = sorted(splits.keys(), key=lambda x: (0 if str(x).upper() == "HALLMARK" else 1, str(x).upper()))
 
         for pfx in ordered:
             sub = splits[pfx]
-            if sub is None or sub.empty:
+            if sub is None or not isinstance(sub, pd.DataFrame) or sub.empty:
                 continue
+
+            sub_plot = _apply_display_index(sub)
 
             title_prefix = str(pfx).upper()
 
             plot_decoupler_activity_heatmap(
-                sub,
+                sub_plot,
                 net_name=net_name,
                 figdir=figdir,
                 top_k=heatmap_top_k,
                 rank_mode="var",
                 use_zscore=True,
                 wrap_labels=True,
-                stem=f"heatmap_top_{pfx.lower()}_",
+                stem=f"heatmap_top_{str(pfx).lower()}_",
                 title_prefix=title_prefix,
             )
 
             plot_decoupler_cluster_topn_barplots(
-                sub,
+                sub_plot,
                 net_name=net_name,
                 figdir=figdir,
                 n=bar_top_n,
                 use_abs=False,
-                stem_prefix=f"cluster_{pfx.lower()}",
+                stem_prefix=f"cluster_{str(pfx).lower()}",
                 title_prefix=title_prefix,
             )
 
             plot_decoupler_dotplot(
-                sub,
+                sub_plot,
                 net_name=net_name,
                 figdir=figdir,
                 top_k=dotplot_top_k,
@@ -3216,15 +3302,19 @@ def plot_decoupler_all_styles(
                 color_by="z",
                 size_by="abs_raw",
                 wrap_labels=True,
-                stem=f"dotplot_top_{pfx.lower()}_",
+                stem=f"dotplot_top_{str(pfx).lower()}_",
                 title_prefix=title_prefix,
             )
 
         return
 
-    # Non-MSigDB nets: unchanged behavior (single set of plots)
+    # ------------------------------------------------------------------
+    # Non-MSigDB nets: single set of plots
+    # ------------------------------------------------------------------
+    activity_plot = _apply_display_index(activity)
+
     plot_decoupler_activity_heatmap(
-        activity,
+        activity_plot,
         net_name=net_name,
         figdir=figdir,
         top_k=heatmap_top_k,
@@ -3234,7 +3324,7 @@ def plot_decoupler_all_styles(
     )
 
     plot_decoupler_cluster_topn_barplots(
-        activity,
+        activity_plot,
         net_name=net_name,
         figdir=figdir,
         n=bar_top_n,
@@ -3242,7 +3332,7 @@ def plot_decoupler_all_styles(
     )
 
     plot_decoupler_dotplot(
-        activity,
+        activity_plot,
         net_name=net_name,
         figdir=figdir,
         top_k=dotplot_top_k,

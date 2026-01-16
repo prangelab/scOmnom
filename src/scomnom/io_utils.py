@@ -821,25 +821,101 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr") -> None:
     """
     Save an AnnData object either as .zarr or .h5ad.
 
-    Parameters
-    ----------
-    adata : AnnData
-        The in-memory dataset to save.
-    out_path : Path
-        Destination path (directory for zarr, file for h5ad).
-    fmt : str
-        "zarr" or "h5ad"
+    Automatically makes adata.uns (and nested structures) safe for H5AD/Zarr by:
+      - converting any nested pandas.DataFrame into a tagged, json-compatible dict
+      - converting numpy arrays to lists where needed
+      - ensuring keys are strings
+
+    This is done on a shallow copy of adata so the in-memory object remains unchanged.
     """
+    import copy
+    import numpy as np
+    import pandas as pd
+
+    def _df_to_tagged_payload(df: pd.DataFrame) -> dict:
+        # Use split format: compact + stable
+        payload = df.to_dict(orient="split")  # keys: index, columns, data
+        return {
+            "__type__": "pandas.DataFrame",
+            "orient": "split",
+            "payload": payload,
+        }
+
+    def _ndarray_to_payload(a: np.ndarray) -> dict:
+        return {
+            "__type__": "numpy.ndarray",
+            "dtype": str(a.dtype),
+            "shape": list(a.shape),
+            "data": a.tolist(),
+        }
+
+    def _sanitize(obj):
+        """
+        Recursively sanitize nested structures to be storage-friendly.
+        """
+        # pandas DataFrame
+        if isinstance(obj, pd.DataFrame):
+            return _df_to_tagged_payload(obj)
+
+        # pandas Series (rare in your uns; still handle)
+        if isinstance(obj, pd.Series):
+            return {
+                "__type__": "pandas.Series",
+                "name": None if obj.name is None else str(obj.name),
+                "index": [str(x) for x in obj.index.astype(str).tolist()],
+                "data": obj.tolist(),
+            }
+
+        # numpy arrays
+        if isinstance(obj, np.ndarray):
+            # if it's a small-ish array in uns, store as list payload
+            # (your big matrices should not live in uns anyway)
+            return _ndarray_to_payload(obj)
+
+        # numpy scalars
+        if isinstance(obj, (np.generic,)):
+            try:
+                return obj.item()
+            except Exception:
+                return str(obj)
+
+        # dict-like
+        if isinstance(obj, dict):
+            out = {}
+            for k, v in obj.items():
+                # keys must be strings for h5ad friendliness
+                ks = str(k)
+                out[ks] = _sanitize(v)
+            return out
+
+        # list/tuple
+        if isinstance(obj, (list, tuple)):
+            return [_sanitize(v) for v in obj]
+
+        # basic python scalars are fine
+        if obj is None or isinstance(obj, (str, int, float, bool)):
+            return obj
+
+        # fallback: stringify unknown objects
+        return str(obj)
+
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Work on a copy so we don't mutate the user's adata in memory
+    adata_to_write = adata.copy()
+    try:
+        adata_to_write.uns = _sanitize(copy.deepcopy(adata_to_write.uns))
+    except Exception as e:
+        LOGGER.warning("Failed to fully sanitize adata.uns; attempting best-effort write anyway. (%s)", e)
+
     if fmt == "zarr":
         LOGGER.info(f"Saving dataset as Zarr → {out_path}")
-        adata.write_zarr(str(out_path), chunks=None)
+        adata_to_write.write_zarr(str(out_path), chunks=None)
 
     elif fmt == "h5ad":
         LOGGER.info(f"Saving dataset as H5AD → {out_path}")
-        adata.write_h5ad(str(out_path), compression="gzip")
+        adata_to_write.write_h5ad(str(out_path), compression="gzip")
 
     else:
         raise ValueError(f"Unknown dataset format '{fmt}'. Expected 'zarr' or 'h5ad'.")
@@ -851,15 +927,64 @@ def load_dataset(path: Path) -> ad.AnnData:
     """
     Load a dataset from Zarr or H5AD into memory.
 
-    Parameters
-    ----------
-    path : Path
-        Path to .zarr directory or .h5ad file.
-
-    Returns
-    -------
-    AnnData
+    Automatically rehydrates any tagged objects produced by save_dataset():
+      - pandas.DataFrame
+      - pandas.Series
+      - numpy.ndarray
     """
+    import numpy as np
+    import pandas as pd
+
+    def _rehydrate(obj):
+        if isinstance(obj, dict) and "__type__" in obj:
+            t = obj.get("__type__", None)
+
+            if t == "pandas.DataFrame":
+                orient = obj.get("orient", "split")
+                payload = obj.get("payload", None)
+                if orient == "split" and isinstance(payload, dict):
+                    try:
+                        df = pd.DataFrame(
+                            data=payload.get("data", []),
+                            index=payload.get("index", []),
+                            columns=payload.get("columns", []),
+                        )
+                        return df
+                    except Exception:
+                        return obj  # fallback: leave tagged payload
+
+            if t == "pandas.Series":
+                try:
+                    idx = obj.get("index", [])
+                    data = obj.get("data", [])
+                    name = obj.get("name", None)
+                    return pd.Series(data=data, index=pd.Index(idx, dtype=str), name=name)
+                except Exception:
+                    return obj
+
+            if t == "numpy.ndarray":
+                try:
+                    data = obj.get("data", [])
+                    dtype = obj.get("dtype", None)
+                    a = np.array(data, dtype=dtype)
+                    # shape is best-effort; only reshape if consistent
+                    shp = obj.get("shape", None)
+                    if shp is not None:
+                        try:
+                            a = a.reshape(tuple(shp))
+                        except Exception:
+                            pass
+                    return a
+                except Exception:
+                    return obj
+
+        # normal recursion
+        if isinstance(obj, dict):
+            return {str(k): _rehydrate(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_rehydrate(v) for v in obj]
+        return obj
+
     path = Path(path)
 
     if not path.exists():
@@ -867,13 +992,20 @@ def load_dataset(path: Path) -> ad.AnnData:
 
     if path.suffix == ".h5ad":
         LOGGER.info(f"Loading H5AD dataset → {path}")
-        return ad.read_h5ad(str(path))
-
-    if path.suffix == ".zarr" or path.is_dir():
+        adata = ad.read_h5ad(str(path))
+    elif path.suffix == ".zarr" or path.is_dir():
         LOGGER.info(f"Loading Zarr dataset → {path}")
-        return ad.read_zarr(str(path))  # fully in-memory
+        adata = ad.read_zarr(str(path))  # fully in-memory
+    else:
+        raise ValueError(f"Cannot load dataset from: {path}. Expected .zarr directory or .h5ad file.")
 
-    raise ValueError(f"Cannot load dataset from: {path}. Expected .zarr directory or .h5ad file.")
+    # Rehydrate tagged structures in uns
+    try:
+        adata.uns = _rehydrate(dict(adata.uns))
+    except Exception as e:
+        LOGGER.warning("Failed to rehydrate tagged objects in adata.uns. (%s)", e)
+
+    return adata
 
 
 # =====================================================================

@@ -168,10 +168,54 @@ def _register_round(
     cfg_snapshot: dict | None,
     parent_round_id: str | None = None,
     notes: str | None = None,
+    # --- optional schema extras (safe defaults) ---
+    cluster_id_map: dict[str, str] | None = None,
+    cluster_renumbering: dict[str, str] | None = None,
+    cache_labels: bool = False,
+    compacting: dict | None = None,
 ) -> None:
     _ensure_cluster_rounds(adata)
 
-    adata.uns["cluster_rounds"][round_id] = {
+    # -----------------------------
+    # Cluster sizes (for audit + downstream sanity checks)
+    # -----------------------------
+    cluster_sizes: dict[str, int] = {}
+    if isinstance(labels_obs_key, str) and labels_obs_key in adata.obs:
+        try:
+            vc = adata.obs[labels_obs_key].astype(str).value_counts()
+            cluster_sizes = {str(k): int(v) for k, v in vc.items()}
+        except Exception:
+            cluster_sizes = {}
+
+    # -----------------------------
+    # Identity maps if not provided
+    # -----------------------------
+    if cluster_id_map is None:
+        # Default: identity mapping over observed cluster ids (if present), else empty
+        if cluster_sizes:
+            cluster_id_map = {cid: cid for cid in cluster_sizes.keys()}
+        else:
+            cluster_id_map = {}
+
+    if cluster_renumbering is None:
+        # Default: identity renumbering for the NEW ids (values of cluster_id_map)
+        new_ids = sorted({str(v) for v in cluster_id_map.values()})
+        cluster_renumbering = {nid: nid for nid in new_ids}
+
+    # -----------------------------
+    # Optional cached labels copy (convenience; keep off by default)
+    # -----------------------------
+    labels_cache: list[str] | None = None
+    if cache_labels and isinstance(labels_obs_key, str) and labels_obs_key in adata.obs:
+        try:
+            labels_cache = adata.obs[labels_obs_key].astype(str).tolist()
+        except Exception:
+            labels_cache = None
+
+    # -----------------------------
+    # Round payload
+    # -----------------------------
+    payload: dict[str, object] = {
         "round_id": str(round_id),
         "parent_round_id": None if parent_round_id is None else str(parent_round_id),
         "created_utc": _utc_now_iso(),
@@ -185,13 +229,23 @@ def _register_round(
         "sweep": sweep,
         "cfg": cfg_snapshot,
 
-        # precreate slots for later
+        # --- spec-ish linkage & audit helpers ---
+        "cluster_sizes": cluster_sizes,                 # {cluster_id: n_cells}
+        "cluster_id_map": dict(cluster_id_map),         # {old_id: new_id} (identity for non-compacted rounds)
+        "cluster_renumbering": dict(cluster_renumbering),  # {new_id: renumbered_id} (often identity)
+        "labels": labels_cache,                         # optional convenience copy (can be large)
+
+        # precreate slots for later (existing)
         "annotation": {},
         "decoupler": {},
         "qc": {},
         "stability": {},
         "diagnostics": {},
+
+        "compacting": {} if compacting is None else dict(compacting),
     }
+
+    adata.uns["cluster_rounds"][round_id] = payload
 
     if round_id not in adata.uns["cluster_round_order"]:
         adata.uns["cluster_round_order"].append(round_id)
@@ -1936,6 +1990,13 @@ def _publish_decoupler_from_round_to_top_level(
         if isinstance(payload, dict) and "activity" in payload:
             # Shallow copy is enough; activity is a DF
             adata.uns[res] = payload
+            # publish display hints for plotting
+            try:
+                adata.uns[res].setdefault("config", {})
+                adata.uns[res]["config"]["cluster_display_map"] = dec.get("cluster_display_map", None)
+                adata.uns[res]["config"]["cluster_display_labels"] = dec.get("cluster_display_labels", None)
+            except Exception:
+                pass
         else:
             if clear_missing and res in adata.uns:
                 del adata.uns[res]
@@ -2051,6 +2112,25 @@ def _run_msigdb(
         LOGGER.warning("MSigDB: decoupler run failed (method=%s): %s", str(method), e)
         return
 
+    # Build activity_by_gmt
+    try:
+        feature_meta = pd.DataFrame(
+            {
+                "term": activity.columns.astype(str),
+                "gmt": [_infer_msigdb_gmt(c) for c in activity.columns.astype(str)],
+            }
+        ).set_index("term", drop=False)
+
+        activity_by_gmt = msigdb_activity_by_gmt_from_activity_and_meta(
+            activity,
+            feature_meta=feature_meta,
+            gmt_col="gmt",
+        )
+    except Exception as e:
+        LOGGER.warning("MSigDB: failed to build activity_by_gmt; leaving empty. (%s)", e)
+        feature_meta = None
+        activity_by_gmt = {}
+
     payload = {
         "activity": activity,
         "config": {
@@ -2063,9 +2143,8 @@ def _run_msigdb(
             "resource": "msigdb_gmt",
             "round_id": rid,
         },
-        # forward slot for later (gmt-aware compaction): we'll fill this in a later patch
-        "activity_by_gmt": None,
-        "feature_meta": None,
+        "activity_by_gmt": activity_by_gmt,  # <-- populated
+        "feature_meta": feature_meta,  # <-- optional but helps audits/debug
     }
 
     _round_put_decoupler(adata, round_id=rid, resource=out_resource, payload=payload)
@@ -2308,27 +2387,80 @@ def _run_dorothea(
         int(min_n),
     )
 
+
+def _round_cluster_display_map(
+    adata: ad.AnnData,
+    *,
+    round_id: str,
+    labels_obs_key: str,
+) -> dict[str, str]:
+    """
+    Build mapping {cluster_id -> display_label} for a round.
+
+    Prefers the round-scoped pretty labels column (CLUSTER_LABEL_KEY__{round_id}).
+    Falls back to {cluster_id -> cluster_id} if pretty labels are missing.
+
+    Assumes:
+      - labels_obs_key is per-cell cluster ids (strings / categoricals)
+      - pretty labels, if present, are constant within cluster ids
+    """
+    if labels_obs_key not in adata.obs:
+        raise KeyError(f"labels_obs_key '{labels_obs_key}' not found in adata.obs")
+
+    pretty_key = f"{CLUSTER_LABEL_KEY}__{round_id}"
+    if pretty_key not in adata.obs:
+        # no pretty labels yet
+        cl = adata.obs[labels_obs_key].astype(str)
+        cats = pd.unique(cl)
+        return {str(c): str(c) for c in cats}
+
+    tmp = pd.DataFrame(
+        {
+            "cluster_id": adata.obs[labels_obs_key].astype(str).to_numpy(),
+            "pretty": adata.obs[pretty_key].astype(str).to_numpy(),
+        },
+        index=adata.obs_names,
+    )
+
+    # take first pretty label per cluster defensively
+    m = (
+        tmp.groupby("cluster_id", observed=True)["pretty"]
+        .agg(lambda x: str(x.iloc[0]) if len(x) else "Unknown")
+        .astype(str)
+        .to_dict()
+    )
+    return {str(k): str(v) for k, v in m.items()}
+
+
 def run_decoupler_for_round(
     adata: ad.AnnData,
     cfg: ClusterAnnotateConfig,
     *,
     round_id: str | None = None,
-    prefer_pretty_labels_for_pb: bool = True,
     publish_to_top_level_if_active: bool = True,
 ) -> None:
     """
     Round-native decoupler orchestrator:
 
     1) Computes round-scoped pseudobulk store: adata.uns[f"pseudobulk__{round_id}"]
+       IMPORTANT: pseudobulk is ALWAYS computed on the round-stable cluster ids
+       stored in round["labels_obs_key"] (NOT pretty labels), so downstream
+       compaction/stability has stable identifiers.
+
     2) Runs enabled decoupler resources and stores them in:
          adata.uns["cluster_rounds"][round_id]["decoupler"][resource]
-    3) Records pseudobulk store key in round["decoupler"]["pseudobulk_store_key"]
+
+    3) Records pointers + plotting display metadata in the round:
+         round["decoupler"]["pseudobulk_store_key"] = ...
+         round["decoupler"]["cluster_display_map"] = {cluster_id -> pretty_label}
+         round["decoupler"]["cluster_display_labels"] = [...] aligned to pseudobulk cluster order
+
     4) If round_id is active and publish_to_top_level_if_active=True, publishes
        the round's decoupler payloads to top-level adata.uns["msigdb"/"progeny"/"dorothea"/"pseudobulk"].
 
     Contract:
-      - No direct storage of net results to top-level except via publishing.
-      - Round dict remains the source of truth.
+      - Round dict remains source of truth.
+      - Plotting should use display_map/display_labels, but activities remain indexed by cluster_id.
     """
     if not getattr(cfg, "run_decoupler", False):
         LOGGER.info("Decoupler: disabled (run_decoupler=False).")
@@ -2342,46 +2474,76 @@ def run_decoupler_for_round(
         raise KeyError(f"Decoupler: round {rid!r} not found in adata.uns['cluster_rounds'].")
 
     rinfo = rounds[rid]
-    cluster_key = rinfo.get("cluster_key", None)
-    if not cluster_key or cluster_key not in adata.obs:
+    if not isinstance(rinfo, dict):
+        raise TypeError(f"Decoupler: round entry for {rid!r} is not a dict.")
+
+    labels_obs_key = rinfo.get("labels_obs_key", None)
+    if not labels_obs_key or str(labels_obs_key) not in adata.obs:
         raise KeyError(
-            f"Decoupler: round {rid!r} has cluster_key={cluster_key!r} missing from adata.obs."
+            f"Decoupler: round {rid!r} missing labels_obs_key (or not present in adata.obs). "
+            f"labels_obs_key={labels_obs_key!r}"
         )
+    labels_obs_key = str(labels_obs_key)
 
-    # Prefer pretty labels for pseudobulk if available (readability + stable naming)
-    cluster_key_for_pb = cluster_key
-    if prefer_pretty_labels_for_pb:
-        pretty_key = f"{CLUSTER_LABEL_KEY}__{rid}"
-        if pretty_key in adata.obs:
-            cluster_key_for_pb = pretty_key
-
+    # ------------------------------------------------------------------
+    # 1) Pseudobulk on STABLE cluster ids (round labels_obs_key)
+    # ------------------------------------------------------------------
     pb_key = f"pseudobulk__{rid}"
 
     LOGGER.info(
-        "Decoupler[%s]: computing pseudobulk using cluster_key=%r -> store_key=%r",
+        "Decoupler[%s]: computing pseudobulk using labels_obs_key=%r -> store_key=%r",
         rid,
-        cluster_key_for_pb,
+        labels_obs_key,
         pb_key,
     )
 
     _store_cluster_pseudobulk(
         adata,
-        cluster_key=cluster_key_for_pb,
+        cluster_key=labels_obs_key,
         agg=getattr(cfg, "decoupler_pseudobulk_agg", "mean"),
         use_raw_like=bool(getattr(cfg, "decoupler_use_raw", True)),
         prefer_layers=("counts_raw", "counts_cb"),
         store_key=pb_key,
     )
 
-    # Record pseudobulk pointer in the round (so set_active_round/publish can find it)
+    # Ensure round decoupler dict
     rinfo.setdefault("decoupler", {})
     if not isinstance(rinfo["decoupler"], dict):
         rinfo["decoupler"] = {}
+
+    # Record pseudobulk pointer in the round (so publishing can find it)
     rinfo["decoupler"]["pseudobulk_store_key"] = pb_key
+
+    # ------------------------------------------------------------------
+    # 2) Always store DISPLAY metadata (pretty labels) for plotting
+    # ------------------------------------------------------------------
+    # {cluster_id -> display_label}; falls back to identity if pretty labels missing
+    display_map = _round_cluster_display_map(
+        adata,
+        round_id=rid,
+        labels_obs_key=labels_obs_key,
+    )
+    rinfo["decoupler"]["cluster_display_map"] = dict(display_map)
+
+    # Also store a display labels vector aligned to the pseudobulk cluster order
+    # (nice for quick plotting without re-deriving order)
+    try:
+        pb_store = adata.uns.get(pb_key, None)
+        clusters = []
+        if isinstance(pb_store, dict) and "clusters" in pb_store:
+            clusters = list(np.asarray(pb_store["clusters"], dtype=object))
+        rinfo["decoupler"]["cluster_display_labels"] = [
+            display_map.get(str(c), str(c)) for c in clusters
+        ] if clusters else None
+    except Exception:
+        rinfo["decoupler"]["cluster_display_labels"] = None
+
     rounds[rid] = rinfo
     adata.uns["cluster_rounds"] = rounds
 
-    # ---- Run resources (round-native storage) ----
+    # ------------------------------------------------------------------
+    # 3) Run resources (round-native storage)
+    # ------------------------------------------------------------------
     # MSigDB
     _run_msigdb(adata, cfg, store_key=pb_key, round_id=rid, out_resource="msigdb")
 
@@ -2393,7 +2555,9 @@ def run_decoupler_for_round(
     if getattr(cfg, "run_progeny", True):
         _run_progeny(adata, cfg, store_key=pb_key, round_id=rid, out_resource="progeny")
 
-    # ---- Publish to top-level if this is the active round ----
+    # ------------------------------------------------------------------
+    # 4) Publish to top-level if this is the active round
+    # ------------------------------------------------------------------
     active = adata.uns.get("active_cluster_round", None)
     if publish_to_top_level_if_active and (active is not None) and (str(active) == rid):
         _publish_decoupler_from_round_to_top_level(
@@ -2403,6 +2567,21 @@ def run_decoupler_for_round(
             publish_pseudobulk=True,
             clear_missing=True,
         )
+
+        # Also publish display hints into each top-level resource payload (best-effort)
+        try:
+            dec = adata.uns["cluster_rounds"][rid].get("decoupler", {})
+            dm = dec.get("cluster_display_map", None)
+            dl = dec.get("cluster_display_labels", None)
+            for res in ("msigdb", "progeny", "dorothea"):
+                if res in adata.uns and isinstance(adata.uns[res], dict):
+                    adata.uns[res].setdefault("config", {})
+                    if isinstance(adata.uns[res]["config"], dict):
+                        adata.uns[res]["config"]["cluster_display_map"] = dm
+                        adata.uns[res]["config"]["cluster_display_labels"] = dl
+        except Exception:
+            pass
+
         LOGGER.info("Decoupler[%s]: published to top-level adata.uns for forward compatibility.", rid)
 
 
@@ -2509,8 +2688,17 @@ def run_BISC(
         pass
 
     # --------------------------------------------------------------
-    # Register round
+    # Register round (now includes identity mapping fields)
     # --------------------------------------------------------------
+    # Identity map for the initial round: every cluster maps to itself
+    try:
+        cats = adata.obs[labels_obs_key].astype(str).astype("category").cat.categories.astype(str).tolist()
+    except Exception:
+        cats = sorted(pd.unique(adata.obs[labels_obs_key].astype(str)).tolist())
+
+    identity_map = {c: c for c in cats}
+    identity_renumbering = {c: c for c in sorted(set(identity_map.values()))}
+
     _register_round(
         adata,
         round_id=round_id,
@@ -2530,11 +2718,15 @@ def run_BISC(
             "bio_homogeneity": sweep.get("bio_homogeneity", None),
             "bio_fragmentation": sweep.get("bio_fragmentation", None),
             "bio_ari": sweep.get("bio_ari", None),
-            # optional: store ARI matrix if you want; it can be big.
-            # "ari_matrix": sweep.get("ari_matrix", None),
         },
         cfg_snapshot=asdict(cfg) if hasattr(cfg, "__dataclass_fields__") else None,
         parent_round_id=None,
+
+        # NEW: schema-complete fields (explicit identity mapping)
+        cluster_id_map=identity_map,
+        cluster_renumbering=identity_renumbering,
+        compacting=None,  # no compaction in initial round
+        cache_labels=False,  # keep uns small
     )
 
     # Ensure canonical view points at this round
@@ -2680,6 +2872,20 @@ def _sync_cluster_colors(adata, cluster_key: str) -> None:
     adata.uns[pal_key] = _get_palette(len(cats))
 
 
+def _infer_msigdb_gmt(term: str) -> str:
+    """
+    Best-effort GMT family inference from a decoupler 'source' / term string.
+    Handles:
+      - PREFIX::TERM  -> PREFIX
+      - PREFIX_TERM   -> PREFIX
+    """
+    t = str(term)
+    if "::" in t:
+        p = t.split("::", 1)[0].strip()
+        return p or "UNKNOWN"
+    return (t.split("_", 1)[0].strip() or "UNKNOWN")
+
+
 def msigdb_activity_by_gmt_from_activity_and_meta(
     activity: pd.DataFrame,
     *,
@@ -2707,13 +2913,6 @@ def msigdb_activity_by_gmt_from_activity_and_meta(
     A.index = A.index.astype(str)
     A.columns = A.columns.astype(str)
 
-    def infer_prefix(term: str) -> str:
-        t = str(term)
-        if "::" in t:
-            p = t.split("::", 1)[0].strip()
-            return p or "UNKNOWN"
-        return (t.split("_", 1)[0].strip() or "UNKNOWN")
-
     if feature_meta is not None and isinstance(feature_meta, pd.DataFrame) and not feature_meta.empty:
         fm = feature_meta.copy()
         # normalize to index = term
@@ -2729,12 +2928,12 @@ def msigdb_activity_by_gmt_from_activity_and_meta(
 
         if gmt_col not in fm.columns:
             # fallback to inference
-            prefixes = pd.Series(A.columns, index=A.columns).map(infer_prefix)
+            prefixes = pd.Series(A.columns, index=A.columns).map(_infer_msigdb_gmt)
         else:
             prefixes = pd.Series(A.columns, index=A.columns).map(lambda c: fm.loc[c, gmt_col] if c in fm.index else np.nan)
-            prefixes = prefixes.fillna(pd.Series(A.columns, index=A.columns).map(infer_prefix))
+            prefixes = prefixes.fillna(pd.Series(A.columns, index=A.columns).map(_infer_msigdb_gmt))
     else:
-        prefixes = pd.Series(A.columns, index=A.columns).map(infer_prefix)
+        prefixes = pd.Series(A.columns, index=A.columns).map(_infer_msigdb_gmt)
 
     out: Dict[str, pd.DataFrame] = {}
     for gmt, cols in prefixes.groupby(prefixes).groups.items():
@@ -3231,6 +3430,7 @@ def create_compacted_round_from_parent_round(
         skip_unknown_celltypist_groups=skip_unknown_celltypist_groups,
     )
 
+    # New obs key storing compacted cluster ids for this round
     if labels_obs_key_new is None:
         labels_obs_key_new = f"{parent_cluster_key}__{new_round_id}"
     if labels_obs_key_new in adata.obs:
@@ -3242,9 +3442,37 @@ def create_compacted_round_from_parent_round(
         dst_labels_obs_key=labels_obs_key_new,
         cluster_id_map=outputs.cluster_id_map,
     )
-    adata.obs[labels_obs_key_new] = adata.obs[labels_obs_key_new].astype("category")
+    adata.obs[labels_obs_key_new] = adata.obs[labels_obs_key_new].astype(str).astype("category")
 
-    # Register new round in the *current* schema
+    # Compaction audit payload (stored in round["compacting"])
+    compacting_payload = {
+        "parent_round_id": str(parent_round_id),
+        "within_celltypist_label_only": True,
+        "similarity_metric": "cosine_zscore",
+        "params": {
+            "min_cells": int(min_cells),
+            "zscore_scope": str(zscore_scope),
+            "grouping": str(grouping),
+            "skip_unknown_celltypist_groups": bool(skip_unknown_celltypist_groups),
+            "msigdb_required": bool(msigdb_required),
+        },
+        "thresholds": {
+            "thr_progeny": float(thr_progeny),
+            "thr_dorothea": float(thr_dorothea),
+            "thr_msigdb_default": float(thr_msigdb_default),
+            "thr_msigdb_by_gmt": dict(thr_msigdb_by_gmt or {}),
+        },
+        # heavy objects are still useful; you already store DataFrames in uns elsewhere
+        "pairwise": {
+            "edges": outputs.edges,
+            "adjacency": outputs.adjacency,
+        },
+        "components": outputs.components,
+        "decision_log": outputs.decision_log,
+        "reverse_map": outputs.reverse_map,
+    }
+
+    # Register new round with schema-complete fields
     _register_round(
         adata,
         round_id=new_round_id,
@@ -3256,33 +3484,14 @@ def create_compacted_round_from_parent_round(
         sweep=None,
         cfg_snapshot=asdict(cfg) if hasattr(cfg, "__dataclass_fields__") else None,
         notes=notes,
+
+        # NEW: mapping fields + compacting payload
+        cluster_id_map=dict(outputs.cluster_id_map),
+        cluster_renumbering=dict(outputs.cluster_renumbering),
+        compacting=compacting_payload,
+        cache_labels=False,
     )
 
-    # Attach compaction audit payload to the new round (current schema uses "diagnostics"/"annotation"/etc.)
-    rounds = adata.uns["cluster_rounds"]
-    r = rounds[new_round_id]
-    r.setdefault("diagnostics", {})
-    r["diagnostics"]["compacting"] = {
-        "within_celltypist_label_only": True,
-        "similarity_metric": "cosine_zscore",
-        "thresholds": {
-            "thr_progeny": float(thr_progeny),
-            "thr_dorothea": float(thr_dorothea),
-            "thr_msigdb_default": float(thr_msigdb_default),
-            "thr_msigdb_by_gmt": dict(thr_msigdb_by_gmt or {}),
-        },
-        "pairwise": {
-            "edges": outputs.edges,
-            "adjacency": outputs.adjacency,
-            "components": outputs.components,
-        },
-        "decision_log": outputs.decision_log,
-        "reverse_map": outputs.reverse_map,
-        "cluster_id_map": outputs.cluster_id_map,
-        "cluster_renumbering": outputs.cluster_renumbering,
-    }
-    rounds[new_round_id] = r
-    adata.uns["cluster_rounds"] = rounds
 
 
 
@@ -3656,121 +3865,157 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
     # Compaction
     # ------------------------------------------------------------------
     if getattr(cfg, "enable_compacting", False):
-        # Parent = whatever is currently active (should be r0_initial_clustering)
-        parent_round_id = adata.uns.get("active_cluster_round", None)
-        parent_round_id = str(parent_round_id) if parent_round_id else None
-        if not parent_round_id:
-            LOGGER.warning("Compaction requested but no active_cluster_round found; skipping.")
+        # Compaction requires decoupler outputs (progeny/dorothea and usually msigdb)
+        if not getattr(cfg, "run_decoupler", False):
+            LOGGER.warning(
+                "Compaction requested (enable_compacting=True) but run_decoupler=False. "
+                "Compaction requires decoupler activities; skipping."
+            )
         else:
-            rounds = adata.uns.get("cluster_rounds", {})
-            if not isinstance(rounds, dict) or parent_round_id not in rounds:
-                LOGGER.warning("Compaction requested but parent round '%s' not found; skipping.", parent_round_id)
+            parent_round_id = adata.uns.get("active_cluster_round", None)
+            parent_round_id = str(parent_round_id) if parent_round_id else None
+            if not parent_round_id:
+                LOGGER.warning("Compaction requested but no active_cluster_round found; skipping.")
             else:
-                parent = rounds[parent_round_id]
-
-                # Cluster key to compact (canonical cluster ids for the parent round)
-                cluster_key = str(parent.get("cluster_key", getattr(cfg, "label_key", "leiden")))
-                if cluster_key not in adata.obs:
+                rounds = adata.uns.get("cluster_rounds", {})
+                if not isinstance(rounds, dict) or parent_round_id not in rounds:
                     LOGGER.warning(
-                        "Compaction: parent cluster_key '%s' not found in adata.obs; skipping.", cluster_key
+                        "Compaction requested but parent round '%s' not found; skipping.",
+                        parent_round_id,
                     )
                 else:
-                    # CellTypist per-cell labels key (used to compute majority label per cluster)
-                    celltypist_obs_key = str(getattr(cfg, "celltypist_label_key", "") or "")
-                    if not celltypist_obs_key or celltypist_obs_key not in adata.obs:
+                    # Ensure parent has decoupler results (if user disabled plots/earlier steps, be defensive)
+                    try:
+                        run_decoupler_for_round(adata, cfg, round_id=parent_round_id)
+                    except Exception as e:
                         LOGGER.warning(
-                            "Compaction: celltypist_obs_key '%s' missing in adata.obs; skipping.",
-                            celltypist_obs_key,
+                            "Compaction: failed to ensure decoupler outputs for parent round '%s': %s",
+                            parent_round_id,
+                            e,
+                        )
+
+                    parent = rounds[parent_round_id]
+                    cluster_key = str(parent.get("cluster_key", getattr(cfg, "label_key", "leiden")))
+
+                    if cluster_key not in adata.obs:
+                        LOGGER.warning(
+                            "Compaction: parent cluster_key '%s' not found in adata.obs; skipping.",
+                            cluster_key,
                         )
                     else:
-                        # New round id: r{next}_compacted (typically r1_compacted)
-                        new_round_id = _make_round_id(_next_round_index(adata), "compacted")
-
-                        LOGGER.info(
-                            "Compaction: creating new round '%s' from parent '%s' (cluster_key=%s, celltypist=%s).",
-                            new_round_id,
-                            parent_round_id,
-                            cluster_key,
-                            celltypist_obs_key,
-                        )
-
-                        create_compacted_round_from_parent_round(
-                            adata,
-                            cfg,
-                            parent_round_id=parent_round_id,
-                            new_round_id=new_round_id,
-                            celltypist_obs_key=celltypist_obs_key,
-                            notes=f"Compacted from {parent_round_id}",
-                            min_cells=int(getattr(cfg, "compact_min_cells", 0) or 0),
-                            zscore_scope=str(getattr(cfg, "compact_zscore_scope",
-                                                     "within_celltypist_label") or "within_celltypist_label"),
-                            grouping=str(
-                                getattr(cfg, "compact_grouping", "connected_components") or "connected_components"),
-                            skip_unknown_celltypist_groups=bool(getattr(cfg, "compact_skip_unknown_celltypist_groups", False)),
-                            thr_progeny=float(getattr(cfg, "thr_progeny", 0.98) or 0.98),
-                            thr_dorothea=float(getattr(cfg, "thr_dorothea", 0.98) or 0.98),
-                            thr_msigdb_default=float(getattr(cfg, "thr_msigdb_default", 0.98) or 0.98),
-                            thr_msigdb_by_gmt=getattr(cfg, "thr_msigdb_by_gmt", None),
-                            msigdb_required=bool(getattr(cfg, "msigdb_required", True)),
-                        )
-
-                        # Activate the compacted round so downstream uses canonical keys
-                        set_active_round(adata, new_round_id, publish_decoupler=False)
-
-                        # Re-run CellTypist cluster-level labels + pretty labels for the new round
-                        # (use existing per-cell precomputed labels; round_id ensures round-scoped keys)
-                        rk = adata.uns["cluster_rounds"][new_round_id]["cluster_key"]
-                        _run_celltypist_annotation(
-                            adata,
-                            cfg,
-                            cluster_key=rk,
-                            round_id=new_round_id,
-                            precomputed_labels=celltypist_labels,
-                            precomputed_proba=celltypist_proba,
-                        )
-
-                        # Run decoupler for the compacted round (now active)
-                        if getattr(cfg, "run_decoupler", False):
-                            run_decoupler_for_round(adata, cfg, round_id=new_round_id)
+                        celltypist_obs_key = str(getattr(cfg, "celltypist_label_key", "") or "")
+                        if not celltypist_obs_key or celltypist_obs_key not in adata.obs:
+                            LOGGER.warning(
+                                "Compaction: celltypist_obs_key '%s' missing in adata.obs; skipping.",
+                                celltypist_obs_key,
+                            )
                         else:
-                            LOGGER.info("Decoupler: disabled (run_decoupler=False).")
+                            new_round_id = _make_round_id(_next_round_index(adata), "compacted")
 
-                        # Plot decoupler under the compacted round folder
-                        if cfg.make_figures and getattr(cfg, "run_decoupler", False):
-                            figdir_round = Path("cluster_and_annotate") / new_round_id
+                            LOGGER.info(
+                                "Compaction: creating new round '%s' from parent '%s' (cluster_key=%s, celltypist=%s).",
+                                new_round_id,
+                                parent_round_id,
+                                cluster_key,
+                                celltypist_obs_key,
+                            )
 
-                            if "msigdb" in adata.uns:
-                                plot_utils.plot_decoupler_all_styles(
+                            try:
+                                create_compacted_round_from_parent_round(
                                     adata,
-                                    net_key="msigdb",
-                                    net_name="MSigDB",
-                                    figdir=figdir_round,
-                                    heatmap_top_k=30,
-                                    bar_top_n=10,
-                                    dotplot_top_k=30,
+                                    cfg,
+                                    parent_round_id=parent_round_id,
+                                    new_round_id=new_round_id,
+                                    celltypist_obs_key=celltypist_obs_key,
+                                    notes=f"Compacted from {parent_round_id}",
+                                    min_cells=int(getattr(cfg, "compact_min_cells", 0) or 0),
+                                    zscore_scope=str(
+                                        getattr(cfg, "compact_zscore_scope", "within_celltypist_label")
+                                        or "within_celltypist_label"
+                                    ),
+                                    grouping=str(
+                                        getattr(cfg, "compact_grouping", "connected_components")
+                                        or "connected_components"
+                                    ),
+                                    skip_unknown_celltypist_groups=bool(
+                                        getattr(cfg, "compact_skip_unknown_celltypist_groups", False)
+                                    ),
+                                    thr_progeny=float(getattr(cfg, "thr_progeny", 0.98) or 0.98),
+                                    thr_dorothea=float(getattr(cfg, "thr_dorothea", 0.98) or 0.98),
+                                    thr_msigdb_default=float(getattr(cfg, "thr_msigdb_default", 0.98) or 0.98),
+                                    thr_msigdb_by_gmt=getattr(cfg, "thr_msigdb_by_gmt", None),
+                                    msigdb_required=bool(getattr(cfg, "msigdb_required", True)),
                                 )
+                            except Exception as e:
+                                LOGGER.warning("Compaction failed while creating compacted round: %s", e)
+                            else:
+                                # Activate the compacted round so canonical keys point at it
+                                set_active_round(adata, new_round_id, publish_decoupler=False)
 
-                            if "progeny" in adata.uns:
-                                plot_utils.plot_decoupler_all_styles(
-                                    adata,
-                                    net_key="progeny",
-                                    net_name="PROGENy",
-                                    figdir=figdir_round,
-                                    heatmap_top_k=14,
-                                    bar_top_n=8,
-                                    dotplot_top_k=14,
-                                )
+                                # Re-run CellTypist cluster-level labels + pretty labels for the new round
+                                try:
+                                    rk = adata.uns["cluster_rounds"][new_round_id]["cluster_key"]
+                                    _run_celltypist_annotation(
+                                        adata,
+                                        cfg,
+                                        cluster_key=str(rk),
+                                        round_id=new_round_id,
+                                        precomputed_labels=celltypist_labels,
+                                        precomputed_proba=celltypist_proba,
+                                    )
+                                except Exception as e:
+                                    LOGGER.warning(
+                                        "Compaction: failed to rebuild CellTypist cluster/pretty labels for '%s': %s",
+                                        new_round_id,
+                                        e,
+                                    )
 
-                            if "dorothea" in adata.uns:
-                                plot_utils.plot_decoupler_all_styles(
-                                    adata,
-                                    net_key="dorothea",
-                                    net_name="DoRothEA",
-                                    figdir=figdir_round,
-                                    heatmap_top_k=40,
-                                    bar_top_n=10,
-                                    dotplot_top_k=35,
-                                )
+                                # Run decoupler for the compacted round (now active)
+                                try:
+                                    run_decoupler_for_round(adata, cfg, round_id=new_round_id)
+                                except Exception as e:
+                                    LOGGER.warning(
+                                        "Compaction: decoupler failed for compacted round '%s': %s",
+                                        new_round_id,
+                                        e,
+                                    )
+
+                                # Plot decoupler under the compacted round folder
+                                if cfg.make_figures and getattr(cfg, "run_decoupler", False):
+                                    figdir_round = Path("cluster_and_annotate") / new_round_id
+
+                                    if "msigdb" in adata.uns:
+                                        plot_utils.plot_decoupler_all_styles(
+                                            adata,
+                                            net_key="msigdb",
+                                            net_name="MSigDB",
+                                            figdir=figdir_round,
+                                            heatmap_top_k=30,
+                                            bar_top_n=10,
+                                            dotplot_top_k=30,
+                                        )
+
+                                    if "progeny" in adata.uns:
+                                        plot_utils.plot_decoupler_all_styles(
+                                            adata,
+                                            net_key="progeny",
+                                            net_name="PROGENy",
+                                            figdir=figdir_round,
+                                            heatmap_top_k=14,
+                                            bar_top_n=8,
+                                            dotplot_top_k=14,
+                                        )
+
+                                    if "dorothea" in adata.uns:
+                                        plot_utils.plot_decoupler_all_styles(
+                                            adata,
+                                            net_key="dorothea",
+                                            net_name="DoRothEA",
+                                            figdir=figdir_round,
+                                            heatmap_top_k=40,
+                                            bar_top_n=10,
+                                            dotplot_top_k=35,
+                                        )
     else:
         LOGGER.info("Compaction: disabled (enable_compacting=False).")
 
