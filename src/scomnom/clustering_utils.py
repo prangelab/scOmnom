@@ -387,6 +387,264 @@ def _precompute_celltypist(
         )
         return None, None
 
+def _run_celltypist_annotation(
+    adata: ad.AnnData,
+    cfg: ClusterAnnotateConfig,
+    *,
+    cluster_key: str,
+    round_id: str | None = None,
+    precomputed_labels: Optional[np.ndarray] = None,
+    precomputed_proba: Optional[pd.DataFrame] = None,
+) -> dict[str, str] | None:
+    """
+    Attach CellTypist annotations to AnnData, *round-aware*.
+
+    HARD GUARANTEE (per your requirement):
+      - Always creates round-scoped cluster-level labels and pretty labels,
+        even if CellTypist is disabled or fails.
+
+    Writes (always):
+      - adata.obs[f"{cfg.celltypist_cluster_label_key}__{round_id}"]   (cluster-level CT label; often "Unknown")
+      - adata.obs[f"{CLUSTER_LABEL_KEY}__{round_id}"]                  (pretty label; always string/categorical)
+      - plus aliases:
+          adata.obs[cfg.celltypist_cluster_label_key]  -> latest round
+          adata.obs[CLUSTER_LABEL_KEY]                 -> latest round
+
+    Writes (best-effort):
+      - adata.obs[cfg.celltypist_label_key] (cell-level CT label; "Unknown" if unavailable)
+      - adata.obsm["celltypist_proba"] + adata.uns["celltypist_proba_columns"] if available
+
+    Returns plotting keys dict (never None unless cluster_key missing).
+    """
+    if cluster_key not in adata.obs:
+        raise KeyError(
+            f"_run_celltypist_annotation: cluster_key '{cluster_key}' not found in adata.obs"
+        )
+
+    # Determine round_id (best effort)
+    if round_id is None:
+        rid = adata.uns.get("active_cluster_round", None)
+        round_id = str(rid) if rid else "r0"
+    else:
+        round_id = str(round_id)
+
+    # Round-scoped keys (avoid overwriting across rounds)
+    cell_key = str(cfg.celltypist_label_key)
+    cluster_ct_base = str(cfg.celltypist_cluster_label_key)
+    cluster_ct_key = f"{cluster_ct_base}__{round_id}"
+    pretty_key = f"{CLUSTER_LABEL_KEY}__{round_id}"
+
+    # --------------------------------------------------------------
+    # A) CellTypist predictions (cell-level + probabilities) - BEST EFFORT
+    #    If unavailable, we fill cell_key with "Unknown".
+    # --------------------------------------------------------------
+    celltypist_ok = False
+    try:
+        if cfg.celltypist_model is None:
+            raise RuntimeError("CellTypist disabled (cfg.celltypist_model is None).")
+
+        if precomputed_labels is not None:
+            if precomputed_labels.shape[0] != adata.n_obs:
+                raise ValueError("precomputed_labels length does not match adata.n_obs.")
+            LOGGER.info("Using precomputed CellTypist labels for annotation.")
+            adata.obs[cell_key] = pd.Series(precomputed_labels, index=adata.obs_names).astype(str).astype("category")
+
+            if precomputed_proba is not None:
+                try:
+                    pm = precomputed_proba.loc[adata.obs_names]
+                except Exception:
+                    pm = precomputed_proba.reindex(adata.obs_names)
+                if isinstance(pm, pd.DataFrame) and not pm.empty:
+                    adata.obsm["celltypist_proba"] = pm.to_numpy()
+                    adata.uns["celltypist_proba_columns"] = list(pm.columns.astype(str))
+            celltypist_ok = True
+
+        else:
+            # Fallback path (kept for safety)
+            LOGGER.info("Running CellTypist on main AnnData for annotation (fallback).")
+            sc.pp.normalize_total(adata, target_sum=1e4)
+            sc.pp.log1p(adata)
+
+            model_path = get_celltypist_model(cfg.celltypist_model)
+            from celltypist.models import Model
+            import celltypist
+
+            model = Model.load(str(model_path))
+            predictions = celltypist.annotate(
+                adata,
+                model=model,
+                majority_voting=cfg.celltypist_majority_voting,
+            )
+
+            raw = predictions.predicted_labels
+            if isinstance(raw, dict) and "majority_voting" in raw:
+                cell_level_labels = raw["majority_voting"]
+            else:
+                cell_level_labels = raw
+
+            # write cell-level labels
+            if isinstance(cell_level_labels, (pd.Series, pd.DataFrame)):
+                s = cell_level_labels.squeeze()
+                adata.obs[cell_key] = s.astype(str).astype("category")
+            else:
+                adata.obs[cell_key] = pd.Series(np.asarray(cell_level_labels).ravel(), index=adata.obs_names).astype(str).astype("category")
+
+            # probability matrix if available
+            if hasattr(predictions, "probability_matrix"):
+                pm = predictions.probability_matrix
+                if isinstance(pm, pd.DataFrame) and not pm.empty:
+                    try:
+                        pm = pm.loc[adata.obs_names]
+                    except Exception:
+                        pm = pm.reindex(adata.obs_names)
+                    adata.obsm["celltypist_proba"] = pm.to_numpy()
+                    adata.uns["celltypist_proba_columns"] = list(pm.columns.astype(str))
+
+            celltypist_ok = True
+
+    except Exception as e:
+        LOGGER.warning("CellTypist unavailable/failed; proceeding with Unknown labels. (%s)", e)
+        # Ensure cell_key exists as "Unknown" for all cells (so downstream always has a string column)
+        adata.obs[cell_key] = pd.Series(["Unknown"] * adata.n_obs, index=adata.obs_names).astype("category")
+        # Do NOT delete any existing proba; but don't assume it's valid either.
+        celltypist_ok = False
+
+    # --------------------------------------------------------------
+    # B) Cluster-level majority CellTypist label (ROUND-SCOPED)
+    #    Mask-aware if probability matrix exists; otherwise unmasked.
+    # --------------------------------------------------------------
+    bio_mask = None
+    bio_mask_stats = None
+    try:
+        if "celltypist_proba" in adata.obsm and "celltypist_proba_columns" in adata.uns:
+            pm = pd.DataFrame(
+                adata.obsm["celltypist_proba"],
+                index=adata.obs_names,
+                columns=list(map(str, adata.uns["celltypist_proba_columns"])),
+            )
+            bio_mask, bio_mask_stats = _celltypist_entropy_margin_mask(
+                pm,
+                entropy_abs_limit=float(getattr(cfg, "bio_entropy_abs_limit", 0.5)),
+                entropy_quantile=float(getattr(cfg, "bio_entropy_quantile", 0.7)),
+                margin_min=float(getattr(cfg, "bio_margin_min", 0.10)),
+            )
+    except Exception as e:
+        LOGGER.warning("CellTypist mask reconstruction failed; proceeding unmasked. (%s)", e)
+        bio_mask = None
+        bio_mask_stats = None
+
+    if bio_mask is None or getattr(bio_mask, "shape", (None,))[0] != adata.n_obs:
+        bio_mask = np.ones((adata.n_obs,), dtype=bool)
+
+    min_masked_cells = int(getattr(cfg, "pretty_label_min_masked_cells", 25) or 25)
+    min_masked_frac = float(getattr(cfg, "pretty_label_min_masked_frac", 0.10) or 0.10)
+
+    clust_vals = adata.obs[cluster_key].astype(str)
+    ct_vals = adata.obs[cell_key].astype(str)
+
+    tmp = pd.DataFrame(
+        {
+            "cluster": clust_vals.to_numpy(),
+            "ct": ct_vals.to_numpy(),
+            "masked": bio_mask,
+        },
+        index=adata.obs_names,
+    )
+
+    cluster_sizes = tmp.groupby("cluster").size().to_dict()
+
+    majority_map: dict[str, str] = {}
+    for c, g in tmp.groupby("cluster", sort=False):
+        g_masked = g[g["masked"]]
+        n_total = int(cluster_sizes.get(c, len(g)))
+        n_masked = int(g_masked.shape[0])
+
+        # If too few confident cells OR CellTypist not actually OK -> Unknown
+        if (not celltypist_ok) or (n_masked < min_masked_cells) or (n_total > 0 and (n_masked / n_total) < min_masked_frac):
+            majority_map[str(c)] = "Unknown"
+            continue
+
+        vc = g_masked["ct"].value_counts()
+        majority_map[str(c)] = str(vc.idxmax()) if not vc.empty else "Unknown"
+
+    adata.obs[cluster_ct_key] = clust_vals.map(majority_map).astype("category")
+    adata.obs[cluster_ct_base] = adata.obs[cluster_ct_key]  # alias to latest round
+
+    # --------------------------------------------------------------
+    # C) Pretty labels (ROUND-SCOPED) — ALWAYS
+    # --------------------------------------------------------------
+    # Make stable ordinal prefix from sorted cluster ids (string)
+    try:
+        cats = sorted(pd.unique(clust_vals.astype(str)).astype(str).tolist())
+    except Exception:
+        cats = sorted(set(map(str, clust_vals.tolist())))
+
+    ord_map = {c: f"C{i:02d}" for i, c in enumerate(cats)}
+
+    maj = adata.obs[cluster_ct_key].astype(str).fillna("Unknown")
+    pretty_labels = clust_vals.map(lambda c: f"{ord_map.get(str(c), 'C??')}: {maj.loc[maj.index[0]]}" if False else None)  # placeholder
+
+    # Build pretty label per cell: "C00: <majority>" where majority is looked up by cluster id
+    # (this avoids embedding raw cluster ids; it’s stable and readable)
+    cl_to_maj = {str(k): str(v) for k, v in majority_map.items()}
+    pretty = clust_vals.map(lambda c: f"{ord_map.get(str(c), 'C??')}: {cl_to_maj.get(str(c), 'Unknown')}")
+    adata.obs[pretty_key] = pretty.astype("category")
+    adata.obs[CLUSTER_LABEL_KEY] = adata.obs[pretty_key]  # alias to latest round
+
+    # Palette for round-scoped pretty labels + alias
+    try:
+        from scanpy.plotting.palettes import default_102
+        cats_pretty = adata.obs[pretty_key].cat.categories
+        adata.uns[f"{pretty_key}_colors"] = list(default_102[: len(cats_pretty)])
+        adata.uns[f"{CLUSTER_LABEL_KEY}_colors"] = adata.uns[f"{pretty_key}_colors"]
+    except Exception as e:
+        LOGGER.warning("Could not set pretty-label palette: %s", e)
+
+    # --------------------------------------------------------------
+    # D) Store linkage + mask stats into the round dict (if present)
+    # --------------------------------------------------------------
+    try:
+        rounds = adata.uns.get("cluster_rounds", {})
+        if isinstance(rounds, dict) and round_id in rounds and isinstance(rounds[round_id], dict):
+            rounds[round_id].setdefault("annotation", {})
+            rounds[round_id]["annotation"].update(
+                {
+                    "celltypist_cell_key": cell_key,
+                    "celltypist_cluster_key": cluster_ct_key,
+                    "pretty_cluster_key": pretty_key,
+                    "cluster_key_used": str(cluster_key),
+                    "pretty_label_masked": True,
+                    "pretty_label_min_masked_cells": int(min_masked_cells),
+                    "pretty_label_min_masked_frac": float(min_masked_frac),
+                    "celltypist_ok": bool(celltypist_ok),
+                }
+            )
+            if bio_mask_stats is not None:
+                rounds[round_id].setdefault("bio_mask", {})
+                rounds[round_id]["bio_mask"]["annotation_mask_stats"] = bio_mask_stats
+            adata.uns["cluster_rounds"] = rounds
+    except Exception as e:
+        LOGGER.warning("Failed to store round annotation linkage/mask stats: %s", e)
+
+    LOGGER.info(
+        "Annotation done for round '%s' using cluster_key='%s'. "
+        "Wrote: cell='%s', cluster='%s', pretty='%s' (+ aliases). celltypist_ok=%s",
+        round_id,
+        cluster_key,
+        cell_key,
+        cluster_ct_key,
+        pretty_key,
+        bool(celltypist_ok),
+    )
+
+    return {
+        "round_id": str(round_id),
+        "cluster_key": str(cluster_key),
+        "celltypist_cell_key": str(cell_key),
+        "celltypist_cluster_key": str(cluster_ct_key),
+        "pretty_cluster_key": str(pretty_key),
+    }
+
 
 def _celltypist_entropy_margin_mask(
     prob_matrix: pd.DataFrame,

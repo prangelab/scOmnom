@@ -24,9 +24,10 @@ from .clustering_utils import (
     _make_round_id,
     _res_key,
     _precompute_celltypist,
+    _run_celltypist_annotation,
+
 )
 from .annotation_utils import (
-    _run_celltypist_annotation,
     run_decoupler_for_round,
 )
 from .compaction_utils import create_compacted_round_from_parent_round
