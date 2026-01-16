@@ -123,7 +123,7 @@ def compact_clusters_by_multiview_agreement(
     round_snapshot: Dict[str, Any],
     celltypist_obs_key: str,
     min_cells: int = 0,
-    zscore_scope: str = "within_celltypist_label",
+    zscore_scope: str = "global",
     similarity_metric: str = "cosine_zscore",
     grouping: str = "connected_components",
     thr_progeny: float = 0.98,
@@ -136,19 +136,25 @@ def compact_clusters_by_multiview_agreement(
     """
     Compaction decision engine.
 
-    Current behavior (per your latest tuning):
-      - Compaction ALWAYS uses GLOBAL z-scoring for similarity (ignores zscore_scope arg for computation).
+    Behavior:
+      - Honors zscore_scope:
+          * "global": z-score across all clusters (recommended default)
+          * "within_celltypist_label": z-score within each CellTypist label group
+            (guardrailed: falls back to global if too few clusters in a label)
       - MSigDB per-GMT floors: HALLMARK~0.60, REACTOME~0.45, default~0.50.
         User-provided thresholds act as CAPS (max strictness); adaptive can relax down to floors.
       - MSigDB majority rule special-case: if n_gmts==2, require 1 passing GMT (1-of-2).
       - MSigDB Top-K union similarity uses K=25.
-      - Adaptive thresholds are q90 per CellTypist label computed on global-z vectors.
+      - Adaptive thresholds are q90 per CellTypist label computed on the *effective* z-scored vectors.
 
     Output:
       - components / maps
       - edges dataframe (pairwise audit)
       - decision_log (component-level)
     """
+    import numpy as np
+    import pandas as pd
+
     thr_msigdb_by_gmt = dict(thr_msigdb_by_gmt or {})
 
     labels_obs_key = round_snapshot.get("labels_obs_key", None)
@@ -190,8 +196,17 @@ def compact_clusters_by_multiview_agreement(
         msig_by_gmt = {}
 
     # ------------------------------------------------------------------
-    # Force GLOBAL z-scoring for compaction decision
+    # z-score strategy
     # ------------------------------------------------------------------
+    zscope = (zscore_scope or "global").strip().lower()
+    if zscope not in {"global", "within_celltypist_label"}:
+        LOGGER.warning("Compaction: unknown zscore_scope=%r; falling back to 'global'.", zscore_scope)
+        zscope = "global"
+
+    # Guardrail for within-label z: too few clusters => unstable zscore -> use global
+    WITHIN_LABEL_MIN_CLUSTERS = 4
+
+    # Precompute GLOBAL z-scored views (always available as fallback)
     prog_z_global = _zscore_cols(prog)
     doro_z_global = _zscore_cols(doro)
     msig_z_global = {g: _zscore_cols(df) for g, df in msig_by_gmt.items()}
@@ -238,7 +253,7 @@ def compact_clusters_by_multiview_agreement(
     adjacency: Dict[str, List[Tuple[str, str]]] = {}
 
     # ------------------------------------------------------------------
-    # Robust thresholds + MSigDB majority + MSigDB top-K union
+    # Thresholds + MSigDB majority + MSigDB top-K union
     # ------------------------------------------------------------------
     TOPK_MSIGDB = 25
     ADAPT_Q = 0.90
@@ -294,14 +309,33 @@ def compact_clusters_by_multiview_agreement(
     pass_edges_by_label: Dict[str, List[Tuple[str, str]]] = {}
     adaptive_thresholds_by_label: Dict[str, Dict[str, Any]] = {}
 
+    # Helper: choose effective z-scored views for this label
+    def _effective_z_views_for_label(clusters_for_label: List[str]) -> tuple[pd.DataFrame, pd.DataFrame, Dict[str, pd.DataFrame], str]:
+        """
+        Returns (prog_z, doro_z, msig_z_by_gmt, effective_scope_string)
+        """
+        c = [str(x) for x in clusters_for_label]
+        if zscope == "within_celltypist_label" and len(c) >= WITHIN_LABEL_MIN_CLUSTERS:
+            # z-score only within this label's clusters (stable enough)
+            prog_z_loc = _zscore_cols(prog.loc[c])
+            doro_z_loc = _zscore_cols(doro.loc[c])
+            msig_z_loc = {g: _zscore_cols(msig_by_gmt[g].loc[c]) for g in msig_by_gmt.keys()}
+            return prog_z_loc, doro_z_loc, msig_z_loc, "within_celltypist_label"
+        # fallback/global
+        return (
+            prog_z_global.loc[c],
+            doro_z_global.loc[c],
+            {g: msig_z_global[g].loc[c] for g in msig_by_gmt.keys()},
+            "global",
+        )
+
     for ct_label, clusters in sorted(label_to_clusters.items(), key=lambda kv: kv[0]):
         clusters = sorted(map(str, clusters))
         if len(clusters) < 2:
             continue
 
-        prog_z = prog_z_global.loc[clusters]
-        doro_z = doro_z_global.loc[clusters]
-        msig_z = {g: msig_z_global[g].loc[clusters] for g in msig_by_gmt.keys()}
+        # pick effective z-scoring for this label (honors config with guardrail)
+        prog_z, doro_z, msig_z, effective_scope = _effective_z_views_for_label(clusters)
 
         # 1) compute similarity distributions within ct_label
         prog_sims: List[float] = []
@@ -359,7 +393,9 @@ def compact_clusters_by_multiview_agreement(
                 "cap_msig_default": None if thr_msigdb_default is None else float(thr_msigdb_default),
                 "cap_msig_by_gmt": {str(g): float(v) for g, v in (thr_msigdb_by_gmt or {}).items()},
             },
-            "compaction_zscore_scope": "global",
+            "zscore_scope_arg": str(zscore_scope),
+            "zscore_scope_effective": str(effective_scope),
+            "within_label_min_clusters_for_zscore": int(WITHIN_LABEL_MIN_CLUSTERS),
         }
 
         passed_edges: List[Tuple[str, str]] = []
@@ -385,7 +421,12 @@ def compact_clusters_by_multiview_agreement(
                 for gmt, dfz in msig_z.items():
                     s = _cosine_topk_union(dfz.loc[a].to_numpy(), dfz.loc[b].to_numpy(), k=TOPK_MSIGDB)
                     msig_sims[gmt] = float(s)
-                    thr_g = float(thr_msig_ct.get(str(gmt), min(_cap_for_gmt(str(gmt)), max(_floor_for_gmt(str(gmt)), 0.0))))
+                    thr_g = float(
+                        thr_msig_ct.get(
+                            str(gmt),
+                            min(_cap_for_gmt(str(gmt)), max(_floor_for_gmt(str(gmt)), 0.0)),
+                        )
+                    )
                     ok = bool(s >= thr_g)
                     msig_pass_flags[gmt] = ok
                     if not ok:
@@ -430,13 +471,18 @@ def compact_clusters_by_multiview_agreement(
                     "fail_msigdb_gmts": ",".join(msig_fail_gmts) if msig_fail_gmts else "",
                     "pass_all": bool(pass_all),
                     "similarity_metric": f"{similarity_metric}+msigdb_topk_union_k{TOPK_MSIGDB}+adaptive_q{ADAPT_Q}",
-                    "zscore_scope": str(zscore_scope),  # transparency only
-                    "compaction_zscore_scope": "global",
+                    "zscore_scope": str(zscore_scope),
+                    "zscore_scope_effective": str(effective_scope),
                     "grouping": grouping,
                 }
 
                 for gmt, s in msig_sims.items():
-                    thr_g = float(thr_msig_ct.get(str(gmt), min(_cap_for_gmt(str(gmt)), max(_floor_for_gmt(str(gmt)), 0.0))))
+                    thr_g = float(
+                        thr_msig_ct.get(
+                            str(gmt),
+                            min(_cap_for_gmt(str(gmt)), max(_floor_for_gmt(str(gmt)), 0.0)),
+                        )
+                    )
                     row[f"sim_msigdb__{gmt}"] = float(s)
                     row[f"thr_msigdb__{gmt}"] = float(thr_g)
                     row[f"pass_msigdb__{gmt}"] = bool(s >= thr_g)
@@ -452,7 +498,7 @@ def compact_clusters_by_multiview_agreement(
         try:
             LOGGER.info(
                 "Compaction[%s] adaptive thresholds: thr_prog=%.3f thr_doro=%.3f msig_gmts=%d "
-                "(q=%.2f, topk=%d, msig_majority=%.2f, compaction_z=global)",
+                "(q=%.2f, topk=%d, msig_majority=%.2f, z=%s)",
                 str(ct_label),
                 float(thr_prog_ct),
                 float(thr_doro_ct),
@@ -460,6 +506,7 @@ def compact_clusters_by_multiview_agreement(
                 float(ADAPT_Q),
                 int(TOPK_MSIGDB),
                 float(MSIGDB_MAJORITY_FRAC),
+                str(effective_scope),
             )
         except Exception:
             pass
@@ -493,7 +540,7 @@ def compact_clusters_by_multiview_agreement(
                     "n_members": int(len(comp)),
                     "reason": (
                         "adaptive multiview agreement within CellTypist label "
-                        "(progeny + dorothea + msigdb_majority(topK), compaction_z=global)"
+                        "(progeny + dorothea + msigdb_majority(topK))"
                     ),
                     "grouping": grouping,
                     "adaptive": adaptive_thresholds_by_label.get(str(ct_label), None),
@@ -537,7 +584,7 @@ def compact_clusters_by_multiview_agreement(
         LOGGER.info(
             "Compaction summary: considered=%d clusters across %d CellTypist groups; "
             "merge_groups=%d; clusters_in_merged_groups=%d; total_components=%d; "
-            "min_cells=%d; grouping=%s; zscore_scope(arg)=%s; compaction_z=global; "
+            "min_cells=%d; grouping=%s; zscore_scope(arg)=%s; zscore_scope_effective=per_label; "
             "msigdb_required=%s; skip_unknown_groups=%s; adaptive_q=%.2f; msigdb_topk=%d; msigdb_majority=%.2f",
             int(n_clusters_considered),
             int(n_labels),
@@ -565,6 +612,7 @@ def compact_clusters_by_multiview_agreement(
         adjacency=adjacency,
         decision_log=decision_log,
     )
+
 
 
 # =============================================================================

@@ -435,6 +435,22 @@ def _run_celltypist_annotation(
     pretty_key = f"{CLUSTER_LABEL_KEY}__{round_id}"
 
     # --------------------------------------------------------------
+    # Helper: stable "Leiden-style" cluster ordering by size
+    # --------------------------------------------------------------
+    def _cluster_order_by_size(labels: pd.Series) -> list[str]:
+        """
+        Return cluster ids ordered by:
+          1) descending size
+          2) stable tie-break by cluster id (string)
+        """
+        s = labels.astype(str)
+        vc = s.value_counts(dropna=False)  # desc by default
+        df = pd.DataFrame({"cluster": vc.index.astype(str), "n": vc.values.astype(int)})
+        df["cluster_sort"] = df["cluster"].astype(str)
+        df = df.sort_values(["n", "cluster_sort"], ascending=[False, True], kind="mergesort")
+        return df["cluster"].astype(str).tolist()
+
+    # --------------------------------------------------------------
     # A) CellTypist predictions (cell-level + probabilities) - BEST EFFORT
     #    If unavailable, we fill cell_key with "Unknown".
     # --------------------------------------------------------------
@@ -572,29 +588,30 @@ def _run_celltypist_annotation(
 
     # --------------------------------------------------------------
     # C) Pretty labels (ROUND-SCOPED) — ALWAYS
+    #     IMPORTANT: numbering follows Leiden practice: sort clusters by size (desc).
     # --------------------------------------------------------------
-    # Make stable ordinal prefix from sorted cluster ids (string)
+    # Stable cluster order (desc size, tie-break by original cluster id)
     try:
-        cats = sorted(pd.unique(clust_vals.astype(str)).astype(str).tolist())
+        cluster_order = _cluster_order_by_size(clust_vals)
     except Exception:
-        cats = sorted(set(map(str, clust_vals.tolist())))
+        # fallback: stable string sort
+        cluster_order = sorted(pd.unique(clust_vals.astype(str)).astype(str).tolist())
 
-    ord_map = {c: f"C{i:02d}" for i, c in enumerate(cats)}
+    ord_map = {c: f"C{i:02d}" for i, c in enumerate(cluster_order)}
 
-    maj = adata.obs[cluster_ct_key].astype(str).fillna("Unknown")
-    pretty_labels = clust_vals.map(lambda c: f"{ord_map.get(str(c), 'C??')}: {maj.loc[maj.index[0]]}" if False else None)  # placeholder
-
-    # Build pretty label per cell: "C00: <majority>" where majority is looked up by cluster id
-    # (this avoids embedding raw cluster ids; it’s stable and readable)
+    # Build pretty label per cell: "C00: <majority_label>"
     cl_to_maj = {str(k): str(v) for k, v in majority_map.items()}
     pretty = clust_vals.map(lambda c: f"{ord_map.get(str(c), 'C??')}: {cl_to_maj.get(str(c), 'Unknown')}")
-    adata.obs[pretty_key] = pretty.astype("category")
+
+    # Make categorical with categories ordered by size
+    pretty_categories = [f"{ord_map[c]}: {cl_to_maj.get(str(c), 'Unknown')}" for c in cluster_order]
+    adata.obs[pretty_key] = pd.Categorical(pretty.astype(str), categories=pretty_categories, ordered=False)
     adata.obs[CLUSTER_LABEL_KEY] = adata.obs[pretty_key]  # alias to latest round
 
     # Palette for round-scoped pretty labels + alias
     try:
         from scanpy.plotting.palettes import default_102
-        cats_pretty = adata.obs[pretty_key].cat.categories
+        cats_pretty = list(adata.obs[pretty_key].cat.categories)
         adata.uns[f"{pretty_key}_colors"] = list(default_102[: len(cats_pretty)])
         adata.uns[f"{CLUSTER_LABEL_KEY}_colors"] = adata.uns[f"{pretty_key}_colors"]
     except Exception as e:
@@ -602,6 +619,7 @@ def _run_celltypist_annotation(
 
     # --------------------------------------------------------------
     # D) Store linkage + mask stats into the round dict (if present)
+    #    (Also stores the size-sorted cluster_order + display map for downstream consumers.)
     # --------------------------------------------------------------
     try:
         rounds = adata.uns.get("cluster_rounds", {})
@@ -619,6 +637,14 @@ def _run_celltypist_annotation(
                     "celltypist_ok": bool(celltypist_ok),
                 }
             )
+
+            # NEW: stable ordering + mapping (useful for decoupler/pseudobulk/plots)
+            rounds[round_id]["cluster_order"] = list(map(str, cluster_order))
+            rounds[round_id]["cluster_display_map"] = {
+                str(cid): f"{ord_map.get(str(cid), 'C??')}: {cl_to_maj.get(str(cid), 'Unknown')}"
+                for cid in cluster_order
+            }
+
             if bio_mask_stats is not None:
                 rounds[round_id].setdefault("bio_mask", {})
                 rounds[round_id]["bio_mask"]["annotation_mask_stats"] = bio_mask_stats
@@ -644,6 +670,7 @@ def _run_celltypist_annotation(
         "celltypist_cluster_key": str(cluster_ct_key),
         "pretty_cluster_key": str(pretty_key),
     }
+
 
 
 def _celltypist_entropy_margin_mask(
