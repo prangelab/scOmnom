@@ -23,9 +23,9 @@ from .clustering_utils import (
     _next_round_index,
     _make_round_id,
     _res_key,
+    _precompute_celltypist,
 )
 from .annotation_utils import (
-    _precompute_celltypist,
     _run_celltypist_annotation,
     run_decoupler_for_round,
 )
