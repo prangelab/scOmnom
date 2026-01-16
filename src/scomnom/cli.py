@@ -670,7 +670,7 @@ def cluster_and_annotate(
     # Compaction
     # -----------------------------
     enable_compacting: bool = typer.Option(
-        False,
+        True,
         "--enable-compacting/--no-enable-compacting",
         help="[Compaction] Create an additional compacted clustering round using multiview agreement.",
     ),

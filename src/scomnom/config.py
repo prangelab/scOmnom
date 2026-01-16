@@ -334,7 +334,7 @@ class ClusterAnnotateConfig(BaseModel):
     # Compaction
     # ------------------------------------------------------------------
     enable_compacting: bool = Field(
-        False,
+        True,
         description="If True, create an additional 'compacted' clustering round using multiview agreement (progeny/dorothea/msigdb).",
     )
 
