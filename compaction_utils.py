@@ -678,7 +678,7 @@ def create_compacted_round_from_parent_round(
             "edges": outputs.edges,
             "adjacency": outputs.adjacency,
         },
-        "components": outputs.components,
+        "components": None,
         "decision_log": outputs.decision_log,
         "reverse_map": outputs.reverse_map,
     }
