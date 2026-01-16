@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Optional, List, Literal
+from typing import Optional, List, Literal, Dict
 import typer
 from pathlib import Path
 import warnings
@@ -23,7 +23,7 @@ warnings.filterwarnings(action="ignore", message=".*not compatible with tight_la
 warnings.filterwarnings(action="ignore", message="pkg_resources is deprecated as an API", category=UserWarning)
 warnings.filterwarnings(action="ignore", message=r".*does not have many workers.*", category=UserWarning, module="lightning.pytorch")
 warnings.filterwarnings(action="ignore", message=".*already log-transformed.*", category=UserWarning)
-warnings.filterwarnings(action="ignore", message="Argument `use_highly_variable` is deprecated",category=FutureWarning,module="scanpy",)
+warnings.filterwarnings(action="ignore", message="Argument `use_highly_variable` is deprecated", category=FutureWarning, module="scanpy")
 
 
 # ---------------------------------------------------------------------
@@ -43,8 +43,10 @@ def _normalize_methods(methods):
 
     invalid = [m for m in expanded if m not in ALLOWED_METHODS]
     if invalid:
-        raise ValueError(f"Invalid method(s): {', '.join(invalid)}. "
-                         f"Allowed: {', '.join(sorted(ALLOWED_METHODS))}")
+        raise ValueError(
+            f"Invalid method(s): {', '.join(invalid)}. "
+            f"Allowed: {', '.join(sorted(ALLOWED_METHODS))}"
+        )
 
     return expanded
 
@@ -52,6 +54,7 @@ def _normalize_methods(methods):
 def _methods_completion(ctx: typer.Context, args: List[str], incomplete: str) -> List[str]:
     prefix = incomplete.lower()
     return [m for m in sorted(ALLOWED_METHODS) if m.lower().startswith(prefix)]
+
 
 def validate_decoupler_consensus_methods(
     value: Optional[List[str]],
@@ -91,6 +94,7 @@ def validate_decoupler_consensus_methods(
 
     return methods
 
+
 def _celltypist_models_completion(ctx: typer.Context, args: List[str], incomplete: str) -> List[str]:
     from .io_utils import get_available_celltypist_models
     try:
@@ -108,7 +112,7 @@ def _gene_sets_completion(
     incomplete: str,
 ) -> List[str]:
     """
-    Autocomplete for --ssgsea-gene-sets.
+    Autocomplete for --msigdb-gene-sets.
 
     Suggests:
     1. Common MSigDB collection keywords (HALLMARK, REACTOME, BIOCARTA, ...)
@@ -117,44 +121,23 @@ def _gene_sets_completion(
     """
     prefix = incomplete.lower()
 
-    # -----------------------------------------------------
-    # 1. Known MSigDB collections (broadest modern set)
-    # -----------------------------------------------------
     standard_sets = [
-        # Hallmark
         "HALLMARK",
-
-        # MSigDB curated (C2)
         "REACTOME",
         "BIOCARTA",
         "KEGG",
-
-        # GO collections
         "GO_BP",
         "GO_MF",
         "GO_CC",
-
-        # Immunologic signatures
         "IMMUNO",
-
-        # Oncogenic signatures
         "ONCOGENIC",
-
-        # Transcription factor targets
         "TF_TARGETS",
-
-        # MicroRNA targets
         "MIR_TARGETS",
-
-        # WikiPathways (now part of MSigDB 2024+)
         "WIKIPATHWAYS",
     ]
 
     suggestions = [s for s in standard_sets if s.lower().startswith(prefix)]
 
-    # -----------------------------------------------------
-    # 2. Include local *.gmt files if they match prefix
-    # -----------------------------------------------------
     known_dirs = [
         Path.cwd(),
         Path.home(),
@@ -169,7 +152,6 @@ def _gene_sets_completion(
             if f.name.lower().startswith(prefix):
                 suggestions.append(str(f))
 
-    # Deduplicate but preserve order
     seen = set()
     unique = []
     for s in suggestions:
@@ -199,9 +181,9 @@ def load_and_filter(
     cellbender_dir: Optional[Path] = typer.Option(
         None, "--cellbender-dir", "-c",
         help=(
-                "[I/O] Path with CellBender filtered outputs.\n"
-                "Used alone: CellBender-only mode (no raw counts).\n"
-                "Used with --raw-sample-dir: enables raw vs CellBender QC comparison."
+            "[I/O] Path with CellBender filtered outputs.\n"
+            "Used alone: CellBender-only mode (no raw counts).\n"
+            "Used with --raw-sample-dir: enables raw vs CellBender QC comparison."
         ),
     ),
     output_dir: Path = typer.Option(
@@ -230,7 +212,6 @@ def load_and_filter(
     min_genes: int = typer.Option(500, help="[QC] Minimum genes per cell."),
     min_cells_per_sample: int = typer.Option(20, help="[QC] Minimum cells per sample."),
     max_pct_mt: float = typer.Option(5.0, help="[QC] Max mitochondrial percentage."),
-
     n_top_genes: int = typer.Option(2000, help="Number of highly variable genes to select"),
 
     # -------------------------------------------------------------
@@ -276,8 +257,6 @@ def load_and_filter(
         help="Path to pre-doublet AnnData (.zarr or .h5ad). Defaults to <out>/adata.merged.zarr.",
     ),
 
-
-
     # -------------------------------------------------------------
     # Figures
     # -------------------------------------------------------------
@@ -308,16 +287,12 @@ def load_and_filter(
         help="[I/O] Suffix for CellBender barcode file "
              "(e.g. '_cellbender_out_cell_barcodes.csv').",
     ),
-
 ):
     logfile = output_dir / "load-and-filter.log"
     init_logging(logfile)
     logging.getLogger(__name__).info("Logging initialized")
     logging.getLogger("scomnom.load_and_filter").info("load_and_filter logger active")
 
-    # -------------------------------------------------------------
-    # Resolve implicit apply-doublet-score path
-    # -------------------------------------------------------------
     if apply_doublet_score:
         if apply_doublet_score_path is None:
             apply_doublet_score_path = output_dir / "adata.merged.zarr"
@@ -361,9 +336,6 @@ def load_and_filter(
 # ======================================================================
 @app.command("integrate", help="Integration + benchmarking.")
 def integrate(
-    # -----------------------------
-    # I/O
-    # -----------------------------
     input_path: Path = typer.Option(
         ..., "--input-path", "-i",
         help="[I/O] Dataset produced by load-and-filter (.zarr or .h5ad)."
@@ -383,9 +355,6 @@ def integrate(
         help="Optionally write an .h5ad copy.",
     ),
 
-    # -------------------------------------------------------------
-    # Figures
-    # -------------------------------------------------------------
     figdir_name: str = typer.Option(
         "figures",
         "--figdir-name",
@@ -398,9 +367,6 @@ def integrate(
         help="[Figures] Output figure formats.",
     ),
 
-    # -----------------------------
-    # Integration
-    # -----------------------------
     methods: Optional[List[str]] = typer.Option(
         None, "--methods", "-m",
         help="[Integration] Methods: BBKNN, scVI, scANVI.",
@@ -415,9 +381,6 @@ def integrate(
         help="[scIB] Label key for benchmarking and scANVI.",
     ),
 
-    # -----------------------------
-    # Benchmarking
-    # -----------------------------
     benchmark_n_jobs: int = typer.Option(
         16,
         "--benchmark-n-jobs",
@@ -458,233 +421,315 @@ def integrate(
     help="Clustering (resolution sweep + stability) and optional CellTypist + decoupler annotation (MSigDB/DoRothEA/PROGENy).",
 )
 def cluster_and_annotate(
-        # -----------------------------
-        # I/O (integrate-style)
-        # -----------------------------
-        input_path: Optional[Path] = typer.Option(
-            None,
-            "--input-path",
-            "-i",
-            help="[I/O] Integrated dataset produced by `scomnom integrate` (.zarr or .h5ad).",
-        ),
-        output_dir: Optional[Path] = typer.Option(
-            None,
-            "--output-dir",
-            "-o",
-            help="[I/O] Output directory (default = input parent).",
-        ),
-        output_name: str = typer.Option(
-            "adata.clustered.annotated",
-            "--output-name",
-            help="[I/O] Base name for clustered/annotated dataset.",
-        ),
-        save_h5ad: bool = typer.Option(
-            False,
-            "--save-h5ad/--no-save-h5ad",
-            help="[I/O] Optionally write an .h5ad copy (in addition to .zarr).",
-        ),
+    # -----------------------------
+    # I/O (integrate-style)
+    # -----------------------------
+    input_path: Optional[Path] = typer.Option(
+        None,
+        "--input-path",
+        "-i",
+        help="[I/O] Integrated dataset produced by `scomnom integrate` (.zarr or .h5ad).",
+    ),
+    output_dir: Optional[Path] = typer.Option(
+        None,
+        "--output-dir",
+        "-o",
+        help="[I/O] Output directory (default = input parent).",
+    ),
+    output_name: str = typer.Option(
+        "adata.clustered.annotated",
+        "--output-name",
+        help="[I/O] Base name for clustered/annotated dataset.",
+    ),
+    save_h5ad: bool = typer.Option(
+        False,
+        "--save-h5ad/--no-save-h5ad",
+        help="[I/O] Optionally write an .h5ad copy (in addition to .zarr).",
+    ),
 
-        # -----------------------------
-        # Figures (integrate-style)
-        # -----------------------------
-        figdir_name: str = typer.Option(
-            "figures",
-            "--figdir-name",
-            help="[Figures] Name of figure directory.",
-        ),
-        figure_formats: List[str] = typer.Option(
-            ["png", "pdf"],
-            "--figure-formats",
-            "-F",
-            help="[Figures] Output figure formats.",
-        ),
-        make_figures: bool = typer.Option(
-            True,
-            "--make-figures/--no-make-figures",
-            help="[Figures] Enable/disable figure generation.",
-        ),
+    # -----------------------------
+    # Figures
+    # -----------------------------
+    figdir_name: str = typer.Option(
+        "figures",
+        "--figdir-name",
+        help="[Figures] Name of figure directory.",
+    ),
+    figure_formats: List[str] = typer.Option(
+        ["png", "pdf"],
+        "--figure-formats",
+        "-F",
+        help="[Figures] Output figure formats.",
+    ),
+    make_figures: bool = typer.Option(
+        True,
+        "--make-figures/--no-make-figures",
+        help="[Figures] Enable/disable figure generation.",
+    ),
 
-        # -----------------------------
-        # Embeddings / keys
-        # -----------------------------
-        embedding_key: str = typer.Option(
-            "X_integrated",
-            "--embedding-key",
-            "-e",
-            help="[Clustering] Embedding key in .obsm for neighbors + scoring.",
-        ),
-        batch_key: Optional[str] = typer.Option(
-            None,
-            "--batch-key",
-            "-b",
-            help="[Clustering] Batch/sample column in adata.obs (default: auto-detect).",
-        ),
-        label_key: str = typer.Option(
-            "leiden",
-            "--label-key",
-            "-l",
-            help="[Clustering] Final cluster key stored in adata.obs.",
-        ),
+    # -----------------------------
+    # Embeddings / keys
+    # -----------------------------
+    embedding_key: str = typer.Option(
+        "X_integrated",
+        "--embedding-key",
+        "-e",
+        help="[Clustering] Embedding key in .obsm for neighbors + scoring.",
+    ),
+    batch_key: Optional[str] = typer.Option(
+        None,
+        "--batch-key",
+        "-b",
+        help="[Clustering] Batch/sample column in adata.obs (default: auto-detect).",
+    ),
+    label_key: str = typer.Option(
+        "leiden",
+        "--label-key",
+        "-l",
+        help="[Clustering] Final cluster key stored in adata.obs.",
+    ),
 
-        # -----------------------------
-        # Resolution sweep
-        # -----------------------------
-        res_min: float = typer.Option(0.1, "--res-min"),
-        res_max: float = typer.Option(2.5, "--res-max"),
-        n_resolutions: int = typer.Option(25, "--n-resolutions"),
-        penalty_alpha: float = typer.Option(0.02, "--penalty-alpha"),
+    # -----------------------------
+    # Bio-guided clustering weights
+    # -----------------------------
+    bio_guided_clustering: bool = typer.Option(
+        True,
+        "--bio-guided/--no-bio-guided",
+        help="[Bio] Enable/disable biological metrics guidance during resolution selection.",
+    ),
+    w_hom: float = typer.Option(0.15, "--w-hom", help="[Bio] Weight for bio homogeneity (if available)."),
+    w_frag: float = typer.Option(0.10, "--w-frag", help="[Bio] Weight for bio fragmentation (if available)."),
+    w_bioari: float = typer.Option(0.15, "--w-bioari", help="[Bio] Weight for bio ARI (if available)."),
 
-        # -----------------------------
-        # Stability / selection
-        # -----------------------------
-        stability_repeats: int = typer.Option(5, "--stability-repeats"),
-        subsample_frac: float = typer.Option(0.8, "--subsample-frac"),
-        random_state: int = typer.Option(42, "--random-state"),
-        tiny_cluster_size: int = typer.Option(20, "--tiny-cluster-size"),
-        min_cluster_size: int = typer.Option(20, "--min-cluster-size"),
-        min_plateau_len: int = typer.Option(3, "--min-plateau-len"),
-        max_cluster_jump_frac: float = typer.Option(0.4, "--max-cluster-jump-frac"),
-        stability_threshold: float = typer.Option(0.85, "--stability-threshold"),
-        w_stab: float = typer.Option(0.50, "--w-stab"),
-        w_sil: float = typer.Option(0.35, "--w-sil"),
-        w_tiny: float = typer.Option(0.15, "--w-tiny"),
+    # -----------------------------
+    # Resolution sweep
+    # -----------------------------
+    res_min: float = typer.Option(0.1, "--res-min"),
+    res_max: float = typer.Option(2.5, "--res-max"),
+    n_resolutions: int = typer.Option(25, "--n-resolutions"),
+    penalty_alpha: float = typer.Option(0.02, "--penalty-alpha"),
 
-        # -----------------------------
-        # CellTypist
-        # -----------------------------
-        celltypist_model: Optional[str] = typer.Option(
-            "Immune_All_Low.pkl",
-            "--celltypist-model",
-            "-M",
-            autocompletion=_celltypist_models_completion,
-            help="[CellTypist] Path or name of model. If None, skip annotation.",
-        ),
-        celltypist_majority_voting: bool = typer.Option(
-            True,
-            "--celltypist-majority-voting/--no-celltypist-majority-voting",
-            help="[CellTypist] Use majority voting.",
-        ),
-        annotation_csv: Optional[Path] = typer.Option(
-            None,
-            "--annotation-csv",
-            "-A",
-            help="[CellTypist] Optional CSV with per-cluster annotations.",
-        ),
+    # -----------------------------
+    # Stability / selection
+    # -----------------------------
+    stability_repeats: int = typer.Option(5, "--stability-repeats"),
+    subsample_frac: float = typer.Option(0.8, "--subsample-frac"),
+    random_state: int = typer.Option(42, "--random-state"),
+    tiny_cluster_size: int = typer.Option(20, "--tiny-cluster-size"),
+    min_cluster_size: int = typer.Option(20, "--min-cluster-size"),
+    min_plateau_len: int = typer.Option(3, "--min-plateau-len"),
+    max_cluster_jump_frac: float = typer.Option(0.4, "--max-cluster-jump-frac"),
+    stability_threshold: float = typer.Option(0.85, "--stability-threshold"),
+    w_stab: float = typer.Option(0.50, "--w-stab"),
+    w_sil: float = typer.Option(0.35, "--w-sil"),
+    w_tiny: float = typer.Option(0.15, "--w-tiny"),
 
-        # -----------------------------
-        # Bio-metrics mask (CellTypist confidence gate)
-        # -----------------------------
-        bio_mask_enabled: bool = typer.Option(
-            True,
-            "--bio-mask/--no-bio-mask",
-            help="[Bio] Enable confidence mask for bio metrics (hom/frag/bioARI). Clustering unchanged.",
-        ),
-        bio_mask_entropy_abs_limit: float = typer.Option(
-            0.5,
-            "--bio-mask-entropy-abs-limit",
-            help="[Bio] Absolute entropy ceiling. Cells with entropy <= this always pass.",
-        ),
-        bio_mask_entropy_quantile: float = typer.Option(
-            0.7,
-            "--bio-mask-entropy-quantile",
-            help="[Bio] Fallback entropy quantile. Effective entropy cutoff is max(abs_limit, quantile cutoff).",
-        ),
-        bio_mask_margin_min: float = typer.Option(
-            0.1,
-            "--bio-mask-margin-min",
-            help="[Bio] Minimum margin (top1 - top2) required to keep a cell for bio metrics.",
-        ),
-        bio_mask_min_frac: float = typer.Option(
-            0.10,
-            "--bio-mask-min-frac",
-            help="[Bio] Ensure at least this fraction of cells remain for bio metrics (0 disables).",
-        ),
+    # -----------------------------
+    # CellTypist
+    # -----------------------------
+    celltypist_model: Optional[str] = typer.Option(
+        "Immune_All_Low.pkl",
+        "--celltypist-model",
+        "-M",
+        autocompletion=_celltypist_models_completion,
+        help="[CellTypist] Path or name of model. If None, skip annotation.",
+    ),
+    celltypist_majority_voting: bool = typer.Option(
+        True,
+        "--celltypist-majority-voting/--no-celltypist-majority-voting",
+        help="[CellTypist] Use majority voting.",
+    ),
+    annotation_csv: Optional[Path] = typer.Option(
+        None,
+        "--annotation-csv",
+        "-A",
+        help="[CellTypist] Optional CSV with per-cluster annotations.",
+    ),
 
-        # -----------------------------
-        # Model management
-        # -----------------------------
-        list_models: bool = typer.Option(False, "--list-models"),
-        download_models: bool = typer.Option(False, "--download-models"),
+    # -----------------------------
+    # Bio mask (CellTypist confidence gate)
+    # -----------------------------
+    bio_mask_mode: Literal["entropy_margin", "none"] = typer.Option(
+        "entropy_margin",
+        "--bio-mask-mode",
+        help="[Bio] CellTypist confidence mask mode for bio metrics: entropy_margin or none.",
+    ),
+    bio_entropy_abs_limit: float = typer.Option(
+        0.5,
+        "--bio-entropy-abs-limit",
+        help="[Bio] Absolute entropy ceiling. Cells with entropy <= this always pass.",
+    ),
+    bio_entropy_quantile: float = typer.Option(
+        0.7,
+        "--bio-entropy-quantile",
+        help="[Bio] Entropy quantile. Final entropy cut is max(abs_limit, q-threshold).",
+    ),
+    bio_margin_min: float = typer.Option(
+        0.10,
+        "--bio-margin-min",
+        help="[Bio] Minimum margin (top1 - top2) to pass mask.",
+    ),
+    bio_mask_min_cells: int = typer.Option(
+        500,
+        "--bio-mask-min-cells",
+        help="[Bio] Disable bio mask if fewer than this many cells pass (safety).",
+    ),
+    bio_mask_min_frac: float = typer.Option(
+        0.05,
+        "--bio-mask-min-frac",
+        help="[Bio] Disable bio mask if fewer than this fraction of cells pass (safety).",
+    ),
 
-        # -----------------------------
-        # Decoupler (cluster-level nets)
-        # -----------------------------
-        run_decoupler: bool = typer.Option(
-            True,
-            "--run-decoupler/--no-run-decoupler",
-            help="[Decoupler] Run decoupler-based annotation (MSigDB, DoRothEA, PROGENy).",
-        ),
+    # Pretty label gating (cluster-level CT majority)
+    pretty_label_min_masked_cells: int = typer.Option(
+        25,
+        "--pretty-label-min-masked-cells",
+        help="[CellTypist] Minimum masked cells in a cluster to assign cluster-level label; else Unknown.",
+    ),
+    pretty_label_min_masked_frac: float = typer.Option(
+        0.10,
+        "--pretty-label-min-masked-frac",
+        help="[CellTypist] Minimum masked fraction in a cluster to assign cluster-level label; else Unknown.",
+    ),
 
-        # Pseudobulk settings
-        decoupler_pseudobulk_agg: str = typer.Option(
-            "mean",
-            "--decoupler-pseudobulk-agg",
-            help="[Decoupler] Pseudobulk aggregation: mean or median.",
-        ),
-        decoupler_use_raw: bool = typer.Option(
-            True,
-            "--decoupler-use-raw/--no-decoupler-use-raw",
-            help="[Decoupler] Prefer adata.raw / raw-like source if present for pseudobulk.",
-        ),
+    # -----------------------------
+    # Model management
+    # -----------------------------
+    list_models: bool = typer.Option(False, "--list-models"),
+    download_models: bool = typer.Option(False, "--download-models"),
 
-        # Global decoupler method defaults
-        decoupler_method: str = typer.Option(
-            "consensus",
-            "--decoupler-method",
-            help="[Decoupler] Default method for decoupler runs (can be overridden per net).",
-        ),
-        decoupler_consensus_methods: Optional[List[str]] = typer.Option(
-            ["ulm", "mlm", "wsum"],
-            "--decoupler-consensus-methods",
-            help= "[Decoupler] List of consensus methods.",
-            callback=validate_decoupler_consensus_methods,
-        ),
-        decoupler_min_n_targets: int = typer.Option(
-            5,
-            "--decoupler-min-n-targets",
-            help="[Decoupler] Minimum targets per source.",
-        ),
+    # -----------------------------
+    # Decoupler (cluster-level nets)
+    # -----------------------------
+    run_decoupler: bool = typer.Option(
+        True,
+        "--run-decoupler/--no-run-decoupler",
+        help="[Decoupler] Run decoupler-based annotation (MSigDB, DoRothEA, PROGENy).",
+    ),
 
-        # MSigDB
-        msigdb_gene_sets_cli: Optional[str] = typer.Option(
-            None,
-            "--msigdb-gene-sets",
-            help="[MSigDB] Comma-separated MSigDB keywords (e.g. 'HALLMARK,REACTOME') or paths to .gmt files.",
-            autocompletion=_gene_sets_completion,
-        ),
-        msigdb_method: str = typer.Option(
-            "consensus",
-            "--msigdb-method",
-            help="[MSigDB] Method override for MSigDB nets.",
-        ),
-        msigdb_min_n_targets: int = typer.Option(
-            5,
-            "--msigdb-min-n-targets",
-            help="[MSigDB] Minimum targets per pathway.",
-        ),
+    decoupler_pseudobulk_agg: str = typer.Option(
+        "mean",
+        "--decoupler-pseudobulk-agg",
+        help="[Decoupler] Pseudobulk aggregation: mean or median.",
+    ),
+    decoupler_use_raw: bool = typer.Option(
+        True,
+        "--decoupler-use-raw/--no-decoupler-use-raw",
+        help="[Decoupler] Prefer raw-like source (counts layers/raw) for pseudobulk when available.",
+    ),
 
-        # DoRothEA / PROGENy toggles + methods
-        run_dorothea: bool = typer.Option(True, "--run-dorothea/--no-run-dorothea"),
-        dorothea_method: str = typer.Option("consensus", "--dorothea-method"),
-        dorothea_min_n_targets: int = typer.Option(5, "--dorothea-min-n-targets"),
-        dorothea_confidence: str = typer.Option("A,B,C", "--dorothea-confidence"),
+    decoupler_method: str = typer.Option(
+        "consensus",
+        "--decoupler-method",
+        help="[Decoupler] Default method for decoupler runs (can be overridden per net).",
+    ),
+    decoupler_consensus_methods: Optional[List[str]] = typer.Option(
+        None,
+        "--decoupler-consensus-methods",
+        help="[Decoupler] List of consensus methods (e.g. --decoupler-consensus-methods ulm --decoupler-consensus-methods mlm).",
+        callback=validate_decoupler_consensus_methods,
+    ),
+    decoupler_min_n_targets: int = typer.Option(
+        5,
+        "--decoupler-min-n-targets",
+        help="[Decoupler] Minimum targets per source.",
+    ),
 
-        run_progeny: bool = typer.Option(True, "--run-progeny/--no-run-progeny"),
-        progeny_method: str = typer.Option("consensus", "--progeny-method"),
-        progeny_min_n_targets: int = typer.Option(5, "--progeny-min-n-targets"),
-        progeny_top_n: int = typer.Option(100, "--progeny-top-n"),
-        progeny_organism: str = typer.Option("human", "--progeny-organism"),
+    # MSigDB
+    msigdb_gene_sets_cli: Optional[str] = typer.Option(
+        None,
+        "--msigdb-gene-sets",
+        help="[MSigDB] Comma-separated MSigDB keywords (e.g. 'HALLMARK,REACTOME') or paths to .gmt files.",
+        autocompletion=_gene_sets_completion,
+    ),
+    msigdb_method: str = typer.Option(
+        "consensus",
+        "--msigdb-method",
+        help="[MSigDB] Method override for MSigDB nets.",
+    ),
+    msigdb_min_n_targets: int = typer.Option(
+        5,
+        "--msigdb-min-n-targets",
+        help="[MSigDB] Minimum targets per pathway.",
+    ),
+
+    # DoRothEA / PROGENy toggles + methods
+    run_dorothea: bool = typer.Option(True, "--run-dorothea/--no-run-dorothea"),
+    dorothea_method: str = typer.Option("consensus", "--dorothea-method"),
+    dorothea_min_n_targets: int = typer.Option(5, "--dorothea-min-n-targets"),
+    dorothea_confidence: str = typer.Option("A,B,C", "--dorothea-confidence"),
+    dorothea_organism: str = typer.Option("human", "--dorothea-organism"),
+
+    run_progeny: bool = typer.Option(True, "--run-progeny/--no-run-progeny"),
+    progeny_method: str = typer.Option("consensus", "--progeny-method"),
+    progeny_min_n_targets: int = typer.Option(5, "--progeny-min-n-targets"),
+    progeny_top_n: int = typer.Option(100, "--progeny-top-n"),
+    progeny_organism: str = typer.Option("human", "--progeny-organism"),
+
+    # -----------------------------
+    # Compaction
+    # -----------------------------
+    enable_compacting: bool = typer.Option(
+        False,
+        "--enable-compacting/--no-enable-compacting",
+        help="[Compaction] Create an additional compacted clustering round using multiview agreement.",
+    ),
+    compact_min_cells: int = typer.Option(
+        0,
+        "--compact-min-cells",
+        help="[Compaction] Exclude clusters smaller than this from compaction decisions (0 disables).",
+    ),
+    compact_zscore_scope: Literal["within_celltypist_label", "global"] = typer.Option(
+        "within_celltypist_label",
+        "--compact-zscore-scope",
+        help="[Compaction] Z-score scope for similarity comparisons.",
+    ),
+    compact_grouping: Literal["connected_components", "clique"] = typer.Option(
+        "connected_components",
+        "--compact-grouping",
+        help="[Compaction] How to form compaction groups from pass edges.",
+    ),
+    compact_skip_unknown_celltypist_groups: bool = typer.Option(
+        False,
+        "--compact-skip-unknown/--no-compact-skip-unknown",
+        help="[Compaction] Skip compaction for Unknown/UNKNOWN CellTypist cluster-label groups.",
+    ),
+    thr_progeny: float = typer.Option(
+        0.98,
+        "--thr-progeny",
+        help="[Compaction] Similarity threshold for PROGENy activities (cosine on z-scored activities).",
+    ),
+    thr_dorothea: float = typer.Option(
+        0.98,
+        "--thr-dorothea",
+        help="[Compaction] Similarity threshold for DoRothEA activities (cosine on z-scored activities).",
+    ),
+    thr_msigdb_default: float = typer.Option(
+        0.98,
+        "--thr-msigdb-default",
+        help="[Compaction] Default similarity threshold for each MSigDB GMT block.",
+    ),
+    thr_msigdb_by_gmt: Optional[str] = typer.Option(
+        None,
+        "--thr-msigdb-by-gmt",
+        help="[Compaction] Optional per-GMT thresholds as 'HALLMARK=0.99,REACTOME=0.985'.",
+    ),
+    msigdb_required: bool = typer.Option(
+        True,
+        "--msigdb-required/--no-msigdb-required",
+        help="[Compaction] Require MSigDB activity_by_gmt for compaction decisions.",
+    ),
 ):
     # ---------------------------------------------------------
-    # Handle --list-models /considered in integration-style
+    # Handle --list-models / --download-models
     # ---------------------------------------------------------
     if list_models:
-            from .io_utils import get_available_celltypist_models
-            models = get_available_celltypist_models()
-            typer.echo("\nAvailable CellTypist models:\n")
-            for m in models:
-                typer.echo(f"  - {m['name']}")
-            raise typer.Exit()
+        from .io_utils import get_available_celltypist_models
+        models = get_available_celltypist_models()
+        typer.echo("\nAvailable CellTypist models:\n")
+        for m in models:
+            typer.echo(f"  - {m['name']}")
+        raise typer.Exit()
 
     if download_models:
         from .io_utils import download_all_celltypist_models
@@ -695,7 +740,7 @@ def cluster_and_annotate(
     # Validate required input
     # ---------------------------------------------------------
     if input_path is None:
-        raise typer.BadParameter("Missing required option --input / -i")
+        raise typer.BadParameter("Missing required option --input-path / -i")
 
     # ---------------------------------------------------------
     # Resolve output dir + logging
@@ -704,14 +749,41 @@ def cluster_and_annotate(
     log_path = out_dir / "cluster-and-annotate.log"
     init_logging(log_path)
 
+    # ---------------------------------------------------------
     # Parse MSigDB gene sets
+    # ---------------------------------------------------------
     if msigdb_gene_sets_cli is None:
-        gene_sets_list = None  # allow config defaults
+        gene_sets_list = None
     else:
         gene_sets_list = [x.strip() for x in msigdb_gene_sets_cli.split(",") if x.strip()]
 
     # ---------------------------------------------------------
-    # Build config (new ClusterAnnotateConfig fields)
+    # Parse thr_msigdb_by_gmt "A=0.99,B=0.985" -> dict
+    # ---------------------------------------------------------
+    thr_msigdb_by_gmt_dict: Optional[Dict[str, float]] = None
+    if thr_msigdb_by_gmt:
+        d: Dict[str, float] = {}
+        for part in str(thr_msigdb_by_gmt).split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "=" not in part:
+                raise typer.BadParameter(
+                    "--thr-msigdb-by-gmt must be 'GMT=thr,GMT=thr' (e.g. HALLMARK=0.99,REACTOME=0.985)"
+                )
+            k, v = part.split("=", 1)
+            k = k.strip()
+            v = v.strip()
+            if not k:
+                raise typer.BadParameter("Empty GMT key in --thr-msigdb-by-gmt")
+            try:
+                d[k] = float(v)
+            except Exception:
+                raise typer.BadParameter(f"Non-numeric threshold for GMT {k!r}: {v!r}")
+        thr_msigdb_by_gmt_dict = d or None
+
+    # ---------------------------------------------------------
+    # Build config
     # ---------------------------------------------------------
     kwargs = dict(
         input_path=input_path,
@@ -722,6 +794,11 @@ def cluster_and_annotate(
         embedding_key=embedding_key,
         batch_key=batch_key,
         label_key=label_key,
+
+        bio_guided_clustering=bio_guided_clustering,
+        w_hom=w_hom,
+        w_frag=w_frag,
+        w_bioari=w_bioari,
 
         res_min=res_min,
         res_max=res_max,
@@ -744,34 +821,46 @@ def cluster_and_annotate(
         celltypist_majority_voting=celltypist_majority_voting,
         annotation_csv=annotation_csv,
 
-        bio_mask_enabled=bio_mask_enabled,
-        bio_mask_entropy_abs_limit=bio_mask_entropy_abs_limit,
-        bio_mask_entropy_quantile=bio_mask_entropy_quantile,
-        bio_mask_margin_min=bio_mask_margin_min,
+        bio_mask_mode=bio_mask_mode,
+        bio_entropy_abs_limit=bio_entropy_abs_limit,
+        bio_entropy_quantile=bio_entropy_quantile,
+        bio_margin_min=bio_margin_min,
+        bio_mask_min_cells=bio_mask_min_cells,
         bio_mask_min_frac=bio_mask_min_frac,
 
-        run_decoupler=run_decoupler,
+        pretty_label_min_masked_cells=pretty_label_min_masked_cells,
+        pretty_label_min_masked_frac=pretty_label_min_masked_frac,
 
+        run_decoupler=run_decoupler,
         decoupler_pseudobulk_agg=decoupler_pseudobulk_agg,
         decoupler_use_raw=decoupler_use_raw,
         decoupler_method=decoupler_method,
-        decoupler_consensus_methods=decoupler_consensus_methods,
         decoupler_min_n_targets=decoupler_min_n_targets,
-
         msigdb_method=msigdb_method,
         msigdb_min_n_targets=msigdb_min_n_targets,
-        # (msigdb_gene_sets comes from gene_sets_list below)
 
         run_dorothea=run_dorothea,
         dorothea_method=dorothea_method,
         dorothea_min_n_targets=dorothea_min_n_targets,
         dorothea_confidence=[x.strip() for x in dorothea_confidence.split(",") if x.strip()],
+        dorothea_organism=dorothea_organism,
 
         run_progeny=run_progeny,
         progeny_method=progeny_method,
         progeny_min_n_targets=progeny_min_n_targets,
         progeny_top_n=progeny_top_n,
         progeny_organism=progeny_organism,
+
+        enable_compacting=enable_compacting,
+        compact_min_cells=compact_min_cells,
+        compact_zscore_scope=compact_zscore_scope,
+        compact_grouping=compact_grouping,
+        compact_skip_unknown_celltypist_groups=compact_skip_unknown_celltypist_groups,
+        thr_progeny=thr_progeny,
+        thr_dorothea=thr_dorothea,
+        thr_msigdb_default=thr_msigdb_default,
+        thr_msigdb_by_gmt=thr_msigdb_by_gmt_dict,
+        msigdb_required=msigdb_required,
 
         make_figures=make_figures,
         figdir_name=figdir_name,
@@ -780,17 +869,15 @@ def cluster_and_annotate(
         logfile=log_path,
     )
 
+    # only set if provided (so config defaults can apply)
+    if decoupler_consensus_methods is not None:
+        kwargs["decoupler_consensus_methods"] = decoupler_consensus_methods
     if gene_sets_list is not None:
         kwargs["msigdb_gene_sets"] = gene_sets_list
 
     cfg = ClusterAnnotateConfig(**kwargs)
 
-    # ---------------------------------------------------------
-    # Run
-    # ---------------------------------------------------------
     run_clustering(cfg)
-
-
 
 
 if __name__ == "__main__":

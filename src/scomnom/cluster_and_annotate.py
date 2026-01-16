@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import logging
-import warnings
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Dict, List, Tuple, Sequence, Optional
+from typing import Dict, List, Tuple, Optional, Any, Sequence
 import json
 
 import anndata as ad
@@ -19,6 +18,7 @@ from . import io_utils, plot_utils
 from .io_utils import get_celltypist_model, resolve_msigdb_gene_sets
 from .plot_utils import _extract_series, _normalize_array
 from datetime import datetime, timezone
+
 
 
 LOGGER = logging.getLogger(__name__)
@@ -1630,25 +1630,6 @@ def _run_celltypist_annotation(
     except Exception as e:
         LOGGER.warning("Failed to store round annotation linkage/mask stats: %s", e)
 
-    # --------------------------------------------------------------
-    # D) Store linkage into the round dict (if present)
-    # --------------------------------------------------------------
-    try:
-        rounds = adata.uns.get("cluster_rounds", {})
-        if isinstance(rounds, dict) and round_id in rounds and isinstance(rounds[round_id], dict):
-            rounds[round_id].setdefault("annotation", {})
-            rounds[round_id]["annotation"].update(
-                {
-                    "celltypist_cell_key": cell_key,
-                    "celltypist_cluster_key": cluster_ct_key,
-                    "pretty_cluster_key": pretty_key,
-                    "cluster_key_used": cluster_key,
-                }
-            )
-            adata.uns["cluster_rounds"] = rounds
-    except Exception as e:
-        LOGGER.warning("Failed to store round annotation linkage: %s", e)
-
     LOGGER.info(
         "CellTypist annotation done for round '%s' using cluster_key='%s'. "
         "Wrote: cell='%s', cluster='%s', pretty='%s' (+ aliases).",
@@ -2641,6 +2622,670 @@ def run_BISC(
     return adata
 
 
+# =============================================================================
+# Utilities: colors + timestamps
+# =============================================================================
+def _ensure_category_with_order(s: pd.Series, ordered_categories: Optional[List[str]] = None) -> pd.Series:
+    s = s.astype(str)
+    if ordered_categories is None:
+        cats = sorted(pd.unique(s).tolist())
+    else:
+        cats = list(ordered_categories)
+    return pd.Categorical(s, categories=cats, ordered=False)
+
+
+def _get_palette(n: int) -> List[str]:
+    """
+    Deterministic palette (hex) for n categories.
+    Uses matplotlib if available; otherwise falls back.
+    """
+    try:
+        import matplotlib.pyplot as plt
+        cmap = plt.get_cmap("tab20")
+        colors = [cmap(i % cmap.N) for i in range(n)]
+        # rgba -> hex
+        def to_hex(rgba):
+            r, g, b = rgba[:3]
+            return "#{:02x}{:02x}{:02x}".format(int(r * 255), int(g * 255), int(b * 255))
+        return [to_hex(c) for c in colors]
+    except Exception:
+        # fallback
+        base = [
+            "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+            "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+        ]
+        return [base[i % len(base)] for i in range(n)]
+
+
+def _sync_cluster_colors(adata, cluster_key: str) -> None:
+    """
+    Ensure adata.uns[f"{cluster_key}_colors"] aligns with the categorical ordering
+    of adata.obs[cluster_key].
+    """
+    if cluster_key not in adata.obs:
+        return
+    s = adata.obs[cluster_key]
+    if not pd.api.types.is_categorical_dtype(s):
+        s = pd.Series(_ensure_category_with_order(pd.Series(s, index=adata.obs.index))).astype("category")
+        adata.obs[cluster_key] = s
+
+    cats = list(adata.obs[cluster_key].cat.categories.astype(str))
+    pal_key = f"{cluster_key}_colors"
+    existing = adata.uns.get(pal_key, None)
+
+    if isinstance(existing, (list, tuple)) and len(existing) >= len(cats):
+        adata.uns[pal_key] = list(existing)[: len(cats)]
+        return
+
+    adata.uns[pal_key] = _get_palette(len(cats))
+
+
+def msigdb_activity_by_gmt_from_activity_and_meta(
+    activity: pd.DataFrame,
+    *,
+    feature_meta: Optional[pd.DataFrame] = None,
+    gmt_col: str = "gmt",
+) -> Dict[str, pd.DataFrame]:
+    """
+    Build {GMT -> activity_sub} from:
+      - activity: clusters x terms
+      - feature_meta: dataframe indexed by term OR has column 'term', with a gmt_col giving family.
+    If feature_meta not provided, falls back to prefix inference:
+      - "HALLMARK_*" -> HALLMARK
+      - "REACTOME_*" -> REACTOME
+      - "KEGG_*" -> KEGG
+      - "WIKIPATHWAYS_*" -> WIKIPATHWAYS
+      - "BIOCARTA_*" -> BIOCARTA
+      - "GOBP_*"/"GOCC_*"/"GOMF_*" -> GOBP/GOCC/GOMF
+      - "PREFIX::TERM" -> PREFIX
+      - else first token before '_' -> token
+    """
+    if activity is None or not isinstance(activity, pd.DataFrame) or activity.empty:
+        return {}
+
+    A = activity.copy()
+    A.index = A.index.astype(str)
+    A.columns = A.columns.astype(str)
+
+    def infer_prefix(term: str) -> str:
+        t = str(term)
+        if "::" in t:
+            p = t.split("::", 1)[0].strip()
+            return p or "UNKNOWN"
+        return (t.split("_", 1)[0].strip() or "UNKNOWN")
+
+    if feature_meta is not None and isinstance(feature_meta, pd.DataFrame) and not feature_meta.empty:
+        fm = feature_meta.copy()
+        # normalize to index = term
+        if fm.index.name is None or fm.index.astype(str).tolist() != fm.index.tolist():
+            fm.index = fm.index.astype(str)
+        if "term" in fm.columns and fm.index.name != "term":
+            # if term column exists and index isn't term-like, set it
+            try:
+                fm = fm.set_index("term", drop=False)
+            except Exception:
+                pass
+        fm.index = fm.index.astype(str)
+
+        if gmt_col not in fm.columns:
+            # fallback to inference
+            prefixes = pd.Series(A.columns, index=A.columns).map(infer_prefix)
+        else:
+            prefixes = pd.Series(A.columns, index=A.columns).map(lambda c: fm.loc[c, gmt_col] if c in fm.index else np.nan)
+            prefixes = prefixes.fillna(pd.Series(A.columns, index=A.columns).map(infer_prefix))
+    else:
+        prefixes = pd.Series(A.columns, index=A.columns).map(infer_prefix)
+
+    out: Dict[str, pd.DataFrame] = {}
+    for gmt, cols in prefixes.groupby(prefixes).groups.items():
+        cols = list(cols)
+        if not cols:
+            continue
+        out[str(gmt)] = A.loc[:, cols].copy()
+
+    return out
+
+
+def ensure_round_msigdb_activity_by_gmt(
+    round_snapshot: Dict[str, Any],
+    *,
+    msigdb_key: str = "msigdb",
+    activity_key: str = "activity",
+    feature_meta_key: str = "feature_meta",
+    gmt_col: str = "gmt",
+) -> None:
+    """
+    Mutates round_snapshot in-place:
+      round["decoupler"]["msigdb"]["activity_by_gmt"] = {...}
+    """
+    dec = round_snapshot.setdefault("decoupler", {})
+    ms = dec.setdefault(msigdb_key, {})
+
+    if "activity_by_gmt" in ms and isinstance(ms["activity_by_gmt"], dict) and ms["activity_by_gmt"]:
+        return
+
+    activity = ms.get(activity_key, None)
+    feature_meta = ms.get(feature_meta_key, None)
+    if activity is None or not isinstance(activity, pd.DataFrame) or activity.empty:
+        raise KeyError("Cannot build activity_by_gmt: round['decoupler']['msigdb']['activity'] missing/empty.")
+
+    if feature_meta is not None and isinstance(feature_meta, dict):
+        # allow dict feature_meta -> dataframe
+        feature_meta = pd.DataFrame(feature_meta)
+
+    by_gmt = msigdb_activity_by_gmt_from_activity_and_meta(activity, feature_meta=feature_meta, gmt_col=gmt_col)
+    if not by_gmt:
+        raise ValueError("Failed to build MSigDB activity_by_gmt (no GMT blocks produced).")
+
+    ms["activity_by_gmt"] = by_gmt
+
+
+# =============================================================================
+# Compaction decision engine
+# =============================================================================
+
+@dataclass
+class CompactionOutputs:
+    components: List[List[str]]
+    cluster_id_map: Dict[str, str]
+    reverse_map: Dict[str, List[str]]
+    cluster_renumbering: Dict[str, str]
+    edges: pd.DataFrame
+    adjacency: Dict[str, List[Tuple[str, str]]]
+    decision_log: List[Dict[str, Any]]
+
+
+def _as_float_df(df: pd.DataFrame) -> pd.DataFrame:
+    x = df.copy()
+    x.index = x.index.astype(str)
+    x.columns = x.columns.astype(str)
+    return x.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+
+
+def _cosine(a: np.ndarray, b: np.ndarray) -> float:
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    na = float(np.linalg.norm(a))
+    nb = float(np.linalg.norm(b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return float(np.dot(a, b) / (na * nb))
+
+
+def _zscore_cols(df: pd.DataFrame, eps: float = 1e-9) -> pd.DataFrame:
+    mu = df.mean(axis=0)
+    sd = df.std(axis=0).replace(0, np.nan)
+    z = (df - mu) / (sd + eps)
+    return z.replace([np.inf, -np.inf], 0.0).fillna(0.0)
+
+
+def _pair_iter(items: Sequence[str]) -> List[Tuple[str, str]]:
+    out = []
+    n = len(items)
+    for i in range(n):
+        for j in range(i + 1, n):
+            out.append((items[i], items[j]))
+    return out
+
+
+def _connected_components(nodes: List[str], edges: List[Tuple[str, str]]) -> List[List[str]]:
+    if not nodes:
+        return []
+    nbr: Dict[str, List[str]] = {n: [] for n in nodes}
+    for u, v in edges:
+        nbr[u].append(v)
+        nbr[v].append(u)
+
+    seen = set()
+    comps: List[List[str]] = []
+    for n in nodes:
+        if n in seen:
+            continue
+        stack = [n]
+        seen.add(n)
+        comp = []
+        while stack:
+            u = stack.pop()
+            comp.append(u)
+            for v in nbr[u]:
+                if v not in seen:
+                    seen.add(v)
+                    stack.append(v)
+        comps.append(sorted(comp))
+    return comps
+
+
+def _clique_components(nodes: List[str], pass_edges_set: set[Tuple[str, str]]) -> List[List[str]]:
+    if not nodes:
+        return []
+
+    adj: Dict[str, set[str]] = {n: set() for n in nodes}
+    for u, v in pass_edges_set:
+        adj[u].add(v)
+        adj[v].add(u)
+
+    remaining = set(nodes)
+    cliques: List[List[str]] = []
+
+    def degree(n: str) -> int:
+        return len(adj[n] & remaining)
+
+    while remaining:
+        seed = sorted(remaining, key=lambda x: (-degree(x), x))[0]
+        clique = {seed}
+        candidates = (adj[seed] & remaining) - clique
+        while candidates:
+            cand = sorted(candidates, key=lambda x: (-degree(x), x))[0]
+            if all((cand in adj[m]) for m in clique):
+                clique.add(cand)
+            candidates = {c for c in candidates if all((c in adj[m]) for m in clique)}
+            candidates.discard(cand)
+
+        cliques.append(sorted(clique))
+        remaining -= clique
+
+    return cliques
+
+
+def compact_clusters_by_multiview_agreement(
+    *,
+    adata,
+    round_snapshot: Dict[str, Any],
+    celltypist_obs_key: str,
+    min_cells: int = 0,
+    zscore_scope: str = "within_celltypist_label",
+    similarity_metric: str = "cosine_zscore",
+    grouping: str = "connected_components",
+    thr_progeny: float = 0.98,
+    thr_dorothea: float = 0.98,
+    thr_msigdb_default: float = 0.98,
+    thr_msigdb_by_gmt: Optional[Dict[str, float]] = None,
+    msigdb_required: bool = True,
+    # NEW: gated by cfg at callsite (pass bool from cfg)
+    skip_unknown_celltypist_groups: bool = False,
+) -> CompactionOutputs:
+    """
+    Compaction decision engine.
+
+    Key change vs older versions:
+      - Groups clusters by the ROUND-SCOPED cluster-level CellTypist label if available
+        (round_snapshot["annotation"]["celltypist_cluster_key"] in adata.obs).
+      - Falls back to per-cell majority (celltypist_obs_key) only if the round-scoped
+        cluster-level key is missing.
+      - Optionally skips Unknown/UNKNOWN groups (cfg-gated via skip_unknown_celltypist_groups).
+    """
+    thr_msigdb_by_gmt = dict(thr_msigdb_by_gmt or {})
+
+    labels_obs_key = round_snapshot.get("labels_obs_key", None)
+    if not labels_obs_key or labels_obs_key not in adata.obs:
+        raise KeyError("round_snapshot['labels_obs_key'] missing or not in adata.obs")
+
+    if celltypist_obs_key not in adata.obs:
+        raise KeyError(f"celltypist_obs_key '{celltypist_obs_key}' not found in adata.obs")
+
+    cluster_per_cell = adata.obs[labels_obs_key].astype(str)
+    celltypist_per_cell = adata.obs[celltypist_obs_key].astype(str)
+
+    cluster_sizes = cluster_per_cell.value_counts()
+    all_clusters = sorted(cluster_sizes.index.astype(str).tolist())
+
+    dec = round_snapshot.get("decoupler", {})
+    prog = dec.get("progeny", {}).get("activity", None)
+    doro = dec.get("dorothea", {}).get("activity", None)
+    msig_by_gmt = dec.get("msigdb", {}).get("activity_by_gmt", None)
+
+    if prog is None or doro is None:
+        raise KeyError("Missing progeny/dorothea activity in round_snapshot['decoupler']")
+
+    prog = _as_float_df(prog).reindex(index=all_clusters).fillna(0.0)
+    doro = _as_float_df(doro).reindex(index=all_clusters).fillna(0.0)
+
+    if msigdb_required:
+        if not isinstance(msig_by_gmt, dict) or not msig_by_gmt:
+            raise KeyError("Missing msigdb activity_by_gmt in round_snapshot['decoupler']['msigdb']")
+        msig_by_gmt_clean: Dict[str, pd.DataFrame] = {}
+        for gmt, df in msig_by_gmt.items():
+            if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+                continue
+            msig_by_gmt_clean[str(gmt)] = _as_float_df(df).reindex(index=all_clusters).fillna(0.0)
+        if not msig_by_gmt_clean:
+            raise ValueError("msigdb_required=True but no non-empty GMT blocks found")
+        msig_by_gmt = msig_by_gmt_clean
+    else:
+        msig_by_gmt = {}
+
+    if zscore_scope == "global":
+        prog_z_global = _zscore_cols(prog)
+        doro_z_global = _zscore_cols(doro)
+        msig_z_global = {g: _zscore_cols(df) for g, df in msig_by_gmt.items()}
+    elif zscore_scope == "within_celltypist_label":
+        prog_z_global = doro_z_global = None
+        msig_z_global = None
+    else:
+        raise ValueError("zscore_scope must be 'within_celltypist_label' or 'global'")
+
+    # ------------------------------------------------------------------
+    # Grouping label per cluster (CellTypist)
+    #
+    # Prefer round-scoped cluster-level CellTypist key (mask-aware, can be Unknown)
+    # from: round_snapshot["annotation"]["celltypist_cluster_key"].
+    #
+    # Fallback: derive grouping label per cluster from per-cell majority of celltypist_obs_key.
+    # ------------------------------------------------------------------
+    ann = round_snapshot.get("annotation", {})
+    ann = ann if isinstance(ann, dict) else {}
+    ct_cluster_key = ann.get("celltypist_cluster_key", None)
+
+    majority_ct: Dict[str, str] = {}
+
+    if isinstance(ct_cluster_key, str) and ct_cluster_key in adata.obs:
+        # This column should be constant within each cluster; we take the first value defensively.
+        tmp = pd.DataFrame(
+            {
+                "cluster": cluster_per_cell.values,
+                "ct_cluster": adata.obs[ct_cluster_key].astype(str).values,
+            }
+        )
+        majority_ct = (
+            tmp.groupby("cluster", observed=True)["ct_cluster"]
+            .agg(lambda x: str(x.iloc[0]) if len(x) else "UNKNOWN")
+            .astype(str)
+            .to_dict()
+        )
+    else:
+        # Fallback: per-cell majority vote within each cluster
+        tmp = pd.DataFrame({"cluster": cluster_per_cell.values, "ct": celltypist_per_cell.values})
+        majority_ct = (
+            tmp.groupby("cluster", observed=True)["ct"]
+            .agg(lambda x: x.value_counts().index[0] if len(x) else "UNKNOWN")
+            .astype(str)
+            .to_dict()
+        )
+
+    # Map CellTypist-group label -> list of clusters in that group
+    label_to_clusters: Dict[str, List[str]] = {}
+    for cl in all_clusters:
+        if min_cells and int(cluster_sizes.get(cl, 0)) < int(min_cells):
+            continue
+        lab = str(majority_ct.get(cl, "UNKNOWN"))
+        label_to_clusters.setdefault(lab, []).append(cl)
+
+    # Optional: do NOT compact Unknown-labeled clusters with each other
+    if skip_unknown_celltypist_groups:
+        label_to_clusters.pop("Unknown", None)
+        label_to_clusters.pop("UNKNOWN", None)
+
+    edge_rows: List[Dict[str, Any]] = []
+    adjacency: Dict[str, List[Tuple[str, str]]] = {}
+
+    def _thr_for_gmt(gmt: str) -> float:
+        return float(thr_msigdb_by_gmt.get(gmt, thr_msigdb_default))
+
+    pass_edges_by_label: Dict[str, List[Tuple[str, str]]] = {}
+
+    for ct_label, clusters in sorted(label_to_clusters.items(), key=lambda kv: kv[0]):
+        clusters = sorted(clusters)
+        if len(clusters) < 2:
+            continue
+
+        if zscore_scope == "within_celltypist_label":
+            prog_z = _zscore_cols(prog.loc[clusters])
+            doro_z = _zscore_cols(doro.loc[clusters])
+            msig_z = {g: _zscore_cols(df.loc[clusters]) for g, df in msig_by_gmt.items()}
+        else:
+            prog_z = prog_z_global.loc[clusters]
+            doro_z = doro_z_global.loc[clusters]
+            msig_z = {g: msig_z_global[g].loc[clusters] for g in msig_by_gmt.keys()}
+
+        passed_edges: List[Tuple[str, str]] = []
+
+        for a, b in _pair_iter(clusters):
+            sim_prog = _cosine(prog_z.loc[a].to_numpy(), prog_z.loc[b].to_numpy())
+            sim_doro = _cosine(doro_z.loc[a].to_numpy(), doro_z.loc[b].to_numpy())
+
+            msig_sims: Dict[str, float] = {}
+            msig_pass_all = True
+            msig_fail_gmts: List[str] = []
+            for gmt, dfz in msig_z.items():
+                s = _cosine(dfz.loc[a].to_numpy(), dfz.loc[b].to_numpy())
+                msig_sims[gmt] = float(s)
+                if s < _thr_for_gmt(gmt):
+                    msig_pass_all = False
+                    msig_fail_gmts.append(gmt)
+
+            pass_prog = sim_prog >= float(thr_progeny)
+            pass_doro = sim_doro >= float(thr_dorothea)
+            pass_all = bool(pass_prog and pass_doro and msig_pass_all)
+
+            if pass_all:
+                passed_edges.append((a, b))
+
+            row = {
+                "celltypist_label": ct_label,
+                "a": a,
+                "b": b,
+                "n_a": int(cluster_sizes.get(a, 0)),
+                "n_b": int(cluster_sizes.get(b, 0)),
+                "sim_progeny": float(sim_prog),
+                "thr_progeny": float(thr_progeny),
+                "pass_progeny": bool(pass_prog),
+                "sim_dorothea": float(sim_doro),
+                "thr_dorothea": float(thr_dorothea),
+                "pass_dorothea": bool(pass_doro),
+                "pass_msigdb_all_gmt": bool(msig_pass_all),
+                "fail_msigdb_gmts": ",".join(msig_fail_gmts) if msig_fail_gmts else "",
+                "pass_all": bool(pass_all),
+                "similarity_metric": similarity_metric,
+                "zscore_scope": zscore_scope,
+                "grouping": grouping,
+            }
+            for gmt, s in msig_sims.items():
+                row[f"sim_msigdb__{gmt}"] = float(s)
+                row[f"thr_msigdb__{gmt}"] = float(_thr_for_gmt(gmt))
+                row[f"pass_msigdb__{gmt}"] = bool(s >= _thr_for_gmt(gmt))
+
+            edge_rows.append(row)
+
+        pass_edges_by_label[ct_label] = passed_edges
+        adjacency[ct_label] = passed_edges
+
+    edges_df = pd.DataFrame(edge_rows)
+
+    decision_log: List[Dict[str, Any]] = []
+    all_components: List[List[str]] = []
+
+    for ct_label, clusters in sorted(label_to_clusters.items(), key=lambda kv: kv[0]):
+        clusters = sorted(clusters)
+        if len(clusters) == 0:
+            continue
+        passed_edges = pass_edges_by_label.get(ct_label, [])
+
+        if grouping == "connected_components":
+            comps = _connected_components(clusters, passed_edges)
+        elif grouping == "clique":
+            s = set((min(u, v), max(u, v)) for (u, v) in passed_edges)
+            comps = _clique_components(clusters, s)
+        else:
+            raise ValueError("grouping must be 'connected_components' or 'clique'")
+
+        for comp in comps:
+            if len(comp) <= 1:
+                continue
+            decision_log.append(
+                {
+                    "celltypist_label": ct_label,
+                    "members": list(comp),
+                    "n_members": int(len(comp)),
+                    "reason": "all-pass multiview agreement within CellTypist label",
+                    "grouping": grouping,
+                    "thresholds": {
+                        "thr_progeny": float(thr_progeny),
+                        "thr_dorothea": float(thr_dorothea),
+                        "thr_msigdb_default": float(thr_msigdb_default),
+                        "thr_msigdb_by_gmt": dict(thr_msigdb_by_gmt),
+                    },
+                }
+            )
+
+        all_components.extend([list(c) for c in comps])
+
+    covered = set(c for comp in all_components for c in comp)
+    missing = [
+        c
+        for c in all_clusters
+        if (min_cells == 0 or int(cluster_sizes.get(c, 0)) >= int(min_cells)) and c not in covered
+    ]
+    for c in missing:
+        all_components.append([c])
+
+    def comp_size(members: List[str]) -> int:
+        return int(sum(int(cluster_sizes.get(m, 0)) for m in members))
+
+    comps_sorted = sorted(all_components, key=lambda comp: (-comp_size(comp), [str(x) for x in comp]))
+
+    cluster_id_map: Dict[str, str] = {}
+    reverse_map: Dict[str, List[str]] = {}
+
+    for i, members in enumerate(comps_sorted):
+        new_id = f"C{i:02d}"
+        reverse_map[new_id] = list(members)
+        for old in members:
+            cluster_id_map[str(old)] = new_id
+
+    cluster_renumbering = {k: k for k in reverse_map.keys()}
+
+    return CompactionOutputs(
+        components=[list(m) for m in reverse_map.values()],
+        cluster_id_map=cluster_id_map,
+        reverse_map=reverse_map,
+        cluster_renumbering=cluster_renumbering,
+        edges=edges_df,
+        adjacency=adjacency,
+        decision_log=decision_log,
+    )
+
+
+def _apply_cluster_id_map_to_obs(
+    adata,
+    *,
+    src_labels_obs_key: str,
+    dst_labels_obs_key: str,
+    cluster_id_map: Dict[str, str],
+) -> None:
+    src = adata.obs[src_labels_obs_key].astype(str)
+    dst = src.map(lambda x: cluster_id_map.get(str(x), str(x))).astype(str)
+    adata.obs[dst_labels_obs_key] = dst
+
+
+def create_compacted_round_from_parent_round(
+    adata: ad.AnnData,
+    cfg: ClusterAnnotateConfig,
+    *,
+    parent_round_id: str,
+    new_round_id: str,
+    celltypist_obs_key: str,
+    notes: str = "",
+    labels_obs_key_new: str | None = None,
+    # compaction params
+    min_cells: int = 0,
+    zscore_scope: str = "within_celltypist_label",
+    grouping: str = "connected_components",
+    skip_unknown_celltypist_groups: bool = False,
+    thr_progeny: float = 0.98,
+    thr_dorothea: float = 0.98,
+    thr_msigdb_default: float = 0.98,
+    thr_msigdb_by_gmt: dict[str, float] | None = None,
+    msigdb_required: bool = True,
+) -> None:
+    _ensure_cluster_rounds(adata)
+
+    rounds = adata.uns.get("cluster_rounds", {})
+    if parent_round_id not in rounds:
+        raise KeyError(f"Parent round '{parent_round_id}' not found in adata.uns['cluster_rounds'].")
+
+    parent = rounds[parent_round_id]
+    parent_labels_obs_key = parent.get("labels_obs_key")
+    if not parent_labels_obs_key or parent_labels_obs_key not in adata.obs:
+        raise KeyError("Parent round missing labels_obs_key or it is not present in adata.obs.")
+
+    parent_cluster_key = parent.get("cluster_key")
+    if not parent_cluster_key:
+        raise KeyError("Parent round missing 'cluster_key'.")
+
+    # Ensure MSigDB activity_by_gmt exists in parent snapshot if required
+    if msigdb_required:
+        ensure_round_msigdb_activity_by_gmt(parent)
+
+    outputs = compact_clusters_by_multiview_agreement(
+        adata=adata,
+        round_snapshot=parent,
+        celltypist_obs_key=celltypist_obs_key,
+        min_cells=min_cells,
+        zscore_scope=zscore_scope,
+        grouping=grouping,
+        thr_progeny=thr_progeny,
+        thr_dorothea=thr_dorothea,
+        thr_msigdb_default=thr_msigdb_default,
+        thr_msigdb_by_gmt=thr_msigdb_by_gmt,
+        msigdb_required=msigdb_required,
+        skip_unknown_celltypist_groups=skip_unknown_celltypist_groups,
+    )
+
+    if labels_obs_key_new is None:
+        labels_obs_key_new = f"{parent_cluster_key}__{new_round_id}"
+    if labels_obs_key_new in adata.obs:
+        raise ValueError(f"labels_obs_key_new '{labels_obs_key_new}' already exists in adata.obs.")
+
+    _apply_cluster_id_map_to_obs(
+        adata,
+        src_labels_obs_key=parent_labels_obs_key,
+        dst_labels_obs_key=labels_obs_key_new,
+        cluster_id_map=outputs.cluster_id_map,
+    )
+    adata.obs[labels_obs_key_new] = adata.obs[labels_obs_key_new].astype("category")
+
+    # Register new round in the *current* schema
+    _register_round(
+        adata,
+        round_id=new_round_id,
+        parent_round_id=parent_round_id,
+        cluster_key=str(parent_cluster_key),
+        labels_obs_key=str(labels_obs_key_new),
+        kind="COMPACTED",
+        best_resolution=None,
+        sweep=None,
+        cfg_snapshot=asdict(cfg) if hasattr(cfg, "__dataclass_fields__") else None,
+        notes=notes,
+    )
+
+    # Attach compaction audit payload to the new round (current schema uses "diagnostics"/"annotation"/etc.)
+    rounds = adata.uns["cluster_rounds"]
+    r = rounds[new_round_id]
+    r.setdefault("diagnostics", {})
+    r["diagnostics"]["compacting"] = {
+        "within_celltypist_label_only": True,
+        "similarity_metric": "cosine_zscore",
+        "thresholds": {
+            "thr_progeny": float(thr_progeny),
+            "thr_dorothea": float(thr_dorothea),
+            "thr_msigdb_default": float(thr_msigdb_default),
+            "thr_msigdb_by_gmt": dict(thr_msigdb_by_gmt or {}),
+        },
+        "pairwise": {
+            "edges": outputs.edges,
+            "adjacency": outputs.adjacency,
+            "components": outputs.components,
+        },
+        "decision_log": outputs.decision_log,
+        "reverse_map": outputs.reverse_map,
+        "cluster_id_map": outputs.cluster_id_map,
+        "cluster_renumbering": outputs.cluster_renumbering,
+    }
+    rounds[new_round_id] = r
+    adata.uns["cluster_rounds"] = rounds
+
+
+
 # -------------------------------------------------------------------------
 # Public orchestrator
 # -------------------------------------------------------------------------
@@ -3007,6 +3652,127 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                     dotplot_top_k=35,
                 )
 
+    # ------------------------------------------------------------------
+    # Compaction
+    # ------------------------------------------------------------------
+    if getattr(cfg, "enable_compacting", False):
+        # Parent = whatever is currently active (should be r0_initial_clustering)
+        parent_round_id = adata.uns.get("active_cluster_round", None)
+        parent_round_id = str(parent_round_id) if parent_round_id else None
+        if not parent_round_id:
+            LOGGER.warning("Compaction requested but no active_cluster_round found; skipping.")
+        else:
+            rounds = adata.uns.get("cluster_rounds", {})
+            if not isinstance(rounds, dict) or parent_round_id not in rounds:
+                LOGGER.warning("Compaction requested but parent round '%s' not found; skipping.", parent_round_id)
+            else:
+                parent = rounds[parent_round_id]
+
+                # Cluster key to compact (canonical cluster ids for the parent round)
+                cluster_key = str(parent.get("cluster_key", getattr(cfg, "label_key", "leiden")))
+                if cluster_key not in adata.obs:
+                    LOGGER.warning(
+                        "Compaction: parent cluster_key '%s' not found in adata.obs; skipping.", cluster_key
+                    )
+                else:
+                    # CellTypist per-cell labels key (used to compute majority label per cluster)
+                    celltypist_obs_key = str(getattr(cfg, "celltypist_label_key", "") or "")
+                    if not celltypist_obs_key or celltypist_obs_key not in adata.obs:
+                        LOGGER.warning(
+                            "Compaction: celltypist_obs_key '%s' missing in adata.obs; skipping.",
+                            celltypist_obs_key,
+                        )
+                    else:
+                        # New round id: r{next}_compacted (typically r1_compacted)
+                        new_round_id = _make_round_id(_next_round_index(adata), "compacted")
+
+                        LOGGER.info(
+                            "Compaction: creating new round '%s' from parent '%s' (cluster_key=%s, celltypist=%s).",
+                            new_round_id,
+                            parent_round_id,
+                            cluster_key,
+                            celltypist_obs_key,
+                        )
+
+                        create_compacted_round_from_parent_round(
+                            adata,
+                            cfg,
+                            parent_round_id=parent_round_id,
+                            new_round_id=new_round_id,
+                            celltypist_obs_key=celltypist_obs_key,
+                            notes=f"Compacted from {parent_round_id}",
+                            min_cells=int(getattr(cfg, "compact_min_cells", 0) or 0),
+                            zscore_scope=str(getattr(cfg, "compact_zscore_scope",
+                                                     "within_celltypist_label") or "within_celltypist_label"),
+                            grouping=str(
+                                getattr(cfg, "compact_grouping", "connected_components") or "connected_components"),
+                            skip_unknown_celltypist_groups=bool(getattr(cfg, "compact_skip_unknown_celltypist_groups", False)),
+                            thr_progeny=float(getattr(cfg, "thr_progeny", 0.98) or 0.98),
+                            thr_dorothea=float(getattr(cfg, "thr_dorothea", 0.98) or 0.98),
+                            thr_msigdb_default=float(getattr(cfg, "thr_msigdb_default", 0.98) or 0.98),
+                            thr_msigdb_by_gmt=getattr(cfg, "thr_msigdb_by_gmt", None),
+                            msigdb_required=bool(getattr(cfg, "msigdb_required", True)),
+                        )
+
+                        # Activate the compacted round so downstream uses canonical keys
+                        set_active_round(adata, new_round_id, publish_decoupler=False)
+
+                        # Re-run CellTypist cluster-level labels + pretty labels for the new round
+                        # (use existing per-cell precomputed labels; round_id ensures round-scoped keys)
+                        rk = adata.uns["cluster_rounds"][new_round_id]["cluster_key"]
+                        _run_celltypist_annotation(
+                            adata,
+                            cfg,
+                            cluster_key=rk,
+                            round_id=new_round_id,
+                            precomputed_labels=celltypist_labels,
+                            precomputed_proba=celltypist_proba,
+                        )
+
+                        # Run decoupler for the compacted round (now active)
+                        if getattr(cfg, "run_decoupler", False):
+                            run_decoupler_for_round(adata, cfg, round_id=new_round_id)
+                        else:
+                            LOGGER.info("Decoupler: disabled (run_decoupler=False).")
+
+                        # Plot decoupler under the compacted round folder
+                        if cfg.make_figures and getattr(cfg, "run_decoupler", False):
+                            figdir_round = Path("cluster_and_annotate") / new_round_id
+
+                            if "msigdb" in adata.uns:
+                                plot_utils.plot_decoupler_all_styles(
+                                    adata,
+                                    net_key="msigdb",
+                                    net_name="MSigDB",
+                                    figdir=figdir_round,
+                                    heatmap_top_k=30,
+                                    bar_top_n=10,
+                                    dotplot_top_k=30,
+                                )
+
+                            if "progeny" in adata.uns:
+                                plot_utils.plot_decoupler_all_styles(
+                                    adata,
+                                    net_key="progeny",
+                                    net_name="PROGENy",
+                                    figdir=figdir_round,
+                                    heatmap_top_k=14,
+                                    bar_top_n=8,
+                                    dotplot_top_k=14,
+                                )
+
+                            if "dorothea" in adata.uns:
+                                plot_utils.plot_decoupler_all_styles(
+                                    adata,
+                                    net_key="dorothea",
+                                    net_name="DoRothEA",
+                                    figdir=figdir_round,
+                                    heatmap_top_k=40,
+                                    bar_top_n=10,
+                                    dotplot_top_k=35,
+                                )
+    else:
+        LOGGER.info("Compaction: disabled (enable_compacting=False).")
 
     # ------------------------------------------------------------------
     # Make 'plateaus' HDF5/Zarr-safe — ROUND-AWARE (encode IN PLACE)

@@ -187,38 +187,6 @@ class ClusterAnnotateConfig(BaseModel):
     w_bioari: float = 0.15
 
     # ------------------------------------------------------------------
-    # Bio-metrics masking (CellTypist confidence gate)
-    # Applies ONLY to biological metrics (bio_hom/bio_frag/bio_ari),
-    # not to clustering itself.
-    # ------------------------------------------------------------------
-    bio_mask_enabled: bool = True
-
-    # "Hybrid Entropy Gate" parameters
-    bio_mask_entropy_abs_limit: float = Field(
-        0.5,
-        description="Absolute entropy ceiling. Cells with entropy <= this always pass.",
-    )
-    bio_mask_entropy_quantile: float = Field(
-        0.7,
-        description="Fallback entropy quantile (relative). Used as max(abs_limit, q-threshold).",
-    )
-
-    # Margin gate (p1 - p2)
-    bio_mask_margin_min: float = Field(
-        0.1,
-        description="Minimum margin (top1 - top2) required to pass biomask.",
-    )
-
-    # Safety: if mask is too strict, relax to keep at least this fraction (0 disables)
-    bio_mask_min_frac: float = Field(
-        0.10,
-        ge=0.0,
-        le=1.0,
-        description="Ensure at least this fraction of cells remain for bio metrics; if fewer, relax entropy cutoff.",
-    )
-
-
-    # ------------------------------------------------------------------
     # Figures
     # ------------------------------------------------------------------
     figdir_name: str = "figures"
@@ -263,6 +231,55 @@ class ClusterAnnotateConfig(BaseModel):
 
     annotation_csv: Optional[Path] = None
     available_models: Optional[List[Dict[str, str]]] = None
+
+    # ------------------------------------------------------------------
+    # Bio mask (CellTypist confidence gate)
+    # ------------------------------------------------------------------
+    bio_mask_mode: Literal["entropy_margin", "none"] = Field(
+        "entropy_margin",
+        description="Bio mask mode. 'entropy_margin' uses entropy+margin on CellTypist probabilities; 'none' disables bio mask.",
+    )
+
+    bio_entropy_abs_limit: float = Field(
+        0.5,
+        description="Absolute entropy ceiling for CellTypist proba mask (cells with H <= this pass).",
+    )
+
+    bio_entropy_quantile: float = Field(
+        0.7,
+        description="Entropy quantile threshold for mask. Final entropy cut is max(abs_limit, quantile value).",
+    )
+
+    bio_margin_min: float = Field(
+        0.10,
+        description="Minimum CellTypist margin (top1 - top2) to pass mask.",
+    )
+
+    bio_mask_min_cells: int = Field(
+        500,
+        ge=0,
+        description="Safety gate: disable bio mask if fewer than this many cells pass.",
+    )
+
+    bio_mask_min_frac: float = Field(
+        0.05,
+        ge=0.0,
+        le=1.0,
+        description="Safety gate: disable bio mask if fewer than this fraction of cells pass.",
+    )
+
+    pretty_label_min_masked_cells: int = Field(
+        25,
+        ge=0,
+        description="Minimum number of masked (high-confidence) cells required in a cluster to assign a CellTypist cluster label.",
+    )
+
+    pretty_label_min_masked_frac: float = Field(
+        0.10,
+        ge=0.0,
+        le=1.0,
+        description="Minimum fraction of masked cells within a cluster required to assign a CellTypist cluster label.",
+    )
 
     # ------------------------------------------------------------------
     # Decoupler (cluster-level pseudobulk + nets)
@@ -312,6 +329,67 @@ class ClusterAnnotateConfig(BaseModel):
     dorothea_min_n_targets: int = Field(5)
     dorothea_confidence: List[str] = Field(default_factory=lambda: ["A", "B", "C"])
     dorothea_organism: str = Field("human")
+
+    # ------------------------------------------------------------------
+    # Compaction
+    # ------------------------------------------------------------------
+    enable_compacting: bool = Field(
+        False,
+        description="If True, create an additional 'compacted' clustering round using multiview agreement (progeny/dorothea/msigdb).",
+    )
+
+    compact_min_cells: int = Field(
+        0,
+        ge=0,
+        description="Exclude clusters smaller than this from compaction decisions (0 disables).",
+    )
+
+    compact_zscore_scope: Literal["within_celltypist_label", "global"] = Field(
+        "within_celltypist_label",
+        description="Z-score scope for similarity comparisons during compaction.",
+    )
+
+    compact_grouping: Literal["connected_components", "clique"] = Field(
+        "connected_components",
+        description="How to form compaction groups from pairwise-pass edges.",
+    )
+
+    compact_skip_unknown_celltypist_groups: bool = Field(
+        False,
+        description="If True, do not compact clusters whose round-scoped CellTypist cluster label is Unknown/UNKNOWN.",
+    )
+
+    # Thresholds used by compaction decision engine
+    thr_progeny: float = Field(
+        0.98,
+        ge=-1.0,
+        le=1.0,
+        description="Similarity threshold for PROGENy activities when deciding compaction edges.",
+    )
+
+    thr_dorothea: float = Field(
+        0.98,
+        ge=-1.0,
+        le=1.0,
+        description="Similarity threshold for DoRothEA activities when deciding compaction edges.",
+    )
+
+    thr_msigdb_default: float = Field(
+        0.98,
+        ge=-1.0,
+        le=1.0,
+        description="Default similarity threshold for each MSigDB GMT block when deciding compaction edges.",
+    )
+
+    thr_msigdb_by_gmt: Optional[Dict[str, float]] = Field(
+        None,
+        description="Optional per-GMT similarity thresholds for MSigDB compaction (overrides thr_msigdb_default per GMT key).",
+    )
+
+    msigdb_required: bool = Field(
+        True,
+        description="If True, require MSigDB activity_by_gmt for compaction (otherwise compaction can run with progeny+doro only).",
+    )
 
     # ------------------------------------------------------------------
     # Logging
@@ -369,26 +447,56 @@ class ClusterAnnotateConfig(BaseModel):
             raise ValueError("decoupler_pseudobulk_agg must be one of: 'mean', 'median'")
         return v
 
-    @field_validator("bio_mask_entropy_abs_limit")
+    @field_validator("bio_entropy_abs_limit")
     @classmethod
-    def _validate_bio_mask_entropy_abs(cls, v: float) -> float:
+    def _validate_bio_entropy_abs_limit(cls, v: float) -> float:
         v = float(v)
         if v < 0.0:
-            raise ValueError("bio_mask_entropy_abs_limit must be >= 0")
+            raise ValueError("bio_entropy_abs_limit must be >= 0")
         return v
 
-    @field_validator("bio_mask_entropy_quantile")
+    @field_validator("bio_entropy_quantile")
     @classmethod
-    def _validate_bio_mask_entropy_quantile(cls, v: float) -> float:
+    def _validate_bio_entropy_quantile(cls, v: float) -> float:
         v = float(v)
         if not (0.0 < v <= 1.0):
-            raise ValueError("bio_mask_entropy_quantile must be in (0, 1]")
+            raise ValueError("bio_entropy_quantile must be in (0, 1]")
         return v
 
-    @field_validator("bio_mask_margin_min")
+    @field_validator("bio_margin_min")
     @classmethod
-    def _validate_bio_mask_margin_min(cls, v: float) -> float:
+    def _validate_bio_margin_min(cls, v: float) -> float:
         v = float(v)
         if not (0.0 <= v <= 1.0):
-            raise ValueError("bio_mask_margin_min must be in [0, 1]")
+            raise ValueError("bio_margin_min must be in [0, 1]")
         return v
+
+    @field_validator("pretty_label_min_masked_frac", "bio_mask_min_frac")
+    @classmethod
+    def _validate_frac_01(cls, v: float) -> float:
+        v = float(v)
+        if not (0.0 <= v <= 1.0):
+            raise ValueError("value must be in [0, 1]")
+        return v
+
+    @field_validator("thr_progeny", "thr_dorothea", "thr_msigdb_default")
+    @classmethod
+    def _validate_similarity_thresholds(cls, v: float) -> float:
+        v = float(v)
+        # cosine similarities live in [-1, 1]
+        if v < -1.0 or v > 1.0:
+            raise ValueError("similarity threshold must be in [-1, 1]")
+        return v
+
+    @field_validator("thr_msigdb_by_gmt")
+    @classmethod
+    def _validate_thr_msigdb_by_gmt(cls, v: Optional[Dict[str, float]]) -> Optional[Dict[str, float]]:
+        if v is None:
+            return None
+        out: Dict[str, float] = {}
+        for k, val in dict(v).items():
+            vv = float(val)
+            if vv < -1.0 or vv > 1.0:
+                raise ValueError(f"thr_msigdb_by_gmt[{k!r}] must be in [-1, 1]")
+            out[str(k)] = vv
+        return out
