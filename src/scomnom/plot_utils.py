@@ -2238,6 +2238,211 @@ def plot_cluster_tree(
     save_multi(stem, figdir, fig)
 
 
+def plot_compaction_flow(
+    adata: "ad.AnnData",
+    *,
+    parent_round_id: str,
+    child_round_id: str,
+    figdir: "Path | str",
+    min_frac: float = 0.02,
+    stem: str = "compaction_flow",
+    palette: list[str] | None = None,
+    title: str | None = None,
+) -> None:
+    """
+    Visualize compaction as a 2-level flow graph (parent clusters -> compacted clusters).
+
+    Nodes:
+      - ("parent", parent_cluster_id)
+      - ("child",  child_cluster_id)
+
+    Edges:
+      - weighted by fraction of the parent cluster that maps to the child cluster
+        (usually 1.0 since compaction is a merge-only mapping)
+
+    This is intentionally similar to plot_cluster_tree(), but specialized for
+    compaction (two levels only).
+    """
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+
+    figdir = _ensure_path(figdir)
+
+    # Resolve round metadata + obs keys
+    rounds = adata.uns.get("cluster_rounds", {})
+    if not isinstance(rounds, dict):
+        LOGGER.warning("compaction_flow: adata.uns['cluster_rounds'] missing/invalid.")
+        return
+    if parent_round_id not in rounds or child_round_id not in rounds:
+        LOGGER.warning("compaction_flow: rounds %r or %r not found.", parent_round_id, child_round_id)
+        return
+
+    parent_obs_key = str(rounds[parent_round_id].get("labels_obs_key", ""))
+    child_obs_key = str(rounds[child_round_id].get("labels_obs_key", ""))
+
+    if parent_obs_key not in adata.obs or child_obs_key not in adata.obs:
+        LOGGER.warning(
+            "compaction_flow: required obs keys not found: parent=%r child=%r",
+            parent_obs_key,
+            child_obs_key,
+        )
+        return
+
+    # Color lookup by cluster id
+    if palette is not None:
+        palette = list(palette)
+        color_lookup = lambda cid: palette[int(cid) % len(palette)]
+    else:
+        cmap = plt.get_cmap("tab20")
+        color_lookup = lambda cid: cmap(int(cid) % cmap.N)
+
+    parent = adata.obs[parent_obs_key].astype(str).to_numpy()
+    child = adata.obs[child_obs_key].astype(str).to_numpy()
+
+    df = pd.DataFrame({"parent": parent, "child": child})
+    counts = df.value_counts().reset_index(name="n")
+
+    parent_sizes = df["parent"].value_counts().to_dict()
+    child_sizes = df["child"].value_counts().to_dict()
+
+    # Build graph
+    G = nx.DiGraph()
+
+    # Add nodes
+    for p, sz in parent_sizes.items():
+        node = ("parent", str(p))
+        G.add_node(node, level=0, size=int(sz), kind="parent")
+    for c, sz in child_sizes.items():
+        node = ("child", str(c))
+        G.add_node(node, level=1, size=int(sz), kind="child")
+
+    # Add edges
+    for _, row in counts.iterrows():
+        p = str(row["parent"])
+        c = str(row["child"])
+        n = int(row["n"])
+        base = float(parent_sizes.get(p, 0))
+        frac = (n / base) if base > 0 else 0.0
+        if frac < float(min_frac):
+            continue
+
+        G.add_edge(
+            ("parent", p),
+            ("child", c),
+            weight=float(frac),
+            flow=int(n),
+            color=color_lookup(p),
+        )
+
+    if G.number_of_edges() == 0:
+        LOGGER.warning("compaction_flow: no edges above min_frac=%.3f", float(min_frac))
+        return
+
+    # Layout: two columns, sorted by size (descending)
+    parents_sorted = sorted(parent_sizes.keys(), key=lambda k: (-int(parent_sizes[k]), str(k)))
+    children_sorted = sorted(child_sizes.keys(), key=lambda k: (-int(child_sizes[k]), str(k)))
+
+    x_parent, x_child = 0.0, 1.8
+
+    # vertical positions: spread evenly
+    y_parent = np.linspace(0, -max(1, len(parents_sorted) - 1), len(parents_sorted))
+    y_child = np.linspace(0, -max(1, len(children_sorted) - 1), len(children_sorted))
+
+    pos = {}
+    for yy, p in zip(y_parent, parents_sorted):
+        pos[("parent", str(p))] = (x_parent, float(yy))
+    for yy, c in zip(y_child, children_sorted):
+        pos[("child", str(c))] = (x_child, float(yy))
+
+    # Node visuals
+    node_colors = []
+    node_sizes = []
+    for node in G.nodes:
+        kind = G.nodes[node].get("kind", "")
+        if kind == "parent":
+            node_colors.append(color_lookup(node[1]))
+        else:
+            node_colors.append("#BBBBBB")  # compacted nodes neutral
+        node_sizes.append(40 + 7.0 * np.sqrt(float(G.nodes[node].get("size", 1))))
+
+    # Edge visuals
+    edge_colors, edge_widths, edge_alphas = [], [], []
+    for u, v, d in G.edges(data=True):
+        w = float(d.get("weight", 0.0))
+        edge_colors.append(d.get("color", "gray"))
+
+        width = 0.8 + 7.0 / (1.0 + np.exp(-10 * (w - 0.2)))
+        width = float(min(width, 7.0))
+        edge_widths.append(width)
+
+        alpha = 1.0 / (1.0 + np.exp(-8 * (w - 0.12)))
+        alpha = float(max(0.05, min(alpha, 1.0)))
+        edge_alphas.append(alpha)
+
+    # Plot
+    fig_h = max(5.0, 0.35 * max(len(parents_sorted), len(children_sorted)))
+    fig, ax = plt.subplots(figsize=(13, fig_h))
+
+    lc = nx.draw_networkx_edges(
+        G,
+        pos,
+        width=edge_widths,
+        edge_color=edge_colors,
+        alpha=edge_alphas,
+        arrows=False,
+        ax=ax,
+    )
+    if lc is not None:
+        try:
+            lc.set_zorder(1)
+        except Exception:
+            pass
+
+    nc = nx.draw_networkx_nodes(
+        G,
+        pos,
+        node_size=node_sizes,
+        node_color=node_colors,
+        edgecolors="black",
+        linewidths=0.4,
+        ax=ax,
+    )
+    try:
+        nc.set_zorder(3)
+    except Exception:
+        pass
+
+    # Labels: compact but readable
+    def _label(node):
+        kind, cid = node
+        return f"{cid}" if kind == "child" else f"{cid}"
+
+    # annotate only nodes (optional: could use pretty labels if you want)
+    for node, (x, y) in pos.items():
+        ax.text(
+            x + (0.02 if node[0] == "parent" else 0.02),
+            y,
+            _label(node),
+            fontsize=9,
+            ha="left",
+            va="center",
+            color="black",
+            zorder=10,
+        )
+
+    ttl = title or f"Compaction flow: {parent_round_id} → {child_round_id}"
+    ax.set_title(ttl, fontsize=13)
+    ax.set_xticks([x_parent, x_child])
+    ax.set_xticklabels([parent_round_id, child_round_id])
+    ax.set_yticks([])
+    ax.set_frame_on(False)
+    ax.grid(False)
+    plt.tight_layout()
+
+    save_multi(stem, figdir, fig)
+
+
 # ----------------------------------------------------------------------
 # Stability curves (silhouette, stability, composite, tiny penalty)
 # ----------------------------------------------------------------------
@@ -3313,8 +3518,12 @@ def plot_decoupler_all_styles(
                 continue
 
             sub_plot = _apply_display_index(sub)
-
-            title_prefix = str(pfx).upper()
+            rid = str(adata.uns.get("active_cluster_round") or "")
+            rid = str(rid) if rid else None
+            if rid:
+                rid_short = rid.split("_", 1)[0]
+            stem_prefix = f"{rid}_" if rid_short else ""
+            title_prefix = f"{str(pfx).upper()} [{rid}]" if rid else str(pfx).upper()
 
             plot_decoupler_activity_heatmap(
                 sub_plot,
@@ -3324,7 +3533,7 @@ def plot_decoupler_all_styles(
                 rank_mode="var",
                 use_zscore=True,
                 wrap_labels=True,
-                stem=f"heatmap_top_{str(pfx).lower()}_",
+                stem=f"{stem_prefix}_heatmap_top_{str(pfx).lower()}_",
                 title_prefix=title_prefix,
             )
 
@@ -3334,7 +3543,7 @@ def plot_decoupler_all_styles(
                 figdir=figdir,
                 n=bar_top_n,
                 use_abs=False,
-                stem_prefix=f"cluster_{str(pfx).lower()}",
+                stem_prefix=f"{stem_prefix}_cluster_{str(pfx).lower()}",
                 title_prefix=title_prefix,
             )
 
@@ -3347,7 +3556,7 @@ def plot_decoupler_all_styles(
                 color_by="z",
                 size_by="abs_raw",
                 wrap_labels=True,
-                stem=f"dotplot_top_{str(pfx).lower()}_",
+                stem=f"{stem_prefix}_dotplot_top_{str(pfx).lower()}_",
                 title_prefix=title_prefix,
             )
 

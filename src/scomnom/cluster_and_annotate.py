@@ -277,7 +277,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
         embedding_key=embedding_key,
         celltypist_labels=celltypist_labels,
         celltypist_proba=celltypist_proba,
-        round_suffix="initial_clustering",
+        round_suffix="BISC",
     )
 
     if cfg.make_figures:
@@ -351,13 +351,12 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
             LOGGER.warning("Decoupler plots: no active cluster round found; skipping.")
         else:
             figdir_round = Path("cluster_and_annotate") / active_round_id
-            rid = str(adata.uns.get("active_cluster_round") or "")
 
             if "msigdb" in adata.uns:
                 plot_utils.plot_decoupler_all_styles(
                     adata,
                     net_key="msigdb",
-                    net_name=f"MSigDB [{rid}]",
+                    net_name=f"MSigDB",
                     figdir=figdir_round,
                     heatmap_top_k=30,
                     bar_top_n=10,
@@ -367,7 +366,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                 plot_utils.plot_decoupler_all_styles(
                     adata,
                     net_key="progeny",
-                    net_name=f"PROGENy [{rid}]",
+                    net_name=f"PROGENy",
                     figdir=figdir_round,
                     heatmap_top_k=14,
                     bar_top_n=8,
@@ -377,7 +376,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                 plot_utils.plot_decoupler_all_styles(
                     adata,
                     net_key="dorothea",
-                    net_name=f"DoRothEA [{rid}]",
+                    net_name=f"DoRothEA",
                     figdir=figdir_round,
                     heatmap_top_k=40,
                     bar_top_n=10,
@@ -483,6 +482,13 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                                 figdir=figdir_cluster,
                                 stem="umap_pretty_cluster_label",
                             )
+                        plot_utils.plot_compaction_flow(
+                            adata,
+                            parent_round_id=parent_round_id,
+                            child_round_id=new_round_id,
+                            figdir=Path("cluster_and_annotate") / new_round_id / "clustering",
+                            min_frac=0.02,
+                        )
                     except Exception as e:
                         LOGGER.warning("Compaction: failed to plot compacted-round UMAPs: %s", e)
 
@@ -490,13 +496,12 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                     if getattr(cfg, "run_decoupler", False):
                         try:
                             figdir_round = Path("cluster_and_annotate") / new_round_id
-                            rid = str(adata.uns.get("active_cluster_round") or new_round_id)
 
                             if "msigdb" in adata.uns:
                                 plot_utils.plot_decoupler_all_styles(
                                     adata,
                                     net_key="msigdb",
-                                    net_name=f"MSigDB [{rid}]",
+                                    net_name=f"MSigDB",
                                     figdir=figdir_round,
                                     heatmap_top_k=30,
                                     bar_top_n=10,
@@ -507,7 +512,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                                 plot_utils.plot_decoupler_all_styles(
                                     adata,
                                     net_key="progeny",
-                                    net_name=f"PROGENy [{rid}]",
+                                    net_name=f"PROGENy",
                                     figdir=figdir_round,
                                     heatmap_top_k=14,
                                     bar_top_n=8,

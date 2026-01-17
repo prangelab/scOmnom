@@ -1379,7 +1379,7 @@ def run_BISC(
     embedding_key: str,
     celltypist_labels: Optional[np.ndarray],
     celltypist_proba: Optional[pd.DataFrame],
-    round_suffix: str = "initial_clustering",
+    round_suffix: str = "BISC",
 ) -> ad.AnnData:
     _ensure_cluster_rounds(adata)
 
