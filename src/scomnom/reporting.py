@@ -1,10 +1,13 @@
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Tuple
+
 from pathlib import Path
 from datetime import datetime
 import html
 import json
-
 from collections import defaultdict
-from typing import List, Dict
 
 
 # ======================================================================
@@ -557,17 +560,6 @@ table.summary th {
   background: #f0f0f0;
 }
 """
-
-
-from __future__ import annotations
-
-from pathlib import Path
-from datetime import datetime
-import html
-import json
-
-from collections import defaultdict
-from typing import Any, Dict, List, Tuple
 
 
 # ======================================================================
