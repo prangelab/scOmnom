@@ -3492,9 +3492,15 @@ def plot_decoupler_all_styles(
 
         return out
 
-    # ------------------------------------------------------------------
+    # Setup informative titles
+    rid = str(adata.uns.get("active_cluster_round") or "")
+    rid = str(rid) if rid else None
+    if rid:
+        rid_short = rid.split("_", 1)[0]
+    stem_prefix = f"{rid}_" if rid_short else ""
+    title_prefix = f"{str(pfx).upper()} [{rid}]" if rid else str(pfx).upper()
+
     # MSigDB: split per GMT family (prefer round-precomputed activity_by_gmt)
-    # ------------------------------------------------------------------
     if str(net_key).lower().strip() == "msigdb":
         splits = block.get("activity_by_gmt", None)
         if isinstance(splits, dict) and splits:
@@ -3518,12 +3524,6 @@ def plot_decoupler_all_styles(
                 continue
 
             sub_plot = _apply_display_index(sub)
-            rid = str(adata.uns.get("active_cluster_round") or "")
-            rid = str(rid) if rid else None
-            if rid:
-                rid_short = rid.split("_", 1)[0]
-            stem_prefix = f"{rid}_" if rid_short else ""
-            title_prefix = f"{str(pfx).upper()} [{rid}]" if rid else str(pfx).upper()
 
             plot_decoupler_activity_heatmap(
                 sub_plot,
@@ -3575,6 +3575,8 @@ def plot_decoupler_all_styles(
         rank_mode="var",
         use_zscore=True,
         wrap_labels=True,
+        stem=f"{stem_prefix}_heatmap_top_{str(pfx).lower()}_",
+        title_prefix=title_prefix,
     )
 
     plot_decoupler_cluster_topn_barplots(
@@ -3583,6 +3585,8 @@ def plot_decoupler_all_styles(
         figdir=figdir,
         n=bar_top_n,
         use_abs=False,
+        stem_prefix=f"{stem_prefix}_cluster_{str(pfx).lower()}",
+        title_prefix=title_prefix,
     )
 
     plot_decoupler_dotplot(
@@ -3594,4 +3598,6 @@ def plot_decoupler_all_styles(
         color_by="z",
         size_by="abs_raw",
         wrap_labels=True,
+        stem=f"{stem_prefix}_dotplot_top_{str(pfx).lower()}_",
+        title_prefix=title_prefix,
     )
