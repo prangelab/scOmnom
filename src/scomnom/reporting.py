@@ -557,3 +557,312 @@ table.summary th {
   background: #f0f0f0;
 }
 """
+
+
+from __future__ import annotations
+
+from pathlib import Path
+from datetime import datetime
+import html
+import json
+
+from collections import defaultdict
+from typing import Any, Dict, List, Tuple
+
+
+# ======================================================================
+# Cluster+Annotate report
+# ======================================================================
+
+def generate_cluster_and_annotate_report(
+    *,
+    fig_root: Path,
+    cfg,
+    version: str,
+    adata,
+) -> None:
+    """
+    Generate a self-contained HTML report for the cluster-and-annotate module
+    embedding all plots.
+
+    Output:
+      <fig_root>/cluster_and_annotate_report.html
+
+    Assumes the standard fig layout:
+      <fig_root>/png/**.png
+      <fig_root>/pdf/**.pdf
+    """
+    fig_root = Path(fig_root).resolve()
+    png_root = fig_root / "png"
+    out_html = fig_root / "cluster_and_annotate_report.html"
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # ------------------------------------------------------------------
+    # Collect images (PNG only)
+    # ------------------------------------------------------------------
+    images = sorted(png_root.rglob("*.png"))
+    rel_images = [img.relative_to(fig_root) for img in images]
+
+    # ------------------------------------------------------------------
+    # Round grouping (based on path: .../cluster_and_annotate/<round_id>/...)
+    # ------------------------------------------------------------------
+    by_round: Dict[str, List[Path]] = defaultdict(list)
+
+    for p in rel_images:
+        parts = p.parts
+        # Expect: png/cluster_and_annotate/<round_id>/...
+        rid = _extract_round_id_from_relpath(parts)
+        by_round[rid].append(p)
+
+    # Use stored round order if available
+    round_order = []
+    try:
+        ro = adata.uns.get("cluster_round_order", None)
+        if isinstance(ro, (list, tuple)) and ro:
+            round_order = [str(x) for x in ro]
+    except Exception:
+        round_order = []
+
+    # Ensure stable order with unknowns appended
+    ordered_rounds = []
+    seen = set()
+    for rid in round_order:
+        if rid in by_round:
+            ordered_rounds.append(rid)
+            seen.add(rid)
+    for rid in sorted(by_round.keys()):
+        if rid not in seen:
+            ordered_rounds.append(rid)
+
+    active_round = adata.uns.get("active_cluster_round", None)
+    active_round = str(active_round) if active_round is not None else None
+
+    # ------------------------------------------------------------------
+    # Header
+    # ------------------------------------------------------------------
+    cfg_json = json.dumps(getattr(cfg, "__dict__", {}), indent=2, default=str)
+
+    header = f"""
+    <h1>scOmnom cluster-and-annotate report</h1>
+
+    <div class="meta">
+    Version:   {html.escape(str(version))}
+    Timestamp: {html.escape(str(timestamp))}
+
+    Active round: {html.escape(str(active_round))}
+
+    Round order:
+    {html.escape(json.dumps(ordered_rounds, indent=2))}
+
+    Parameters:
+    {html.escape(cfg_json)}
+    </div>
+    """
+
+    # ------------------------------------------------------------------
+    # Summary (round table)
+    # ------------------------------------------------------------------
+    summary_html = _render_cluster_round_summary(adata, ordered_rounds)
+
+    # ------------------------------------------------------------------
+    # Render body
+    # ------------------------------------------------------------------
+    body: List[str] = [header, summary_html]
+
+    if not ordered_rounds:
+        body.append("<p><em>No cluster_and_annotate figures found under png/.</em></p>")
+    else:
+        for rid in ordered_rounds:
+            imgs = by_round.get(rid, [])
+            if not imgs:
+                continue
+
+            rid_label = html.escape(str(rid))
+            open_attr = " open" if (active_round and rid == active_round) else " open"
+
+            body.append(f"<details{open_attr}><summary><h2>Round: {rid_label}</h2></summary>")
+
+            sections = _classify_cluster_annotate_images(imgs)
+
+            for title, sec_imgs in sections:
+                if not sec_imgs:
+                    continue
+
+                body.append(f"<h3>{html.escape(title)}</h3>")
+                body.append('<div class="grid">')
+                for p in sec_imgs:
+                    body.append(render_image_block(p))
+                body.append("</div>")
+
+            body.append("</details>")
+
+    # ------------------------------------------------------------------
+    # Final HTML
+    # ------------------------------------------------------------------
+    html_doc = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>scOmnom cluster-and-annotate report</title>
+      <style>{_REPORT_CSS}</style>
+    </head>
+    <body>
+      {''.join(body)}
+    </body>
+    </html>
+    """
+
+    out_html.write_text(html_doc, encoding="utf-8")
+
+
+# ======================================================================
+# Helpers (cluster+annotate report)
+# ======================================================================
+
+def _extract_round_id_from_relpath(parts: Tuple[str, ...]) -> str:
+    """
+    Extract round_id from a relative png path.
+
+    Expected patterns:
+      png/cluster_and_annotate/<round_id>/...
+      png/<anything>/<round_id>/...   (fallback)
+
+    Returns "unknown" if not found.
+    """
+    try:
+        # common: ("png", "cluster_and_annotate", "<rid>", ...)
+        if len(parts) >= 3 and parts[0] == "png" and parts[1] == "cluster_and_annotate":
+            return str(parts[2])
+
+        # fallback: find "cluster_and_annotate" anywhere
+        if "cluster_and_annotate" in parts:
+            i = list(parts).index("cluster_and_annotate")
+            if i + 1 < len(parts):
+                return str(parts[i + 1])
+
+        return "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _classify_cluster_annotate_images(imgs: List[Path]) -> List[Tuple[str, List[Path]]]:
+    """
+    Group round images into stable, readable sections.
+    """
+    clustering: List[Path] = []
+    annotation: List[Path] = []
+    decoupler: List[Path] = []
+    compaction: List[Path] = []
+    other: List[Path] = []
+
+    for p in imgs:
+        s = p.as_posix().lower()
+
+        # folder-based hints
+        if "/clustering/" in s:
+            clustering.append(p)
+            continue
+        if "/annotation/" in s:
+            annotation.append(p)
+            continue
+        if "/decoupler/" in s:
+            decoupler.append(p)
+            continue
+        if "compaction" in s or "compacted" in s and ("flow" in s or "merge" in s or "component" in s):
+            compaction.append(p)
+            continue
+
+        # filename-based hints
+        if "umap" in s or "cluster_tree" in s or "cluster_flow" in s:
+            clustering.append(p)
+        elif "celltypist" in s or "cluster_label" in s and "umap" in s:
+            annotation.append(p)
+        elif "heatmap" in s or "dotplot" in s or "barplot" in s or "decoupler" in s:
+            decoupler.append(p)
+        elif "compaction" in s or "compacted" in s:
+            compaction.append(p)
+        else:
+            other.append(p)
+
+    # Keep deterministic ordering within sections
+    clustering = sorted(clustering, key=lambda x: x.as_posix())
+    annotation = sorted(annotation, key=lambda x: x.as_posix())
+    decoupler = sorted(decoupler, key=lambda x: x.as_posix())
+    compaction = sorted(compaction, key=lambda x: x.as_posix())
+    other = sorted(other, key=lambda x: x.as_posix())
+
+    return [
+        ("Clustering", clustering),
+        ("Annotation", annotation),
+        ("Decoupler", decoupler),
+        ("Compaction", compaction),
+        ("Other", other),
+    ]
+
+
+def _render_cluster_round_summary(adata, ordered_rounds: List[str]) -> str:
+    """
+    Render a small summary table per round (best-effort).
+    """
+    rounds = adata.uns.get("cluster_rounds", {})
+    if not isinstance(rounds, dict) or not ordered_rounds:
+        return """
+        <h2>Summary</h2>
+        <p><em>No round metadata available.</em></p>
+        """
+
+    rows = []
+    for rid in ordered_rounds:
+        r = rounds.get(rid, None)
+        if not isinstance(r, dict):
+            continue
+
+        labels_obs_key = r.get("labels_obs_key", "")
+        cluster_key = r.get("cluster_key", "")
+        n_clusters = ""
+        try:
+            if labels_obs_key and labels_obs_key in adata.obs:
+                n_clusters = int(adata.obs[str(labels_obs_key)].astype(str).nunique())
+        except Exception:
+            n_clusters = ""
+
+        parent = r.get("parent_round_id", "") or r.get("parent", "") or ""
+        notes = r.get("notes", "") or ""
+
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(rid))}</td>"
+            f"<td>{html.escape(str(parent))}</td>"
+            f"<td>{html.escape(str(labels_obs_key))}</td>"
+            f"<td>{html.escape(str(cluster_key))}</td>"
+            f"<td>{html.escape(str(n_clusters))}</td>"
+            f"<td>{html.escape(str(notes))}</td>"
+            "</tr>"
+        )
+
+    if not rows:
+        return """
+        <h2>Summary</h2>
+        <p><em>No round metadata rows.</em></p>
+        """
+
+    return f"""
+    <h2>Summary</h2>
+    <table class="summary">
+      <thead>
+        <tr>
+          <th>round_id</th>
+          <th>parent</th>
+          <th>labels_obs_key</th>
+          <th>cluster_key</th>
+          <th>n_clusters</th>
+          <th>notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        {''.join(rows)}
+      </tbody>
+    </table>
+    """

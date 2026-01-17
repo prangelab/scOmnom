@@ -11,7 +11,7 @@ import scanpy as sc
 
 from .config import ClusterAnnotateConfig
 from .logging_utils import init_logging
-from . import io_utils, plot_utils
+from . import io_utils, plot_utils, reporting
 from .plot_utils import _extract_series
 
 
@@ -539,6 +539,18 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
 
     # Make plateaus HDF5/Zarr-safe
     _json_encode_round_plateaus_in_place(adata)
+
+    if cfg.make_figures:
+        try:
+            reporting.generate_cluster_and_annotate_report(
+                fig_root=fig_root,
+                cfg=cfg,
+                version=__version__,
+                adata=adata,
+            )
+            LOGGER.info("Wrote cluster-and-annotate report.")
+        except Exception as e:
+            LOGGER.warning("Failed to generate cluster-and-annotate report: %s", e)
 
     # ------------------------------------------------------------------
     # Save outputs
