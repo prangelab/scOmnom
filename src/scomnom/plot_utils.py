@@ -3369,16 +3369,19 @@ def plot_decoupler_all_styles(
       - MSigDB: prefers adata.uns["msigdb"]["activity_by_gmt"] if present,
         otherwise falls back to prefix splitting of the activity columns.
     """
-
     net_name = net_name or net_key
     block = adata.uns.get(net_key, {})
     activity = block.get("activity", None)
 
-    LOGGER.info("plot_decoupler_all_styles: net=%s activity_type=%s shape=%s",
-                net_key,
-                type(block.get("activity", None)).__name__,
-                getattr(block.get("activity", None), "shape", None))
-
+    try:
+        LOGGER.info(
+            "plot_decoupler_all_styles: net=%s activity_type=%s shape=%s",
+            str(net_key),
+            type(activity).__name__,
+            getattr(activity, "shape", None),
+        )
+    except Exception:
+        pass
 
     if activity is None or not isinstance(activity, pd.DataFrame) or activity.empty:
         return
@@ -3442,6 +3445,12 @@ def plot_decoupler_all_styles(
         return {}
 
     def _get_display_order() -> list[str]:
+        """
+        Returns the *display* row order (pretty labels), aligned to pseudobulk cluster order.
+        Stored by run_decoupler_for_round() as:
+          - block["config"]["cluster_display_labels"] (top-level publish)
+          - rounds[rid]["decoupler"]["cluster_display_labels"] (round-owned)
+        """
         # 1) Best: published into top-level resource payload by run_decoupler_for_round()
         try:
             cfg = block.get("config", {})
@@ -3458,10 +3467,11 @@ def plot_decoupler_all_styles(
             rid = str(rid) if rid is not None else None
             rounds = adata.uns.get("cluster_rounds", {})
             if rid and isinstance(rounds, dict) and rid in rounds:
-                r = rounds[rid]
-                labels = r.get("cluster_display_labels", None)
-                if isinstance(labels, (list, tuple)) and labels:
-                    return [str(x) for x in labels]
+                dec = rounds[rid].get("decoupler", {})
+                if isinstance(dec, dict):
+                    labels = dec.get("cluster_display_labels", None)
+                    if isinstance(labels, (list, tuple)) and labels:
+                        return [str(x) for x in labels]
         except Exception:
             pass
 
@@ -3471,44 +3481,41 @@ def plot_decoupler_all_styles(
     display_order = _get_display_order()
 
     def _apply_display_index(df: pd.DataFrame) -> pd.DataFrame:
-        if not display_map:
-            return df
         out = df.copy()
-        old = out.index.astype(str)
-        new = old.map(lambda x: display_map.get(str(x), str(x)))
 
-        # If mapping creates duplicates, make them unique but readable
-        if pd.Index(new).has_duplicates:
-            new = [f"{lbl} [{cid}]" for lbl, cid in zip(new, old)]
+        if display_map:
+            old = out.index.astype(str)
+            new = old.map(lambda x: display_map.get(str(x), str(x)))
 
-        out.index = pd.Index(new, name=out.index.name)
+            # If mapping creates duplicates, make them unique but readable
+            if pd.Index(new).has_duplicates:
+                new = [f"{lbl} [{cid}]" for lbl, cid in zip(new, old)]
 
-        # >>> KEY FIX: enforce intended row order if we have it
+            out.index = pd.Index(new, name=out.index.name)
+
+        # Enforce intended row order if we have it (order is in display-space)
         if display_order:
-            # keep only rows present; preserve order
             want = [x for x in display_order if x in out.index]
             if want:
                 out = out.reindex(want)
 
         return out
 
-    # Setup informative titles
-    rid = str(adata.uns.get("active_cluster_round") or "")
-    rid = str(rid) if rid else None
-    if rid:
-        rid_short = rid.split("_", 1)[0]
-    stem_prefix = f"{rid}_" if rid_short else ""
-    title_prefix = f"{str(pfx).upper()} [{rid}]" if rid else str(pfx).upper()
+    # ------------------------------------------------------------------
+    # Round ID for filenames (short) + titles (full)
+    # ------------------------------------------------------------------
+    rid_full = adata.uns.get("active_cluster_round", None)
+    rid_full = str(rid_full) if rid_full else None
+    rid_short = rid_full.split("_", 1)[0] if rid_full else None
+    stem_prefix = f"{rid_short}_" if rid_short else ""
 
+    # ------------------------------------------------------------------
     # MSigDB: split per GMT family (prefer round-precomputed activity_by_gmt)
+    # ------------------------------------------------------------------
     if str(net_key).lower().strip() == "msigdb":
         splits = block.get("activity_by_gmt", None)
         if isinstance(splits, dict) and splits:
-            # sanitize: keep only non-empty dataframes
-            splits = {
-                str(k): v for k, v in splits.items()
-                if isinstance(v, pd.DataFrame) and not v.empty
-            }
+            splits = {str(k): v for k, v in splits.items() if isinstance(v, pd.DataFrame) and not v.empty}
         else:
             splits = _split_activity_for_msigdb(activity)
 
@@ -3516,7 +3523,10 @@ def plot_decoupler_all_styles(
             return
 
         # Stable-ish ordering (HALLMARK first if present, then alphabetical)
-        ordered = sorted(splits.keys(), key=lambda x: (0 if str(x).upper() == "HALLMARK" else 1, str(x).upper()))
+        ordered = sorted(
+            splits.keys(),
+            key=lambda x: (0 if str(x).upper() == "HALLMARK" else 1, str(x).upper()),
+        )
 
         for pfx in ordered:
             sub = splits[pfx]
@@ -3524,6 +3534,10 @@ def plot_decoupler_all_styles(
                 continue
 
             sub_plot = _apply_display_index(sub)
+
+            title_prefix = (
+                f"{str(pfx).upper()} [{rid_full}]" if rid_full else str(pfx).upper()
+            )
 
             plot_decoupler_activity_heatmap(
                 sub_plot,
@@ -3533,7 +3547,7 @@ def plot_decoupler_all_styles(
                 rank_mode="var",
                 use_zscore=True,
                 wrap_labels=True,
-                stem=f"{stem_prefix}_heatmap_top_{str(pfx).lower()}_",
+                stem=f"{stem_prefix}heatmap_top_{str(pfx).lower()}_",
                 title_prefix=title_prefix,
             )
 
@@ -3543,7 +3557,7 @@ def plot_decoupler_all_styles(
                 figdir=figdir,
                 n=bar_top_n,
                 use_abs=False,
-                stem_prefix=f"{stem_prefix}_cluster_{str(pfx).lower()}",
+                stem_prefix=f"{stem_prefix}cluster_{str(pfx).lower()}",
                 title_prefix=title_prefix,
             )
 
@@ -3556,7 +3570,7 @@ def plot_decoupler_all_styles(
                 color_by="z",
                 size_by="abs_raw",
                 wrap_labels=True,
-                stem=f"{stem_prefix}_dotplot_top_{str(pfx).lower()}_",
+                stem=f"{stem_prefix}dotplot_top_{str(pfx).lower()}_",
                 title_prefix=title_prefix,
             )
 
@@ -3567,6 +3581,8 @@ def plot_decoupler_all_styles(
     # ------------------------------------------------------------------
     activity_plot = _apply_display_index(activity)
 
+    title_prefix = f"{str(net_name)} [{rid_full}]" if rid_full else str(net_name)
+
     plot_decoupler_activity_heatmap(
         activity_plot,
         net_name=net_name,
@@ -3575,7 +3591,7 @@ def plot_decoupler_all_styles(
         rank_mode="var",
         use_zscore=True,
         wrap_labels=True,
-        stem=f"{stem_prefix}_heatmap_top_{str(pfx).lower()}_",
+        stem=f"{stem_prefix}heatmap_top_",
         title_prefix=title_prefix,
     )
 
@@ -3585,7 +3601,7 @@ def plot_decoupler_all_styles(
         figdir=figdir,
         n=bar_top_n,
         use_abs=False,
-        stem_prefix=f"{stem_prefix}_cluster_{str(pfx).lower()}",
+        stem_prefix=f"{stem_prefix}cluster",
         title_prefix=title_prefix,
     )
 
@@ -3598,6 +3614,7 @@ def plot_decoupler_all_styles(
         color_by="z",
         size_by="abs_raw",
         wrap_labels=True,
-        stem=f"{stem_prefix}_dotplot_top_{str(pfx).lower()}_",
+        stem=f"{stem_prefix}dotplot_top_",
         title_prefix=title_prefix,
     )
+
