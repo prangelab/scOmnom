@@ -39,6 +39,25 @@ LOGGER = logging.getLogger(__name__)
 # -------------------------------------------------------------------------
 # Small orchestrator-only helpers (kept here)
 # -------------------------------------------------------------------------
+def _get_best_integration_tag(adata) -> str:
+    """
+    Returns something like 'scANVI' / 'scPoli' / 'Harmony' / 'BBKNN' / 'Unintegrated'
+    or 'NA' if not found. Sanitized for filenames/IDs.
+    """
+    best = None
+    try:
+        integ = adata.uns.get("integration", {})
+        if isinstance(integ, dict):
+            best = integ.get("best_embedding", None)
+    except Exception:
+        best = None
+
+    tag = str(best) if best else "NA"
+    # keep it filesystem/ID-safe
+    tag = re.sub(r"[^A-Za-z0-9]+", "-", tag).strip("-")
+    return tag or "NA"
+
+
 def _plot_round_clustering_diagnostics(
     adata: ad.AnnData,
     cfg: ClusterAnnotateConfig,
@@ -272,13 +291,14 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
     sc.tl.umap(adata)
 
     # --- BISC round ---
+    best_emb = _get_best_integration_tag(adata)
     run_BISC(
         adata,
         cfg,
         embedding_key=embedding_key,
         celltypist_labels=celltypist_labels,
         celltypist_proba=celltypist_proba,
-        round_suffix="BISC",
+        round_suffix=f"{best_emb}_BISC",
     )
 
     if cfg.make_figures:
@@ -401,7 +421,8 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                 LOGGER.warning("Compaction requested but no valid active parent round found; skipping.")
             else:
                 # make a new round id
-                new_round_id = _make_round_id(_next_round_index(adata), "compacted")
+                best_emb = _get_best_integration_tag(adata)
+                new_round_id = _make_round_id(_next_round_index(adata), f"{best_emb}_compacted")
 
                 # create compacted round (writes obs + registers round)
                 create_compacted_round_from_parent_round(
