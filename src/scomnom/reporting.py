@@ -1,261 +1,663 @@
-
+# src/scomnom/reporting.py
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
-
-from pathlib import Path
+from dataclasses import asdict, is_dataclass
 from datetime import datetime
+from collections import defaultdict
+from pathlib import Path
+from typing import Any, Dict, List, Tuple, Optional, Iterable
 import html
 import json
-from collections import defaultdict
+import re
 
 
-# ======================================================================
-# Public API
-# ======================================================================
+# =============================================================================
+# Small UX helpers
+# =============================================================================
 
-def generate_qc_report(
-    *,
-    fig_root: Path,
-    cfg,
-    version: str,
-    adata,
-):
-    """
-    Generate a self-contained HTML QC report embedding all plots.
+def _safe(x: Any) -> str:
+    return html.escape(str(x))
 
-    Output:
-      <fig_root>/report.html
-    """
 
-    fig_root = fig_root.resolve()
-    png_root = fig_root / "png"
-    out_html = fig_root / "qc_report.html"
+def _slug(s: str) -> str:
+    s = str(s).lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+    return s or "section"
 
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # ------------------------------------------------------------------
-    # Collect images (PNG only)
-    # ------------------------------------------------------------------
-    images = sorted(png_root.rglob("*.png"))
-    rel_images = [img.relative_to(fig_root) for img in images]
+def _pretty_relpath(p: Path) -> str:
+    # report is written to fig_root/*.html, images live under fig_root/png/...
+    s = p.as_posix()
+    s = re.sub(r"^png/", "", s)
+    return s
 
-    # ------------------------------------------------------------------
-    # High-level section classification
-    # ------------------------------------------------------------------
-    sections = {
-        "Doublets": [],
-        "CellBender": [],
-        "QC metrics": [],
-        "QC scatter": [],
-        "Overview": [],
-        "Other": [],
+
+def _cfg_to_json(cfg: Any) -> str:
+    try:
+        if is_dataclass(cfg):
+            return json.dumps(asdict(cfg), indent=2, default=str)
+    except Exception:
+        pass
+    try:
+        return json.dumps(getattr(cfg, "__dict__", {}), indent=2, default=str)
+    except Exception:
+        return json.dumps({"cfg": str(cfg)}, indent=2, default=str)
+
+
+def _caption_from_filename(fname: str) -> str:
+    name = Path(fname).stem
+    name = name.replace("__", " / ")
+    name = name.replace("_", " ")
+    name = name.replace("postfilter", "post-filter")
+    name = name.replace("prefilter", "pre-filter")
+    name = name.replace("qc", "QC")
+    name = re.sub(r"\s+", " ", name).strip()
+    # small niceties
+    name = name.replace("umap", "UMAP")
+    name = name.replace("scib", "scIB")
+    return name[:1].upper() + name[1:] if name else "Plot"
+
+
+# =============================================================================
+# Plot classification + descriptions
+# =============================================================================
+
+def _classify_plot_type(rel_path: Path) -> str:
+    """Heuristic classifier used for grouping and collapse policy."""
+    s = rel_path.as_posix().lower()
+    stem = rel_path.stem.lower()
+
+    # decoupler
+    if "decoupler" in s:
+        if "heatmap" in stem:
+            return "decoupler_heatmap"
+        if "dotplot" in stem or "dotplot" in s or "dot" in stem:
+            return "decoupler_dotplot"
+        if "bar" in stem or "top" in stem and "bar" in stem:
+            return "decoupler_bar"
+        return "decoupler_other"
+
+    # clustering / rounds
+    if "/clustering/" in s or "resolution" in stem or "cluster_tree" in stem or "stability" in stem:
+        return "clustering"
+
+    if "compaction" in s or "compaction" in stem or "compacted" in stem:
+        return "compaction"
+
+    if "celltypist" in s or "annotation" in s or "pretty_cluster" in stem:
+        return "annotation"
+
+    # integration
+    if "scib" in s or "integration_metrics" in stem or "results_table" in stem:
+        return "scib"
+
+    if "umap" in stem or "/umap" in s:
+        return "umap"
+
+    # qc
+    if "doublet" in s or "doublet" in stem:
+        return "doublet"
+
+    if "cellbender" in s or "cellbender" in stem:
+        return "cellbender"
+
+    if "qc_scatter" in s or "complexity" in stem or "scatter" in stem:
+        return "qc_scatter"
+
+    if "qc_metrics" in s or "violin" in stem or "hist" in stem:
+        return "qc_metrics"
+
+    if "overview" in s:
+        return "overview"
+
+    return "other"
+
+
+def _describe_plot(rel_path: Path) -> str:
+    """Short description shown under each plot."""
+    s = rel_path.as_posix().lower()
+    stem = rel_path.stem.lower()
+
+    # QC
+    if "qc_plots" in s and "violin" in stem:
+        if "mt" in stem:
+            return "Per-sample distribution of mitochondrial fraction."
+        if "ribo" in stem:
+            return "Per-sample distribution of ribosomal fraction."
+        if "hb" in stem:
+            return "Per-sample distribution of hemoglobin fraction."
+        if "counts" in stem:
+            return "Per-sample distribution of library size (UMIs)."
+        if "genes" in stem:
+            return "Per-sample distribution of detected genes."
+        return "Per-sample QC distribution."
+
+    if "qc_plots" in s and "hist" in stem:
+        if "mt" in stem:
+            return "Overall distribution of mitochondrial fraction."
+        if "total_counts" in stem:
+            return "Overall distribution of library size (UMIs)."
+        if "n_genes" in stem or "genes" in stem:
+            return "Overall distribution of detected genes."
+        return "Overall QC distribution."
+
+    if "qc_plots" in s and ("complexity" in stem or ("scatter" in stem and "qc" in stem)):
+        return "QC scatter diagnostic for outliers and complexity."
+
+    # Doublets
+    if "doublet" in stem:
+        if "hist" in stem:
+            return "Doublet-score distribution; red lines indicate inferred per-sample thresholds."
+        if "threshold" in stem:
+            return "Inferred doublet-score threshold per sample."
+        if "fraction" in stem:
+            return "Observed doublet fraction per sample."
+        if "vs_total_counts" in stem:
+            return "Doublet score vs library size."
+        if "violin" in stem:
+            return "Doublet-score distribution per sample; red line indicates inferred threshold."
+        if "ecdf" in stem:
+            return "ECDF of doublet scores; red lines show inferred thresholds."
+        return "Doublet diagnostics."
+
+    # CellBender
+    if "cellbender" in stem or "cellbender" in s:
+        if "removed_fraction" in stem:
+            return "Fraction of counts removed by CellBender (background removal)."
+        if "raw_vs_cb" in stem:
+            return "Gene-level comparison of raw vs CellBender counts."
+        return "CellBender diagnostics."
+
+    # Integration
+    if "scib" in s or "results_table" in stem:
+        return "Integration benchmarking summary (scIB metrics)."
+    if "umap" in stem and "vs_unintegrated" in stem:
+        return "Side-by-side UMAP comparison against the unintegrated baseline."
+    if "umap" in stem:
+        return "UMAP visualization of an embedding / integration method."
+
+    # Clustering
+    if "cluster_tree" in stem:
+        return "How clusters split/merge across the resolution sweep."
+    if "resolution_sweep" in stem:
+        return "Resolution sweep: silhouette, number of clusters, and penalized score."
+    if "stability" in stem and "ari" in stem:
+        return "Subsampling stability across repeats (ARI vs full-data clustering)."
+    if "cluster_selection" in stem or "stability_curves" in stem:
+        return "Metrics used for resolution selection (structural + penalties)."
+    if "biological_metrics" in stem:
+        return "Bio-guided clustering metrics across the resolution sweep."
+    if "cluster_sizes" in stem:
+        return "Cluster sizes (cells per cluster)."
+    if "cluster_qc_summary" in stem:
+        return "Mean QC metrics per cluster (diagnostic)."
+    if "cluster_batch_composition" in stem:
+        return "Batch composition within each cluster."
+    if "silhouette_by_cluster" in stem:
+        return "Silhouette distributions per cluster."
+    if "compaction_flow" in stem:
+        return "Flow from parent clusters to compacted clusters."
+
+    # Decoupler
+    if "decoupler" in s:
+        if "heatmap" in stem:
+            return "Decoupler activity heatmap (top features/pathways)."
+        if "dotplot" in stem:
+            return "Decoupler dotplot summary (activity + magnitude)."
+        if "bar" in stem:
+            return "Per-cluster top-N decoupler features (barplot)."
+        return "Decoupler plot."
+
+    return "Diagnostic plot."
+
+
+# =============================================================================
+# HTML building blocks
+# =============================================================================
+
+def _css() -> str:
+    # tight + readable + stable across many images
+    return """
+    :root {
+      --bg: #ffffff;
+      --muted: #6b7280;
+      --border: #e5e7eb;
+      --card: #ffffff;
+      --shadow: 0 1px 2px rgba(0,0,0,0.06);
+      --shadow2: 0 6px 20px rgba(0,0,0,0.08);
+      --radius: 12px;
     }
 
-    for p in rel_images:
-        s = p.as_posix()
-        if "doublets" in s:
-            sections["Doublets"].append(p)
-        elif "cellbender" in s:
-            sections["CellBender"].append(p)
-        elif "qc_metrics" in s:
-            sections["QC metrics"].append(p)
-        elif "qc_scatter" in s:
-            sections["QC scatter"].append(p)
-        elif "overview" in s:
-            sections["Overview"].append(p)
-        else:
-            sections["Other"].append(p)
-
-    # ------------------------------------------------------------------
-    # CSS
-    # ------------------------------------------------------------------
-    css = """
     body {
-      font-family: system-ui, -apple-system, sans-serif;
-      margin: 2rem;
-      max-width: 1400px;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: #111827;
+      margin: 0;
+      padding: 0;
     }
 
-    h1, h2, h3, h4 {
-      margin-top: 1.5rem;
+    .wrap {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 1.15rem 1.15rem 3rem;
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      gap: 1.1rem;
     }
 
-    details > summary {
-      cursor: pointer;
-      font-weight: 600;
-      margin: 0.5rem 0;
+    @media (max-width: 1100px) {
+      .wrap { grid-template-columns: 1fr; }
+      .toc { position: static !important; }
+    }
+
+    h1 {
+      font-size: 1.55rem;
+      margin: 0.2rem 0 0.8rem;
+      letter-spacing: -0.02em;
+    }
+
+    h2 {
+      font-size: 1.15rem;
+      margin: 0.2rem 0 0.6rem;
+      letter-spacing: -0.01em;
     }
 
     .meta {
-      background: #f6f8fa;
-      border: 1px solid #ddd;
-      padding: 1rem;
-      border-radius: 6px;
-      font-family: monospace;
+      background: #f8fafc;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 0.85rem 1rem;
+      box-shadow: var(--shadow);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
       white-space: pre-wrap;
+      font-size: 12px;
+      line-height: 1.35;
+      color: #111827;
     }
 
-    figure {
-      margin: 0.5rem;
+    .toc {
+      position: sticky;
+      top: 1rem;
+      align-self: start;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 0.8rem;
+      background: #fff;
+      box-shadow: var(--shadow);
     }
 
-    figure img {
-      max-width: 100%;
-      border: 1px solid #ddd;
-      border-radius: 4px;
+    .toc h2 {
+      font-size: 0.95rem;
+      margin: 0 0 0.5rem;
     }
 
-    figcaption {
-      font-size: 0.85rem;
-      color: #444;
-      margin-top: 0.25rem;
+    .toc a {
+      display: block;
+      text-decoration: none;
+      color: #111827;
+      padding: 0.26rem 0.35rem;
+      border-radius: 8px;
+      font-size: 0.9rem;
+    }
+
+    .toc a:hover {
+      background: #f3f4f6;
+    }
+
+    .content {
+      min-width: 0;
+    }
+
+    details.section {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: #fff;
+      box-shadow: var(--shadow);
+      margin: 0 0 0.85rem;
+      overflow: hidden;
+    }
+
+    details.section > summary {
+      cursor: pointer;
+      padding: 0.72rem 0.9rem;
+      font-weight: 650;
+      list-style: none;
+      user-select: none;
+    }
+
+    details.section > summary::-webkit-details-marker { display: none; }
+
+    details.section[open] > summary {
+      border-bottom: 1px solid var(--border);
+      background: #fafafa;
+    }
+
+    .section-body {
+      padding: 0.85rem;
+    }
+
+    .note {
+      font-size: 0.92rem;
+      color: #374151;
+      margin: 0.18rem 0 0.65rem;
+    }
+
+    .pill {
+      display: inline-block;
+      font-size: 0.78rem;
+      padding: 0.12rem 0.5rem;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: #fafafa;
+      color: #111827;
+      margin-left: 0.35rem;
+      vertical-align: middle;
+    }
+
+    .summary-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 0.25rem 0 0.45rem;
+      font-size: 0.95rem;
+    }
+
+    .summary-table th, .summary-table td {
+      border: 1px solid var(--border);
+      padding: 0.42rem 0.58rem;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .summary-table th {
+      background: #f3f4f6;
+      font-weight: 650;
     }
 
     .grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
-      gap: 1rem;
-    }
-
-    table.summary {
-      border-collapse: collapse;
-      margin-top: 1rem;
-      margin-bottom: 2rem;
-    }
-
-    table.summary th,
-    table.summary td {
-      border: 1px solid #ccc;
-      padding: 0.4rem 0.6rem;
-      text-align: left;
-    }
-
-    table.summary th {
-      background: #f0f0f0;
-    }
-
-    .raw-cb-block {
-      margin-bottom: 2rem;
-    }
-
-    .raw-cb-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 1rem;
+      grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+      gap: 0.8rem;
       align-items: start;
     }
 
-    .img-missing {
-      border: 1px dashed #bbb;
-      padding: 2rem;
-      text-align: center;
-      color: #888;
-      font-style: italic;
+    @media (max-width: 520px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+
+    figure.card {
+      margin: 0;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      box-shadow: var(--shadow);
+      transition: box-shadow 120ms ease;
+    }
+
+    figure.card:hover {
+      box-shadow: var(--shadow2);
+    }
+
+    .card-img {
+      padding: 0.55rem;
+      background: #fff;
+    }
+
+    figure.card img {
+      width: 100%;
+      height: auto;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: #fff;
+    }
+
+    .card-cap {
+      padding: 0.65rem 0.78rem 0.7rem;
+      border-top: 1px solid var(--border);
+    }
+
+    .cap-title {
+      font-size: 0.94rem;
+      font-weight: 650;
+      margin-bottom: 0.22rem;
+    }
+
+    .cap-desc {
+      font-size: 0.87rem;
+      color: #374151;
+      margin-bottom: 0.33rem;
+    }
+
+    .cap-meta {
+      font-size: 0.77rem;
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      overflow-wrap: anywhere;
+    }
+
+    /* Nested sections (still collapsible, but slightly tighter) */
+    details.section.subsection > summary {
+      padding: 0.55rem 0.8rem;
+      font-weight: 600;
     }
     """
 
-    # ------------------------------------------------------------------
-    # Header
-    # ------------------------------------------------------------------
-    cfg_json = json.dumps(cfg.__dict__, indent=2, default=str)
 
-    header = f"""
-    <h1>scOmnom QC report</h1>
+def _details_block(title: str, inner_html: str, *, open_by_default: bool = False, extra_class: str = "") -> str:
+    open_attr = " open" if open_by_default else ""
+    cls = f"section {extra_class}".strip()
+    return f"""
+    <details class="{cls}"{open_attr}>
+      <summary>{title}</summary>
+      <div class="section-body">
+        {inner_html}
+      </div>
+    </details>
+    """
 
-    <div class="meta">
-    Version:   {version}
-    Timestamp: {timestamp}
 
-    Parameters:
-    {html.escape(cfg_json)}
+def _grid_block(items: List[str]) -> str:
+    return f"""
+    <div class="grid">
+      {''.join(items)}
     </div>
     """
 
-    # ------------------------------------------------------------------
-    # Summary statistics
-    # ------------------------------------------------------------------
-    qc_summary = _collect_qc_summary(adata)
 
+def _toc(sections: List[Tuple[str, str]]) -> str:
+    links = "\n".join([f'<a href="#{_safe(sid)}">{_safe(title)}</a>' for sid, title in sections])
+    return f"""
+    <nav class="toc">
+      <h2>Contents</h2>
+      {links}
+    </nav>
+    """
+
+
+def render_image_block(rel_img_path: Path) -> str:
+    caption = _caption_from_filename(rel_img_path.name)
+    desc = _describe_plot(rel_img_path)
+    meta = _pretty_relpath(rel_img_path)
+    src = rel_img_path.as_posix()  # must be relative to the report file in fig_root/
+    return f"""
+    <figure class="card">
+      <div class="card-img">
+        <img loading="lazy" src="{src}">
+      </div>
+      <figcaption class="card-cap">
+        <div class="cap-title">{_safe(caption)}</div>
+        <div class="cap-desc">{_safe(desc)}</div>
+        <div class="cap-meta">{_safe(meta)}</div>
+      </figcaption>
+    </figure>
+    """
+
+
+# =============================================================================
+# File collection
+# =============================================================================
+
+def _collect_images(fig_root: Path) -> List[Path]:
+    """
+    Returns PNGs as paths *relative to fig_root*, i.e. `png/.../file.png`.
+    """
+    fig_root = Path(fig_root).resolve()
+    png_root = fig_root / "png"
+    if not png_root.exists():
+        return []
+    imgs_abs = sorted(png_root.rglob("*.png"))
+    return [p.relative_to(fig_root) for p in imgs_abs]
+
+
+# =============================================================================
+# QC report
+# =============================================================================
+
+def _collect_qc_summary(adata) -> dict:
+    obs = getattr(adata, "obs", None)
+    summary: Dict[str, Any] = {
+        "n_cells": int(getattr(adata, "n_obs", 0)),
+        "n_genes": int(getattr(adata, "n_vars", 0)),
+    }
+
+    try:
+        info = getattr(adata, "uns", {}).get("doublet_calling")
+        if isinstance(info, dict):
+            summary["doublet_observed_rate"] = info.get("observed_global_rate")
+    except Exception:
+        pass
+
+    if obs is not None:
+        for col in [
+            "total_counts",
+            "n_genes_by_counts",
+            "pct_counts_mt",
+            "pct_counts_ribo",
+            "pct_counts_hb",
+        ]:
+            try:
+                if col in obs:
+                    summary[f"median_{col}"] = float(obs[col].median())
+                    summary[f"mean_{col}"] = float(obs[col].mean())
+            except Exception:
+                continue
+
+    return summary
+
+
+def generate_qc_report(*, fig_root: Path, cfg: Any, version: str, adata: Any) -> None:
+    """
+    Output:
+      <fig_root>/qc_report.html
+
+    Sections are collapsible and collapsed by default (except Summary).
+    """
+    fig_root = Path(fig_root).resolve()
+    out_html = fig_root / "qc_report.html"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    rel_images = _collect_images(fig_root)
+
+    sections: Dict[str, List[Path]] = {
+        "Overview": [],
+        "QC metrics": [],
+        "QC scatter": [],
+        "Doublets": [],
+        "CellBender": [],
+        "Other": [],
+    }
+
+    for p in rel_images:
+        t = _classify_plot_type(p)
+        if t == "doublet":
+            sections["Doublets"].append(p)
+        elif t == "cellbender":
+            sections["CellBender"].append(p)
+        elif t == "qc_metrics":
+            sections["QC metrics"].append(p)
+        elif t == "qc_scatter":
+            sections["QC scatter"].append(p)
+        elif t == "overview":
+            sections["Overview"].append(p)
+        else:
+            sections["Other"].append(p)
+
+    cfg_json = _cfg_to_json(cfg)
+    header = f"""
+    <h1 id="top">scOmnom QC report</h1>
+    <div class="meta">Version:   {_safe(version)}
+Timestamp: {_safe(timestamp)}
+
+Parameters:
+{_safe(cfg_json)}</div>
+    """
+
+    qc_summary = _collect_qc_summary(adata)
     rows = []
     for k, v in qc_summary.items():
-        rows.append(
-            f"<tr><td>{k}</td><td>{v:.4g}</td></tr>"
-            if isinstance(v, float)
-            else f"<tr><td>{k}</td><td>{v}</td></tr>"
-        )
+        if isinstance(v, float):
+            rows.append(f"<tr><td>{_safe(k)}</td><td>{v:.4g}</td></tr>")
+        else:
+            rows.append(f"<tr><td>{_safe(k)}</td><td>{_safe(v)}</td></tr>")
 
     summary_html = f"""
-    <h2>Summary statistics</h2>
-    <table class="summary">
-      <thead>
-        <tr><th>Metric</th><th>Value</th></tr>
-      </thead>
-      <tbody>
-        {''.join(rows)}
-      </tbody>
+    {header}
+    <table class="summary-table">
+      <thead><tr><th>Metric</th><th>Value</th></tr></thead>
+      <tbody>{''.join(rows)}</tbody>
     </table>
     """
 
-    # ------------------------------------------------------------------
-    # Render body
-    # ------------------------------------------------------------------
-    body = [header, summary_html]
+    toc_sections: List[Tuple[str, str]] = [("summary", "Summary")]
+    for title, imgs in sections.items():
+        if imgs:
+            toc_sections.append((_slug(title), title))
+
+    blocks: List[str] = []
+    blocks.append('<div id="summary"></div>')
+    blocks.append(_details_block("Summary", summary_html, open_by_default=True))
+
+    notes = {
+        "Overview": "High-level outputs (e.g., HVGs/PCA, overall summaries).",
+        "QC metrics": "Distributions and violins for key QC metrics (pre/post filter where available).",
+        "QC scatter": "Scatter diagnostics for outliers and complexity.",
+        "Doublets": "SOLO doublet diagnostics and inferred thresholds.",
+        "CellBender": "Raw vs CellBender comparisons (when CellBender input was used).",
+        "Other": "",
+    }
 
     for title, imgs in sections.items():
         if not imgs:
             continue
+        inner = ""
+        note = notes.get(title, "")
+        if note:
+            inner += f"<p class='note'>{_safe(note)}</p>"
+        inner += _grid_block([render_image_block(p) for p in imgs])
+        blocks.append(f'<div id="{_slug(title)}"></div>')
+        blocks.append(
+            _details_block(
+                f"{_safe(title)} <span class='pill'>{len(imgs)} plots</span>",
+                inner,
+                open_by_default=False,
+            )
+        )
 
-        body.append(f"<details open><summary><h2>{title}</h2></summary>")
-
-        # --------------------------------------------------------------
-        # QC metrics / scatter: PRE vs POST → RAW vs CB
-        # --------------------------------------------------------------
-        if title in {"QC metrics", "QC scatter"}:
-            stage_groups = group_by_stage(imgs)
-
-            for stage, stage_imgs in stage_groups.items():
-                body.append(f"<h3>{stage.replace('_', ' ').title()}</h3>")
-
-                raw_cb_groups = group_raw_cb(stage_imgs)
-
-                for base_key, entry in sorted(raw_cb_groups.items()):
-                    if entry["raw"] or entry["cb"]:
-                        body.append(
-                            render_raw_cb_block(
-                                base_key=base_key,
-                                entry=entry,
-                                rel_root=fig_root,
-                            )
-                        )
-                    else:
-                        for p in entry["other"]:
-                            body.append(render_image_block(p))
-
-        # --------------------------------------------------------------
-        # Everything else: flat grid
-        # --------------------------------------------------------------
-        else:
-            body.append('<div class="grid">')
-            for p in imgs:
-                body.append(render_image_block(p))
-            body.append("</div>")
-
-        body.append("</details>")
-
-    # ------------------------------------------------------------------
-    # Final HTML
-    # ------------------------------------------------------------------
     html_doc = f"""
     <!DOCTYPE html>
     <html>
     <head>
       <meta charset="utf-8">
       <title>scOmnom QC report</title>
-      <style>{css}</style>
+      <style>{_css()}</style>
     </head>
     <body>
-      {''.join(body)}
+      <div class="wrap">
+        {_toc(toc_sections)}
+        <main class="content">
+          {''.join(blocks)}
+        </main>
+      </div>
     </body>
     </html>
     """
@@ -263,172 +665,48 @@ def generate_qc_report(
     out_html.write_text(html_doc, encoding="utf-8")
 
 
-# ======================================================================
-# Helpers
-# ======================================================================
-
-def _caption_from_filename(fname: str) -> str:
-    name = Path(fname).stem
-    name = name.replace("_", " ")
-    name = name.replace("postfilter", "post-filter")
-    name = name.replace("prefilter", "pre-filter")
-    return name.capitalize()
-
-
-def render_image_block(img_path: Path) -> str:
-    caption = _caption_from_filename(img_path.name)
-    return f"""
-    <figure>
-      <img src="{img_path.as_posix()}">
-      <figcaption>{html.escape(caption)}</figcaption>
-    </figure>
-    """
-
-
-def group_by_stage(files: List[Path]) -> Dict[str, List[Path]]:
-    groups = defaultdict(list)
-    for f in files:
-        name = f.name
-        if "prefilter" in name:
-            groups["pre-filter"].append(f)
-        elif "postfilter" in name:
-            groups["post-filter"].append(f)
-        else:
-            groups["other"].append(f)
-    return groups
-
-
-def group_raw_cb(files: List[Path]) -> Dict[str, dict]:
-    groups = defaultdict(lambda: {"raw": None, "cb": None, "other": []})
-    for f in files:
-        stem = f.stem
-        if stem.endswith("_raw"):
-            groups[stem[:-4]]["raw"] = f
-        elif stem.endswith("_cb"):
-            groups[stem[:-3]]["cb"] = f
-        else:
-            groups[stem]["other"].append(f)
-    return groups
-
-
-def render_raw_cb_block(base_key: str, entry: dict, rel_root: Path) -> str:
-    def slot(p: Path | None, label: str):
-        if p is None:
-            return f"<div class='img-missing'>{label}<br>(missing)</div>"
-        return f"""
-        <figure>
-          <img src="{p.as_posix()}">
-          <figcaption>{label}</figcaption>
-        </figure>
-        """
-
-    title = base_key.replace("_", " ")
-
-    return f"""
-    <div class="raw-cb-block">
-      <h4>{html.escape(title)}</h4>
-      <div class="raw-cb-grid">
-        {slot(entry["raw"], "Raw")}
-        {slot(entry["cb"], "CellBender")}
-      </div>
-    </div>
-    """
-
-
-def _collect_qc_summary(adata) -> dict:
-    obs = adata.obs
-    summary = {
-        "n_cells": int(adata.n_obs),
-        "n_genes": int(adata.n_vars),
-    }
-
-    info = adata.uns.get("doublet_calling")
-    if info is not None:
-        summary["doublet_observed_rate"] = info.get("observed_global_rate")
-
-    for col in [
-        "total_counts",
-        "n_genes_by_counts",
-        "pct_counts_mt",
-        "pct_counts_ribo",
-        "pct_counts_hb",
-    ]:
-        if col in obs:
-            summary[f"median_{col}"] = float(obs[col].median())
-            summary[f"mean_{col}"] = float(obs[col].mean())
-
-    return summary
-
-
-# ======================================================================
+# =============================================================================
 # Integration report
-# ======================================================================
+# =============================================================================
+
 def generate_integration_report(
     *,
     fig_root: Path,
     version: str,
-    adata,
+    adata: Any,
     batch_key: str,
     label_key: str,
-    methods: list[str],
+    methods: List[str],
     selected_embedding: str,
     benchmark_n_jobs: int,
-):
+) -> None:
     """
-    Generate a self-contained HTML integration report embedding all plots.
-
     Output:
       <fig_root>/integration_report.html
+
+    Sections are collapsible and collapsed by default (except Summary).
     """
-
-    fig_root = fig_root.resolve()
-    png_root = fig_root / "png"
+    fig_root = Path(fig_root).resolve()
     out_html = fig_root / "integration_report.html"
-
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # ------------------------------------------------------------------
-    # Collect images (PNG only)
-    # ------------------------------------------------------------------
-    images = sorted(png_root.rglob("*.png"))
-    rel_images = [img.relative_to(fig_root) for img in images]
+    rel_images = _collect_images(fig_root)
 
-    # ------------------------------------------------------------------
-    # Section classification
-    # ------------------------------------------------------------------
     sections: Dict[str, List[Path]] = {
-        "Integration benchmarking": [],
+        "Benchmarking": [],
         "UMAPs": [],
         "Other": [],
     }
 
     for p in rel_images:
-        s = p.as_posix().lower()
-        if "scib" in s:
-            sections["Integration benchmarking"].append(p)
-        elif "umap" in s:
+        t = _classify_plot_type(p)
+        if t == "scib":
+            sections["Benchmarking"].append(p)
+        elif t == "umap":
             sections["UMAPs"].append(p)
         else:
             sections["Other"].append(p)
 
-    # ------------------------------------------------------------------
-    # Header
-    # ------------------------------------------------------------------
-    header = f"""
-    <h1>scOmnom Integration Report</h1>
-
-    <div class="meta">
-    Version:   {version}
-    Timestamp: {timestamp}
-
-    Selected embedding:
-    {html.escape(selected_embedding)}
-    </div>
-    """
-
-    # ------------------------------------------------------------------
-    # Summary table
-    # ------------------------------------------------------------------
     summary = {
         "version": version,
         "timestamp": timestamp,
@@ -439,52 +717,82 @@ def generate_integration_report(
         "selected_embedding": selected_embedding,
     }
 
-    rows = []
-    for k, v in summary.items():
-        rows.append(f"<tr><td>{k}</td><td>{html.escape(str(v))}</td></tr>")
-
+    rows = [f"<tr><td>{_safe(k)}</td><td>{_safe(v)}</td></tr>" for k, v in summary.items()]
     summary_html = f"""
-    <h2>Summary</h2>
-    <table class="summary">
-      <thead>
-        <tr><th>Metric</th><th>Value</th></tr>
-      </thead>
-      <tbody>
-        {''.join(rows)}
-      </tbody>
+    <h1 id="top">scOmnom Integration report</h1>
+    <div class="meta">Version:   {_safe(version)}
+Timestamp: {_safe(timestamp)}
+
+Selected embedding:
+{_safe(selected_embedding)}</div>
+
+    <table class="summary-table">
+      <thead><tr><th>Field</th><th>Value</th></tr></thead>
+      <tbody>{''.join(rows)}</tbody>
     </table>
     """
 
-    # ------------------------------------------------------------------
-    # Render body
-    # ------------------------------------------------------------------
-    body = [header, summary_html]
+    toc_sections: List[Tuple[str, str]] = [("summary", "Summary")]
+    if sections["Benchmarking"]:
+        toc_sections.append(("benchmarking", "Benchmarking"))
+    if sections["UMAPs"]:
+        toc_sections.append(("umaps", "UMAPs"))
+    if sections["Other"]:
+        toc_sections.append(("other", "Other"))
 
-    for title, imgs in sections.items():
-        if not imgs:
-            continue
+    blocks: List[str] = []
+    blocks.append('<div id="summary"></div>')
+    blocks.append(_details_block("Summary", summary_html, open_by_default=True))
 
-        body.append(f"<details open><summary><h2>{title}</h2></summary>")
-        body.append('<div class="grid">')
+    if sections["Benchmarking"]:
+        inner = (
+            "<p class='note'>scIB benchmarking outputs. Use these to understand tradeoffs between batch mixing "
+            "and biological conservation.</p>"
+            + _grid_block([render_image_block(p) for p in sections["Benchmarking"]])
+        )
+        blocks.append('<div id="benchmarking"></div>')
+        blocks.append(_details_block(
+            f"Benchmarking <span class='pill'>{len(sections['Benchmarking'])} plots</span>",
+            inner,
+            open_by_default=False,
+        ))
 
-        for p in imgs:
-            body.append(render_image_block(p))
+    if sections["UMAPs"]:
+        inner = (
+            "<p class='note'>UMAPs for each embedding / method. These can be many; expand only when needed.</p>"
+            + _grid_block([render_image_block(p) for p in sections["UMAPs"]])
+        )
+        blocks.append('<div id="umaps"></div>')
+        blocks.append(_details_block(
+            f"UMAPs <span class='pill'>{len(sections['UMAPs'])} plots</span>",
+            inner,
+            open_by_default=False,
+        ))
 
-        body.append("</div></details>")
+    if sections["Other"]:
+        inner = _grid_block([render_image_block(p) for p in sections["Other"]])
+        blocks.append('<div id="other"></div>')
+        blocks.append(_details_block(
+            f"Other <span class='pill'>{len(sections['Other'])} plots</span>",
+            inner,
+            open_by_default=False,
+        ))
 
-    # ------------------------------------------------------------------
-    # Final HTML
-    # ------------------------------------------------------------------
     html_doc = f"""
     <!DOCTYPE html>
     <html>
     <head>
       <meta charset="utf-8">
-      <title>scOmnom Integration Report</title>
-      <style>{_REPORT_CSS}</style>
+      <title>scOmnom Integration report</title>
+      <style>{_css()}</style>
     </head>
     <body>
-      {''.join(body)}
+      <div class="wrap">
+        {_toc(toc_sections)}
+        <main class="content">
+          {''.join(blocks)}
+        </main>
+      </div>
     </body>
     </html>
     """
@@ -492,132 +800,133 @@ def generate_integration_report(
     out_html.write_text(html_doc, encoding="utf-8")
 
 
-# ----------------------------------------------------------------------
-# Shared CSS (reuse QC report style verbatim)
-# ----------------------------------------------------------------------
-_REPORT_CSS = """
-body {
-  font-family: system-ui, -apple-system, sans-serif;
-  margin: 2rem;
-  max-width: 1400px;
-}
+# =============================================================================
+# Cluster + annotate report
+# =============================================================================
 
-h1, h2, h3, h4 {
-  margin-top: 1.5rem;
-}
-
-details > summary {
-  cursor: pointer;
-  font-weight: 600;
-  margin: 0.5rem 0;
-}
-
-.meta {
-  background: #f6f8fa;
-  border: 1px solid #ddd;
-  padding: 1rem;
-  border-radius: 6px;
-  font-family: monospace;
-  white-space: pre-wrap;
-}
-
-figure {
-  margin: 0.5rem;
-}
-
-figure img {
-  max-width: 100%;
-  border: 1px solid #ddd;
-  border-radius: 4px;
-}
-
-figcaption {
-  font-size: 0.85rem;
-  color: #444;
-  margin-top: 0.25rem;
-}
-
-.grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
-  gap: 1rem;
-}
-
-table.summary {
-  border-collapse: collapse;
-  margin-top: 1rem;
-  margin-bottom: 2rem;
-}
-
-table.summary th,
-table.summary td {
-  border: 1px solid #ccc;
-  padding: 0.4rem 0.6rem;
-  text-align: left;
-}
-
-table.summary th {
-  background: #f0f0f0;
-}
-"""
-
-
-# ======================================================================
-# Cluster+Annotate report
-# ======================================================================
-
-def generate_cluster_and_annotate_report(
-    *,
-    fig_root: Path,
-    cfg,
-    version: str,
-    adata,
-) -> None:
+def _extract_round_id(rel_img_path: Path) -> str:
     """
-    Generate a self-contained HTML report for the cluster-and-annotate module
-    embedding all plots.
+    Try to find `cluster_and_annotate/<round_id>/...` in the relative path.
 
+    Works whether images are under:
+      png/<run_round>/cluster_and_annotate/<round_id>/...
+    or:
+      png/cluster_and_annotate/<round_id>/...
+    """
+    parts = rel_img_path.parts
+    if "cluster_and_annotate" not in parts:
+        return "unknown"
+    i = list(parts).index("cluster_and_annotate")
+    if i + 1 < len(parts):
+        return str(parts[i + 1])
+    return "unknown"
+
+
+def _classify_cluster_round_sections(imgs: List[Path]) -> List[Tuple[str, List[Path]]]:
+    clustering, annotation, compaction, decoupler, other = [], [], [], [], []
+
+    for p in imgs:
+        t = _classify_plot_type(p)
+        if t == "clustering":
+            clustering.append(p)
+        elif t == "annotation":
+            annotation.append(p)
+        elif t == "compaction":
+            compaction.append(p)
+        elif t.startswith("decoupler"):
+            decoupler.append(p)
+        else:
+            other.append(p)
+
+    keyfn = lambda x: x.as_posix()
+    return [
+        ("Clustering", sorted(clustering, key=keyfn)),
+        ("Annotation", sorted(annotation, key=keyfn)),
+        ("Compaction", sorted(compaction, key=keyfn)),
+        ("Decoupler", sorted(decoupler, key=keyfn)),
+        ("Other", sorted(other, key=keyfn)),
+    ]
+
+
+def _render_cluster_report_summary(adata: Any, ordered_rounds: List[str]) -> str:
+    active_round = None
+    try:
+        active_round = getattr(adata, "uns", {}).get("active_cluster_round", None)
+        active_round = str(active_round) if active_round is not None else None
+    except Exception:
+        active_round = None
+
+    # best-effort: surface round meta if present
+    rounds_meta = {}
+    try:
+        rounds_meta = getattr(adata, "uns", {}).get("cluster_rounds", {})
+        if not isinstance(rounds_meta, dict):
+            rounds_meta = {}
+    except Exception:
+        rounds_meta = {}
+
+    rows = []
+    for rid in ordered_rounds:
+        rinfo = rounds_meta.get(rid, {}) if isinstance(rounds_meta, dict) else {}
+        if not isinstance(rinfo, dict):
+            rinfo = {}
+        best_res = rinfo.get("best_resolution", "")
+        ncl = rinfo.get("n_clusters", "")
+        rows.append(
+            "<tr>"
+            f"<td>{_safe(rid)}{' <span class=\"pill\">active</span>' if active_round == rid else ''}</td>"
+            f"<td>{_safe(best_res)}</td>"
+            f"<td>{_safe(ncl)}</td>"
+            "</tr>"
+        )
+
+    return f"""
+    <p class="note">
+      Report is organized by <b>round</b>. All sections are collapsed by default, and
+      <b>Decoupler barplots are always collapsed</b> to keep the page readable.
+    </p>
+
+    <table class="summary-table">
+      <thead><tr><th>Round</th><th>Best resolution</th><th># clusters</th></tr></thead>
+      <tbody>{''.join(rows) if rows else ''}</tbody>
+    </table>
+    """
+
+
+def generate_cluster_and_annotate_report(*, fig_root: Path, cfg: Any, version: str, adata: Any) -> None:
+    """
     Output:
       <fig_root>/cluster_and_annotate_report.html
 
-    Assumes the standard fig layout:
-      <fig_root>/png/**.png
-      <fig_root>/pdf/**.pdf
+    Requirements implemented:
+      - Tight layout
+      - Short description per plot
+      - Sections collapsible and collapsed by default
+      - Cluster-and-annotate: decoupler barplots collapsed by default
+      - Active round (if known) is expanded; other rounds collapsed
     """
     fig_root = Path(fig_root).resolve()
-    png_root = fig_root / "png"
     out_html = fig_root / "cluster_and_annotate_report.html"
-
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # ------------------------------------------------------------------
-    # Collect images (PNG only)
-    # ------------------------------------------------------------------
-    images = sorted(png_root.rglob("*.png"))
-    rel_images = [img.relative_to(fig_root) for img in images]
+    rel_images = _collect_images(fig_root)
 
-    # ------------------------------------------------------------------
-    # Round grouping (based on path: .../cluster_and_annotate/<round_id>/...)
-    # ------------------------------------------------------------------
+    # Group by round id (best-effort)
     by_round: Dict[str, List[Path]] = defaultdict(list)
-
     for p in rel_images:
-        parts = p.parts
-        # Expect: png/cluster_and_annotate/<round_id>/...
-        rid = _extract_round_id_from_relpath(parts)
+        rid = _extract_round_id(p)
         by_round[rid].append(p)
 
-    # Use stored round order if available
-    round_order = []
+    # round ordering: prefer adata.uns["cluster_round_order"]
+    round_order: List[str] = []
     try:
-        ro = adata.uns.get("cluster_round_order", None)
+        ro = getattr(adata, "uns", {}).get("cluster_round_order", None)
         if isinstance(ro, (list, tuple)) and ro:
             round_order = [str(x) for x in ro]
     except Exception:
         round_order = []
 
-    # Ensure stable order with unknowns appended
-    ordered_rounds = []
+    ordered_rounds: List[str] = []
     seen = set()
     for rid in round_order:
         if rid in by_round:
@@ -627,234 +936,159 @@ def generate_cluster_and_annotate_report(
         if rid not in seen:
             ordered_rounds.append(rid)
 
-    active_round = adata.uns.get("active_cluster_round", None)
-    active_round = str(active_round) if active_round is not None else None
+    active_round: Optional[str] = None
+    try:
+        active_round = getattr(adata, "uns", {}).get("active_cluster_round", None)
+        active_round = str(active_round) if active_round is not None else None
+    except Exception:
+        active_round = None
 
-    # ------------------------------------------------------------------
-    # Header
-    # ------------------------------------------------------------------
-    cfg_json = json.dumps(getattr(cfg, "__dict__", {}), indent=2, default=str)
-
+    cfg_json = _cfg_to_json(cfg)
     header = f"""
-    <h1>scOmnom cluster-and-annotate report</h1>
+    <h1 id="top">scOmnom cluster-and-annotate report</h1>
+    <div class="meta">Version:   {_safe(version)}
+Timestamp: {_safe(timestamp)}
 
-    <div class="meta">
-    Version:   {html.escape(str(version))}
-    Timestamp: {html.escape(str(timestamp))}
+Active round: {_safe(active_round)}
 
-    Active round: {html.escape(str(active_round))}
+Round order:
+{_safe(json.dumps(ordered_rounds, indent=2))}
 
-    Round order:
-    {html.escape(json.dumps(ordered_rounds, indent=2))}
-
-    Parameters:
-    {html.escape(cfg_json)}
-    </div>
+Parameters:
+{_safe(cfg_json)}</div>
     """
 
-    # ------------------------------------------------------------------
-    # Summary (round table)
-    # ------------------------------------------------------------------
-    summary_html = _render_cluster_round_summary(adata, ordered_rounds)
+    toc_sections: List[Tuple[str, str]] = [("summary", "Summary")]
+    for rid in ordered_rounds:
+        toc_sections.append((f"round-{_slug(rid)}", f"Round: {rid}"))
 
-    # ------------------------------------------------------------------
-    # Render body
-    # ------------------------------------------------------------------
-    body: List[str] = [header, summary_html]
+    blocks: List[str] = []
+    blocks.append('<div id="summary"></div>')
+    blocks.append(_details_block("Summary", header + _render_cluster_report_summary(adata, ordered_rounds), open_by_default=True))
+
+    # Policy toggle (kept as a code constant; default is to keep them, but collapsed)
+    OMIT_DECOUPLER_BARPLOTS = False
 
     if not ordered_rounds:
-        body.append("<p><em>No cluster_and_annotate figures found under png/.</em></p>")
+        blocks.append("<p class='note'><em>No cluster_and_annotate figures found under png/.</em></p>")
     else:
         for rid in ordered_rounds:
             imgs = by_round.get(rid, [])
             if not imgs:
                 continue
 
-            rid_label = html.escape(str(rid))
-            open_attr = " open" if (active_round and rid == active_round) else " open"
+            open_round = bool(active_round) and (rid == active_round)
 
-            body.append(f"<details{open_attr}><summary><h2>Round: {rid_label}</h2></summary>")
+            # Round title anchor
+            blocks.append(f'<div id="round-{_slug(rid)}"></div>')
 
-            sections = _classify_cluster_annotate_images(imgs)
+            # Split into sections
+            sections = _classify_cluster_round_sections(imgs)
+
+            inner_parts: List[str] = []
+            inner_parts.append(
+                f"<p class='note'>Figures for round <strong>{_safe(rid)}</strong>.</p>"
+            )
 
             for title, sec_imgs in sections:
                 if not sec_imgs:
                     continue
 
-                body.append(f"<h3>{html.escape(title)}</h3>")
-                body.append('<div class="grid">')
-                for p in sec_imgs:
-                    body.append(render_image_block(p))
-                body.append("</div>")
+                if title == "Decoupler":
+                    heat = [p for p in sec_imgs if _classify_plot_type(p) == "decoupler_heatmap"]
+                    dots = [p for p in sec_imgs if _classify_plot_type(p) == "decoupler_dotplot"]
+                    bars = [p for p in sec_imgs if _classify_plot_type(p) == "decoupler_bar"]
+                    other = [p for p in sec_imgs if _classify_plot_type(p) == "decoupler_other"]
 
-            body.append("</details>")
+                    dec_parts: List[str] = []
+                    dec_parts.append("<p class='note'>Cluster-level pathway/regulator activity scores.</p>")
 
-    # ------------------------------------------------------------------
-    # Final HTML
-    # ------------------------------------------------------------------
+                    if heat:
+                        dec_parts.append(_details_block(
+                            f"Heatmaps <span class='pill'>{len(heat)} plots</span>",
+                            "<p class='note'>Top features/pathways across clusters.</p>"
+                            + _grid_block([render_image_block(p) for p in heat]),
+                            open_by_default=False,
+                            extra_class="subsection",
+                        ))
+                    if dots:
+                        dec_parts.append(_details_block(
+                            f"Dotplots <span class='pill'>{len(dots)} plots</span>",
+                            "<p class='note'>Compact overview of activity patterns.</p>"
+                            + _grid_block([render_image_block(p) for p in dots]),
+                            open_by_default=False,
+                            extra_class="subsection",
+                        ))
+
+                    if bars and not OMIT_DECOUPLER_BARPLOTS:
+                        # REQUIRED: collapsed by default
+                        dec_parts.append(_details_block(
+                            f"Barplots <span class='pill'>{len(bars)} plots</span>",
+                            "<p class='note'>Per-cluster top-N features. Collapsed by default to reduce clutter.</p>"
+                            + _grid_block([render_image_block(p) for p in bars]),
+                            open_by_default=False,
+                            extra_class="subsection",
+                        ))
+
+                    if other:
+                        dec_parts.append(_details_block(
+                            f"Other <span class='pill'>{len(other)} plots</span>",
+                            _grid_block([render_image_block(p) for p in other]),
+                            open_by_default=False,
+                            extra_class="subsection",
+                        ))
+
+                    inner_parts.append(_details_block(
+                        f"Decoupler <span class='pill'>{len(sec_imgs)} plots</span>",
+                        "".join(dec_parts),
+                        open_by_default=False,
+                        extra_class="subsection",
+                    ))
+                    continue
+
+                # Non-decoupler sections
+                section_note = {
+                    "Clustering": "Resolution selection and clustering diagnostics (sweep, stability, UMAPs).",
+                    "Annotation": "CellTypist / cluster label diagnostics and summaries.",
+                    "Compaction": "Compaction mapping and compacted-round diagnostics (if enabled).",
+                    "Other": "",
+                }.get(title, "")
+
+                inner = ""
+                if section_note:
+                    inner += f"<p class='note'>{_safe(section_note)}</p>"
+                inner += _grid_block([render_image_block(p) for p in sec_imgs])
+
+                inner_parts.append(_details_block(
+                    f"{_safe(title)} <span class='pill'>{len(sec_imgs)} plots</span>",
+                    inner,
+                    open_by_default=False,
+                    extra_class="subsection",
+                ))
+
+            blocks.append(_details_block(
+                f"Round: {_safe(rid)} <span class='pill'>{len(imgs)} plots</span>",
+                "".join(inner_parts),
+                open_by_default=open_round,
+            ))
+
     html_doc = f"""
     <!DOCTYPE html>
     <html>
     <head>
       <meta charset="utf-8">
       <title>scOmnom cluster-and-annotate report</title>
-      <style>{_REPORT_CSS}</style>
+      <style>{_css()}</style>
     </head>
     <body>
-      {''.join(body)}
+      <div class="wrap">
+        {_toc(toc_sections)}
+        <main class="content">
+          {''.join(blocks)}
+        </main>
+      </div>
     </body>
     </html>
     """
 
     out_html.write_text(html_doc, encoding="utf-8")
-
-
-# ======================================================================
-# Helpers (cluster+annotate report)
-# ======================================================================
-
-def _extract_round_id_from_relpath(parts: Tuple[str, ...]) -> str:
-    """
-    Extract round_id from a relative png path.
-
-    Expected patterns:
-      png/cluster_and_annotate/<round_id>/...
-      png/<anything>/<round_id>/...   (fallback)
-
-    Returns "unknown" if not found.
-    """
-    try:
-        # common: ("png", "cluster_and_annotate", "<rid>", ...)
-        if len(parts) >= 3 and parts[0] == "png" and parts[1] == "cluster_and_annotate":
-            return str(parts[2])
-
-        # fallback: find "cluster_and_annotate" anywhere
-        if "cluster_and_annotate" in parts:
-            i = list(parts).index("cluster_and_annotate")
-            if i + 1 < len(parts):
-                return str(parts[i + 1])
-
-        return "unknown"
-    except Exception:
-        return "unknown"
-
-
-def _classify_cluster_annotate_images(imgs: List[Path]) -> List[Tuple[str, List[Path]]]:
-    """
-    Group round images into stable, readable sections.
-    """
-    clustering: List[Path] = []
-    annotation: List[Path] = []
-    decoupler: List[Path] = []
-    compaction: List[Path] = []
-    other: List[Path] = []
-
-    for p in imgs:
-        s = p.as_posix().lower()
-
-        # folder-based hints
-        if "/clustering/" in s:
-            clustering.append(p)
-            continue
-        if "/annotation/" in s:
-            annotation.append(p)
-            continue
-        if "/decoupler/" in s:
-            decoupler.append(p)
-            continue
-        if "compaction" in s or "compacted" in s and ("flow" in s or "merge" in s or "component" in s):
-            compaction.append(p)
-            continue
-
-        # filename-based hints
-        if "umap" in s or "cluster_tree" in s or "cluster_flow" in s:
-            clustering.append(p)
-        elif "celltypist" in s or "cluster_label" in s and "umap" in s:
-            annotation.append(p)
-        elif "heatmap" in s or "dotplot" in s or "barplot" in s or "decoupler" in s:
-            decoupler.append(p)
-        elif "compaction" in s or "compacted" in s:
-            compaction.append(p)
-        else:
-            other.append(p)
-
-    # Keep deterministic ordering within sections
-    clustering = sorted(clustering, key=lambda x: x.as_posix())
-    annotation = sorted(annotation, key=lambda x: x.as_posix())
-    decoupler = sorted(decoupler, key=lambda x: x.as_posix())
-    compaction = sorted(compaction, key=lambda x: x.as_posix())
-    other = sorted(other, key=lambda x: x.as_posix())
-
-    return [
-        ("Clustering", clustering),
-        ("Annotation", annotation),
-        ("Decoupler", decoupler),
-        ("Compaction", compaction),
-        ("Other", other),
-    ]
-
-
-def _render_cluster_round_summary(adata, ordered_rounds: List[str]) -> str:
-    """
-    Render a small summary table per round (best-effort).
-    """
-    rounds = adata.uns.get("cluster_rounds", {})
-    if not isinstance(rounds, dict) or not ordered_rounds:
-        return """
-        <h2>Summary</h2>
-        <p><em>No round metadata available.</em></p>
-        """
-
-    rows = []
-    for rid in ordered_rounds:
-        r = rounds.get(rid, None)
-        if not isinstance(r, dict):
-            continue
-
-        labels_obs_key = r.get("labels_obs_key", "")
-        cluster_key = r.get("cluster_key", "")
-        n_clusters = ""
-        try:
-            if labels_obs_key and labels_obs_key in adata.obs:
-                n_clusters = int(adata.obs[str(labels_obs_key)].astype(str).nunique())
-        except Exception:
-            n_clusters = ""
-
-        parent = r.get("parent_round_id", "") or r.get("parent", "") or ""
-        notes = r.get("notes", "") or ""
-
-        rows.append(
-            "<tr>"
-            f"<td>{html.escape(str(rid))}</td>"
-            f"<td>{html.escape(str(parent))}</td>"
-            f"<td>{html.escape(str(labels_obs_key))}</td>"
-            f"<td>{html.escape(str(cluster_key))}</td>"
-            f"<td>{html.escape(str(n_clusters))}</td>"
-            f"<td>{html.escape(str(notes))}</td>"
-            "</tr>"
-        )
-
-    if not rows:
-        return """
-        <h2>Summary</h2>
-        <p><em>No round metadata rows.</em></p>
-        """
-
-    return f"""
-    <h2>Summary</h2>
-    <table class="summary">
-      <thead>
-        <tr>
-          <th>round_id</th>
-          <th>parent</th>
-          <th>labels_obs_key</th>
-          <th>cluster_key</th>
-          <th>n_clusters</th>
-          <th>notes</th>
-        </tr>
-      </thead>
-      <tbody>
-        {''.join(rows)}
-      </tbody>
-    </table>
-    """
