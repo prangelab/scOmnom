@@ -24,6 +24,30 @@ CELLTYPIST_CACHE = Path.home() / ".cache" / "scomnom" / "celltypist_models"
 CELLTYPIST_CACHE.mkdir(parents=True, exist_ok=True)
 
 
+def _downgrade_nullable_strings(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    for col in out.columns:
+        s = out[col]
+
+        # 1. Handle Categoricals
+        if isinstance(s.dtype, pd.CategoricalDtype):
+            cats = s.cat.categories
+            # Check if categories are the 'new' string type
+            if hasattr(cats, "dtype") and str(cats.dtype).startswith(("string", "arrow")):
+                # Convert categories to plain objects, preserving None/NaN properly
+                new_cats = cats.astype(object).fillna(np.nan)
+                out[col] = s.cat.rename_categories(new_cats)
+            continue
+
+        # 2. Handle standard nullable string columns
+        if str(s.dtype).startswith(("string", "arrow")):
+            # to_numpy(dtype=object) is the safest 'downgrade' path
+            # as it handles the pd.NA -> np.nan conversion correctly
+            out[col] = s.to_numpy(dtype=object)
+
+    return out
+
+
 def detect_sample_dirs(base: Path, patterns: list[str]) -> List[Path]:
     """
     Detect sample folders based on user-specified patterns in config.
@@ -685,6 +709,9 @@ def _prepare_sample_for_merge(
     a.obs[batch_key] = sample_name
     a.obs_names = [f"{sample_name}_{x}" for x in adata.obs_names]
 
+    a.var = _downgrade_nullable_strings(a.var)
+    a.obs = _downgrade_nullable_strings(a.obs)
+
     # ------------------------------------------------------------------
     # Write padded Zarr
     # ------------------------------------------------------------------
@@ -992,6 +1019,9 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr") -> None:
             "Failed to fully sanitize adata.uns; attempting best-effort write anyway. (%s)",
             e,
         )
+
+    adata_to_write.var = _downgrade_nullable_strings(adata_to_write.var)
+    adata_to_write.obs = _downgrade_nullable_strings(adata_to_write.obs)
 
     # ------------------------------------------------------------
     # Write dataset
