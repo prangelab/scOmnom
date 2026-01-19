@@ -40,6 +40,7 @@ LOGGER = logging.getLogger(__name__)
 # Small orchestrator-only helpers (kept here)
 # -------------------------------------------------------------------------
 def _get_best_integration_tag(adata) -> str:
+    import re
     """
     Returns something like 'scANVI' / 'scPoli' / 'Harmony' / 'BBKNN' / 'Unintegrated'
     or 'NA' if not found. Sanitized for filenames/IDs.
