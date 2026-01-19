@@ -1,5 +1,6 @@
 # src/<your_package>/cluster_and_annotate.py
 from __future__ import annotations
+from scomnom import __version__
 
 import json
 import logging

@@ -882,6 +882,13 @@ def run_integrate(cfg: ProcessAndIntegrateConfig) -> ad.AnnData:
         adata.obsm["X_integrated"] = adata.obsm[best]
         sc.pp.neighbors(adata, use_rep="X_integrated")
 
+    adata.uns.setdefault("integration", {})
+    adata.uns["integration"].update({
+        "best_embedding": best,
+        "available_embeddings": list(emb_keys),
+        "selection_timestamp": datetime.utcnow().isoformat(),
+    })
+
     sc.tl.umap(adata)
 
     reporting.generate_integration_report(
