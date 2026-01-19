@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import anndata as ad
 import scanpy as sc
+import pandas as pd
 from pathlib import Path
 import shutil
 import os
