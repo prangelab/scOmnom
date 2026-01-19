@@ -633,13 +633,38 @@ def _prepare_sample_for_merge(
     )
 
     # ------------------------------------------------------------------
-    # Pad var dataframe
+    # Pad var dataframe (dtype-safe)
     # ------------------------------------------------------------------
     var = pd.DataFrame(index=union_genes)
 
     for col in adata.var.columns:
-        s = pd.Series(adata.var[col].values, index=adata.var_names)
-        var[col] = var.index.map(s)
+        s0 = adata.var[col]
+
+        # align to union genes (preserves dtype better than map)
+        s = s0.reindex(var.index)
+
+        # Fill missing values in a dtype-aware way to avoid NaN->float corruption
+        if pd.api.types.is_bool_dtype(s0):
+            s = s.fillna(False).astype(bool)
+
+        elif pd.api.types.is_categorical_dtype(s0):
+            # keep categories; missing stays missing (safe)
+            s = s.astype("category")
+            # optional: ensure same categories as original
+            try:
+                s = s.cat.set_categories(s0.cat.categories)
+            except Exception:
+                pass
+
+        elif pd.api.types.is_numeric_dtype(s0):
+            # numeric columns: fill with 0 (or leave NaN if you prefer)
+            s = s.fillna(0)
+
+        else:
+            # strings/objects: zarr string arrays hate float NaN
+            s = s.astype("string").fillna("")
+
+        var[col] = s.values
 
     # Sanity: gene_ids must survive if they existed
     if "gene_ids" in adata.var.columns and "gene_ids" not in var.columns:
