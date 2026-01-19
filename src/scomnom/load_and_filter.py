@@ -286,6 +286,7 @@ def _train_scvi(
 # ---------------------------------------------------------------------
 def compute_qc_metrics(adata: ad.AnnData, cfg: QCFilterConfig) -> ad.AnnData:
     from scipy import sparse
+    import numpy as np
 
     X = adata.X
     if sparse.issparse(X):
