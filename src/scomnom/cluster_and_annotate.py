@@ -523,7 +523,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                                 plot_utils.plot_decoupler_all_styles(
                                     adata,
                                     net_key="dorothea",
-                                    net_name=f"DoRothEA [{rid}]",
+                                    net_name=f"DoRothEA",
                                     figdir=figdir_round,
                                     heatmap_top_k=40,
                                     bar_top_n=10,
