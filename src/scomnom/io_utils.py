@@ -670,7 +670,7 @@ def _prepare_sample_for_merge(
 
         # Fill missing values in a dtype-aware way to avoid NaN->float corruption
         if pd.api.types.is_bool_dtype(s0):
-            s = s.fillna(False).astype(bool)
+            s = s.fillna(False).infer_objects(copy=False).astype(bool)
 
         elif pd.api.types.is_categorical_dtype(s0):
             # keep categories; missing stays missing (safe)
@@ -683,7 +683,7 @@ def _prepare_sample_for_merge(
 
         elif pd.api.types.is_numeric_dtype(s0):
             # numeric columns: fill with 0 (or leave NaN if you prefer)
-            s = s.fillna(0)
+            s = (s.fillna(0).infer_objects(copy=False))
 
         else:
             # strings/objects: zarr string arrays hate float NaN
