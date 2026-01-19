@@ -543,7 +543,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
     if cfg.make_figures:
         try:
             reporting.generate_cluster_and_annotate_report(
-                fig_root=fig_root,
+                fig_root=Path(cfg.figdir) / "cluster_and_annotate",
                 cfg=cfg,
                 version=__version__,
                 adata=adata,
