@@ -881,8 +881,8 @@ def generate_cluster_and_annotate_report(*, fig_root: Path, cfg, version: str, a
         "Parameters:\n"
         f"{cfg_json}"
         "</div>"
-        "<p class='note'>This report is organized by <b>round</b>. Heavy plot families are collapsed by default, and "
-        "<b>all decoupler barplots are collapsed</b> to keep the page readable.</p>"
+        "<p class='note'>This report is organized by <b>clustering round</b>."
+        " Plot families are collapsed by default to keep the page readable.</p>"
     )
 
     # ------------------------------------------------------------------
@@ -958,7 +958,7 @@ def generate_cluster_and_annotate_report(*, fig_root: Path, cfg, version: str, a
 
                         if bars:
                             inner = (
-                                "<p class='note'>Per-cluster top-N features. These can be very many, so they are collapsed by default.</p>"
+                                "<p class='note'>Per-cluster top-N features.</p>"
                                 + _grid_block([_render_image_card(p) for p in bars])
                             )
                             title_html = f"Decoupler barplots <span class='pill'>{len(bars)} plots</span>"
