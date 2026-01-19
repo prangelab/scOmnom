@@ -635,6 +635,7 @@ def _prepare_sample_for_merge(
     import scipy.sparse as sp
     import pandas as pd
     import anndata as ad
+    pd.set_option('future.no_silent_downcasting', True)
 
     # ------------------------------------------------------------------
     # Preconditions
@@ -657,37 +658,39 @@ def _prepare_sample_for_merge(
         shape=(adata.n_obs, len(union_genes)),
     )
 
-    # ------------------------------------------------------------------
-    # Pad var dataframe (dtype-safe)
-    # ------------------------------------------------------------------
     var = pd.DataFrame(index=union_genes)
 
     for col in adata.var.columns:
         s0 = adata.var[col]
 
-        # align to union genes (preserves dtype better than map)
-        s = s0.reindex(var.index)
-
-        # Fill missing values in a dtype-aware way to avoid NaN->float corruption
         if pd.api.types.is_bool_dtype(s0):
-            s = s.fillna(False).infer_objects(copy=False).astype(bool)
+            # Fill new genes with False for boolean masks
+            s = s0.reindex(var.index, fill_value=False).astype(bool)
 
-        elif pd.api.types.is_categorical_dtype(s0):
-            # keep categories; missing stays missing (safe)
-            s = s.astype("category")
-            # optional: ensure same categories as original
+        elif pd.api.types.is_numeric_dtype(s0):
+            # Fill missing numeric values with 0
+            s = s0.reindex(var.index, fill_value=0)
+            # Ensure we didn't end up with an Object array
+            if s.dtype == object:
+                s = s.infer_objects(copy=False)
+
+        elif isinstance(s0.dtype, pd.CategoricalDtype):
+            # Categoricals are special; missing values remain as 'NaN' categories
+            # We reindex normally then ensure categorical type is preserved
+            s = s0.reindex(var.index).astype("category")
             try:
                 s = s.cat.set_categories(s0.cat.categories)
             except Exception:
                 pass
 
-        elif pd.api.types.is_numeric_dtype(s0):
-            # numeric columns: fill with 0 (or leave NaN if you prefer)
-            s = (s.fillna(0).infer_objects(copy=False))
+        elif pd.api.types.is_string_dtype(s0):
+            # For strings, Zarr/H5AD prefer empty strings over Float-NaNs
+            # We convert to string first to handle nullable types safely
+            s = s0.reindex(var.index).astype(str).replace("nan", "")
 
         else:
-            # strings/objects: zarr string arrays hate float NaN
-            s = s.astype("string").fillna("")
+            # Fallback for any other complex types
+            s = s0.reindex(var.index).fillna("")
 
         var[col] = s.values
 
