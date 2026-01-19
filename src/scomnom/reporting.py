@@ -709,28 +709,6 @@ def generate_integration_report(
 # =============================================================================
 # Cluster + annotate report
 # =============================================================================
-def _extract_round_id_from_rel_png(rel_from_fig_root: Path) -> str:
-    """
-    Infer round id from relative path like:
-      png/cluster_and_annotate/<round_id>/...
-      png/<module_roundX>/cluster_and_annotate/<round_id>/...  (older layouts)
-    """
-    parts = rel_from_fig_root.parts
-    # most common: ("png","cluster_and_annotate","r0_xxx",...)
-    if len(parts) >= 3 and parts[0] == "png" and parts[1] == "cluster_and_annotate":
-        return str(parts[2])
-
-    # fallback: scan for "cluster_and_annotate"
-    try:
-        idx = list(parts).index("cluster_and_annotate")
-        if idx + 1 < len(parts):
-            return str(parts[idx + 1])
-    except Exception:
-        pass
-
-    return "unknown"
-
-
 def _split_round_sections(imgs: List[Path]) -> List[Tuple[str, List[Path]]]:
     clustering: List[Path] = []
     annotation: List[Path] = []
@@ -807,7 +785,7 @@ def generate_cluster_and_annotate_report(*, fig_root: Path, cfg, version: str, a
     Write: <fig_root>/cluster_and_annotate_report.html
     Expects figures under: <fig_root>/png/...
     Behavior:
-      - Organize by clustering round
+      - Organize by clustering round (from adata.uns, NOT from file paths)
       - Round sections collapsed by default (active round open if known)
       - Decoupler barplots ALWAYS collapsed by default
     """
@@ -815,37 +793,79 @@ def generate_cluster_and_annotate_report(*, fig_root: Path, cfg, version: str, a
     out_html = fig_root / "cluster_and_annotate_report.html"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    rel_imgs = _collect_pngs(fig_root)
+    rel_imgs = _collect_pngs(fig_root)  # Paths relative to fig_root (as in the rest of your report)
 
-    by_round: Dict[str, List[Path]] = defaultdict(list)
-    for p in rel_imgs:
-        rid = _extract_round_id_from_rel_png(p)
-        by_round[rid].append(p)
+    # ------------------------------------------------------------------
+    # Authoritative round list from AnnData
+    # ------------------------------------------------------------------
+    uns = getattr(adata, "uns", {}) or {}
 
-    # Order rounds: prefer adata.uns["cluster_round_order"] if present
-    ordered_rounds: List[str] = []
-    seen: set[str] = set()
+    rounds_meta = uns.get("cluster_rounds", {})
+    if not isinstance(rounds_meta, dict):
+        rounds_meta = {}
 
-    round_order = []
-    try:
-        ro = getattr(adata, "uns", {}).get("cluster_round_order", None)
-        if isinstance(ro, (list, tuple)):
-            round_order = [str(x) for x in ro]
-    except Exception:
-        round_order = []
-
-    for rid in round_order:
-        if rid in by_round and rid not in seen:
-            ordered_rounds.append(rid)
-            seen.add(rid)
-    for rid in sorted(by_round.keys()):
-        if rid not in seen:
-            ordered_rounds.append(rid)
-            seen.add(rid)
-
-    active_round = getattr(adata, "uns", {}).get("active_cluster_round", None)
+    active_round = uns.get("active_cluster_round", None)
     active_round = str(active_round) if active_round is not None else None
 
+    # Prefer explicit stored order, but keep only valid rounds
+    ordered_rounds: List[str] = []
+    ro = uns.get("cluster_round_order", None)
+    if isinstance(ro, (list, tuple)) and ro:
+        ordered_rounds = [str(x) for x in ro if str(x) in rounds_meta]
+
+    # Fallback to sorted registered rounds
+    if not ordered_rounds:
+        ordered_rounds = sorted([str(k) for k in rounds_meta.keys()])
+
+    # Ensure active round is shown even if not registered (rare but possible)
+    if active_round and active_round not in ordered_rounds:
+        ordered_rounds.append(active_round)
+
+    # ------------------------------------------------------------------
+    # Map images -> rounds (best-effort), otherwise "unassigned"
+    # ------------------------------------------------------------------
+    by_round: Dict[str, List[Path]] = {rid: [] for rid in ordered_rounds}
+    by_round["unassigned"] = []
+
+    def _rid_from_path(p: Path) -> str | None:
+        """
+        Extract round id from a fig path like:
+          png/<run_round>/cluster_and_annotate/<rid>/...
+        Works with any leading folders before cluster_and_annotate.
+        """
+        parts = list(p.parts)
+        # Find the segment "cluster_and_annotate" anywhere, then take next part
+        try:
+            i = parts.index("cluster_and_annotate")
+            if i + 1 < len(parts):
+                return str(parts[i + 1])
+        except ValueError:
+            return None
+        except Exception:
+            return None
+        return None
+
+    for p in rel_imgs:
+        rid = _rid_from_path(p)
+        if rid and rid in by_round:
+            by_round[rid].append(p)
+        else:
+            by_round["unassigned"].append(p)
+
+    # Nice fallback: if EVERYTHING is unassigned but we have exactly one registered round,
+    # assign all images to that round (common when the path format changed).
+    if by_round["unassigned"] and len(ordered_rounds) == 1:
+        only = ordered_rounds[0]
+        by_round[only].extend(by_round["unassigned"])
+        by_round["unassigned"] = []
+
+    # Drop "unassigned" if empty
+    if not by_round["unassigned"]:
+        by_round.pop("unassigned", None)
+
+    # ------------------------------------------------------------------
+    # Header / meta
+    # ------------------------------------------------------------------
     cfg_dict = getattr(cfg, "__dict__", {})
     cfg_json = _safe(json.dumps(cfg_dict, indent=2, default=str))
     rounds_json = _safe(json.dumps(ordered_rounds, indent=2, default=str))
@@ -865,100 +885,122 @@ def generate_cluster_and_annotate_report(*, fig_root: Path, cfg, version: str, a
         "<b>all decoupler barplots are collapsed</b> to keep the page readable.</p>"
     )
 
-    # TOC: summary + each round
+    # ------------------------------------------------------------------
+    # TOC: summary + registered rounds (+ unassigned if present)
+    # ------------------------------------------------------------------
     toc_sections: List[Tuple[str, str]] = [("summary", "Summary")]
     for rid in ordered_rounds:
         toc_sections.append((f"round-{_slug(rid)}", f"Round: {rid}"))
+    if "unassigned" in by_round:
+        toc_sections.append(("round-unassigned", "Unassigned"))
     toc_html = _toc(toc_sections)
 
     blocks: List[str] = [header]
 
     # Summary (open)
     summary_inner = (
-        "<p class='note'>Round list and active round pointer.</p>"
+        "<p class='note'>Round list and active round pointer (from <code>adata.uns</code>).</p>"
         '<table class="summary-table"><thead><tr><th>Field</th><th>Value</th></tr></thead><tbody>'
         f"<tr><td>active_round</td><td>{_safe(active_round)}</td></tr>"
-        f"<tr><td>n_rounds_found</td><td>{len(ordered_rounds)}</td></tr>"
+        f"<tr><td>n_rounds_registered</td><td>{len(ordered_rounds)}</td></tr>"
+        f"<tr><td>n_plots_total</td><td>{sum(len(v) for v in by_round.values())}</td></tr>"
         "</tbody></table>"
     )
     blocks.append('<div id="summary"></div>')
     blocks.append(_details_block("Summary", summary_inner, open_by_default=True))
 
-    if not ordered_rounds:
-        blocks.append("<p class='note'><em>No cluster_and_annotate figures found under png/.</em></p>")
+    # ------------------------------------------------------------------
+    # Round sections (render even if empty)
+    # ------------------------------------------------------------------
+    if not ordered_rounds and "unassigned" not in by_round:
+        blocks.append("<p class='note'><em>No cluster_and_annotate rounds found in adata.uns, and no figures found.</em></p>")
     else:
         for rid in ordered_rounds:
             imgs = by_round.get(rid, [])
-            if not imgs:
-                continue
 
             sid = f"round-{_slug(rid)}"
             blocks.append(f'<div id="{sid}"></div>')
 
             open_round = bool(active_round) and (rid == active_round)
-            sections = _split_round_sections(imgs)
+            sections = _split_round_sections(imgs) if imgs else []
 
             round_parts: List[str] = []
             round_parts.append(f"<p class='note'>Figures for round <strong>{_safe(rid)}</strong>.</p>")
             round_parts.append(_render_round_summary_table(adata, rid))
 
-            for title, sec_imgs in sections:
-                if not sec_imgs:
-                    continue
+            if not imgs:
+                round_parts.append("<p class='note'><em>No figures were matched to this round.</em></p>")
+            else:
+                for title, sec_imgs in sections:
+                    if not sec_imgs:
+                        continue
 
-                # Decoupler: split further; barplots collapsed by default
-                if title == "Decoupler":
-                    heat = [p for p in sec_imgs if _classify_plot_type(p) == "decoupler_heatmap"]
-                    dots = [p for p in sec_imgs if _classify_plot_type(p) == "decoupler_dotplot"]
-                    bars = [p for p in sec_imgs if _classify_plot_type(p) == "decoupler_bar"]
-                    other = [p for p in sec_imgs if _classify_plot_type(p) == "decoupler_other"]
+                    # Decoupler: split further; barplots collapsed by default
+                    if title == "Decoupler":
+                        heat = [p for p in sec_imgs if _classify_plot_type(p) == "decoupler_heatmap"]
+                        dots = [p for p in sec_imgs if _classify_plot_type(p) == "decoupler_dotplot"]
+                        bars = [p for p in sec_imgs if _classify_plot_type(p) == "decoupler_bar"]
+                        other = [p for p in sec_imgs if _classify_plot_type(p) == "decoupler_other"]
 
-                    if heat:
-                        inner = "<p class='note'>Top features/pathways across clusters.</p>" + _grid_block(
-                            [_render_image_card(p) for p in heat]
-                        )
-                        title_html = f"Decoupler heatmaps <span class='pill'>{len(heat)} plots</span>"
-                        round_parts.append(_details_block(title_html, inner, open_by_default=False, extra_class="subsection"))
+                        if heat:
+                            inner = "<p class='note'>Top features/pathways across clusters.</p>" + _grid_block(
+                                [_render_image_card(p) for p in heat]
+                            )
+                            title_html = f"Decoupler heatmaps <span class='pill'>{len(heat)} plots</span>"
+                            round_parts.append(_details_block(title_html, inner, open_by_default=False, extra_class="subsection"))
 
-                    if dots:
-                        inner = "<p class='note'>Compact overview of activity patterns.</p>" + _grid_block(
-                            [_render_image_card(p) for p in dots]
-                        )
-                        title_html = f"Decoupler dotplots <span class='pill'>{len(dots)} plots</span>"
-                        round_parts.append(_details_block(title_html, inner, open_by_default=False, extra_class="subsection"))
+                        if dots:
+                            inner = "<p class='note'>Compact overview of activity patterns.</p>" + _grid_block(
+                                [_render_image_card(p) for p in dots]
+                            )
+                            title_html = f"Decoupler dotplots <span class='pill'>{len(dots)} plots</span>"
+                            round_parts.append(_details_block(title_html, inner, open_by_default=False, extra_class="subsection"))
 
-                    if bars:
-                        inner = (
-                            "<p class='note'>Per-cluster top-N features. These can be very many, so they are collapsed by default.</p>"
-                            + _grid_block([_render_image_card(p) for p in bars])
-                        )
-                        title_html = f"Decoupler barplots <span class='pill'>{len(bars)} plots</span>"
-                        # REQUIRED: collapsed by default
-                        round_parts.append(_details_block(title_html, inner, open_by_default=False, extra_class="subsection"))
+                        if bars:
+                            inner = (
+                                "<p class='note'>Per-cluster top-N features. These can be very many, so they are collapsed by default.</p>"
+                                + _grid_block([_render_image_card(p) for p in bars])
+                            )
+                            title_html = f"Decoupler barplots <span class='pill'>{len(bars)} plots</span>"
+                            round_parts.append(_details_block(title_html, inner, open_by_default=False, extra_class="subsection"))
 
-                    if other:
-                        inner = _grid_block([_render_image_card(p) for p in other])
-                        title_html = f"Decoupler other <span class='pill'>{len(other)} plots</span>"
-                        round_parts.append(_details_block(title_html, inner, open_by_default=False, extra_class="subsection"))
+                        if other:
+                            inner = _grid_block([_render_image_card(p) for p in other])
+                            title_html = f"Decoupler other <span class='pill'>{len(other)} plots</span>"
+                            round_parts.append(_details_block(title_html, inner, open_by_default=False, extra_class="subsection"))
 
-                    continue
+                        continue
 
-                # Non-decoupler sections: collapsible, tight, collapsed by default
-                note = ""
-                if title == "Clustering":
-                    note = "Resolution sweep, stability, cluster tree, and clustering UMAP diagnostics."
-                elif title == "Annotation":
-                    note = "CellTypist and cluster label visualizations and summaries."
-                elif title == "Compaction":
-                    note = "Compaction flow and compacted-round diagnostics."
+                    # Non-decoupler sections: collapsible, tight, collapsed by default
+                    note = ""
+                    if title == "Clustering":
+                        note = "Resolution sweep, stability, cluster tree, and clustering UMAP diagnostics."
+                    elif title == "Annotation":
+                        note = "CellTypist and cluster label visualizations and summaries."
+                    elif title == "Compaction":
+                        note = "Compaction flow and compacted-round diagnostics."
 
-                note_html = f"<p class='note'>{_safe(note)}</p>" if note else ""
-                inner = note_html + _grid_block([_render_image_card(p) for p in sec_imgs])
-                title_html = f"{_safe(title)} <span class='pill'>{len(sec_imgs)} plots</span>"
-                round_parts.append(_details_block(title_html, inner, open_by_default=False, extra_class="subsection"))
+                    note_html = f"<p class='note'>{_safe(note)}</p>" if note else ""
+                    inner = note_html + _grid_block([_render_image_card(p) for p in sec_imgs])
+                    title_html = f"{_safe(title)} <span class='pill'>{len(sec_imgs)} plots</span>"
+                    round_parts.append(_details_block(title_html, inner, open_by_default=False, extra_class="subsection"))
 
             round_title_html = f"Round: {_safe(rid)} <span class='pill'>{len(imgs)} plots</span>"
             blocks.append(_details_block(round_title_html, "".join(round_parts), open_by_default=open_round))
+
+        # Unassigned bucket (if present)
+        if "unassigned" in by_round:
+            imgs = by_round["unassigned"]
+            blocks.append('<div id="round-unassigned"></div>')
+            inner = (
+                "<p class='note'>These plots could not be mapped to a registered round from <code>adata.uns['cluster_rounds']</code>.</p>"
+                + _grid_block([_render_image_card(p) for p in imgs])
+            )
+            blocks.append(_details_block(
+                f"Unassigned <span class='pill'>{len(imgs)} plots</span>",
+                inner,
+                open_by_default=False,
+            ))
 
     html_doc = (
         "<!DOCTYPE html><html><head>"
@@ -970,3 +1012,4 @@ def generate_cluster_and_annotate_report(*, fig_root: Path, cfg, version: str, a
         "</body></html>"
     )
     out_html.write_text(html_doc, encoding="utf-8")
+
