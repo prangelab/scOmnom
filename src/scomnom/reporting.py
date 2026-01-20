@@ -772,7 +772,7 @@ def _render_round_summary_table(adata, rid: str) -> str:
         rows.append(f"<tr><td>{_safe(k)}</td><td>{_safe(v_disp)}</td></tr>")
 
     return (
-        "<p class='note'>Quick metadata for this round (from <code>adata.uns['cluster_rounds']</code> when available).</p>"
+        "<p class='note'>Quick metadata for this clustering state (from <code>adata.uns['cluster_rounds']</code> when available).</p>"
         '<table class="summary-table">'
         "<thead><tr><th>Field</th><th>Value</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
@@ -785,8 +785,8 @@ def generate_cluster_and_annotate_report(*, fig_root: Path, cfg, version: str, a
     Write: <fig_root>/cluster_and_annotate_report.html
     Expects figures under: <fig_root>/png/...
     Behavior:
-      - Organize by clustering round (from adata.uns, NOT from file paths)
-      - Round sections collapsed by default (active round open if known)
+      - Organize by clustering state (from adata.uns, NOT from file paths)
+      - Clustering state sections collapsed by default (active round open if known)
       - Decoupler barplots ALWAYS collapsed by default
     """
     fig_root = Path(fig_root).resolve()
@@ -827,26 +827,8 @@ def generate_cluster_and_annotate_report(*, fig_root: Path, cfg, version: str, a
     by_round: Dict[str, List[Path]] = {rid: [] for rid in ordered_rounds}
     by_round["unassigned"] = []
 
-    def _rid_from_path(p: Path) -> str | None:
-        """
-        Extract round id from a fig path like:
-          png/<run_round>/cluster_and_annotate/<rid>/...
-        Works with any leading folders before cluster_and_annotate.
-        """
-        parts = list(p.parts)
-        # Find the segment "cluster_and_annotate" anywhere, then take next part
-        try:
-            i = parts.index("cluster_and_annotate")
-            if i + 1 < len(parts):
-                return str(parts[i + 1])
-        except ValueError:
-            return None
-        except Exception:
-            return None
-        return None
-
     for p in rel_imgs:
-        rid = _rid_from_path(p)
+        rid = _extract_round_id_from_rel_png(p)
         if rid and rid in by_round:
             by_round[rid].append(p)
         else:
@@ -875,13 +857,13 @@ def generate_cluster_and_annotate_report(*, fig_root: Path, cfg, version: str, a
         '<div class="meta">'
         f"Version:   {_safe(version)}\n"
         f"Timestamp: {_safe(timestamp)}\n\n"
-        f"Active round: {_safe(active_round)}\n\n"
-        "Round order:\n"
+        f"Active clustering state: {_safe(active_round)}\n\n"
+        "Clustering state order:\n"
         f"{rounds_json}\n\n"
         "Parameters:\n"
         f"{cfg_json}"
         "</div>"
-        "<p class='note'>This report is organized by <b>clustering round</b>."
+        "<p class='note'>This report is organized by <b>clustering clustering state</b>."
         " Plot families are collapsed by default to keep the page readable.</p>"
     )
 
@@ -890,16 +872,16 @@ def generate_cluster_and_annotate_report(*, fig_root: Path, cfg, version: str, a
     # ------------------------------------------------------------------
     toc_sections: List[Tuple[str, str]] = [("summary", "Summary")]
     for rid in ordered_rounds:
-        toc_sections.append((f"round-{_slug(rid)}", f"Round: {rid}"))
+        toc_sections.append((f"clustering state-{_slug(rid)}", f"Clustering state: {rid}"))
     if "unassigned" in by_round:
-        toc_sections.append(("round-unassigned", "Unassigned"))
+        toc_sections.append(("state-unassigned", "Unassigned"))
     toc_html = _toc(toc_sections)
 
     blocks: List[str] = [header]
 
     # Summary (open)
     summary_inner = (
-        "<p class='note'>Round list and active round pointer (from <code>adata.uns</code>).</p>"
+        "<p class='note'>Clustering state list and active state (round) pointer (from <code>adata.uns</code>).</p>"
         '<table class="summary-table"><thead><tr><th>Field</th><th>Value</th></tr></thead><tbody>'
         f"<tr><td>active_round</td><td>{_safe(active_round)}</td></tr>"
         f"<tr><td>n_rounds_registered</td><td>{len(ordered_rounds)}</td></tr>"
@@ -910,7 +892,7 @@ def generate_cluster_and_annotate_report(*, fig_root: Path, cfg, version: str, a
     blocks.append(_details_block("Summary", summary_inner, open_by_default=True))
 
     # ------------------------------------------------------------------
-    # Round sections (render even if empty)
+    # Clustering state sections (render even if empty)
     # ------------------------------------------------------------------
     if not ordered_rounds and "unassigned" not in by_round:
         blocks.append("<p class='note'><em>No cluster_and_annotate rounds found in adata.uns, and no figures found.</em></p>")
@@ -918,18 +900,18 @@ def generate_cluster_and_annotate_report(*, fig_root: Path, cfg, version: str, a
         for rid in ordered_rounds:
             imgs = by_round.get(rid, [])
 
-            sid = f"round-{_slug(rid)}"
+            sid = f"clustering state-{_slug(rid)}"
             blocks.append(f'<div id="{sid}"></div>')
 
             open_round = bool(active_round) and (rid == active_round)
             sections = _split_round_sections(imgs) if imgs else []
 
             round_parts: List[str] = []
-            round_parts.append(f"<p class='note'>Figures for round <strong>{_safe(rid)}</strong>.</p>")
+            round_parts.append(f"<p class='note'>Figures for clustering state <strong>{_safe(rid)}</strong>.</p>")
             round_parts.append(_render_round_summary_table(adata, rid))
 
             if not imgs:
-                round_parts.append("<p class='note'><em>No figures were matched to this round.</em></p>")
+                round_parts.append("<p class='note'><em>No figures were matched to this clustering state.</em></p>")
             else:
                 for title, sec_imgs in sections:
                     if not sec_imgs:
@@ -978,22 +960,22 @@ def generate_cluster_and_annotate_report(*, fig_root: Path, cfg, version: str, a
                     elif title == "Annotation":
                         note = "CellTypist and cluster label visualizations and summaries."
                     elif title == "Compaction":
-                        note = "Compaction flow and compacted-round diagnostics."
+                        note = "Compaction flow and compacted-state diagnostics."
 
                     note_html = f"<p class='note'>{_safe(note)}</p>" if note else ""
                     inner = note_html + _grid_block([_render_image_card(p) for p in sec_imgs])
                     title_html = f"{_safe(title)} <span class='pill'>{len(sec_imgs)} plots</span>"
                     round_parts.append(_details_block(title_html, inner, open_by_default=False, extra_class="subsection"))
 
-            round_title_html = f"Round: {_safe(rid)} <span class='pill'>{len(imgs)} plots</span>"
+            round_title_html = f"Clustering state: {_safe(rid)} <span class='pill'>{len(imgs)} plots</span>"
             blocks.append(_details_block(round_title_html, "".join(round_parts), open_by_default=open_round))
 
         # Unassigned bucket (if present)
         if "unassigned" in by_round:
             imgs = by_round["unassigned"]
-            blocks.append('<div id="round-unassigned"></div>')
+            blocks.append('<div id="state-unassigned"></div>')
             inner = (
-                "<p class='note'>These plots could not be mapped to a registered round from <code>adata.uns['cluster_rounds']</code>.</p>"
+                "<p class='note'>These plots could not be mapped to a registered clustering state from <code>adata.uns['cluster_rounds']</code>.</p>"
                 + _grid_block([_render_image_card(p) for p in imgs])
             )
             blocks.append(_details_block(
@@ -1013,3 +995,31 @@ def generate_cluster_and_annotate_report(*, fig_root: Path, cfg, version: str, a
     )
     out_html.write_text(html_doc, encoding="utf-8")
 
+
+def _extract_round_id_from_rel_png(rel_path_from_fig_root: Path) -> str | None:
+    """
+    rel_path_from_fig_root looks like:
+      png/cluster_and_annotate_roundN/<round_id>/...
+    or (older/alternate):
+      png/cluster_and_annotate/<round_id>/...
+    Returns the <round_id> or None if not detectable.
+    """
+    parts = list(Path(rel_path_from_fig_root).parts)
+
+    # strip leading "png" if present
+    if parts and parts[0] == "png":
+        parts = parts[1:]
+
+    if not parts:
+        return None
+
+    # Layout A: cluster_and_annotate_roundN/<rid>/...
+    if parts[0].startswith("cluster_and_annotate_round"):
+        return parts[1] if len(parts) >= 2 else None
+
+    # Layout B: cluster_and_annotate/<rid>/...
+    try:
+        i = parts.index("cluster_and_annotate")
+        return parts[i + 1] if i + 1 < len(parts) else None
+    except ValueError:
+        return None
