@@ -18,3 +18,6 @@ Added first stable version of the cluster-and-annotate module. It is now usable,
 Fixed an issue during sample merging where boolean adata.var columns (e.g. mt, ribo, hb) could be upcast to float due to missing values introduced when padding to the union gene set, causing Zarr write failures in some environments.
 #### Nullable string categories write failure:
 Resolved a crash when writing padded Zarr files caused by pandas nullable string dtypes (e.g. StringArray / ArrowStringArray) in adata.var categorical columns (notably gene_ids), by coercing to storage-safe string representations compatible with older anndata versions.
+
+## 0.1.4 [20-01-2026]
+Improved layout of reports.
