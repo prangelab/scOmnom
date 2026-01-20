@@ -326,13 +326,14 @@ def _run_harmony(
     use_rep: str = "X_pca",
 ) -> np.ndarray:
     import harmonypy as hm
+    import numpy as np
 
     if use_rep not in adata.obsm:
         raise KeyError(f"{use_rep} not found in adata.obsm")
 
     LOGGER.info("Running Harmony integration")
 
-    Z = np.asarray(adata.obsm[use_rep])          # (n_cells, n_pcs)
+    Z = np.asarray(adata.obsm[use_rep])  # expected (n_cells, n_pcs)
     meta = adata.obs[[batch_key]].copy()
 
     ho = hm.run_harmony(
@@ -342,15 +343,26 @@ def _run_harmony(
         verbose=False,
     )
 
-    # IMPORTANT: transpose
-    Z_corr = np.asarray(ho.Z_corr).T              # (n_cells, n_pcs)
+    Z_corr = np.asarray(ho.Z_corr)
 
-    if Z_corr.shape[0] != adata.n_obs:
+    # Harmonypy / wrappers have not always been consistent about orientation, so double check.
+    if Z_corr.shape == (Z.shape[1], Z.shape[0]):
+        LOGGER.warning(
+            "Harmony returned Z_corr as (n_pcs, n_cells)=%s; transposing to (n_cells, n_pcs).",
+            Z_corr.shape,
+        )
+        Z_corr = Z_corr.T
+    elif Z_corr.shape != Z.shape:
         raise RuntimeError(
-            f"Harmony output shape mismatch: {Z_corr.shape}"
+            f"Harmony output shape mismatch: got {Z_corr.shape}, expected {Z.shape} "
+            f"(or transposed {(Z.shape[1], Z.shape[0])})."
         )
 
+    if Z_corr.shape[0] != adata.n_obs:
+        raise RuntimeError(f"Harmony output shape mismatch: {Z_corr.shape}")
+
     return Z_corr
+
 
 
 # ---------------------------------------------------------------------
