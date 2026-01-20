@@ -740,58 +740,108 @@ def _split_round_sections(imgs: List[Path]) -> List[Tuple[str, List[Path]]]:
     ]
 
 
-def _render_round_summary_table(adata, rid: str) -> str:
+def _infer_round_cluster_labels_key(adata, rid: str, rinfo: dict, cfg=None) -> str | None:
+    """Return the obs column that contains cluster labels for *this* round."""
+    obs = getattr(adata, "obs", None)
+    if obs is None:
+        return None
+
+    # 1) explicit key saved in uns (best)
+    k = rinfo.get("labels_obs_key", None)
+    if isinstance(k, str) and k in obs:
+        return k
+
+    # 2) cluster_key may already be round-specific
+    ck = rinfo.get("cluster_key", None)
+    if isinstance(ck, str) and ck in obs and "__" in ck:
+        return ck
+
+    # 3) try common round-suffixed conventions
+    candidates: list[str] = []
+
+    if isinstance(ck, str) and ck:
+        candidates.append(f"{ck}__{rid}")  # e.g. leiden__r0...
+
+    # cfg.label_key often used as base (if passed)
+    if cfg is not None:
+        base = getattr(cfg, "label_key", None)
+        if isinstance(base, str) and base:
+            candidates.append(f"{base}__{rid}")
+            candidates.append(f"{base}_{rid}")  # sometimes people use underscore
+
+    for cand in candidates:
+        if cand in obs:
+            return cand
+
+    # 4) last resort: plain cluster_key (may be overwritten!)
+    if isinstance(ck, str) and ck in obs:
+        return ck
+
+    return None
+
+
+def _infer_n_clusters_for_round(adata, rid: str, rinfo: dict, cfg=None) -> int | None:
+    k = _infer_round_cluster_labels_key(adata, rid, rinfo, cfg=cfg)
+    if not k:
+        return None
+    try:
+        return int(getattr(adata.obs[k], "astype", lambda x: adata.obs[k])(str).nunique())
+    except Exception:
+        try:
+            return int(adata.obs[k].nunique())
+        except Exception:
+            return None
+
+
+def _render_round_summary_table(adata, rid: str, cfg=None) -> str:
+    """
+    Renders a summary table for a specific clustering round.
+    Strictly derives n_clusters from the round-specific labels_obs_key.
+    """
+    # 1. Access round info safely
     rounds = adata.uns.get("cluster_rounds", {})
     rinfo = rounds.get(rid, {}) if isinstance(rounds, dict) else {}
 
-    rows: list[str] = []
+    # 2. Extract specific round attributes
+    cluster_key = rinfo.get("cluster_key")
+    best_res = rinfo.get("best_resolution")
+    labels_key = rinfo.get("labels_obs_key")
 
-    # ---- cluster_key ----
-    cluster_key = rinfo.get("cluster_key", None)
+    # 3. Derive cluster count strictly from the labels_obs_key
+    n_clusters = ""
+    if labels_key and labels_key in adata.obs:
+        s = adata.obs[labels_key]
+        try:
+            # Use categories if available, else unique values
+            if hasattr(s, "cat"):
+                n_clusters = len(s.cat.categories)
+            else:
+                n_clusters = s.nunique()
+        except Exception:
+            pass
 
-    # ---- best_resolution ----
-    best_res = rinfo.get("best_resolution", None)
+    # 4. Helper for HTML rows
+    def _row(label, value):
+        val_str = str(value) if value is not None else ""
+        return f"<tr><td><b>{label}</b></td><td>{val_str}</td></tr>"
 
-    # ---- n_clusters (derived) ----
-    n_clusters = rinfo.get("n_clusters", None)
-
-    if n_clusters is None:
-        # Try from diagnostics at best resolution
-        best_res = rinfo.get("best_resolution", None)
-        diag = rinfo.get("diagnostics", {}) if isinstance(rinfo.get("diagnostics", {}), dict) else {}
-        cc = diag.get("cluster_counts", {}) if isinstance(diag.get("cluster_counts", {}), dict) else {}
-
-        if best_res is not None and cc:
-            # keys may be "0.60" or similar
-            k1 = f"{float(best_res):.2f}"
-            n_clusters = cc.get(k1, cc.get(str(best_res), None))
-
-    # Final fallback: derive from obs
-    if n_clusters is None and cluster_key and cluster_key in adata.obs:
-        s = adata.obs[cluster_key]
-        if pd.api.types.is_categorical_dtype(s):
-            n_clusters = int(len(s.cat.categories))
-        else:
-            n_clusters = int(s.nunique(dropna=True))
-
-    def add_row(k, v):
-        rows.append(
-            f"<tr><td>{_safe(k)}</td><td>{_safe(v) if v is not None else ''}</td></tr>"
-        )
-
-    add_row("round_id", rid)
-    add_row("best_resolution", best_res)
-    add_row("n_clusters", n_clusters)
-    add_row("cluster_key", cluster_key)
-    add_row("notes", rinfo.get("notes", None))
+    # 5. Build Table
+    rows = [
+        _row("Round ID", rid),
+        _row("Cluster Key", cluster_key),
+        _row("Labels Obs Key", labels_key),
+        _row("Best Resolution", best_res),
+        _row("N Clusters", n_clusters),
+        _row("Notes", rinfo.get("notes")),
+    ]
 
     return (
-        '<table class="summary-table">'
-        '<thead><tr><th>Field</th><th>Value</th></tr></thead>'
+        '<table class="summary-table" style="width:100%; border-collapse: collapse;">'
+        '<thead><tr style="text-align: left; border-bottom: 2px solid #ddd;">'
+        '<th>Field</th><th>Value</th></tr></thead>'
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
     )
-
 
 def generate_cluster_and_annotate_report(*, fig_root: Path, cfg, version: str, adata) -> None:
     """
