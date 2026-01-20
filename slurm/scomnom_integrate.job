@@ -30,6 +30,13 @@ PREVLOC=$(pwd)
 cd $TMPDIR
 pwd
 
+# Set multicore vars
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export NUMEXPR_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export IGRAPH_OPENMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+
 # Run scOmnom
 echo "Running scomnom..."
 scomnom integrate -i adata.filtered.zarr -o results --benchmark-n-jobs $SLURM_CPUS_PER_TASK

@@ -742,39 +742,39 @@ def _split_round_sections(imgs: List[Path]) -> List[Tuple[str, List[Path]]]:
 
 
 def _render_round_summary_table(adata, rid: str) -> str:
-    rounds = getattr(adata, "uns", {}).get("cluster_rounds", {})
-    if not isinstance(rounds, dict):
-        rounds = {}
+    rounds = adata.uns.get("cluster_rounds", {})
+    rinfo = rounds.get(rid, {}) if isinstance(rounds, dict) else {}
 
-    rinfo = rounds.get(rid, {})
-    if not isinstance(rinfo, dict):
-        rinfo = {}
-
-    best_res = rinfo.get("best_resolution", None)
-    n_clusters = rinfo.get("n_clusters", None)
+    # ---- cluster_key ----
     cluster_key = rinfo.get("cluster_key", None)
-    notes = rinfo.get("notes", None)
 
-    fields: List[Tuple[str, Any]] = [
-        ("round_id", rid),
-        ("best_resolution", best_res),
-        ("n_clusters", n_clusters),
-        ("cluster_key", cluster_key),
-        ("notes", notes),
-    ]
+    # ---- best_resolution ----
+    best_res = rinfo.get("best_resolution", None)
+
+    # ---- n_clusters (derived) ----
+    n_clusters = None
+    if cluster_key and cluster_key in adata.obs:
+        try:
+            n_clusters = adata.obs[cluster_key].nunique()
+        except Exception:
+            n_clusters = None
 
     rows = []
-    for k, v in fields:
-        if v is None:
-            v_disp = ""
-        else:
-            v_disp = v
-        rows.append(f"<tr><td>{_safe(k)}</td><td>{_safe(v_disp)}</td></tr>")
+
+    def add_row(k, v):
+        rows.append(
+            f"<tr><td>{_safe(k)}</td><td>{_safe(v) if v is not None else ''}</td></tr>"
+        )
+
+    add_row("round_id", rid)
+    add_row("best_resolution", best_res)
+    add_row("n_clusters", n_clusters)
+    add_row("cluster_key", cluster_key)
+    add_row("notes", rinfo.get("notes", None))
 
     return (
-        "<p class='note'>Quick metadata for this clustering state (from <code>adata.uns['cluster_rounds']</code> when available).</p>"
         '<table class="summary-table">'
-        "<thead><tr><th>Field</th><th>Value</th></tr></thead>"
+        '<thead><tr><th>Field</th><th>Value</th></tr></thead>'
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
     )
@@ -863,7 +863,7 @@ def generate_cluster_and_annotate_report(*, fig_root: Path, cfg, version: str, a
         "Parameters:\n"
         f"{cfg_json}"
         "</div>"
-        "<p class='note'>This report is organized by <b>clustering clustering state</b>."
+        "<p class='note'>This report is organized by <b>clustering state</b>."
         " Plot families are collapsed by default to keep the page readable.</p>"
     )
 

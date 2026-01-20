@@ -38,6 +38,13 @@ PREVLOC=$(pwd)
 cd $TMPDIR
 pwd
 
+# Set multicore vars
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export NUMEXPR_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export IGRAPH_OPENMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+
 # Run scOmnom
 echo "Running scomnom..."
 scomnom load-and-filter -c cellbender -r raw -o results -m metadata.tsv --n-jobs $SLURM_CPUS_PER_TASK --min-genes 200 --max-pct-mt 30
