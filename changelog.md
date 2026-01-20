@@ -21,3 +21,7 @@ Resolved a crash when writing padded Zarr files caused by pandas nullable string
 
 ## 0.1.4 [20-01-2026]
 Improved layout of reports.
+
+## 0.1.5 [20-01-2026]
+Optimised resolution sweep by removing full ARI table computation. Only adjacent ARIs are needed.
+Fixed bug preventing color values to be read from adata.
