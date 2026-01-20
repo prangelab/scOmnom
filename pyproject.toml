@@ -36,7 +36,6 @@ dependencies = [
   "requests",
   "decoupler",
   "scvi-tools",
-  "scarches",
 ]
 
 [project.scripts]

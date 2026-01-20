@@ -13,7 +13,7 @@ import logging
 from .logging_utils import init_logging
 
 
-ALLOWED_METHODS = {"scVI", "scANVI", "scPoli", "Harmony", "Scanorama", "BBKNN"}
+ALLOWED_METHODS = {"scVI", "scANVI", "Harmony", "Scanorama", "BBKNN"}
 ALLOWED_DECOUPLER_METHODS = {"ulm", "mlm", "wsum", "aucell"}
 app = typer.Typer(help="scOmnom CLI — high-throughput scRNA-seq preprocessing and analysis pipeline.")
 
@@ -369,7 +369,7 @@ def integrate(
 
     methods: Optional[List[str]] = typer.Option(
         None, "--methods", "-m",
-        help="[Integration] Methods: BBKNN, scVI, scANVI.",
+        help="[Integration] Methods: BBKNN, Harmony, Scanorama, scVI, scANVI.",
         case_sensitive=False,
     ),
     batch_key: Optional[str] = typer.Option(
