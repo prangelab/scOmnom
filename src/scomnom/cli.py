@@ -412,7 +412,8 @@ def integrate(
     # NEW: scANVI supervision options
     # ------------------------------------------------------------------
     scanvi_label_source: str = typer.Option(
-        "leiden",
+        "bisc_light",
+        "--scanvi-label-source",
         "--scanvi-label-source",
         help="[scANVI] How to generate supervision labels for scANVI: 'leiden' or 'bisc_light'.",
     ),

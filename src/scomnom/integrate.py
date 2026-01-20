@@ -203,6 +203,9 @@ def _compute_scanvi_prelabels(
     Create coarse, structural labels for scANVI by sweeping Leiden resolutions
     on scVI latent space.
 
+    Uses the *centroid silhouette* proxy (O(n*k*d)) via clustering_utils._centroid_silhouette
+    instead of sklearn silhouette (O(n^2) / expensive).
+
     Writes:
       - adata_hvg.obsm["X_scvi_latent"]
       - adata_hvg.obs[out_key]
@@ -210,7 +213,8 @@ def _compute_scanvi_prelabels(
     Returns:
       out_key
     """
-    from sklearn.metrics import silhouette_score
+    # IMPORTANT: use our centroid silhouette proxy, not sklearn
+    from .clustering_utils import _centroid_silhouette
 
     if batch_key not in adata_hvg.obs:
         raise KeyError(f"batch_key '{batch_key}' not found in adata.obs")
@@ -230,7 +234,7 @@ def _compute_scanvi_prelabels(
     # Ensure neighbors once on the latent
     sc.pp.neighbors(adata_hvg, use_rep="X_scvi_latent")
 
-    # Sample for silhouette to keep runtime sane
+    # Optional subsample for centroid silhouette (still cheap, but keep your knob)
     rng = np.random.default_rng(int(silhouette_random_state))
     n = int(adata_hvg.n_obs)
     if silhouette_n is not None and int(silhouette_n) < n:
@@ -243,6 +247,7 @@ def _compute_scanvi_prelabels(
     best_res: float | None = None
     best_score: float = -np.inf
     best_nclust: int = 0
+    best_sil: float = float("nan")
 
     # Sweep
     for r in [float(x) for x in resolutions]:
@@ -250,30 +255,35 @@ def _compute_scanvi_prelabels(
         sc.tl.leiden(adata_hvg, resolution=r, key_added=key)
 
         labels_all = adata_hvg.obs[key].astype(str).to_numpy()
-        if idx_sil is not None:
-            labels = labels_all[idx_sil]
-        else:
-            labels = labels_all
+        labels = labels_all[idx_sil] if idx_sil is not None else labels_all
 
+        # number of clusters in FULL data (not the subsample)
         n_clusters = int(pd.unique(labels_all).size)
 
-        # silhouette_score requires >=2 clusters and < n_samples
-        sil = np.nan
-        if n_clusters >= 2 and n_clusters < len(labels):
+        # centroid silhouette requires >=2 clusters and < n_samples
+        sil = float("nan")
+        if n_clusters >= 2 and n_clusters < int(labels.size):
             try:
-                sil = float(silhouette_score(Z_sil, labels, metric="euclidean"))
+                sil = float(_centroid_silhouette(Z_sil, labels))
             except Exception:
-                sil = np.nan
+                sil = float("nan")
 
         # mild penalty for too many clusters
         score = (sil if np.isfinite(sil) else -1.0) - float(alpha_nclusters) * float(n_clusters)
 
-        LOGGER.info("scanVI prelabels: res=%.3f -> n_clusters=%d, silhouette=%.4f, score=%.4f", r, n_clusters, float(sil) if np.isfinite(sil) else float("nan"), score)
+        LOGGER.info(
+            "scanVI prelabels: res=%.3f -> n_clusters=%d, centroid_silhouette=%.4f, score=%.4f",
+            r,
+            n_clusters,
+            sil if np.isfinite(sil) else float("nan"),
+            score,
+        )
 
         if score > best_score:
             best_score = score
             best_res = r
             best_nclust = n_clusters
+            best_sil = sil
 
     if best_res is None:
         raise RuntimeError("Failed to select a preflight resolution for scANVI labels")
@@ -286,7 +296,6 @@ def _compute_scanvi_prelabels(
     tiny = set(counts[counts < int(tiny_cluster_min_cells)].index.astype(str))
 
     # --- Guardrail 2: batch trap -> Unknown ---
-    # mark cluster Unknown if dominated by a single batch
     batch = adata_hvg.obs[batch_key].astype(str)
     trap = set()
 
@@ -311,9 +320,11 @@ def _compute_scanvi_prelabels(
     # Log summary
     n_unknown = int((out.astype(str) == "Unknown").sum())
     LOGGER.info(
-        "scanVI prelabels selected: res=%.3f -> n_clusters=%d; Unknown=%d (tiny<%d: %d clusters; batch_trap>=%.2f & n>=%d: %d clusters)",
+        "scanVI prelabels selected: res=%.3f -> n_clusters=%d; centroid_silhouette=%.4f; Unknown=%d "
+        "(tiny<%d: %d clusters; batch_trap>=%.2f & n>=%d: %d clusters)",
         float(best_res),
         int(best_nclust),
+        float(best_sil) if np.isfinite(best_sil) else float("nan"),
         n_unknown,
         int(tiny_cluster_min_cells),
         int(len(tiny)),
