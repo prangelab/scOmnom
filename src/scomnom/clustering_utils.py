@@ -1138,9 +1138,13 @@ def _resolution_sweep(
 
     for res in resolutions:
         res_f = float(res)
-        key = f"{cfg.label_key}_{res_f:.2f}"
-        LOGGER.info("Running Leiden clustering at resolution %.2f -> key '%s'", res_f, key)
 
+        # -----------------------------
+        # Cleaner, human-facing logging
+        # -----------------------------
+        LOGGER.info("Running Leiden clustering at resolution %.2f", res_f)
+
+        key = f"{cfg.label_key}_{res_f:.2f}"
         sc.tl.leiden(
             adata,
             resolution=res_f,
@@ -1159,8 +1163,23 @@ def _resolution_sweep(
         cluster_sizes[res_f] = sizes
 
         sil = _centroid_silhouette(X, labels)
+        pen = sil - cfg.penalty_alpha * n_clusters
+
         silhouette_scores.append(sil)
-        penalized_scores.append(sil - cfg.penalty_alpha * n_clusters)
+        penalized_scores.append(pen)
+
+        # -----------------------------
+        # One-line quantitative summary
+        # -----------------------------
+        LOGGER.info(
+            "  → %d clusters | silhouette=%.3f | penalized=%.3f | min/med/max size=%d/%d/%d",
+            n_clusters,
+            sil,
+            pen,
+            int(sizes.min()),
+            int(np.median(sizes)),
+            int(sizes.max()),
+        )
 
         if use_bio:
             m = bio_mask
@@ -1171,18 +1190,20 @@ def _resolution_sweep(
             bio_m = celltypist_labels[m]
 
             if labels_m.size >= 2 and np.unique(labels_m).size >= 2:
-                bio_hom[res_f] = float(_compute_bio_homogeneity(labels_m, bio_m))
-                bio_frag[res_f] = float(_compute_bio_fragmentation(labels_m, bio_m))
-                bio_ari[res_f] = float(adjusted_rand_score(labels_m, bio_m))
+                bh = float(_compute_bio_homogeneity(labels_m, bio_m))
+                bf = float(_compute_bio_fragmentation(labels_m, bio_m))
+                ba = float(adjusted_rand_score(labels_m, bio_m))
 
-    ari_matrix = pd.DataFrame(
-        index=[f"{r:.2f}" for r in res_list],
-        columns=[f"{r:.2f}" for r in res_list],
-        dtype=float,
-    )
-    for i, r1 in enumerate(res_list):
-        for j, r2 in enumerate(res_list):
-            ari_matrix.iat[i, j] = float(adjusted_rand_score(clusterings_float[r1], clusterings_float[r2]))
+                bio_hom[res_f] = bh
+                bio_frag[res_f] = bf
+                bio_ari[res_f] = ba
+
+                LOGGER.info(
+                    "    bio metrics: homogeneity=%.3f | fragmentation=%.3f | bio-ARI=%.3f",
+                    bh,
+                    bf,
+                    ba,
+                )
 
     metrics = ResolutionMetrics(
         resolutions=res_list,
@@ -1222,7 +1243,6 @@ def _resolution_sweep(
         "silhouette_scores": silhouette_scores,
         "n_clusters": n_clusters_list,
         "penalized_scores": penalized_scores,
-        "ari_matrix": ari_matrix,
         "composite_scores": [selection.scores[r] for r in res_list],
         "stability_scores": [selection.stability[r] for r in res_list],
         "tiny_cluster_penalty": [selection.tiny_cluster_penalty[r] for r in res_list],
@@ -1242,6 +1262,7 @@ def _resolution_sweep(
 
     clusterings_str: Dict[str, np.ndarray] = {_res_key(r): labs for r, labs in clusterings_float.items()}
     return best_res, sweep, clusterings_str
+
 
 
 def _subsampling_stability(
