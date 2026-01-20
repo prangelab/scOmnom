@@ -59,6 +59,7 @@ dependencies:
   # These packages seem to install more stable from pip
   - pip:
       - scvi-tools
+      - scarches
       - scanorama
       - harmonypy
       - scib-metrics

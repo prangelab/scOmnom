@@ -200,28 +200,72 @@ def _run_scpoli(
     label_key: Optional[str],
 ) -> np.ndarray:
     """
-    Run scPoli integration.
+    Run scPoli integration via scArches (NOT scvi-tools).
 
-    scPoli models sample relationships via a learned batch embedding.
-    Optionally supervised via label_key.
+    Returns
+    -------
+    np.ndarray
+        Latent representation (n_cells × n_latent)
     """
-    from scvi.model import SCPOLI
+    import numpy as np
 
-    LOGGER.info("Training scPoli for integration")
+    try:
+        # scPoli lives in scArches
+        from scarches.models.scpoli import scPoli  # type: ignore
+    except Exception as e:
+        raise ImportError(
+            "scPoli is not available in scvi-tools as scvi.model.SCPOLI in your environment.\n"
+            "Install scArches and its deps, then re-run.\n"
+            "Example: pip install scarches"
+        ) from e
 
-    SCPOLI.setup_anndata(
-        adata,
-        batch_key=batch_key,
-        cell_type_key=label_key,
+    if batch_key not in adata.obs:
+        raise KeyError(f"batch_key '{batch_key}' not found in adata.obs")
+
+    if label_key is not None:
+        _ensure_label_key(adata, label_key)
+
+    LOGGER.info(
+        "Training scPoli (scArches) for integration (batch_key=%r, label_key=%r)",
+        batch_key,
+        label_key,
     )
 
-    model = SCPOLI(adata)
+    # scArches API: condition_keys + (optional) cell_type_keys
+    model = scPoli(
+        adata=adata,
+        condition_keys=[batch_key],
+        cell_type_keys=[label_key] if label_key else None,
+    )
+
+    # Keep your existing behavior: 50 epochs, no progress bar
+    # (scArches uses its own logging/progress internally)
     model.train(
-        max_epochs=50,
-        enable_progress_bar=False,
+        n_epochs=50,
+        # conservative defaults; scPoli supports these parameters (see scArches tutorial)
+        pretraining_epochs=40,
+        eta=10,
     )
 
-    return np.asarray(model.get_latent_representation())
+    # Extract latent representation (API differs across scArches versions)
+    if hasattr(model, "get_latent"):
+        Z = model.get_latent(adata)
+    elif hasattr(model, "get_latent_representation"):
+        Z = model.get_latent_representation(adata)
+    elif hasattr(model, "get_latent_embedding"):
+        Z = model.get_latent_embedding(adata)
+    else:
+        raise AttributeError(
+            "Could not find a latent extraction method on scPoli model "
+            "(expected one of: get_latent / get_latent_representation / get_latent_embedding)."
+        )
+
+    Z = np.asarray(Z)
+    if Z.shape[0] != adata.n_obs:
+        raise RuntimeError(f"scPoli latent shape mismatch: got {Z.shape}, expected ({adata.n_obs}, k)")
+
+    return Z
+
 
 
 def _run_scanorama(
@@ -574,18 +618,16 @@ def _select_best_embedding(
     """
     Run scIB benchmarking and select the best integration embedding.
 
-      - If adata.n_obs > benchmark_threshold: stratified subsample by batch_key
-        to benchmark_n_cells (default 100k), then run scIB on that subset.
-      - Else: run scIB on full data.
+    IMPORTANT BEHAVIOR (patched):
+      - Benchmark includes not only embeddings created in *this* run (`embedding_keys`)
+        but also any pre-existing, eligible embeddings already present in `adata.obsm`.
+      - This enables "second pass" benchmarking (e.g. run only scPoli) while still
+        comparing against embeddings computed in prior runs.
 
-    Selection strategy (baseline-aware):
-      1) batch > Unintegrated AND bio > Unintegrated
-      2) bio > Unintegrated
-      3) batch > Unintegrated
-      4) fallback: highest Total
-
-    Returns:
-      best embedding key (string)
+    Eligibility for pre-existing embeddings:
+      - key is in a known allowlist of integration embeddings
+      - value exists in adata.obsm
+      - is array-like and has shape (adata.n_obs, d) with d >= 2
     """
     from scib_metrics.benchmark import Benchmarker, BioConservation, BatchCorrection
 
@@ -604,10 +646,76 @@ def _select_best_embedding(
         "scPoli": "supervised",
     }
 
-    benchmark_embeddings = [
-        e for e in embedding_keys
-        if not e.upper().startswith("BBKNN")
+    # --------------------------------------------------
+    # Build benchmark embedding list:
+    #   - always include embeddings created this run (except BBKNN)
+    #   - PLUS any pre-existing embeddings in adata.obsm that are eligible
+    # --------------------------------------------------
+    created = [str(e) for e in (embedding_keys or [])]
+    created_set = set(created)
+
+    # Allowlist of "integration-style" embeddings we might want to benchmark if present.
+    # (We exclude 'X_integrated' deliberately because it's derived/selected, not a method.)
+    ALLOWED_EXISTING = [
+        "Unintegrated",
+        "Harmony",
+        "Scanorama",
+        "scVI",
+        "scANVI",
+        "scPoli",
+        # If you later add more methods, add their canonical obsm keys here.
     ]
+
+    def _is_valid_embedding_key(k: str) -> bool:
+        return bool(k) and (not k.upper().startswith("BBKNN"))
+
+    def _is_valid_embedding_matrix(k: str) -> bool:
+        if k not in adata.obsm:
+            return False
+        try:
+            Z = np.asarray(adata.obsm[k])
+        except Exception:
+            return False
+        if Z.ndim != 2:
+            return False
+        if Z.shape[0] != int(adata.n_obs):
+            return False
+        if Z.shape[1] < 2:
+            return False
+        # Reject non-finite embeddings (rare, but can poison scIB)
+        if not np.isfinite(Z).all():
+            return False
+        return True
+
+    # Start from created keys
+    benchmark_embeddings: list[str] = []
+    for e in created:
+        if _is_valid_embedding_key(e) and _is_valid_embedding_matrix(e):
+            benchmark_embeddings.append(e)
+
+    # Add eligible pre-existing embeddings (second pass support)
+    pre_existing_added: list[str] = []
+    for k in ALLOWED_EXISTING:
+        if k in created_set:
+            continue
+        if _is_valid_embedding_key(k) and _is_valid_embedding_matrix(k):
+            benchmark_embeddings.append(k)
+            pre_existing_added.append(k)
+
+    # De-dup while preserving order
+    benchmark_embeddings = list(dict.fromkeys(benchmark_embeddings))
+
+    if pre_existing_added:
+        LOGGER.info(
+            "scIB benchmarking: including pre-existing embeddings from adata.obsm (not recomputed this run): %s",
+            pre_existing_added,
+        )
+
+    if not benchmark_embeddings:
+        raise RuntimeError(
+            "No valid embeddings available for scIB benchmarking. "
+            "Expected at least one embedding in adata.obsm among created keys or known existing keys."
+        )
 
     # --------------------------------------------------
     # Subsample (stratified by batch) if needed
@@ -629,33 +737,25 @@ def _select_best_embedding(
         target = int(benchmark_n_cells)
         rng = np.random.default_rng(int(benchmark_random_state))
 
-        # batch sizes
         batch_series = adata.obs[batch_key].astype("category")
         batches = batch_series.cat.categories.tolist()
         batch_counts = batch_series.value_counts().reindex(batches).to_numpy()
         batch_props = batch_counts / batch_counts.sum()
 
-        # initial allocation
         alloc = np.floor(batch_props * target).astype(int)
-
-        # ensure we don't allocate more than available per batch
         alloc = np.minimum(alloc, batch_counts)
 
-        # ensure at least 1 from each batch that exists (if target allows)
         if target >= len(batches):
             alloc = np.maximum(alloc, (batch_counts > 0).astype(int))
             alloc = np.minimum(alloc, batch_counts)
 
-        # fix rounding to hit exact target (as close as possible)
         current = int(alloc.sum())
         leftover = target - current
 
         if leftover > 0:
-            # distribute leftover to batches with remaining capacity
             capacity = batch_counts - alloc
             eligible = np.where(capacity > 0)[0]
             if eligible.size > 0:
-                # weight by remaining capacity
                 weights = capacity[eligible].astype(float)
                 weights = weights / weights.sum() if weights.sum() > 0 else None
                 picks = rng.choice(eligible, size=leftover, replace=True, p=weights)
@@ -664,7 +764,6 @@ def _select_best_embedding(
                         alloc[i] += 1
 
         elif leftover < 0:
-            # remove extras from batches with alloc > 1 (or >0 if needed)
             remove = -leftover
             removable = np.where(alloc > 0)[0]
             if removable.size > 0:
@@ -675,10 +774,7 @@ def _select_best_embedding(
                     if alloc[i] > 0:
                         alloc[i] -= 1
 
-        # final indices
         picked_obs = []
-        obs_names = adata.obs_names.to_numpy()
-
         for b, k in zip(batches, alloc):
             if k <= 0:
                 continue
@@ -697,7 +793,6 @@ def _select_best_embedding(
         picked = np.concatenate(picked_obs)
         rng.shuffle(picked)
 
-        # Safety: clip to target (can happen due to min-1 logic)
         if picked.size > target:
             picked = picked[:target]
 
@@ -708,7 +803,6 @@ def _select_best_embedding(
             int(benchmark_threshold),
         )
 
-        # Copy is important because Benchmarker writes neighbors/graphs into adata
         adata_bm = adata[picked].copy()
 
     else:
@@ -766,18 +860,11 @@ def _select_best_embedding(
 
     baseline = numeric.loc["Unintegrated"]
 
-    # --------------------------------------------------
-    # Helper masks
-    # --------------------------------------------------
     bio_ok = numeric["Bio conservation"] > baseline["Bio conservation"]
     batch_ok = numeric["Batch correction"] > baseline["Batch correction"]
 
-    # Never compare baseline to itself
     candidates = numeric.index != "Unintegrated"
 
-    # --------------------------------------------------
-    # Tiered selection
-    # --------------------------------------------------
     tier1 = numeric.loc[candidates & bio_ok & batch_ok]
     tier2 = numeric.loc[candidates & bio_ok]
     tier3 = numeric.loc[candidates & batch_ok]
@@ -795,9 +882,6 @@ def _select_best_embedding(
         best = numeric.loc[candidates, "Total"].idxmax()
         reason = "fallback (highest Total)"
 
-    # --------------------------------------------------
-    # Logging + annotation
-    # --------------------------------------------------
     method_class = METHOD_CLASS.get(str(best), "unknown")
 
     LOGGER.info(

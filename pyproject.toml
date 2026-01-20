@@ -35,6 +35,8 @@ dependencies = [
   "celltypist",
   "requests",
   "decoupler",
+  "scvi-tools",
+  "scarches",
 ]
 
 [project.scripts]
