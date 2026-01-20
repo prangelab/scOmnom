@@ -744,6 +744,8 @@ def _render_round_summary_table(adata, rid: str) -> str:
     rounds = adata.uns.get("cluster_rounds", {})
     rinfo = rounds.get(rid, {}) if isinstance(rounds, dict) else {}
 
+    rows: list[str] = []
+
     # ---- cluster_key ----
     cluster_key = rinfo.get("cluster_key", None)
 
