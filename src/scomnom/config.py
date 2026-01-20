@@ -103,37 +103,101 @@ class LoadAndFilterConfig(BaseModel):
         return self
 
 
-class IntegrateConfig(BaseModel):
+from pathlib import Path
+from typing import List, Optional, Sequence
+from pydantic import BaseModel, Field, field_validator
 
+
+class IntegrateConfig(BaseModel):
+    # ------------------------------------------------------------------
+    # IO
+    # ------------------------------------------------------------------
     input_path: Path
     output_dir: Path
     output_name: str = "adata.integrated"
     save_h5ad: bool = False
 
-    batch_key: Optional[str] = None
-    label_key: str = "leiden"
+    logfile: Optional[Path] = None
 
+    # ------------------------------------------------------------------
+    # Core keys
+    # ------------------------------------------------------------------
+    batch_key: Optional[str] = None
+    label_key: str = "leiden"  # used for scIB + downstream reporting
+
+    # ------------------------------------------------------------------
+    # Integration methods
+    # ------------------------------------------------------------------
     methods: Optional[List[str]] = None
     benchmark_n_jobs: int = 16
-    benchmark_threshold: int = 100000,
-    benchmark_n_cells: int = 100000,
-    benchmark_random_state: int = 42,
+    benchmark_threshold: int = 100_000
+    benchmark_n_cells: int = 100_000
+    benchmark_random_state: int = 42
 
+    # ------------------------------------------------------------------
+    # scANVI supervision (NEW)
+    # ------------------------------------------------------------------
+    # How to generate labels_key for scANVI
+    #   "leiden"      -> simple Leiden on scVI latent
+    #   "bisc_light"  -> light structural-only BISC on scVI latent
+    scanvi_label_source: str = "bisc_light"
+
+    # Key written into adata.obs and passed to scANVI
+    scanvi_labels_key: str = "scanvi_prelabels"
+
+    # --- BISC-light parameters (only used if scanvi_label_source == "bisc_light")
+    scanvi_bisc_resolutions: List[float] = Field(
+        default_factory=lambda: [0.3, 0.6, 1.0, 1.5, 2.0]
+    )
+    scanvi_bisc_min_cells: int = 100
+    scanvi_bisc_n_subsamples: int = 5
+
+    # ------------------------------------------------------------------
+    # Batch-trap guardrails (NEW)
+    # ------------------------------------------------------------------
+    # If a cluster is dominated by a single batch beyond this fraction,
+    # mark it as "Unknown" for scANVI supervision.
+    scanvi_batch_trap_threshold: float = 0.90
+
+    # Minimum cluster size to consider for batch-trap logic
+    scanvi_batch_trap_min_cells: int = 200
+
+    # Also mark tiny clusters as Unknown
+    scanvi_unknown_tiny_clusters: bool = True
+    scanvi_tiny_cluster_threshold: int = 50
+
+    # ------------------------------------------------------------------
+    # Figures
+    # ------------------------------------------------------------------
     figdir_name: str = "figures"
     figure_formats: List[str] = Field(default_factory=lambda: ["png", "pdf"])
 
-    logfile: Optional[Path] = None
-
+    # ------------------------------------------------------------------
+    # Derived paths
+    # ------------------------------------------------------------------
     @property
     def figdir(self) -> Path:
         return self.output_dir / self.figdir_name
 
+    # ------------------------------------------------------------------
+    # Validators
+    # ------------------------------------------------------------------
     @field_validator("methods")
     @classmethod
     def normalize_methods(cls, v):
         if v is None:
             return None
         return [m.lower() for m in v]
+
+    @field_validator("scanvi_label_source")
+    @classmethod
+    def validate_scanvi_label_source(cls, v):
+        allowed = {"leiden", "bisc_light"}
+        if v not in allowed:
+            raise ValueError(
+                f"scanvi_label_source must be one of {sorted(allowed)}, got {v!r}"
+            )
+        return v
 
 
 # ---------------------------------------------------------------------

@@ -337,11 +337,15 @@ def load_and_filter(
 @app.command("integrate", help="Integration + benchmarking.")
 def integrate(
     input_path: Path = typer.Option(
-        ..., "--input-path", "-i",
-        help="[I/O] Dataset produced by load-and-filter (.zarr or .h5ad)."
+        ...,
+        "--input-path",
+        "-i",
+        help="[I/O] Dataset produced by load-and-filter (.zarr or .h5ad).",
     ),
     output_dir: Optional[Path] = typer.Option(
-        None, "--output-dir", "-o",
+        None,
+        "--output-dir",
+        "-o",
         help="[I/O] Output directory (default = input parent).",
     ),
     output_name: str = typer.Option(
@@ -354,7 +358,6 @@ def integrate(
         "--save-h5ad/--no-save-h5ad",
         help="Optionally write an .h5ad copy.",
     ),
-
     figdir_name: str = typer.Option(
         "figures",
         "--figdir-name",
@@ -366,36 +369,104 @@ def integrate(
         "-F",
         help="[Figures] Output figure formats.",
     ),
-
     methods: Optional[List[str]] = typer.Option(
-        None, "--methods", "-m",
+        None,
+        "--methods",
+        "-m",
         help="[Integration] Methods: BBKNN, Harmony, Scanorama, scVI, scANVI.",
         case_sensitive=False,
     ),
     batch_key: Optional[str] = typer.Option(
-        None, "--batch-key", "-b",
+        None,
+        "--batch-key",
+        "-b",
         help="[Integration] Batch/sample column in .obs.",
     ),
     label_key: str = typer.Option(
-        "leiden", "--label-key", "-l",
-        help="[scIB] Label key for benchmarking and scANVI.",
+        "leiden",
+        "--label-key",
+        "-l",
+        help="[scIB] Label key for benchmarking. (scANVI labels are controlled separately.)",
     ),
-
     benchmark_n_jobs: int = typer.Option(
         16,
         "--benchmark-n-jobs",
         help="[scIB] Parallel workers.",
     ),
-    benchmark_threshold: int = 100000,
-    benchmark_n_cells: int = 100000,
-    benchmark_random_state: int = 42,
+    benchmark_threshold: int = typer.Option(
+        100000,
+        "--benchmark-threshold",
+        help="[scIB] If n_cells exceeds this, benchmark on a stratified subsample.",
+    ),
+    benchmark_n_cells: int = typer.Option(
+        100000,
+        "--benchmark-n-cells",
+        help="[scIB] Target cell count for stratified benchmarking subsample.",
+    ),
+    benchmark_random_state: int = typer.Option(
+        42,
+        "--benchmark-random-state",
+        help="[scIB] RNG seed for stratified benchmarking subsample.",
+    ),
+    # ------------------------------------------------------------------
+    # NEW: scANVI supervision options
+    # ------------------------------------------------------------------
+    scanvi_label_source: str = typer.Option(
+        "leiden",
+        "--scanvi-label-source",
+        help="[scANVI] How to generate supervision labels for scANVI: 'leiden' or 'bisc_light'.",
+    ),
+    scanvi_labels_key: str = typer.Option(
+        "scanvi_prelabels",
+        "--scanvi-labels-key",
+        help="[scANVI] adata.obs key to write and pass as labels_key to scANVI.",
+    ),
+    scanvi_bisc_resolutions: List[float] = typer.Option(
+        [0.3, 0.6, 1.0, 1.5, 2.0],
+        "--scanvi-bisc-resolutions",
+        help="[scANVI/BISC-light] Sparse resolution grid used when scanvi_label_source='bisc_light'.",
+    ),
+    scanvi_bisc_min_cells: int = typer.Option(
+        100,
+        "--scanvi-bisc-min-cells",
+        help="[scANVI/BISC-light] Minimum cluster size during preflight BISC sweep.",
+    ),
+    scanvi_bisc_n_subsamples: int = typer.Option(
+        5,
+        "--scanvi-bisc-n-subsamples",
+        help="[scANVI/BISC-light] Subsampling repeats for stability during preflight BISC.",
+    ),
+    # ------------------------------------------------------------------
+    # NEW: batch-trap / tiny cluster guardrails
+    # ------------------------------------------------------------------
+    scanvi_batch_trap_threshold: float = typer.Option(
+        0.90,
+        "--scanvi-batch-trap-threshold",
+        help="[scANVI] If a cluster is >= this fraction one batch, mark it 'Unknown' for scANVI.",
+    ),
+    scanvi_batch_trap_min_cells: int = typer.Option(
+        200,
+        "--scanvi-batch-trap-min-cells",
+        help="[scANVI] Only apply batch-trap logic to clusters with at least this many cells.",
+    ),
+    scanvi_unknown_tiny_clusters: bool = typer.Option(
+        True,
+        "--scanvi-unknown-tiny-clusters/--no-scanvi-unknown-tiny-clusters",
+        help="[scANVI] Mark very small clusters as 'Unknown' for scANVI supervision.",
+    ),
+    scanvi_tiny_cluster_threshold: int = typer.Option(
+        50,
+        "--scanvi-tiny-cluster-threshold",
+        help="[scANVI] Cluster size below which clusters are marked 'Unknown' (if enabled).",
+    ),
 ):
-    logfile = (output_dir or input_path.parent) / "integrate.log"
+    outdir = output_dir or input_path.parent
+    logfile = outdir / "integrate.log"
     init_logging(logfile)
 
     cfg = IntegrateConfig(
         input_path=input_path,
-        output_dir=output_dir or input_path.parent,
+        output_dir=outdir,
         output_name=output_name,
         save_h5ad=save_h5ad,
         figdir_name=figdir_name,
@@ -407,6 +478,15 @@ def integrate(
         benchmark_threshold=benchmark_threshold,
         benchmark_n_cells=benchmark_n_cells,
         benchmark_random_state=benchmark_random_state,
+        scanvi_label_source=scanvi_label_source,
+        scanvi_labels_key=scanvi_labels_key,
+        scanvi_bisc_resolutions=scanvi_bisc_resolutions,
+        scanvi_bisc_min_cells=scanvi_bisc_min_cells,
+        scanvi_bisc_n_subsamples=scanvi_bisc_n_subsamples,
+        scanvi_batch_trap_threshold=scanvi_batch_trap_threshold,
+        scanvi_batch_trap_min_cells=scanvi_batch_trap_min_cells,
+        scanvi_unknown_tiny_clusters=scanvi_unknown_tiny_clusters,
+        scanvi_tiny_cluster_threshold=scanvi_tiny_cluster_threshold,
         logfile=logfile,
     )
 
