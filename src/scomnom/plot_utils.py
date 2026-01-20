@@ -229,6 +229,72 @@ def save_umap_multi(
 # -------------------------------------------------------------------------
 # Internal helpers
 # -------------------------------------------------------------------------
+def _sanitize_uns_colors(adata: ad.AnnData, key: str) -> None:
+    """
+    Ensure adata.uns[f"{key}_colors"] is a clean list of valid matplotlib colors
+    with length == number of categories in adata.obs[key].
+
+    Fixes common corruption patterns (dicts with '__type__', bad entries).
+    If uns colors are unusable, regenerates a palette.
+    """
+    import matplotlib.colors as mcolors
+    from scanpy.plotting.palettes import default_102
+
+    colors_key = f"{key}_colors"
+    if key not in adata.obs:
+        return
+
+    # Determine expected length (categories)
+    try:
+        cats = adata.obs[key].astype("category").cat.categories
+        n_cats = int(len(cats))
+    except Exception:
+        # if not categorical, don't try to manage palette
+        return
+
+    raw = adata.uns.get(colors_key, None)
+
+    # Normalize various shapes into a list[str]
+    colors: list[str] | None = None
+    if isinstance(raw, list):
+        colors = [str(x) for x in raw]
+    elif isinstance(raw, dict):
+        # common: {"__type__": ..., "0": "#...", ...}
+        # keep numeric-ish keys only, ordered
+        items: list[tuple[int, str]] = []
+        for k, v in raw.items():
+            if str(k).startswith("__"):
+                continue
+            try:
+                idx = int(k)
+            except Exception:
+                continue
+            items.append((idx, str(v)))
+        if items:
+            items.sort(key=lambda t: t[0])
+            colors = [v for _, v in items]
+
+    # Validate
+    def _is_valid_color(c: str) -> bool:
+        try:
+            return bool(mcolors.is_color_like(c))
+        except Exception:
+            return False
+
+    ok = (
+        colors is not None
+        and len(colors) >= n_cats
+        and all(_is_valid_color(c) for c in colors[:n_cats])
+    )
+
+    if ok:
+        adata.uns[colors_key] = colors[:n_cats]
+        return
+
+    # Regenerate palette
+    adata.uns[colors_key] = list(default_102[:n_cats])
+
+
 def _next_round_subdir(root_figdir: Path, formats: Sequence[str], run_name: str) -> Path:
     """
     Pick next <run_name>_roundN by scanning *only* that module's folders:
@@ -1854,6 +1920,11 @@ def plot_cluster_umaps(
     batch_key: str,
     figdir: Path,
 ) -> None:
+
+    _sanitize_uns_colors(adata, label_key)
+    if batch_key is not None and batch_key in adata.obs:
+        _sanitize_uns_colors(adata, batch_key)
+
     fig = sc.pl.umap(adata, color=[label_key], show=False, return_fig=True, legend_loc="right margin")
     save_umap_multi(f"cluster_umap_{label_key}", figdir, fig, right=0.78)
 
