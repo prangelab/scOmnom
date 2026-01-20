@@ -1,0 +1,44 @@
+#! /bin/bash
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --partition=rome
+#SBATCH --constraint=scratch-node
+
+# Setup env
+module load 2025
+
+eval "$(micromamba shell hook -s bash)"
+micromamba activate scOmnom_env
+
+# Copy our stuff
+echo "Copying data to scratch..."
+cp -R results/adata.integrated.zarr $TMPDIR/.
+
+# Copy empty dir structure to preserve run info
+mkdir -p "$TMPDIR/results/figures"
+rsync -a \
+  --include='*/' \
+  --exclude='*' \
+  results/figures/ \
+  "$TMPDIR/results/figures/"
+
+#Tidy up
+PREVLOC=$(pwd)
+cd $TMPDIR
+pwd
+
+# Set multicore vars
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export NUMEXPR_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export IGRAPH_OPENMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+
+# Run scOmnom
+echo "Running scomnom..."
+scomnom cluster-and-annotate -i adata.integrated.zarr -o results
+
+# Copy the results back
+echo "Copying results back to $PREVLOC"
+rsync -a results $PREVLOC/.
+echo "Done!"
