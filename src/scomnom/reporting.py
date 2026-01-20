@@ -1,12 +1,11 @@
 # src/scomnom/reporting.py
 from __future__ import annotations
 
-from collections import defaultdict
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Sequence, Tuple
+from typing import Any, Dict, List, Tuple
 
+import pandas as pd
 import html
 import json
 import re
@@ -752,14 +751,26 @@ def _render_round_summary_table(adata, rid: str) -> str:
     best_res = rinfo.get("best_resolution", None)
 
     # ---- n_clusters (derived) ----
-    n_clusters = None
-    if cluster_key and cluster_key in adata.obs:
-        try:
-            n_clusters = adata.obs[cluster_key].nunique()
-        except Exception:
-            n_clusters = None
+    n_clusters = rinfo.get("n_clusters", None)
 
-    rows = []
+    if n_clusters is None:
+        # Try from diagnostics at best resolution
+        best_res = rinfo.get("best_resolution", None)
+        diag = rinfo.get("diagnostics", {}) if isinstance(rinfo.get("diagnostics", {}), dict) else {}
+        cc = diag.get("cluster_counts", {}) if isinstance(diag.get("cluster_counts", {}), dict) else {}
+
+        if best_res is not None and cc:
+            # keys may be "0.60" or similar
+            k1 = f"{float(best_res):.2f}"
+            n_clusters = cc.get(k1, cc.get(str(best_res), None))
+
+    # Final fallback: derive from obs
+    if n_clusters is None and cluster_key and cluster_key in adata.obs:
+        s = adata.obs[cluster_key]
+        if pd.api.types.is_categorical_dtype(s):
+            n_clusters = int(len(s.cat.categories))
+        else:
+            n_clusters = int(s.nunique(dropna=True))
 
     def add_row(k, v):
         rows.append(
