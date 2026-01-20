@@ -578,9 +578,7 @@ def _run_integrations(
                 # ----------------------------
                 # Enhanced mode (flag-gated): preflight labels on scVI latent
                 # ----------------------------
-                use_preflight = bool(getattr(cfg, "scanvi_preflight_bisc", False))
-
-                labels_key_for_scanvi = str(getattr(cfg, "label_key", "leiden"))
+                use_preflight = bool(str(getattr(cfg, "scanvi_label_source", "leiden")).lower() == "bisc_light")
 
                 if use_preflight:
                     # preflight parameters (all optional; safe defaults)
