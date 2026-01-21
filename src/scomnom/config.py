@@ -137,34 +137,24 @@ class IntegrateConfig(BaseModel):
     # ------------------------------------------------------------------
     # scANVI supervision (NEW)
     # ------------------------------------------------------------------
-    # How to generate labels_key for scANVI
-    #   "leiden"      -> simple Leiden on scVI latent
-    #   "bisc_light"  -> light structural-only BISC on scVI latent
-    scanvi_label_source: str = "bisc_light"
+    scanvi_label_source: Literal["leiden", "bisc_light"] = "bisc_light"
 
-    # Key written into adata.obs and passed to scANVI
-    scanvi_labels_key: str = "scanvi_prelabels"
+    scanvi_max_prelabel_clusters: int = 25  # ↑ increase for atlas-scale data
+    scanvi_preflight_resolutions: Optional[list[float]] = None
 
-    # --- BISC-light parameters (only used if scanvi_label_source == "bisc_light")
-    scanvi_bisc_resolutions: List[float] = Field(
-        default_factory=lambda: [0.3, 0.6, 1.0, 1.5, 2.0]
-    )
-    scanvi_bisc_min_cells: int = 100
-    scanvi_bisc_n_subsamples: int = 5
+    scanvi_preflight_min_stability: float = 0.60
+    scanvi_preflight_parsimony_eps: float = 0.03
 
-    # ------------------------------------------------------------------
-    # Batch-trap guardrails (NEW)
-    # ------------------------------------------------------------------
-    # If a cluster is dominated by a single batch beyond this fraction,
-    # mark it as "Unknown" for scANVI supervision.
+    scanvi_w_stability: float = 0.50
+    scanvi_w_silhouette: float = 0.35
+    scanvi_w_tiny: float = 0.15
+
+    scanvi_prelabels_key: str = "scanvi_prelabels"
+    scanvi_labels_key: str = "leiden"  # only used when scanvi_label_source != "bisc_light"
+
     scanvi_batch_trap_threshold: float = 0.90
-
-    # Minimum cluster size to consider for batch-trap logic
     scanvi_batch_trap_min_cells: int = 200
-
-    # Also mark tiny clusters as Unknown
-    scanvi_unknown_tiny_clusters: bool = True
-    scanvi_tiny_cluster_threshold: int = 50
+    scanvi_tiny_cluster_min_cells: int = 30
 
     # ------------------------------------------------------------------
     # Figures

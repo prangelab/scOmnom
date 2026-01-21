@@ -184,7 +184,6 @@ def _run_scanvi_from_scvi(
 # ---------------------------------------------------------------------
 # Optional: scVI-latent preflight labels for scANVI
 # ---------------------------------------------------------------------
-
 def _compute_scanvi_prelabels(
     adata_hvg: ad.AnnData,
     *,
@@ -192,19 +191,33 @@ def _compute_scanvi_prelabels(
     batch_key: str,
     out_key: str = "scanvi_prelabels",
     resolutions: Optional[Sequence[float]] = None,
-    silhouette_n: int = 50_000,
-    silhouette_random_state: int = 0,
-    alpha_nclusters: float = 0.002,
+    max_prelabel_clusters: int = 25,
+    min_stability_ok: float = 0.60,
+    parsimony_eps: float = 0.03,
+    w_stab: float = 0.50,
+    w_sil: float = 0.35,
+    w_tiny: float = 0.15,
     batch_trap_threshold: float = 0.90,
     batch_trap_min_cells: int = 200,
     tiny_cluster_min_cells: int = 30,
 ) -> str:
     """
     Create coarse, structural labels for scANVI by sweeping Leiden resolutions
-    on scVI latent space.
+    on scVI latent space, then selecting a parsimonious resolution using
+    BISC-inspired structural scoring:
 
-    Uses the *centroid silhouette* proxy (O(n*k*d)) via clustering_utils._centroid_silhouette
-    instead of sklearn silhouette (O(n^2) / expensive).
+      score = w_stab * stability_norm + w_sil * centroid_sil_norm + w_tiny * tiny_penalty_norm
+
+    where:
+      - stability = smoothed ARI between adjacent resolutions (higher is better)
+      - centroid silhouette = _centroid_silhouette (higher is better)
+      - tiny penalty = discourages many tiny clusters (higher is better)
+
+    Additional selection constraints:
+      - prefer resolutions with n_clusters <= max_prelabel_clusters (configurable; default 25)
+      - prefer interior resolutions (exclude endpoints when possible)
+      - require stability >= min_stability_ok when feasible
+      - pick the *lowest* resolution within (1 - parsimony_eps) of best
 
     Writes:
       - adata_hvg.obsm["X_scvi_latent"]
@@ -213,8 +226,15 @@ def _compute_scanvi_prelabels(
     Returns:
       out_key
     """
-    # IMPORTANT: use our centroid silhouette proxy, not sklearn
-    from .clustering_utils import _centroid_silhouette
+    from sklearn.metrics import adjusted_rand_score
+
+    # Import the centroid silhouette used by BISC
+    # (kept as local import to avoid circular imports in some layouts)
+    try:
+        from .clustering_utils import _centroid_silhouette  # type: ignore
+    except Exception:
+        # fallback if integrate.py is executed in a different import context
+        from scomnom.clustering_utils import _centroid_silhouette  # type: ignore
 
     if batch_key not in adata_hvg.obs:
         raise KeyError(f"batch_key '{batch_key}' not found in adata.obs")
@@ -231,84 +251,217 @@ def _compute_scanvi_prelabels(
     if not resolutions:
         resolutions = [0.2, 0.6, 1.0, 1.4, 1.8]
 
+    res_list = [float(r) for r in resolutions]
+    res_list = sorted(res_list)
+
     # Ensure neighbors once on the latent
     sc.pp.neighbors(adata_hvg, use_rep="X_scvi_latent")
 
-    # Optional subsample for centroid silhouette (still cheap, but keep your knob)
-    rng = np.random.default_rng(int(silhouette_random_state))
-    n = int(adata_hvg.n_obs)
-    if silhouette_n is not None and int(silhouette_n) < n:
-        idx_sil = rng.choice(n, size=int(silhouette_n), replace=False)
-        Z_sil = Z[idx_sil]
-    else:
-        idx_sil = None
-        Z_sil = Z
+    # ------------------------------------------------------------------
+    # Helpers (self-contained mini-BISC)
+    # ------------------------------------------------------------------
+    def _normalize_scores(d: dict[float, float]) -> dict[float, float]:
+        if not d:
+            return {}
+        vals = np.array(list(d.values()), dtype=float)
+        vmin = float(np.nanmin(vals))
+        vmax = float(np.nanmax(vals))
+        if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax == vmin:
+            return {k: 0.0 for k in d}
+        return {k: (float(v) - vmin) / (vmax - vmin) for k, v in d.items()}
 
-    best_res: float | None = None
-    best_score: float = -np.inf
-    best_nclust: int = 0
-    best_sil: float = float("nan")
+    def _compute_tiny_cluster_penalty(cluster_sizes: np.ndarray, tiny_threshold: int) -> float:
+        """
+        Higher is better. Penalizes:
+          - many tiny clusters
+          - many cells falling into tiny clusters
+        """
+        cluster_sizes = np.asarray(cluster_sizes, dtype=int)
+        total_clusters = int(cluster_sizes.size)
+        total_cells = int(cluster_sizes.sum())
 
-    # Sweep
-    for r in [float(x) for x in resolutions]:
+        if total_clusters == 0 or total_cells == 0:
+            return 1.0
+
+        tiny_mask = cluster_sizes < int(tiny_threshold)
+        n_tiny = int(np.sum(tiny_mask))
+        cells_in_tiny = int(np.sum(cluster_sizes[tiny_mask]))
+
+        frac_tiny_clusters = n_tiny / total_clusters
+        penalty_cluster_fraction = 1.0 - frac_tiny_clusters
+
+        frac_cells_in_tiny = cells_in_tiny / total_cells
+        penalty_cell_fraction = 1.0 - frac_cells_in_tiny
+
+        return float(0.5 * (penalty_cluster_fraction + penalty_cell_fraction))
+
+    def _compute_smoothed_stability(
+        res_sorted: list[float],
+        ari_adjacent: dict[tuple[float, float], float],
+    ) -> dict[float, float]:
+        stab: dict[float, float] = {}
+        for i, r in enumerate(res_sorted):
+            terms: list[float] = []
+            if i > 0:
+                r_prev = res_sorted[i - 1]
+                if (r_prev, r) in ari_adjacent:
+                    terms.append(float(ari_adjacent[(r_prev, r)]))
+            if i < len(res_sorted) - 1:
+                r_next = res_sorted[i + 1]
+                if (r, r_next) in ari_adjacent:
+                    terms.append(float(ari_adjacent[(r, r_next)]))
+            stab[r] = float(np.mean(terms)) if terms else 0.0
+        return stab
+
+    def _pick_parsimonious(cands: list[float], scores: dict[float, float], eps: float) -> float | None:
+        if not cands:
+            return None
+        best = max(cands, key=lambda r: scores.get(r, -np.inf))
+        best_val = float(scores.get(best, -np.inf))
+        if not np.isfinite(best_val):
+            return min(cands)
+        near = [r for r in cands if float(scores.get(r, -np.inf)) >= (1.0 - float(eps)) * best_val]
+        return min(near) if near else best
+
+    # ------------------------------------------------------------------
+    # Sweep: Leiden + metrics per resolution
+    # ------------------------------------------------------------------
+    labels_by_res: dict[float, np.ndarray] = {}
+    n_clusters_by_res: dict[float, int] = {}
+    sizes_by_res: dict[float, np.ndarray] = {}
+    sil_by_res: dict[float, float] = {}
+    tiny_by_res: dict[float, float] = {}
+
+    for r in res_list:
         key = f"__scanvi_pre_leiden_{r:.3f}"
-        sc.tl.leiden(adata_hvg, resolution=r, key_added=key)
+        sc.tl.leiden(adata_hvg, resolution=float(r), key_added=key)
 
-        labels_all = adata_hvg.obs[key].astype(str).to_numpy()
-        labels = labels_all[idx_sil] if idx_sil is not None else labels_all
+        labels = adata_hvg.obs[key].astype(str).to_numpy()
+        labels_by_res[r] = labels
 
-        # number of clusters in FULL data (not the subsample)
-        n_clusters = int(pd.unique(labels_all).size)
+        vc = pd.Series(labels).value_counts()
+        n_clusters = int(vc.size)
+        n_clusters_by_res[r] = n_clusters
 
-        # centroid silhouette requires >=2 clusters and < n_samples
-        sil = float("nan")
-        if n_clusters >= 2 and n_clusters < int(labels.size):
-            try:
-                sil = float(_centroid_silhouette(Z_sil, labels))
-            except Exception:
-                sil = float("nan")
+        sizes = vc.to_numpy(dtype=int)
+        sizes_by_res[r] = sizes
 
-        # mild penalty for too many clusters
-        score = (sil if np.isfinite(sil) else -1.0) - float(alpha_nclusters) * float(n_clusters)
+        sil = float(_centroid_silhouette(Z, labels))
+        sil_by_res[r] = sil
+
+        tiny = float(_compute_tiny_cluster_penalty(sizes, tiny_threshold=int(tiny_cluster_min_cells)))
+        tiny_by_res[r] = tiny
 
         LOGGER.info(
-            "scanVI prelabels: res=%.3f -> n_clusters=%d, centroid_silhouette=%.4f, score=%.4f",
-            r,
-            n_clusters,
-            sil if np.isfinite(sil) else float("nan"),
-            score,
+            "scanVI prelabels sweep: res=%.3f -> n_clusters=%d, centroid_silhouette=%.4f, tiny_penalty=%.4f",
+            float(r),
+            int(n_clusters),
+            float(sil) if np.isfinite(sil) else float("nan"),
+            float(tiny) if np.isfinite(tiny) else float("nan"),
         )
 
-        if score > best_score:
-            best_score = score
-            best_res = r
-            best_nclust = n_clusters
-            best_sil = sil
+    # ------------------------------------------------------------------
+    # Stability: ARI adjacent + smoothing
+    # ------------------------------------------------------------------
+    ari_adjacent: dict[tuple[float, float], float] = {}
+    for r1, r2 in zip(res_list[:-1], res_list[1:]):
+        ari = float(adjusted_rand_score(labels_by_res[r1], labels_by_res[r2]))
+        ari_adjacent[(r1, r2)] = ari
 
+    stability_by_res = _compute_smoothed_stability(res_list, ari_adjacent)
+
+    # ------------------------------------------------------------------
+    # Composite score (normalized)
+    # ------------------------------------------------------------------
+    sil_norm = _normalize_scores(sil_by_res)
+    tiny_norm = _normalize_scores(tiny_by_res)
+    stab_norm = _normalize_scores(stability_by_res)
+
+    composite: dict[float, float] = {}
+    for r in res_list:
+        composite[r] = float(
+            float(w_stab) * stab_norm.get(r, 0.0)
+            + float(w_sil) * sil_norm.get(r, 0.0)
+            + float(w_tiny) * tiny_norm.get(r, 0.0)
+        )
+
+        LOGGER.info(
+            "scanVI prelabels score: res=%.3f -> stability=%.4f (norm=%.3f), sil=%.4f (norm=%.3f), tiny=%.4f (norm=%.3f) | composite=%.4f",
+            float(r),
+            float(stability_by_res.get(r, 0.0)),
+            float(stab_norm.get(r, 0.0)),
+            float(sil_by_res.get(r, float("nan"))),
+            float(sil_norm.get(r, 0.0)),
+            float(tiny_by_res.get(r, float("nan"))),
+            float(tiny_norm.get(r, 0.0)),
+            float(composite[r]),
+        )
+
+    # ------------------------------------------------------------------
+    # Candidate set selection (BISC-ish)
+    # ------------------------------------------------------------------
+    # Prefer interior resolutions when possible
+    interior = res_list[1:-1] if len(res_list) > 2 else res_list
+
+    # Feasible: stability >= min_stability_ok
+    feasible = [r for r in interior if float(stability_by_res.get(r, 0.0)) >= float(min_stability_ok)]
+
+    # Cap cluster count if requested
+    if max_prelabel_clusters is not None and int(max_prelabel_clusters) > 0:
+        feasible = [r for r in feasible if int(n_clusters_by_res.get(r, 0)) <= int(max_prelabel_clusters)]
+
+    # If feasible set is empty, relax in stages:
+    search_set = feasible
+    relaxed_reason = None
+
+    if not search_set:
+        relaxed_reason = "no resolution met stability+cap constraints; relaxing constraints"
+        search_set = interior.copy()
+
+        if max_prelabel_clusters is not None and int(max_prelabel_clusters) > 0:
+            capped = [r for r in search_set if int(n_clusters_by_res.get(r, 0)) <= int(max_prelabel_clusters)]
+            if capped:
+                search_set = capped
+                relaxed_reason = "relaxed stability constraint (kept cap)"
+
+    if not search_set:
+        # absolute fallback: everything
+        search_set = res_list.copy()
+        relaxed_reason = "relaxed to all resolutions (cap may be impossible)"
+
+    if relaxed_reason:
+        LOGGER.warning("scanVI prelabels: %s. Candidates=%s", relaxed_reason, search_set)
+
+    # Parsimonious pick among near-best
+    best_res = _pick_parsimonious(search_set, composite, eps=float(parsimony_eps))
     if best_res is None:
         raise RuntimeError("Failed to select a preflight resolution for scANVI labels")
 
     chosen_key = f"__scanvi_pre_leiden_{best_res:.3f}"
     raw = adata_hvg.obs[chosen_key].astype(str)
 
-    # --- Guardrail 1: tiny clusters -> Unknown ---
+    # ------------------------------------------------------------------
+    # Guardrail 1: tiny clusters -> Unknown
+    # ------------------------------------------------------------------
     counts = raw.value_counts()
-    tiny = set(counts[counts < int(tiny_cluster_min_cells)].index.astype(str))
+    tiny_clusters = set(counts[counts < int(tiny_cluster_min_cells)].index.astype(str))
 
-    # --- Guardrail 2: batch trap -> Unknown ---
+    # ------------------------------------------------------------------
+    # Guardrail 2: batch trap -> Unknown
+    # ------------------------------------------------------------------
     batch = adata_hvg.obs[batch_key].astype(str)
-    trap = set()
+    trap_clusters = set()
 
     for cid, n_c in counts.items():
         cid = str(cid)
         if int(n_c) < int(batch_trap_min_cells):
             continue
         m = raw == cid
-        frac = batch[m].value_counts(normalize=True).max()
-        if float(frac) >= float(batch_trap_threshold):
-            trap.add(cid)
+        frac = float(batch[m].value_counts(normalize=True).max())
+        if frac >= float(batch_trap_threshold):
+            trap_clusters.add(cid)
 
-    unknown_clusters = sorted(tiny | trap)
+    unknown_clusters = sorted(tiny_clusters | trap_clusters)
 
     out = raw.copy()
     if unknown_clusters:
@@ -320,17 +473,20 @@ def _compute_scanvi_prelabels(
     # Log summary
     n_unknown = int((out.astype(str) == "Unknown").sum())
     LOGGER.info(
-        "scanVI prelabels selected: res=%.3f -> n_clusters=%d; centroid_silhouette=%.4f; Unknown=%d "
-        "(tiny<%d: %d clusters; batch_trap>=%.2f & n>=%d: %d clusters)",
+        "scanVI prelabels selected: res=%.3f -> n_clusters=%d; stability=%.4f; centroid_silhouette=%.4f; tiny_penalty=%.4f; composite=%.4f; Unknown=%d (tiny<%d: %d clusters; batch_trap>=%.2f & n>=%d: %d clusters; cap<=%d)",
         float(best_res),
-        int(best_nclust),
-        float(best_sil) if np.isfinite(best_sil) else float("nan"),
-        n_unknown,
+        int(n_clusters_by_res.get(best_res, 0)),
+        float(stability_by_res.get(best_res, 0.0)),
+        float(sil_by_res.get(best_res, float("nan"))),
+        float(tiny_by_res.get(best_res, float("nan"))),
+        float(composite.get(best_res, float("nan"))),
+        int(n_unknown),
         int(tiny_cluster_min_cells),
-        int(len(tiny)),
+        int(len(tiny_clusters)),
         float(batch_trap_threshold),
         int(batch_trap_min_cells),
-        int(len(trap)),
+        int(len(trap_clusters)),
+        int(max_prelabel_clusters),
     )
 
     return out_key
@@ -578,34 +734,51 @@ def _run_integrations(
                 # ----------------------------
                 # Enhanced mode (flag-gated): preflight labels on scVI latent
                 # ----------------------------
-                use_preflight = bool(str(getattr(cfg, "scanvi_label_source", "leiden")).lower() == "bisc_light")
+                use_preflight = str(
+                    getattr(cfg, "scanvi_label_source", "leiden")
+                ).lower() == "bisc_light"
 
                 if use_preflight:
-                    # preflight parameters (all optional; safe defaults)
-                    res = getattr(cfg, "scanvi_preflight_resolutions", None)
-                    sil_n = int(getattr(cfg, "scanvi_preflight_silhouette_n", 50_000))
-                    sil_rs = int(getattr(cfg, "scanvi_preflight_random_state", 0))
-                    alpha = float(getattr(cfg, "scanvi_preflight_alpha_nclusters", 0.002))
-                    trap_thr = float(getattr(cfg, "scanvi_batch_trap_threshold", 0.90))
-                    trap_min = int(getattr(cfg, "scanvi_batch_trap_min_cells", 200))
-                    tiny_min = int(getattr(cfg, "scanvi_tiny_cluster_min_cells", 30))
-
+                    # --- BISC-light structural preflight for scANVI ---
                     labels_key_for_scanvi = _compute_scanvi_prelabels(
                         adata_hvg,
                         scvi_latent=Z_scvi,
                         batch_key=batch_key,
                         out_key=str(getattr(cfg, "scanvi_prelabels_key", "scanvi_prelabels")),
-                        resolutions=res,
-                        silhouette_n=sil_n,
-                        silhouette_random_state=sil_rs,
-                        alpha_nclusters=alpha,
-                        batch_trap_threshold=trap_thr,
-                        batch_trap_min_cells=trap_min,
-                        tiny_cluster_min_cells=tiny_min,
+                        resolutions=getattr(cfg, "scanvi_preflight_resolutions", None),
+
+                        # ---- new, explicit structural controls ----
+                        max_prelabel_clusters=int(
+                            getattr(cfg, "scanvi_max_prelabel_clusters", 25)
+                        ),
+
+                        # ---- selection / parsimony ----
+                        min_stability_ok=float(
+                            getattr(cfg, "scanvi_preflight_min_stability", 0.60)
+                        ),
+                        parsimony_eps=float(
+                            getattr(cfg, "scanvi_preflight_parsimony_eps", 0.03)
+                        ),
+
+                        # ---- score weights (structural-only) ----
+                        w_stab=float(getattr(cfg, "scanvi_w_stability", 0.50)),
+                        w_sil=float(getattr(cfg, "scanvi_w_silhouette", 0.35)),
+                        w_tiny=float(getattr(cfg, "scanvi_w_tiny", 0.15)),
+
+                        # ---- guardrails ----
+                        batch_trap_threshold=float(
+                            getattr(cfg, "scanvi_batch_trap_threshold", 0.90)
+                        ),
+                        batch_trap_min_cells=int(
+                            getattr(cfg, "scanvi_batch_trap_min_cells", 200)
+                        ),
+                        tiny_cluster_min_cells=int(
+                            getattr(cfg, "scanvi_tiny_cluster_min_cells", 30)
+                        ),
                     )
                 else:
-                    # Default: use user-provided label key from input adata
-                    labels_key_for_scanvi = str(getattr(cfg, "label_key", "leiden"))
+                    # Default: plain Leiden labels already present
+                    labels_key_for_scanvi = str(getattr(cfg, "scanvi_labels_key", "leiden"))
 
                 Zs = _run_scanvi_from_scvi(scvi_model, adata_hvg, labels_key_for_scanvi)
                 _write_embedding_from_hvg("scANVI", np.asarray(Zs), adata_hvg.obs_names)
@@ -947,6 +1120,9 @@ def run_integrate(cfg: IntegrateConfig) -> ad.AnnData:
         label_key=cfg.label_key,
         n_jobs=cfg.benchmark_n_jobs,
         output_dir=cfg.output_dir,
+        benchmark_threshold=cfg.benchmark_threshold,
+        benchmark_n_cells=cfg.benchmark_n_cells,
+        benchmark_random_state=cfg.benchmark_random_state,
     )
 
     plot_keys = list(emb_keys)
@@ -987,7 +1163,7 @@ def run_integrate(cfg: IntegrateConfig) -> ad.AnnData:
             "best_embedding": best,
             "available_embeddings": list(emb_keys),
             "selection_timestamp": datetime.utcnow().isoformat(),
-            "scanvi_preflight_bisc": bool(getattr(cfg, "scanvi_preflight_bisc", False)),
+            "scanvi_label_source": str(getattr(cfg, "scanvi_label_source", "leiden")),
         }
     )
 
