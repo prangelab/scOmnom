@@ -584,16 +584,6 @@ class ClusterAnnotateConfig(BaseModel):
 # MARKERS AND DE CONFIG
 # ---------------------------------------------------------------------
 class MarkersAndDEConfig:
-    """
-    Config for the markers_and_de CLI orchestrator.
-
-    Notebook users should NOT use this; they should call the functions in `scomnom.de_utils`
-    (or your notebook-facing API) directly on an already-loaded AnnData.
-
-    This config is intentionally "flat" and mirrors the fields accessed by
-    `run_markers_and_de(cfg)` in src/scomnom/markers_and_de.py.
-    """
-
     # ------------------------------------------------------------------
     # IO / run scaffolding
     # ------------------------------------------------------------------
