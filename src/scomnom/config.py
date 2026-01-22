@@ -583,7 +583,6 @@ class ClusterAnnotateConfig(BaseModel):
 # ---------------------------------------------------------------------
 # MARKERS AND DE CONFIG
 # ---------------------------------------------------------------------
-@dataclass
 class MarkersAndDEConfig:
     """
     Config for the markers_and_de CLI orchestrator.
