@@ -489,10 +489,71 @@ def integrate(
         "--scanvi-tiny-cluster-min-cells",
         help="[scANVI] Cluster size below which clusters are marked 'Unknown' for scANVI supervision.",
     ),
+
+    # ------------------------------------------------------------------
+    # Annotated secondary integration (SECOND PASS; explicit + guarded)
+    # ------------------------------------------------------------------
+    annotated_run: bool = typer.Option(
+        False,
+        "--annotated-run/--no-annotated-run",
+        help="[Annotated secondary] Run secondary integration using final annotated labels from cluster-and-annotate. "
+             "This mode is explicit and should be used with care.",
+    ),
+    annotated_run_cluster_round: Optional[str] = typer.Option(
+        None,
+        "--annotated-run-cluster-round",
+        help="[Annotated secondary] Source cluster round id (default: active_cluster_round).",
+    ),
+    annotated_run_final_label_key: Optional[str] = typer.Option(
+        None,
+        "--annotated-run-final-label-key",
+        help="[Annotated secondary] Override final label key in adata.obs. "
+             "Default: rounds[round_id]['annotation']['pretty_cluster_key'] or 'cluster_label'.",
+    ),
+    annotated_run_confidence_mask_key: str = typer.Option(
+        "celltypist_confident_entropy_margin",
+        "--annotated-run-confidence-mask-key",
+        help="[Annotated secondary] adata.obs key to store the entropy_margin confidence mask.",
+    ),
+    annotated_run_scanvi_labels_key: str = typer.Option(
+        "scanvi_labels__annotated",
+        "--annotated-run-scanvi-labels-key",
+        help="[Annotated secondary] adata.obs key to store scANVI supervision labels "
+             "(final_label where confident, else 'Unknown').",
+    ),
+    bio_entropy_abs_limit: float = typer.Option(
+        0.5,
+        "--bio-entropy-abs-limit",
+        help="[Annotated secondary] Entropy absolute limit for CellTypist confidence mask.",
+    ),
+    bio_entropy_quantile: float = typer.Option(
+        0.7,
+        "--bio-entropy-quantile",
+        help="[Annotated secondary] Entropy quantile for CellTypist confidence mask (cut uses max(abs, quantile)).",
+    ),
+    bio_margin_min: float = typer.Option(
+        0.10,
+        "--bio-margin-min",
+        help="[Annotated secondary] Minimum top1-top2 probability margin for CellTypist confidence mask.",
+    ),
+
 ):
     outdir = output_dir or input_path.parent
     logfile = outdir / "integrate.log"
     init_logging(logfile)
+
+    # Guardrail: annotated run is explicit, and only computes scANVI__annotated.
+    # We still allow benchmarking against any pre-existing embeddings in the input AnnData.
+    if annotated_run:
+        if methods is not None:
+            lowered = [str(m).lower() for m in methods]
+            if lowered not in (["scanvi"], ["scanvi__annotated"], ["scanvi_annotated"]):
+                LOGGER.warning(
+                    "ANNOTATED RUN: ignoring --methods=%r and forcing scANVI-only computation.",
+                    methods,
+                )
+        methods = ["scanvi"]  # compute only annotated scANVI embedding in integrate.py
+
 
     cfg = IntegrateConfig(
         input_path=input_path,
@@ -524,6 +585,16 @@ def integrate(
         scanvi_batch_trap_min_cells=scanvi_batch_trap_min_cells,
         scanvi_tiny_cluster_min_cells=scanvi_tiny_cluster_min_cells,
         logfile=logfile,
+        # annotated secondary integration
+        annotated_run=annotated_run,
+        annotated_run_cluster_round=annotated_run_cluster_round,
+        annotated_run_final_label_key=annotated_run_final_label_key,
+        annotated_run_confidence_mask_key=annotated_run_confidence_mask_key,
+        annotated_run_scanvi_labels_key=annotated_run_scanvi_labels_key,
+        bio_entropy_abs_limit=bio_entropy_abs_limit,
+        bio_entropy_quantile=bio_entropy_quantile,
+        bio_margin_min=bio_margin_min,
+
     )
 
     run_integrate(cfg)

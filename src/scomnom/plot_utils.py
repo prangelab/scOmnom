@@ -1661,7 +1661,7 @@ import numpy as np
 from pathlib import Path
 
 
-def plot_scib_results_table(scaled: pd.DataFrame) -> None:
+def plot_scib_results_table(scaled: pd.DataFrame, *, stem: str = "scIB_results_table") -> None:
     df = scaled.copy()
 
     # ------------------------------------------------------------------
@@ -1843,7 +1843,7 @@ def plot_scib_results_table(scaled: pd.DataFrame) -> None:
     ax.tick_params(axis="both", which="both", length=0)
 
     plt.tight_layout()
-    save_multi("scIB_results_table", Path("integration"))
+    save_multi(stem, Path("integration"))
     plt.close(fig)
 
 

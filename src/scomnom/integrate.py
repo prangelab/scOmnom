@@ -491,6 +491,194 @@ def _compute_scanvi_prelabels(
 
     return out_key
 
+# ---------------------------------------------------------------------
+# Annotated-run helpers (secondary integration using final cluster labels)
+# ---------------------------------------------------------------------
+
+def _celltypist_entropy_margin_mask(
+    prob_matrix: pd.DataFrame,
+    *,
+    entropy_abs_limit: float = 0.5,
+    entropy_quantile: float = 0.7,
+    margin_min: float = 0.10,
+) -> tuple[np.ndarray, dict]:
+    """
+    Reconstruct the CellTypist 'entropy_margin' confidence mask.
+
+    Policy: good = (H <= max(H_abs, H_q)) AND (margin >= margin_min)
+    Returns: (mask, stats)
+    """
+    P = prob_matrix.to_numpy(dtype=np.float64, copy=False)
+    n = int(P.shape[0])
+    if n == 0:
+        return np.zeros((0,), dtype=bool), {"n_cells": 0}
+
+    eps = 1e-12
+    P_clip = np.clip(P, eps, 1.0)
+    entropy = -np.sum(P_clip * np.log(P_clip), axis=1)
+
+    # top1-top2 margin
+    top2 = np.partition(P, kth=-2, axis=1)[:, -2:]
+    p1 = np.max(top2, axis=1)
+    p2 = np.min(top2, axis=1)
+    margin = p1 - p2
+
+    H_q = float(np.quantile(entropy, float(entropy_quantile)))
+    H_abs = float(entropy_abs_limit)
+    H_cut = max(H_abs, H_q)
+
+    mask = (entropy <= H_cut) & (margin >= float(margin_min))
+
+    stats = {
+        "n_cells": int(n),
+        "kept": int(mask.sum()),
+        "kept_frac": float(mask.mean()) if n > 0 else 0.0,
+        "entropy_abs_limit": float(H_abs),
+        "entropy_quantile": float(entropy_quantile),
+        "entropy_q_value": float(H_q),
+        "entropy_cut_used": float(H_cut),
+        "margin_min": float(margin_min),
+    }
+    return mask, stats
+
+
+def _extract_final_labels_and_mask_for_annotated_run(
+    adata: ad.AnnData,
+    *,
+    round_id: str | None,
+    final_label_key_override: str | None = None,
+    confidence_mask_key: str = "celltypist_confident_entropy_margin",
+) -> tuple[str, str, dict]:
+    """
+    Returns:
+      (final_label_key, mask_obs_key, meta)
+
+    This function:
+      - resolves which cluster round to use
+      - resolves which obs column is the "final label key"
+      - returns the desired mask key name (but does NOT compute it)
+    """
+    rid = round_id
+    if rid is None:
+        rid0 = adata.uns.get("active_cluster_round", None)
+        rid = str(rid0) if rid0 else None
+
+    rounds = adata.uns.get("cluster_rounds", {})
+    if rid is None or not isinstance(rounds, dict) or rid not in rounds:
+        raise RuntimeError(
+            "annotated_run: could not resolve a valid cluster round. "
+            f"Requested={round_id!r}, active={adata.uns.get('active_cluster_round', None)!r}."
+        )
+
+    rinfo = rounds[rid]
+    ann = rinfo.get("annotation", {}) if isinstance(rinfo, dict) else {}
+    if not isinstance(ann, dict):
+        ann = {}
+
+    if final_label_key_override:
+        final_label_key = str(final_label_key_override)
+    else:
+        k = ann.get("pretty_cluster_key", None)
+        if k:
+            final_label_key = str(k)
+        elif "cluster_label" in adata.obs:
+            final_label_key = "cluster_label"
+        else:
+            raise RuntimeError(
+                "annotated_run: could not find final labels. "
+                "Expected rounds[round_id]['annotation']['pretty_cluster_key'] or adata.obs['cluster_label']."
+            )
+
+    if final_label_key not in adata.obs:
+        raise RuntimeError(
+            f"annotated_run: final_label_key={final_label_key!r} not found in adata.obs."
+        )
+
+    meta = {
+        "source_round_id": str(rid),
+        "final_label_key": str(final_label_key),
+        "confidence_mask_key": str(confidence_mask_key),
+        "n_total": int(adata.n_obs),
+    }
+    return str(final_label_key), str(confidence_mask_key), meta
+
+
+
+def _create_projection_round_for_secondary_integration(
+    adata: ad.AnnData,
+    *,
+    parent_round_id: str,
+    integration_key: str,
+) -> str:
+    """
+    Create a derived/projection round named rN_secondary_integration_projection that
+    inherits the parent's round metadata, but marks round_type='projection' and records
+    which integration embedding it corresponds to.
+    """
+    # local import to avoid circulars
+    from .clustering_utils import (
+        _ensure_cluster_rounds,
+        _next_round_index,
+        _make_round_id,
+        _register_round,
+        set_active_round,
+    )
+
+    _ensure_cluster_rounds(adata)
+    rounds = adata.uns.get("cluster_rounds", {})
+    if not isinstance(rounds, dict) or parent_round_id not in rounds:
+        raise KeyError(f"annotated_run: parent_round_id {parent_round_id!r} not found in cluster_rounds.")
+
+    parent = rounds[parent_round_id]
+    cluster_key = str(parent.get("cluster_key", "leiden"))
+    labels_obs_key = str(parent.get("labels_obs_key", cluster_key))
+
+    idx = _next_round_index(adata)
+    new_round_id = _make_round_id(idx, "secondary_integration_projection")
+
+    # Register skeleton
+    _register_round(
+        adata,
+        round_id=new_round_id,
+        cluster_key=cluster_key,
+        labels_obs_key=labels_obs_key,
+        kind="secondary_integration_projection",
+        best_resolution=parent.get("best_resolution", None),
+        sweep=parent.get("sweep", None),
+        cfg_snapshot=parent.get("cfg", None),
+        parent_round_id=str(parent_round_id),
+        notes=f"Projection round after secondary annotated integration; integration_key={integration_key}",
+        cluster_id_map=parent.get("cluster_id_map", None),
+        cluster_renumbering=parent.get("cluster_renumbering", None),
+        cache_labels=False,
+        compacting=parent.get("compacting", None),
+    )
+
+    # Overwrite the auto-created empty slots with inherited info
+    rounds = adata.uns.get("cluster_rounds", {})
+    if isinstance(rounds, dict) and new_round_id in rounds:
+        rnew = rounds[new_round_id]
+        # inherit the rich payloads
+        for field in ("annotation", "decoupler", "qc", "stability", "diagnostics", "inputs", "bio_mask", "cluster_order", "cluster_display_map", "cluster_sizes"):
+            if field in parent:
+                try:
+                    rnew[field] = parent[field]
+                except Exception:
+                    pass
+
+        # mark as projection + record embedding linkage
+        rnew["round_type"] = "projection"
+        rnew.setdefault("inputs", {})
+        if isinstance(rnew["inputs"], dict):
+            rnew["inputs"]["secondary_integration_embedding_key"] = str(integration_key)
+
+        rounds[new_round_id] = rnew
+        adata.uns["cluster_rounds"] = rounds
+
+    # activate it so downstream tools "see" this as latest state
+    set_active_round(adata, new_round_id, publish_decoupler=False)
+    return str(new_round_id)
+
 
 # ---------------------------------------------------------------------
 # Scanorama
@@ -809,6 +997,142 @@ def _run_integrations(
     return adata, created
 
 
+def _run_annotated_scanvi_secondary_integration(
+    adata: ad.AnnData,
+    cfg: IntegrateConfig,
+    *,
+    batch_key: str,
+    source_round_id: str | None,
+    out_embedding_key: str = "scANVI__annotated",
+) -> tuple[ad.AnnData, list[str], str, str, dict]:
+    """
+    Annotated secondary integration:
+      - Extract final labels from a cluster round (pretty labels)
+      - Reconstruct entropy_margin confidence mask
+      - Create labels_for_scanvi = final_label if confident else "Unknown"
+      - Train SCVI (if needed) and SCANVI on HVGs using those labels
+      - Write embedding into adata.obsm[out_embedding_key]
+    Returns:
+      (adata, created_embeddings, final_label_key, mask_key, meta)
+    """
+    # Resolve round + label key
+    final_label_key_override = str(getattr(cfg, "annotated_run_final_label_key", "") or "").strip() or None
+    confidence_mask_key = str(getattr(cfg, "annotated_run_confidence_mask_key", "celltypist_confident_entropy_margin"))
+
+    final_label_key, mask_key, meta = _extract_final_labels_and_mask_for_annotated_run(
+        adata,
+        round_id=source_round_id,
+        final_label_key_override=final_label_key_override,
+        confidence_mask_key=confidence_mask_key,
+    )
+
+    # Compute entropy_margin confidence mask from CellTypist probability matrix (cfg-controlled thresholds)
+    if "celltypist_proba" not in adata.obsm or "celltypist_proba_columns" not in adata.uns:
+        raise RuntimeError(
+            "annotated_run: missing CellTypist probability matrix; cannot compute entropy_margin mask. "
+            "Expected outputs from cluster_and_annotate: adata.obsm['celltypist_proba'] and "
+            "adata.uns['celltypist_proba_columns']."
+        )
+
+    pm = pd.DataFrame(
+        adata.obsm["celltypist_proba"],
+        index=adata.obs_names,
+        columns=[str(x) for x in adata.uns["celltypist_proba_columns"]],
+    )
+
+    mask, mstats = _celltypist_entropy_margin_mask(
+        pm,
+        entropy_abs_limit=float(getattr(cfg, "bio_entropy_abs_limit", 0.5)),
+        entropy_quantile=float(getattr(cfg, "bio_entropy_quantile", 0.7)),
+        margin_min=float(getattr(cfg, "bio_margin_min", 0.10)),
+    )
+
+    adata.obs[mask_key] = pd.Series(mask, index=adata.obs_names).astype(bool)
+    meta["mask_stats"] = mstats
+    meta["n_labeled_confident"] = int(mask.sum())
+
+    # Build supervised labels for scANVI (Unknown for low-confidence)
+    labels_for_scanvi_key = str(getattr(cfg, "annotated_run_scanvi_labels_key", "scanvi_labels__annotated"))
+    s_final = adata.obs[final_label_key].astype(str)
+    s_mask = adata.obs[mask_key].astype(bool)
+
+    s_supervised = s_final.where(s_mask, other="Unknown").astype("category")
+    adata.obs[labels_for_scanvi_key] = s_supervised
+    meta["scanvi_labels_key"] = labels_for_scanvi_key
+
+    LOGGER.warning(
+        "ANNOTATED RUN: using cluster round '%s' final_label_key=%r; mask_key=%r; "
+        "confident=%d/%d (%.2f%%). Training scANVI with Unknown for low-confidence cells.",
+        meta.get("source_round_id", "NA"),
+        final_label_key,
+        mask_key,
+        int(meta["n_labeled_confident"]),
+        int(meta["n_total"]),
+        100.0 * (float(meta["n_labeled_confident"]) / max(1.0, float(meta["n_total"]))),
+    )
+
+    # Ensure PCA/HVG backbone is consistent (same as _run_integrations)
+    if "highly_variable" not in adata.var:
+        raise RuntimeError(
+            "annotated_run: Expected HVGs in adata.var['highly_variable'] (from load-and-filter)."
+        )
+
+    hvg_mask = adata.var["highly_variable"].to_numpy(dtype=bool)
+    if int(hvg_mask.sum()) == 0:
+        raise RuntimeError("annotated_run: adata.var['highly_variable'] selects 0 genes.")
+
+    # Recompute PCA on HVGs (do not depend on existing PCA)
+    LOGGER.info("ANNOTATED RUN: recomputing PCA on HVGs (mask_var='highly_variable').")
+    adata.obsm.pop("X_pca", None)
+    adata.uns.pop("pca", None)
+    for k in ("PCs", "variance_ratio", "variance"):
+        try:
+            adata.varm.pop(k, None)
+        except Exception:
+            pass
+
+    sc.tl.pca(adata, mask_var="highly_variable", svd_solver="arpack")
+    if "X_pca" not in adata.obsm:
+        raise RuntimeError("annotated_run: PCA failed; adata.obsm['X_pca'] missing.")
+
+    # Train on HVGs only
+    adata_hvg = adata[:, hvg_mask].copy()
+
+    # copy supervision labels into HVG view (obs is copied, but keep explicit)
+    adata_hvg.obs[labels_for_scanvi_key] = adata.obs[labels_for_scanvi_key].copy()
+
+    # scVI backbone + scANVI
+    layer = _get_scvi_layer(adata_hvg)
+    scvi_model = _train_scvi(
+        adata_hvg,
+        batch_key=batch_key,
+        layer=layer,
+        purpose="annotated_secondary_integration",
+    )
+
+    Z_scanvi = _run_scanvi_from_scvi(scvi_model, adata_hvg, labels_for_scanvi_key)
+
+    # write embedding to full adata
+    def _write_embedding_from_hvg(full_key: str, Z_hvg: np.ndarray, obs_names_hvg) -> None:
+        if Z_hvg.shape[0] != len(obs_names_hvg):
+            raise RuntimeError(f"{full_key}: latent rows != HVG adata cells")
+
+        if not np.array_equal(np.asarray(obs_names_hvg), np.asarray(adata.obs_names)):
+            order = pd.Index(obs_names_hvg).get_indexer(adata.obs_names)
+            if (order < 0).any():
+                raise RuntimeError(f"{full_key}: HVG adata missing cells from full adata")
+            Z_full = Z_hvg[order, :]
+        else:
+            Z_full = Z_hvg
+
+        adata.obsm[full_key] = np.asarray(Z_full)
+
+    _write_embedding_from_hvg(out_embedding_key, np.asarray(Z_scanvi), adata_hvg.obs_names)
+
+    created = [out_embedding_key]
+    return adata, created, final_label_key, mask_key, meta
+
+
 def _run_bbknn(adata: ad.AnnData, batch_key: str) -> None:
     import bbknn
 
@@ -841,6 +1165,7 @@ def _select_best_embedding(
     benchmark_threshold: int = 100000,
     benchmark_n_cells: int = 100000,
     benchmark_random_state: int = 42,
+    run_tag: str | None = None,
 ) -> str:
     from scib_metrics.benchmark import Benchmarker, BioConservation, BatchCorrection
 
@@ -1025,10 +1350,19 @@ def _select_best_embedding(
     raw = bm.get_results(min_max_scale=False)
     scaled = bm.get_results(min_max_scale=True)
 
-    raw.to_csv(Path(output_dir) / "integration_metrics_raw.tsv", sep="\t")
-    scaled.to_csv(Path(output_dir) / "integration_metrics_scaled.tsv", sep="\t")
+    tag = str(run_tag).strip() if run_tag else ""
+    tag_part = f"_{tag}" if tag else ""
 
-    plot_utils.plot_scib_results_table(scaled)
+    raw_path = Path(output_dir) / f"integration_metrics_raw{tag_part}.tsv"
+    scaled_path = Path(output_dir) / f"integration_metrics_scaled{tag_part}.tsv"
+
+    raw.to_csv(raw_path, sep="\t")
+    scaled.to_csv(scaled_path, sep="\t")
+
+    LOGGER.info("Wrote scIB tables: %s and %s", raw_path.name, scaled_path.name)
+
+    fig_stem = f"scib_results_table{tag_part}" if tag_part else "scib_results_table"
+    plot_utils.plot_scib_results_table(scaled, stem=fig_stem)
 
     numeric = (
         scaled.astype(str)
@@ -1104,70 +1438,202 @@ def run_integrate(cfg: IntegrateConfig) -> ad.AnnData:
         raise RuntimeError("batch_key missing")
     LOGGER.info("Using batch_key='%s'", batch_key)
 
-    methods = cfg.methods or ["scVI", "scANVI", "Harmony", "Scanorama", "BBKNN"]
+    annotated_run = bool(getattr(cfg, "annotated_run", False))
+    if annotated_run:
+        # ----------------------------
+        # Annotated secondary integration (explicit + guarded)
+        # ----------------------------
+        LOGGER.warning("ANNOTATED RUN enabled: will compute ONLY scANVI__annotated (plus scVI backbone as needed).")
 
-    adata, emb_keys = _run_integrations(
-        adata,
-        cfg,
-        methods=methods,
-        batch_key=batch_key,
-    )
+        # Determine source round
+        source_round = getattr(cfg, "annotated_run_cluster_round", None)
+        source_round = str(source_round) if source_round else None
 
-    best = _select_best_embedding(
-        adata,
-        embedding_keys=emb_keys,
-        batch_key=batch_key,
-        label_key=cfg.label_key,
-        n_jobs=cfg.benchmark_n_jobs,
-        output_dir=cfg.output_dir,
-        benchmark_threshold=cfg.benchmark_threshold,
-        benchmark_n_cells=cfg.benchmark_n_cells,
-        benchmark_random_state=cfg.benchmark_random_state,
-    )
-
-    plot_keys = list(emb_keys)
-    if "bbknn" in {m.lower() for m in methods}:
-        plot_keys.append("BBKNN")
-
-    plot_keys = list(dict.fromkeys(plot_keys))
-
-    plot_utils.plot_integration_umaps(
-        adata,
-        embedding_keys=plot_keys,
-        batch_key=batch_key,
-        color=batch_key,
-    )
-
-    if best.lower().startswith("bbknn"):
-        LOGGER.warning(
-            "BBKNN selected as best integration; using BBKNN neighbor graph (graph-based integration)."
-        )
-
-        import bbknn
-
-        bbknn.bbknn(
+        # Compute annotated scANVI embedding (and write it)
+        adata, created_keys, final_label_key, mask_key, meta = _run_annotated_scanvi_secondary_integration(
             adata,
+            cfg,
             batch_key=batch_key,
-            use_rep="X_pca",
+            source_round_id=source_round,
+            out_embedding_key="scANVI__annotated",
         )
 
-        adata.obsm["X_integrated"] = adata.obsm["X_pca"]
+        # Benchmark all available embeddings using FINAL labels
+        best = _select_best_embedding(
+            adata,
+            embedding_keys=created_keys,  # created this run; function will also include pre-existing embeddings
+            batch_key=batch_key,
+            label_key=final_label_key,
+            n_jobs=cfg.benchmark_n_jobs,
+            output_dir=cfg.output_dir,
+            benchmark_threshold=cfg.benchmark_threshold,
+            benchmark_n_cells=cfg.benchmark_n_cells,
+            benchmark_random_state=cfg.benchmark_random_state,
+            run_tag="annotated",
+        )
+
+        # Store the annotated selection without clobbering primary integration
+        if best.lower().startswith("bbknn"):
+            LOGGER.warning("ANNOTATED RUN: BBKNN selected as best; X_integrated_annotated will reference PCA.")
+            adata.obsm["X_integrated_annotated"] = adata.obsm["X_pca"]
+            # neighbors graph for annotated visualization
+            sc.pp.neighbors(adata, use_rep="X_pca")
+        else:
+            adata.obsm["X_integrated_annotated"] = adata.obsm[best]
+            sc.pp.neighbors(adata, use_rep="X_integrated_annotated")
+
+        # Compute an annotated UMAP without overwriting existing UMAP
+        old_umap = adata.obsm.get("X_umap", None)
+        sc.tl.umap(adata)
+        adata.obsm["X_umap_annotated"] = np.asarray(adata.obsm["X_umap"])
+        if old_umap is not None:
+            adata.obsm["X_umap"] = old_umap
+
+        # Plot UMAPs: batch + final labels
+        # (plot_utils.plot_integration_umaps likely uses X_umap; so we temporarily swap)
+        if getattr(cfg, "make_figures", True):
+            try:
+                tmp_umap = adata.obsm.get("X_umap", None)
+                adata.obsm["X_umap"] = adata.obsm["X_umap_annotated"]
+
+                plot_utils.plot_integration_umaps(
+                    adata,
+                    embedding_keys=["X_integrated_annotated"],
+                    batch_key=batch_key,
+                    color=batch_key,
+                )
+                plot_utils.plot_integration_umaps(
+                    adata,
+                    embedding_keys=["X_integrated_annotated"],
+                    batch_key=batch_key,
+                    color=final_label_key,
+                )
+                if tmp_umap is not None:
+                    adata.obsm["X_umap"] = tmp_umap
+            except Exception as e:
+                LOGGER.warning("ANNOTATED RUN: failed to plot annotated UMAPs: %s", e)
+                if old_umap is not None:
+                    adata.obsm["X_umap"] = old_umap
+
+        # Integration provenance
+        adata.uns.setdefault("integration", {})
+        adata.uns["integration"].setdefault("runs", [])
+        try:
+            adata.uns["integration"]["runs"].append(
+                {
+                    "mode": "annotated_secondary",
+                    "embedding_key_created": "scANVI__annotated",
+                    "selected_embedding": str(best),
+                    "final_label_key": str(final_label_key),
+                    "confidence_mask_key": str(mask_key),
+                    "source_round_id": str(meta.get("source_round_id")),
+                    "mask_stats": meta.get("mask_stats", None),
+                    "timestamp_utc": datetime.utcnow().isoformat(),
+                }
+            )
+        except Exception:
+            pass
+
+        # Create derived projection round to keep state clear (no reclustering)
+        try:
+            parent_round = meta.get("source_round_id", None)
+            if parent_round:
+                proj_round = _create_projection_round_for_secondary_integration(
+                    adata,
+                    parent_round_id=str(parent_round),
+                    integration_key="X_integrated_annotated",
+                )
+                LOGGER.info("ANNOTATED RUN: created projection round '%s' (parent='%s').", proj_round, parent_round)
+        except Exception as e:
+            LOGGER.warning("ANNOTATED RUN: failed to create projection round: %s", e)
+
+        # Report generation: reuse existing report (it will see new obsm keys / tables)
+        reporting.generate_integration_report(
+            fig_root=cfg.figdir,
+            version=__version__,
+            adata=adata,
+            batch_key=batch_key,
+            label_key=final_label_key,
+            methods=["scANVI__annotated"],
+            benchmark_n_jobs=cfg.benchmark_n_jobs,
+            selected_embedding=best,
+        )
 
     else:
-        adata.obsm["X_integrated"] = adata.obsm[best]
-        sc.pp.neighbors(adata, use_rep="X_integrated")
+        # ----------------------------
+        # Standard integration path (unchanged)
+        # ----------------------------
+        methods = cfg.methods or ["scVI", "scANVI", "Harmony", "Scanorama", "BBKNN"]
 
-    adata.uns.setdefault("integration", {})
-    adata.uns["integration"].update(
-        {
-            "best_embedding": best,
-            "available_embeddings": list(emb_keys),
-            "selection_timestamp": datetime.utcnow().isoformat(),
-            "scanvi_label_source": str(getattr(cfg, "scanvi_label_source", "leiden")),
-        }
-    )
+        adata, emb_keys = _run_integrations(
+            adata,
+            cfg,
+            methods=methods,
+            batch_key=batch_key,
+        )
 
-    sc.tl.umap(adata)
+        best = _select_best_embedding(
+            adata,
+            embedding_keys=emb_keys,
+            batch_key=batch_key,
+            label_key=cfg.label_key,
+            n_jobs=cfg.benchmark_n_jobs,
+            output_dir=cfg.output_dir,
+            benchmark_threshold=cfg.benchmark_threshold,
+            benchmark_n_cells=cfg.benchmark_n_cells,
+            benchmark_random_state=cfg.benchmark_random_state,
+            run_tag=None,
+        )
+
+        plot_keys = list(emb_keys)
+        if "bbknn" in {m.lower() for m in methods}:
+            plot_keys.append("BBKNN")
+        plot_keys = list(dict.fromkeys(plot_keys))
+
+        plot_utils.plot_integration_umaps(
+            adata,
+            embedding_keys=plot_keys,
+            batch_key=batch_key,
+            color=batch_key,
+        )
+
+        if best.lower().startswith("bbknn"):
+            LOGGER.warning(
+                "BBKNN selected as best integration; using BBKNN neighbor graph (graph-based integration)."
+            )
+            import bbknn
+            bbknn.bbknn(
+                adata,
+                batch_key=batch_key,
+                use_rep="X_pca",
+            )
+            adata.obsm["X_integrated"] = adata.obsm["X_pca"]
+        else:
+            adata.obsm["X_integrated"] = adata.obsm[best]
+            sc.pp.neighbors(adata, use_rep="X_integrated")
+
+        adata.uns.setdefault("integration", {})
+        adata.uns["integration"].update(
+            {
+                "best_embedding": best,
+                "available_embeddings": list(emb_keys),
+                "selection_timestamp": datetime.utcnow().isoformat(),
+                "scanvi_label_source": str(getattr(cfg, "scanvi_label_source", "leiden")),
+            }
+        )
+
+        sc.tl.umap(adata)
+
+        reporting.generate_integration_report(
+            fig_root=cfg.figdir,
+            version=__version__,
+            adata=adata,
+            batch_key=batch_key,
+            label_key=cfg.label_key,
+            methods=methods,
+            benchmark_n_jobs=cfg.benchmark_n_jobs,
+            selected_embedding=best,
+        )
 
     reporting.generate_integration_report(
         fig_root=cfg.figdir,

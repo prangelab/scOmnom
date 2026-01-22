@@ -157,6 +157,29 @@ class IntegrateConfig(BaseModel):
     scanvi_tiny_cluster_min_cells: int = 30
 
     # ------------------------------------------------------------------
+    # Annotated secondary integration (SECOND PASS; explicit + guarded)
+    # ------------------------------------------------------------------
+    annotated_run: bool = False
+
+    # Which cluster round to source "final" labels from. If None -> use active_cluster_round.
+    annotated_run_cluster_round: Optional[str] = None
+
+    # Optional override for which obs column to treat as "final labels".
+    # If None -> use rounds[round_id]["annotation"]["pretty_cluster_key"], else fall back to adata.obs["cluster_label"].
+    annotated_run_final_label_key: Optional[str] = None
+
+    # Where to store the derived boolean mask in adata.obs
+    annotated_run_confidence_mask_key: str = "celltypist_confident_entropy_margin"
+
+    # Where to store the scANVI supervision labels (final label where confident, else "Unknown")
+    annotated_run_scanvi_labels_key: str = "scanvi_labels__annotated"
+
+    # Entropy-margin mask thresholds (must match cluster_and_annotate policy)
+    bio_entropy_abs_limit: float = 0.5
+    bio_entropy_quantile: float = 0.7
+    bio_margin_min: float = 0.10
+
+    # ------------------------------------------------------------------
     # Figures
     # ------------------------------------------------------------------
     figdir_name: str = "figures"
