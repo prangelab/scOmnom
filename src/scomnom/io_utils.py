@@ -1,8 +1,7 @@
 from __future__ import annotations
 import glob
 import logging
-from typing import Dict, List, Optional, Tuple
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, List, Optional, Tuple, Any
 import anndata as ad
 import scanpy as sc
 import pandas as pd
@@ -13,7 +12,6 @@ import re
 import json
 import urllib.request
 import urllib.error
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -1652,3 +1650,425 @@ def resolve_msigdb_gene_sets(
     msigdb_release = release if used_any_msigdb_keyword else None
     return gmt_files_out, used_keywords, msigdb_release
 
+
+def _safe_filename(s: str, max_len: int = 180) -> str:
+    s = str(s)
+    s = s.replace("/", "_").replace("\\", "_").replace(":", "_")
+    s = re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"[^A-Za-z0-9._-]+", "_", s)
+    s = re.sub(r"_+", "_", s).strip("._-")
+    if not s:
+        s = "x"
+    if len(s) > max_len:
+        s = s[:max_len].rstrip("._-")
+    return s
+
+
+def export_pseudobulk_de_tables(
+    adata: ad.AnnData,
+    *,
+    output_dir: Path,
+    store_key: str = "scomnom_de",
+    groupby: Optional[str] = None,
+    condition_key: Optional[str] = None,
+) -> None:
+    """
+    Write pseudobulk DE results stored in adata.uns[store_key] to CSV files.
+
+    Outputs (relative to output_dir):
+      - de_tables/cluster_vs_rest/cluster_vs_rest__<cluster>.csv
+      - de_tables/cluster_vs_rest/__summary.csv (if present)
+      - de_tables/condition_within_cluster__<condition_key>/condition_within_cluster__<group>__<test>_vs_<ref>.csv
+
+    Assumes storage schema from de_utils:
+      adata.uns[store_key]["pseudobulk_cluster_vs_rest"]["results"] : dict[str, DataFrame]
+      adata.uns[store_key]["pseudobulk_cluster_vs_rest"]["summary"]  : DataFrame (optional)
+      adata.uns[store_key]["pseudobulk_condition_within_group"]      : dict[key -> payload]
+    """
+    output_dir = Path(output_dir)
+    base = output_dir / "de_tables"
+    base.mkdir(parents=True, exist_ok=True)
+
+    block = adata.uns.get(store_key, {})
+    if not isinstance(block, dict):
+        return
+
+    # -------------------------
+    # Cluster vs rest
+    # -------------------------
+    pb = block.get("pseudobulk_cluster_vs_rest", {})
+    if isinstance(pb, dict):
+        out_cluster = base / "cluster_vs_rest"
+        out_cluster.mkdir(parents=True, exist_ok=True)
+
+        results_by_cluster = pb.get("results", {})
+        if isinstance(results_by_cluster, dict):
+            for cl, df in results_by_cluster.items():
+                cl_safe = _safe_filename(cl)
+                out_csv = out_cluster / f"cluster_vs_rest__{cl_safe}.csv"
+
+                if df is None or getattr(df, "empty", True):
+                    pd.DataFrame(
+                        columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]
+                    ).to_csv(out_csv, index=False)
+                else:
+                    df2 = df.copy()
+                    if "gene" not in df2.columns:
+                        df2["gene"] = df2.index.astype(str)
+                    df2.to_csv(out_csv, index=False)
+
+        summ = pb.get("summary", None)
+        if isinstance(summ, pd.DataFrame) and not summ.empty:
+            summ.to_csv(out_cluster / "__summary.csv", index=False)
+
+    # -------------------------
+    # Condition within group
+    # -------------------------
+    if condition_key:
+        cond = block.get("pseudobulk_condition_within_group", {})
+        if isinstance(cond, dict) and cond:
+            out_cond = base / f"condition_within_cluster__{_safe_filename(condition_key)}"
+            out_cond.mkdir(parents=True, exist_ok=True)
+
+            # keys look like: "{group_key}={group_value}::{condition_key}::{test}_vs_{reference}"
+            for k, payload in cond.items():
+                if not isinstance(payload, dict):
+                    continue
+
+                df = payload.get("results", None)
+                if df is None:
+                    continue
+
+                group_value = payload.get("group_value", None)
+                test = payload.get("test", None)
+                ref = payload.get("reference", None)
+
+                # fallback parse from key if payload missing
+                if group_value is None and groupby and isinstance(k, str) and k.startswith(f"{groupby}="):
+                    # "groupby=VALUE::..."
+                    try:
+                        group_value = k.split("::", 1)[0].split("=", 1)[1]
+                    except Exception:
+                        group_value = str(k)
+
+                stem = f"condition_within_cluster__{_safe_filename(str(group_value) if group_value is not None else str(k))}"
+                if test is not None and ref is not None:
+                    stem += f"__{_safe_filename(str(test))}_vs_{_safe_filename(str(ref))}"
+
+                out_csv = out_cond / f"{stem}.csv"
+
+                if getattr(df, "empty", True):
+                    pd.DataFrame(
+                        columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]
+                    ).to_csv(out_csv, index=False)
+                else:
+                    df2 = df.copy()
+                    if "gene" not in df2.columns:
+                        df2["gene"] = df2.index.astype(str)
+                    df2.to_csv(out_csv, index=False)
+
+
+def export_rank_genes_groups_tables(
+    adata: ad.AnnData,
+    *,
+    key_added: str,
+    output_dir: Path,
+    groupby: Optional[str] = None,
+    prefix: str = "celllevel_markers",
+) -> None:
+    """
+    Write scanpy rank_genes_groups results (adata.uns[key_added]) to CSV.
+
+    Outputs (relative to output_dir):
+      - marker_tables/<prefix>__all_groups.csv (long/tidy)
+
+    This is notebook-friendly data in a stable tabular format.
+    """
+    output_dir = Path(output_dir)
+    out_dir = output_dir / "marker_tables"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if key_added not in adata.uns:
+        raise KeyError(f"export_rank_genes_groups_tables: key_added={key_added!r} not found in adata.uns")
+
+    # Prefer scanpy helper if available
+    try:
+        import scanpy as sc  # noqa: F401
+        from scanpy.get import rank_genes_groups_df
+
+        # rank_genes_groups_df returns df for one group; iterate and concatenate
+        # groups are stored in adata.uns[key_added]['names'].dtype.names
+        rg = adata.uns[key_added]
+        names = rg.get("names", None)
+        if names is None or not hasattr(names, "dtype") or not getattr(names.dtype, "names", None):
+            raise RuntimeError("rank_genes_groups results missing expected 'names' structured array")
+
+        groups = list(names.dtype.names)
+        dfs = []
+        for g in groups:
+            dfg = rank_genes_groups_df(adata, group=g, key=key_added)
+            dfg.insert(0, "group", str(g))
+            dfs.append(dfg)
+
+        df_all = pd.concat(dfs, axis=0, ignore_index=True)
+
+    except Exception:
+        # Fallback: manual extraction from structured arrays
+        rg = adata.uns[key_added]
+        names = rg.get("names", None)
+        if names is None or not hasattr(names, "dtype") or not getattr(names.dtype, "names", None):
+            raise RuntimeError("rank_genes_groups results missing expected 'names' structured array")
+
+        groups = list(names.dtype.names)
+        cols = ["names", "scores", "logfoldchanges", "pvals", "pvals_adj"]
+        # Some methods may not include all columns; guard each
+        available = {c: rg.get(c, None) for c in cols}
+
+        rows = []
+        for g in groups:
+            n = len(names[g])
+            for i in range(n):
+                row = {"group": str(g), "gene": str(names[g][i])}
+                if available["scores"] is not None:
+                    row["score"] = float(available["scores"][g][i])
+                if available["logfoldchanges"] is not None:
+                    row["logfoldchange"] = float(available["logfoldchanges"][g][i])
+                if available["pvals"] is not None:
+                    row["pval"] = float(available["pvals"][g][i])
+                if available["pvals_adj"] is not None:
+                    row["pvals_adj"] = float(available["pvals_adj"][g][i])
+                rows.append(row)
+
+        df_all = pd.DataFrame(rows)
+
+    # Normalize columns a bit
+    if "names" in df_all.columns and "gene" not in df_all.columns:
+        df_all = df_all.rename(columns={"names": "gene"})
+
+    # helpful metadata columns (best-effort)
+    if groupby is not None:
+        df_all.insert(1, "groupby", str(groupby))
+    df_all.insert(2, "key_added", str(key_added))
+
+    out_csv = out_dir / f"{_safe_filename(prefix)}__all_groups.csv"
+    df_all.to_csv(out_csv, index=False)
+
+
+def _safe_excel_sheet_name(name: str) -> str:
+    """
+    Excel constraints:
+      - max 31 chars
+      - cannot contain: : \ / ? * [ ]
+    """
+    s = str(name)
+    s = re.sub(r"[:\\/?*\[\]]+", "_", s)
+    s = s.strip()
+    if not s:
+        s = "Sheet"
+    return s[:31]
+
+
+def export_pseudobulk_cluster_vs_rest_excel(
+    adata: ad.AnnData,
+    *,
+    output_dir: Path,
+    store_key: str = "scomnom_de",
+    filename: str = "cluster_vs_rest.xlsx",
+) -> None:
+    """
+    Write ALL cluster-vs-rest DE tables into a single Excel workbook.
+    One cluster per sheet.
+    """
+    output_dir = Path(output_dir)
+    out_xlsx = output_dir / "de_tables" / filename
+    out_xlsx.parent.mkdir(parents=True, exist_ok=True)
+
+    block = adata.uns.get(store_key, {})
+    pb = block.get("pseudobulk_cluster_vs_rest", {})
+    results = pb.get("results", {})
+
+    if not isinstance(results, dict) or not results:
+        return
+
+    with pd.ExcelWriter(out_xlsx, engine="xlsxwriter") as writer:
+        for cluster, df in results.items():
+            sheet = _safe_excel_sheet_name(cluster)
+
+            if df is None or getattr(df, "empty", True):
+                pd.DataFrame(
+                    columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]
+                ).to_excel(writer, sheet_name=sheet, index=False)
+            else:
+                df2 = df.copy()
+                if "gene" not in df2.columns:
+                    df2["gene"] = df2.index.astype(str)
+                df2.to_excel(writer, sheet_name=sheet, index=False)
+
+
+def export_pseudobulk_condition_within_cluster_excel(
+    adata: ad.AnnData,
+    *,
+    output_dir: Path,
+    store_key: str = "scomnom_de",
+    condition_key: str,
+    filename: Optional[str] = None,
+) -> None:
+    """
+    One Excel file per condition_key.
+    One sheet per cluster.
+    """
+    if not condition_key:
+        return
+
+    output_dir = Path(output_dir)
+    if filename is None:
+        filename = f"condition_within_cluster__{_safe_filename(condition_key)}.xlsx"
+
+    out_xlsx = output_dir / "de_tables" / filename
+    out_xlsx.parent.mkdir(parents=True, exist_ok=True)
+
+    block = adata.uns.get(store_key, {})
+    cond = block.get("pseudobulk_condition_within_group", {})
+
+    if not isinstance(cond, dict) or not cond:
+        return
+
+    with pd.ExcelWriter(out_xlsx, engine="xlsxwriter") as writer:
+        for key, payload in cond.items():
+            if not isinstance(payload, dict):
+                continue
+
+            df = payload.get("results", None)
+            if df is None:
+                continue
+
+            group_value = payload.get("group_value", key)
+            test = payload.get("test", None)
+            ref = payload.get("reference", None)
+
+            sheet = str(group_value)
+            if test and ref:
+                sheet = f"{sheet} ({test} vs {ref})"
+
+            sheet = _safe_excel_sheet_name(sheet)
+
+            if getattr(df, "empty", True):
+                pd.DataFrame(
+                    columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]
+                ).to_excel(writer, sheet_name=sheet, index=False)
+            else:
+                df2 = df.copy()
+                if "gene" not in df2.columns:
+                    df2["gene"] = df2.index.astype(str)
+                df2.to_excel(writer, sheet_name=sheet, index=False)
+
+
+def export_rank_genes_groups_excel(
+    adata: ad.AnnData,
+    *,
+    key_added: str,
+    output_dir: Path,
+    groupby: Optional[str] = None,
+    filename: Optional[str] = None,
+    prefix: str = "celllevel_markers",
+    max_genes: Optional[int] = None,
+) -> None:
+    """
+    Write scanpy rank_genes_groups results (adata.uns[key_added]) to a single Excel workbook.
+    One group per sheet.
+
+    Outputs (relative to output_dir):
+      - marker_tables/<filename>.xlsx
+
+    Notes:
+      - Uses xlsxwriter.
+      - Sheet names are sanitized + truncated to Excel limits.
+      - If max_genes is set, truncates each sheet to that many rows.
+    """
+    output_dir = Path(output_dir)
+    out_dir = output_dir / "marker_tables"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if key_added not in adata.uns:
+        raise KeyError(f"export_rank_genes_groups_excel: key_added={key_added!r} not found in adata.uns")
+
+    if filename is None:
+        filename = f"{_safe_filename(prefix)}.xlsx"
+
+    out_xlsx = out_dir / filename
+    out_xlsx.parent.mkdir(parents=True, exist_ok=True)
+
+    # Prefer scanpy helper for consistent columns
+    df_all: pd.DataFrame
+    try:
+        from scanpy.get import rank_genes_groups_df
+
+        rg = adata.uns[key_added]
+        names = rg.get("names", None)
+        if names is None or not hasattr(names, "dtype") or not getattr(names.dtype, "names", None):
+            raise RuntimeError("rank_genes_groups results missing expected 'names' structured array")
+
+        groups = list(names.dtype.names)
+        dfs = []
+        for g in groups:
+            dfg = rank_genes_groups_df(adata, group=g, key=key_added)
+            dfg.insert(0, "group", str(g))
+            dfs.append(dfg)
+        df_all = pd.concat(dfs, axis=0, ignore_index=True)
+
+    except Exception:
+        # Fallback: reconstruct a tidy table
+        rg = adata.uns[key_added]
+        names = rg.get("names", None)
+        if names is None or not hasattr(names, "dtype") or not getattr(names.dtype, "names", None):
+            raise RuntimeError("rank_genes_groups results missing expected 'names' structured array")
+
+        groups = list(names.dtype.names)
+        cols = ["names", "scores", "logfoldchanges", "pvals", "pvals_adj"]
+        available = {c: rg.get(c, None) for c in cols}
+
+        rows = []
+        for g in groups:
+            n = len(names[g])
+            for i in range(n):
+                row = {"group": str(g), "gene": str(names[g][i])}
+                if available["scores"] is not None:
+                    row["score"] = float(available["scores"][g][i])
+                if available["logfoldchanges"] is not None:
+                    row["logfoldchange"] = float(available["logfoldchanges"][g][i])
+                if available["pvals"] is not None:
+                    row["pval"] = float(available["pvals"][g][i])
+                if available["pvals_adj"] is not None:
+                    row["pvals_adj"] = float(available["pvals_adj"][g][i])
+                rows.append(row)
+
+        df_all = pd.DataFrame(rows)
+
+    # Normalize columns
+    if "names" in df_all.columns and "gene" not in df_all.columns:
+        df_all = df_all.rename(columns={"names": "gene"})
+
+    # Add metadata cols (best-effort)
+    if groupby is not None and "groupby" not in df_all.columns:
+        df_all.insert(1, "groupby", str(groupby))
+    if "key_added" not in df_all.columns:
+        df_all.insert(2, "key_added", str(key_added))
+
+    # Write workbook: 1 sheet per group
+    if "group" not in df_all.columns:
+        # Degenerate case: just dump everything into one sheet
+        with pd.ExcelWriter(out_xlsx, engine="xlsxwriter") as writer:
+            df_write = df_all.copy()
+            if max_genes is not None and max_genes > 0:
+                df_write = df_write.head(int(max_genes))
+            df_write.to_excel(writer, sheet_name=_safe_excel_sheet_name("markers"), index=False)
+        return
+
+    with pd.ExcelWriter(out_xlsx, engine="xlsxwriter") as writer:
+        groups = list(pd.unique(df_all["group"].astype(str)))
+        for g in groups:
+            dfg = df_all[df_all["group"].astype(str) == str(g)].copy()
+            if max_genes is not None and max_genes > 0:
+                dfg = dfg.head(int(max_genes))
+            sheet = _safe_excel_sheet_name(str(g))
+            dfg.to_excel(writer, sheet_name=sheet, index=False)

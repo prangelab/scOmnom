@@ -6,19 +6,22 @@ from datetime import datetime
 from pathlib import Path
 
 import anndata as ad
+import pandas as pd
 
 from scomnom import __version__
 from . import io_utils, plot_utils, reporting
 from .logging_utils import init_logging
 
 from .de_utils import (
-    CountsSpec,
-    MarkersSpec,
-    compute_markers,
-    de_cluster_vs_rest,
-    de_condition_within_cluster,
-    resolve_groupby_from_round,
+    PseudobulkSpec,
+    CellLevelMarkerSpec,
+    PseudobulkDEOptions,
+    compute_markers_celllevel,
+    de_cluster_vs_rest_pseudobulk,
+    de_condition_within_group_pseudobulk,
+    resolve_group_key,
 )
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -51,11 +54,11 @@ def run_markers_and_de(cfg) -> ad.AnnData:
     adata = io_utils.load_dataset(getattr(cfg, "input_path"))
 
     # Resolve groupby key (round-aware by default)
-    groupby = resolve_groupby_from_round(
+    groupby = resolve_group_key(
         adata,
         groupby=getattr(cfg, "groupby", None),
-        label_source=getattr(cfg, "label_source", "pretty"),
         round_id=getattr(cfg, "round_id", None),
+        prefer_pretty=(str(getattr(cfg, "label_source", "pretty")).lower() == "pretty"),
     )
 
     sample_key = getattr(cfg, "sample_key", None) or getattr(cfg, "batch_key", None) or adata.uns.get("batch_key")
@@ -65,58 +68,96 @@ def run_markers_and_de(cfg) -> ad.AnnData:
     LOGGER.info("markers_and_de: groupby=%r, sample_key=%r", groupby, sample_key)
 
     # Markers
-    markers_spec = MarkersSpec(
-        key_added=str(getattr(cfg, "markers_key", "cluster_markers_wilcoxon")),
+    markers_spec = CellLevelMarkerSpec(
         method=str(getattr(cfg, "markers_method", "wilcoxon")),
         n_genes=int(getattr(cfg, "markers_n_genes", 100)),
-        rankby_abs=bool(getattr(cfg, "markers_rankby_abs", True)),
         use_raw=bool(getattr(cfg, "markers_use_raw", False)),
-        downsample_threshold=int(getattr(cfg, "markers_downsample_threshold", 500_000)),
-        downsample_max_per_group=int(getattr(cfg, "markers_downsample_max_per_group", 2_000)),
+        layer=getattr(cfg, "markers_layer", None),
+        rankby_abs=bool(getattr(cfg, "markers_rankby_abs", True)),
+        max_cells_per_group=int(getattr(cfg, "markers_downsample_max_per_group", 2000)),
         random_state=int(getattr(cfg, "random_state", 42)),
     )
-    compute_markers(adata, groupby=groupby, spec=markers_spec, inplace=True)
 
-    # DE: cluster vs rest
-    counts_spec = CountsSpec(
-        priority_layers=tuple(getattr(cfg, "counts_layers", ("counts_cb", "counts_raw"))),
-        allow_X=bool(getattr(cfg, "allow_X_counts", True)),
-    )
-
-    de_out = output_dir / "de_tables"
-    de_out.mkdir(parents=True, exist_ok=True)
-
-    marker_genes_all_clusters = de_cluster_vs_rest(
+    markers_key = str(getattr(cfg, "markers_key", "cluster_markers_wilcoxon"))
+    compute_markers_celllevel(
         adata,
         groupby=groupby,
+        round_id=getattr(cfg, "round_id", None),
+        spec=markers_spec,
+        key_added=markers_key,
+        store=True,
+    )
+
+    # DE: cluster vs rest
+    # Choose first available layer from cfg.counts_layers; else fall back to X if allowed.
+    layer_candidates = list(getattr(cfg, "counts_layers", ["counts_cb", "counts_raw"]))
+    counts_layer = None
+    for layer in layer_candidates:
+        if layer in adata.layers:
+            counts_layer = layer
+            break
+
+    if counts_layer is None and not bool(getattr(cfg, "allow_X_counts", True)):
+        raise RuntimeError(
+            f"markers_and_de: none of counts_layers found in adata.layers: {layer_candidates}, and allow_X_counts=False"
+        )
+
+    pb_spec = PseudobulkSpec(
         sample_key=str(sample_key),
-        counts=counts_spec,
-        min_cells_target=int(getattr(cfg, "min_cells_target", 20)),
+        counts_layer=counts_layer,  # can be None -> uses adata.X
+    )
+
+    pb_opts = PseudobulkDEOptions(
+        min_cells_per_sample_group=int(getattr(cfg, "min_cells_target", 20)),
+        min_samples_per_level=int(getattr(cfg, "min_samples_per_level", 2)),
         alpha=float(getattr(cfg, "alpha", 0.05)),
-        out_dir=de_out / "cluster_vs_rest",
+        shrink_lfc=bool(getattr(cfg, "shrink_lfc", True)),
+    )
+
+    marker_genes_all_clusters = de_cluster_vs_rest_pseudobulk(
+        adata,
+        groupby=groupby,
+        round_id=getattr(cfg, "round_id", None),
+        spec=pb_spec,
+        opts=pb_opts,
         store_key=str(getattr(cfg, "store_key", "scomnom_de")),
-        inplace=True,
+        store=True,
     )
 
     # Optional condition DE
     condition_key = getattr(cfg, "condition_key", None)
     if condition_key:
-        conditional_de_genes_all_clusters = de_condition_within_cluster(
-            adata,
-            groupby=groupby,
-            sample_key=str(sample_key),
-            condition_key=str(condition_key),
-            reference=getattr(cfg, "condition_reference", None),
-            counts=counts_spec,
-            min_cells=int(getattr(cfg, "min_cells_condition", 20)),
+        reference = getattr(cfg, "condition_reference", None)
+        if reference is None:
+            raise RuntimeError("markers_and_de: condition_reference must be set when condition_key is provided.")
+
+        # per-cluster condition DE
+        groups = pd.Index(pd.unique(adata.obs[groupby].astype(str))).sort_values()
+        conditional_de_genes_all_clusters = {}
+
+        cond_opts = PseudobulkDEOptions(
+            min_cells_per_sample_group=int(getattr(cfg, "min_cells_condition", 20)),
+            min_samples_per_level=int(getattr(cfg, "min_samples_per_level", 2)),
             alpha=float(getattr(cfg, "alpha", 0.05)),
-            out_dir=de_out / f"condition_within_cluster__{condition_key}",
-            store_key=str(getattr(cfg, "store_key", "scomnom_de")),
-            inplace=True,
+            shrink_lfc=bool(getattr(cfg, "shrink_lfc", True)),
         )
+
+        for g in groups:
+            res = de_condition_within_group_pseudobulk(
+                adata,
+                group_value=str(g),
+                groupby=groupby,
+                round_id=getattr(cfg, "round_id", None),
+                condition_key=str(condition_key),
+                reference=str(reference),
+                spec=pb_spec,
+                opts=cond_opts,
+                store_key=str(getattr(cfg, "store_key", "scomnom_de")),
+                store=True,
+            )
+            conditional_de_genes_all_clusters[str(g)] = res
     else:
         conditional_de_genes_all_clusters = None
-        LOGGER.info("markers_and_de: condition_key not set; skipping condition DE.")
 
     # Minimal provenance
     adata.uns.setdefault("markers_and_de", {})
@@ -126,25 +167,83 @@ def run_markers_and_de(cfg) -> ad.AnnData:
             "timestamp_utc": datetime.utcnow().isoformat(),
             "groupby": str(groupby),
             "sample_key": str(sample_key),
-            "markers_key": markers_spec.key_added,
-            "counts_layers": list(counts_spec.priority_layers),
+            "markers_key": str(markers_key),
+            "counts_layers_candidates": list(layer_candidates),
+            "counts_layer_used": counts_layer,
             "alpha": float(getattr(cfg, "alpha", 0.05)),
             "tables": {
-                "cluster_vs_rest": marker_genes_all_clusters.to_dict(orient="records")
+                "cluster_vs_rest_clusters": sorted(list(marker_genes_all_clusters.keys()))
                 if hasattr(marker_genes_all_clusters, "to_dict")
                 else None,
-                "condition_within_cluster": conditional_de_genes_all_clusters.to_dict(orient="records")
+                "condition_within_cluster_clusters": sorted(
+                list(conditional_de_genes_all_clusters.keys())) if conditional_de_genes_all_clusters else None
                 if (conditional_de_genes_all_clusters is not None and hasattr(conditional_de_genes_all_clusters, "to_dict"))
                 else None,
             },
         }
     )
 
-    from . import de_plot_utils
+    # ------------------------------------------------------------------
+    # Write tables
+    # ------------------------------------------------------------------
+    # Markers: cell-level rank_genes_groups -> CSVs
+    io_utils.export_rank_genes_groups_tables(
+        adata,
+        key_added=markers_key,
+        output_dir=output_dir,
+        groupby=str(groupby),
+        prefix="celllevel_markers",
+    )
+
+    # Markers: cell-level rank_genes_groups -> XLSX
+    io_utils.export_rank_genes_groups_excel(
+        adata,
+        key_added=markers_key,
+        output_dir=output_dir,
+        groupby=str(groupby),
+        filename="celllevel_markers.xlsx",
+        max_genes=int(getattr(cfg, "markers_n_genes", 100)),
+    )
+
+    # Pseudobulk cluster-vs-rest: CSV folder
+    io_utils.export_pseudobulk_de_tables(
+        adata,
+        output_dir=output_dir,
+        store_key=str(getattr(cfg, "store_key", "scomnom_de")),
+        groupby=str(groupby),
+        condition_key=None,
+    )
+
+    # Pseudobulk cluster-vs-rest: single XLSX
+    io_utils.export_pseudobulk_cluster_vs_rest_excel(
+        adata,
+        output_dir=output_dir,
+        store_key=str(getattr(cfg, "store_key", "scomnom_de")),
+    )
+
+    if condition_key:
+        # Condition within cluster: CSV folder
+        io_utils.export_pseudobulk_de_tables(
+            adata,
+            output_dir=output_dir,
+            store_key=str(getattr(cfg, "store_key", "scomnom_de")),
+            groupby=str(groupby),
+            condition_key=str(condition_key),
+        )
+
+        # Condition within cluster: single XLSX
+        io_utils.export_pseudobulk_condition_within_cluster_excel(
+            adata,
+            output_dir=output_dir,
+            store_key=str(getattr(cfg, "store_key", "scomnom_de")),
+            condition_key=str(condition_key),
+        )
 
     # ------------------------------------------------------------------
     # Plotting (CLI behavior: create figs + save via save_multi)
     # ------------------------------------------------------------------
+    from . import de_plot_utils
+
     if bool(getattr(cfg, "make_figures", True)):
         store_key = str(getattr(cfg, "store_key", "scomnom_de"))
         alpha = float(getattr(cfg, "alpha", 0.05))
