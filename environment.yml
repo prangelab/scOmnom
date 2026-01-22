@@ -67,3 +67,4 @@ dependencies:
       - umap-learn
       - requests
       - types-pytz
+      - pydeseq2

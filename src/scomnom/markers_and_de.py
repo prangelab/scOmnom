@@ -86,7 +86,7 @@ def run_markers_and_de(cfg) -> ad.AnnData:
     de_out = output_dir / "de_tables"
     de_out.mkdir(parents=True, exist_ok=True)
 
-    manifest1 = de_cluster_vs_rest(
+    marker_genes_all_clusters = de_cluster_vs_rest(
         adata,
         groupby=groupby,
         sample_key=str(sample_key),
@@ -101,7 +101,7 @@ def run_markers_and_de(cfg) -> ad.AnnData:
     # Optional condition DE
     condition_key = getattr(cfg, "condition_key", None)
     if condition_key:
-        manifest2 = de_condition_within_cluster(
+        conditional_de_genes_all_clusters = de_condition_within_cluster(
             adata,
             groupby=groupby,
             sample_key=str(sample_key),
@@ -115,7 +115,7 @@ def run_markers_and_de(cfg) -> ad.AnnData:
             inplace=True,
         )
     else:
-        manifest2 = None
+        conditional_de_genes_all_clusters = None
         LOGGER.info("markers_and_de: condition_key not set; skipping condition DE.")
 
     # Minimal provenance
@@ -129,9 +129,13 @@ def run_markers_and_de(cfg) -> ad.AnnData:
             "markers_key": markers_spec.key_added,
             "counts_layers": list(counts_spec.priority_layers),
             "alpha": float(getattr(cfg, "alpha", 0.05)),
-            "manifests": {
-                "cluster_vs_rest": manifest1.to_dict(orient="records"),
-                "condition_within_cluster": manifest2.to_dict(orient="records") if manifest2 is not None else None,
+            "tables": {
+                "cluster_vs_rest": marker_genes_all_clusters.to_dict(orient="records")
+                if hasattr(marker_genes_all_clusters, "to_dict")
+                else None,
+                "condition_within_cluster": conditional_de_genes_all_clusters.to_dict(orient="records")
+                if (conditional_de_genes_all_clusters is not None and hasattr(conditional_de_genes_all_clusters, "to_dict"))
+                else None,
             },
         }
     )
@@ -139,101 +143,192 @@ def run_markers_and_de(cfg) -> ad.AnnData:
     from . import de_plot_utils
 
     # ------------------------------------------------------------------
-    # Plotting
+    # Plotting (CLI behavior: create figs + save via save_multi)
     # ------------------------------------------------------------------
     if bool(getattr(cfg, "make_figures", True)):
+        store_key = str(getattr(cfg, "store_key", "scomnom_de"))
+        alpha = float(getattr(cfg, "alpha", 0.05))
+        lfc_thresh = float(getattr(cfg, "plot_lfc_thresh", 1.0))
+        top_label_n = int(getattr(cfg, "plot_volcano_top_label_n", 15))
+
+        # how many genes to include in expression plots
+        top_n_per_cluster = int(getattr(cfg, "plot_top_n_per_cluster", 10))
+        max_genes_total = int(getattr(cfg, "plot_max_genes_total", 80))
+
+        use_raw = bool(getattr(cfg, "plot_use_raw", False))
+        layer = getattr(cfg, "plot_layer", None)
+        ncols = int(getattr(cfg, "plot_umap_ncols", 3))
+
         figroot = figdir / "markers_and_de"
 
-        # --------------------------------------------------
-        # Cluster vs Rest DE plots
-        # --------------------------------------------------
-        figdir_cvr = figroot / "cluster_vs_rest"
+        # ---------------------------
+        # helpers
+        # ---------------------------
+        def _select_top_genes(df, *, padj_thresh: float, top_n: int) -> list[str]:
+            if df is None or getattr(df, "empty", True):
+                return []
+            if "gene" not in df.columns or "padj" not in df.columns or "log2FoldChange" not in df.columns:
+                return []
+            tmp = df[["gene", "padj", "log2FoldChange"]].copy()
+            tmp["gene"] = tmp["gene"].astype(str)
+            tmp["padj"] = pd.to_numeric(tmp["padj"], errors="coerce")
+            tmp["log2FoldChange"] = pd.to_numeric(tmp["log2FoldChange"], errors="coerce")
+            tmp = tmp.dropna(subset=["gene", "padj", "log2FoldChange"])
+            tmp = tmp[tmp["padj"] < float(padj_thresh)]
+            if tmp.empty:
+                return []
+            tmp["__abs_lfc"] = tmp["log2FoldChange"].abs()
+            tmp = tmp.sort_values(["padj", "__abs_lfc"], ascending=[True, False])
+            genes = tmp["gene"].head(int(top_n)).tolist()
+            # unique preserve order
+            out = []
+            seen = set()
+            for g in genes:
+                if g and g not in seen:
+                    out.append(g)
+                    seen.add(g)
+            return out
 
-        # Overview / summary
-        fig = de_plot_utils.plot_de_manifest_overview(
-            manifest1,
-            title=f"Cluster vs Rest (alpha={alpha:g})",
-        )
-        plot_utils.save_multi(
-            stem="overview",
-            figdir=figdir_cvr,
-            fig=fig,
-        )
+        def _append_unique(acc: list[str], genes: list[str], limit: int) -> list[str]:
+            seen = set(acc)
+            for g in genes:
+                if g not in seen:
+                    acc.append(g)
+                    seen.add(g)
+                if len(acc) >= limit:
+                    break
+            return acc
 
-        # Volcano grid
-        fig = de_plot_utils.plot_volcano_grid_from_manifest(
-            manifest1,
-            alpha=alpha,
-            max_panels=int(getattr(cfg, "volcano_max_panels", 16)),
-            top_n_labels=int(getattr(cfg, "volcano_top_n_labels", 10)),
-            title="Cluster vs Rest – volcano plots",
-        )
-        plot_utils.save_multi(
-            stem="volcano_grid",
-            figdir=figdir_cvr,
-            fig=fig,
-        )
+        # ---------------------------
+        # 1) Cluster-vs-rest volcanoes + gene list
+        # ---------------------------
+        pb = adata.uns.get(store_key, {}).get("pseudobulk_cluster_vs_rest", {})
+        results_by_cluster = pb.get("results", {}) if isinstance(pb, dict) else {}
+        if not isinstance(results_by_cluster, dict):
+            results_by_cluster = {}
 
-        # Dotplot
-        fig = de_plot_utils.plot_top_de_dotplot(
-            adata,
-            manifest1,
-            groupby=str(groupby),
-            alpha=alpha,
-            top_n_per_group=int(getattr(cfg, "dotplot_top_n_per_group", 10)),
-            use_raw=bool(getattr(cfg, "dotplot_use_raw", False)),
-            layer=getattr(cfg, "dotplot_layer", None),
-        )
-        plot_utils.save_multi(
-            stem="dotplot_top_de",
-            figdir=figdir_cvr,
-            fig=fig,
-        )
+        genes_for_expression_plots: list[str] = []
 
-        # Heatmap
-        fig = de_plot_utils.plot_top_de_heatmap(
-            adata,
-            manifest1,
-            groupby=str(groupby),
-            alpha=alpha,
-            top_n_per_group=int(getattr(cfg, "heatmap_top_n_per_group", 20)),
-            use_raw=bool(getattr(cfg, "heatmap_use_raw", False)),
-            layer=getattr(cfg, "heatmap_layer", None),
-        )
-        plot_utils.save_multi(
-            stem="heatmap_top_de",
-            figdir=figdir_cvr,
-            fig=fig,
-        )
+        if results_by_cluster:
+            figdir_pb = figroot / "cluster_vs_rest"
 
-        # --------------------------------------------------
-        # Condition-within-cluster DE plots (if present)
-        # --------------------------------------------------
-        if manifest2 is not None:
+            for cl, df_de in results_by_cluster.items():
+                title = f"Cluster vs rest: {cl}"
+                fig = de_plot_utils.volcano(
+                    df_de,
+                    padj_thresh=alpha,
+                    lfc_thresh=lfc_thresh,
+                    top_label_n=top_label_n,
+                    title=title,
+                    show=False,
+                )
+                plot_utils.save_multi(
+                    stem=f"volcano__cluster_vs_rest__{cl}",
+                    figdir=figdir_pb,
+                    fig=fig,
+                )
+
+                top_genes = _select_top_genes(df_de, padj_thresh=alpha, top_n=top_n_per_cluster)
+                genes_for_expression_plots = _append_unique(
+                    genes_for_expression_plots,
+                    top_genes,
+                    limit=max_genes_total,
+                )
+        else:
+            LOGGER.warning("markers_and_de: no pseudobulk_cluster_vs_rest results found under adata.uns[%r].", store_key)
+
+        # If we collected genes, make scanpy expression plots once
+        if genes_for_expression_plots:
+            figdir_expr = figroot / "cluster_vs_rest" / "expression"
+
+            fig = de_plot_utils.dotplot_top_genes(
+                adata,
+                genes=genes_for_expression_plots,
+                groupby=str(groupby),
+                use_raw=use_raw,
+                layer=layer,
+                show=False,
+            )
+            plot_utils.save_multi(
+                stem=f"dotplot__cluster_vs_rest__topgenes",
+                figdir=figdir_expr,
+                fig=fig,
+            )
+
+            fig = de_plot_utils.heatmap_top_genes(
+                adata,
+                genes=genes_for_expression_plots,
+                groupby=str(groupby),
+                use_raw=use_raw,
+                layer=layer,
+                show=False,
+            )
+            plot_utils.save_multi(
+                stem=f"heatmap__cluster_vs_rest__topgenes",
+                figdir=figdir_expr,
+                fig=fig,
+            )
+
+            fig = de_plot_utils.umap_features_grid(
+                adata,
+                genes=genes_for_expression_plots,
+                use_raw=use_raw,
+                layer=layer,
+                ncols=ncols,
+                show=False,
+            )
+            plot_utils.save_multi(
+                stem=f"umap_features__cluster_vs_rest__topgenes",
+                figdir=figdir_expr,
+                fig=fig,
+            )
+
+            fig = de_plot_utils.violin_genes(
+                adata,
+                genes=genes_for_expression_plots[: min(len(genes_for_expression_plots), 24)],
+                groupby=str(groupby),
+                use_raw=use_raw,
+                layer=layer,
+                show=False,
+            )
+            plot_utils.save_multi(
+                stem=f"violin__cluster_vs_rest__topgenes",
+                figdir=figdir_expr,
+                fig=fig,
+            )
+
+        # ---------------------------
+        # 2) Condition-within-cluster plots (if present)
+        # ---------------------------
+        cond_block = adata.uns.get(store_key, {}).get("pseudobulk_condition_within_group", {})
+        if isinstance(cond_block, dict) and cond_block and condition_key:
             figdir_cond = figroot / f"condition_within_cluster__{condition_key}"
 
-            fig = de_plot_utils.plot_de_manifest_overview(
-                manifest2,
-                title=f"Condition within cluster: {condition_key} (alpha={alpha:g})",
-            )
-            plot_utils.save_multi(
-                stem="overview",
-                figdir=figdir_cond,
-                fig=fig,
-            )
+            # One volcano per stored contrast key
+            for k, payload in cond_block.items():
+                if not isinstance(payload, dict):
+                    continue
+                df_de = payload.get("results", None)
+                if df_de is None:
+                    continue
 
-            fig = de_plot_utils.plot_volcano_grid_from_manifest(
-                manifest2,
-                alpha=alpha,
-                max_panels=int(getattr(cfg, "volcano_max_panels", 16)),
-                top_n_labels=int(getattr(cfg, "volcano_top_n_labels", 10)),
-                title=f"{condition_key} – volcano plots",
-            )
-            plot_utils.save_multi(
-                stem="volcano_grid",
-                figdir=figdir_cond,
-                fig=fig,
-            )
+                title = str(k)
+                fig = de_plot_utils.volcano(
+                    df_de,
+                    padj_thresh=alpha,
+                    lfc_thresh=lfc_thresh,
+                    top_label_n=top_label_n,
+                    title=title,
+                    show=False,
+                )
+                plot_utils.save_multi(
+                    stem=f"volcano__condition_within_cluster__{k}",
+                    figdir=figdir_cond,
+                    fig=fig,
+                )
+        elif condition_key:
+            LOGGER.info("markers_and_de: no pseudobulk_condition_within_group results found for condition_key=%r.", condition_key)
+
 
     # Save
     out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.markers_and_de")) + ".zarr")

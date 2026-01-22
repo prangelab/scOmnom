@@ -36,6 +36,7 @@ dependencies = [
   "requests",
   "decoupler",
   "scvi-tools",
+  "pydeseq2",
 ]
 
 [project.scripts]
