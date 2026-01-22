@@ -18,7 +18,7 @@ dependencies:
   - pillow>=10.1
 
   # Numeric stack
-  - numpy
+  - numpy>=2.0
   - scipy
   - pandas
   - matplotlib

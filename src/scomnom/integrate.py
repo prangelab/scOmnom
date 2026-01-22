@@ -1445,6 +1445,8 @@ def run_integrate(cfg: IntegrateConfig) -> ad.AnnData:
         # ----------------------------
         LOGGER.warning("ANNOTATED RUN enabled: will compute ONLY scANVI__annotated (plus scVI backbone as needed).")
 
+        methods = ["scANVI__annotated"]
+
         # Determine source round
         source_round = getattr(cfg, "annotated_run_cluster_round", None)
         source_round = str(source_round) if source_round else None
@@ -1634,17 +1636,6 @@ def run_integrate(cfg: IntegrateConfig) -> ad.AnnData:
             benchmark_n_jobs=cfg.benchmark_n_jobs,
             selected_embedding=best,
         )
-
-    reporting.generate_integration_report(
-        fig_root=cfg.figdir,
-        version=__version__,
-        adata=adata,
-        batch_key=batch_key,
-        label_key=cfg.label_key,
-        methods=methods,
-        benchmark_n_jobs=cfg.benchmark_n_jobs,
-        selected_embedding=best,
-    )
 
     out_zarr = cfg.output_dir / (cfg.output_name + ".zarr")
     LOGGER.info("Saving integrated dataset as Zarr → %s", out_zarr)
