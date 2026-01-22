@@ -594,7 +594,7 @@ class MarkersAndDEConfig:
 
     # figures
     figdir_name: str = "figures"
-    figure_formats: Sequence[str] = field(default_factory=lambda: ["png", "pdf"])
+    figure_formats: Sequence[str] = Field(default_factory=lambda: ["png", "pdf"])
     make_figures: bool = True
 
     # outputs
