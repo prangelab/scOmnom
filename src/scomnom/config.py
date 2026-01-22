@@ -578,3 +578,84 @@ class ClusterAnnotateConfig(BaseModel):
                 raise ValueError(f"thr_msigdb_by_gmt[{k!r}] must be in [-1, 1]")
             out[str(k)] = vv
         return out
+
+
+# ---------------------------------------------------------------------
+# MARKERS AND DE CONFIG
+# ---------------------------------------------------------------------
+class MarkersAndDEConfig(BaseModel):
+    # ------------------------------------------------------------------
+    # I/O
+    # ------------------------------------------------------------------
+    input_path: Path
+    output_dir: Path
+    output_name: str = "markers_and_de"
+    save_h5ad: bool = False
+    logfile: Optional[Path] = None
+
+    # ------------------------------------------------------------------
+    # Round-aware label selection
+    # ------------------------------------------------------------------
+    round_id: Optional[str] = None
+    label_source: Literal["pretty", "cluster_key", "custom"] = "pretty"
+    groupby: Optional[str] = None  # used when label_source="custom"
+
+    # sample key (donor/patient/library)
+    sample_key: Optional[str] = None  # default: adata.uns["batch_key"]
+
+    # condition DE (optional)
+    condition_key: Optional[str] = None
+    condition_reference: Optional[str] = None
+
+    # ------------------------------------------------------------------
+    # Counts source
+    # ------------------------------------------------------------------
+    counts_layer_preference: List[str] = Field(
+        default_factory=lambda: ["counts_raw", "counts_cb"]
+    )
+    allow_use_X: bool = True
+
+    # ------------------------------------------------------------------
+    # Pseudobulk aggregation
+    # ------------------------------------------------------------------
+    min_cells_per_group_sample: int = 20
+    min_pseudobulk_replicates: int = 2
+
+    # ------------------------------------------------------------------
+    # DE parameters
+    # ------------------------------------------------------------------
+    de_backend: Literal["pydeseq2"] = "pydeseq2"
+    alpha: float = 0.05
+    lfc_threshold: float = 0.0  # optional post-filter thresholding; PyDESeq2 does Wald by default
+
+    # ------------------------------------------------------------------
+    # Markers (scanpy rank_genes_groups) + guardrails
+    # ------------------------------------------------------------------
+    run_markers: bool = True
+    markers_method: Literal["wilcoxon"] = "wilcoxon"
+    markers_n_genes: int = 100
+    markers_use_raw: bool = False
+    markers_rankby_abs: bool = True
+    markers_key: str = "cluster_markers_wilcoxon"
+
+    markers_max_cells: int = 500_000
+    markers_max_total_cells: int = 200_000
+    markers_max_cells_per_group: int = 2_000
+    markers_random_state: int = 42
+
+    # ------------------------------------------------------------------
+    # Output formatting
+    # ------------------------------------------------------------------
+    table_format: Literal["tsv", "parquet"] = "tsv"
+
+    @model_validator(mode="after")
+    def _check_keys(self):
+        if self.label_source == "custom" and not self.groupby:
+            raise ValueError("groupby is required when label_source='custom'")
+        if self.min_cells_per_group_sample < 0:
+            raise ValueError("min_cells_per_group_sample must be >= 0")
+        if self.min_pseudobulk_replicates < 2:
+            raise ValueError("min_pseudobulk_replicates must be >= 2")
+        if not (0.0 < self.alpha <= 1.0):
+            raise ValueError("alpha must be in (0, 1]")
+        return self
