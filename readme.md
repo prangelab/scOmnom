@@ -199,64 +199,207 @@ Outputs:
 
 ## Integrate (batch correction + benchmarking)
 
-Runs one or more integration methods and optionally benchmarks them.
+The `integrate` module performs batch correction across samples while preserving biological signal. It supports multiple integration algorithms, optional benchmarking with `scIB`, and an advanced supervision strategy for `scANVI`.
+
+By default, integration is **non-destructive**: all embeddings, metrics, and selections are stored in the output `AnnData` object.
+
+---
+
+### Standard integration run
+
+A typical integration run starts from the output of `load-and-filter`:
 
 ```bash
 scomnom integrate \
-  --input-path results/load_and_filter/adata.merged.zarr \
+  --input-path results/load_and_filter/adata.filtered.zarr \
   --batch-key sample_id \
   --output-dir results/integrate/
 ```
 
-Supported methods include: `scVI`, `scANVI`, `scPoli`, `Harmony`, `Scanorama`, `BBKNN`.
-Default methods: All but scPoli. (scPoli is used for a second bio-informed integration pass after clustering)
+This will:
+
+* recompute PCA on HVGs
+* run multiple integration methods
+* benchmark them using `scIB`
+* select a best embedding
+* compute UMAPs
+* write figures and metrics to disk
+* save an integrated `AnnData` object (Zarr by default)
+
 Logs are written to `integrate.log`.
 
 ---
 
-## Clustering and annotation (status)
+### Supported integration methods
 
-The `cluster-and-annotate` module is **under active development**.
+Supported methods include:
 
-- Its interface and outputs are not yet considered stable
-- It is intentionally not documented as part of the standard workflow
-- APIs and defaults may change without notice
+* **scVI / scANVI** — variational autoencoders (recommended for large or complex datasets)
+* **Harmony** — fast linear batch correction
+* **Scanorama** — panoramic batch integration
+* **BBKNN** — graph-based batch correction (baseline)
+
+**Default methods:** all of the above except `scPoli`.
+
+Methods can be restricted explicitly:
+
+```bash
+scomnom integrate \
+  --input-path adata.filtered.zarr \
+  --batch-key sample_id \
+  --methods scVI scANVI Harmony \
+  --output-dir results/integrate/
+```
 
 ---
 
-## Running on HPC / SLURM clusters
+### Intelligent scANVI supervision (BISC-light)
 
-Example SLURM job scripts are provided:
+When `scANVI` is enabled, `scOmnom` can automatically generate supervision labels instead of relying on a single, user-chosen clustering.
 
-```text
-slurm/
-├── scomnom_loadandfilter.job
-└── scomnom_integrate.job
+This **BISC-light** procedure is inspired by the full BISC framework used in `cluster-and-annotate` (see that section for detailed documentation).
+
+At a high level:
+
+1. **Latent-space resolution sweep**
+   A coarse Leiden sweep is performed on the scVI latent space.
+
+2. **Structural scoring**
+   Candidate resolutions are scored using:
+
+   * clustering stability (smoothed ARI between adjacent resolutions)
+   * centroid-based silhouette separation
+   * penalties for excessive tiny clusters
+
+3. **Parsimony selection**
+   The *lowest* resolution within a small epsilon of the best score is selected.
+
+4. **Guardrails**
+
+   * clusters dominated by a single batch are masked (`Unknown`)
+   * very small clusters are masked
+
+The resulting labels are used **only for scANVI supervision** and are written to `adata.obs` (default: `scanvi_prelabels`). They do *not* overwrite downstream clustering or annotation results.
+
+This provides robust, automated supervision without requiring curated biological labels.
+
+---
+
+### scIB benchmarking and truth labels
+
+Integration methods are benchmarked using `scIB`.
+
+By default, benchmarking uses:
+
+* **`leiden`** labels (computed during `load-and-filter`, resolution = 1.0)
+
+This can be overridden via:
+
+```bash
+--scib-truth-label-key <key>
 ```
 
-These scripts are configured for **SURF’s Snellius** compute cluster. Users on other systems must adapt module names, CUDA/driver versions, and conda initialization paths.
+Valid options include:
 
-For large datasets, running on a **GPU partition is strongly recommended**, particularly for scVI/scANVI-based integration.
+* `leiden` (default, recommended for general use)
+* `final` / final cluster labels from `cluster-and-annotate`
+* any explicit `adata.obs` column name
 
-### Performance reference (Snellius)
+This choice affects **benchmarking only** and does not influence integration itself.
 
-Benchmarks obtained using **1× NVIDIA A100 GPU** and **18 CPU cores**.
+---
 
-On Snellius, this CPU allocation implies a **minimum memory slice of 120 GB**, even though the example job scripts do not explicitly request that amount.
+### Secondary integration: annotated refinement (`--annotated-run`)
 
-- **~40k cells**
-  - `load-and-filter`: < 20 minutes
-  - `integrate`: < 30 minutes
+After clustering and annotation, `integrate` can be run a **second time** in a supervised refinement mode.
 
-- **~400k cells**
-  - `load-and-filter`: < 1.5 hours
-  - `integrate`: < 7 hours
+This mode is **optional** and intended for producing cleaner embeddings and UMAPs after final biological labels are known.
 
-In practice, the pipeline is likely to run with **substantially less memory (≈ ≤ 60 GB)**, depending on e.g., selected integration methods.
+#### Key properties
 
-When submitting jobs, ensure `sbatch` is called with appropriate wall time, CPU core reservations, and GPU resources.
+* **Not the default mode**
+* **Requires manual input and output naming**
+* **Runs scANVI only**
+* **Does not overwrite previous results**
 
-The provided SLURM scripts are intended as starting points, not drop-in solutions.
+#### What it does
+
+1. Takes an *annotated* dataset (from `cluster-and-annotate`) as input
+2. Extracts final cluster labels from the selected cluster round
+3. Reconstructs a CellTypist confidence mask
+4. Uses only high-confidence cells as supervision
+5. Trains scANVI to *project* all cells into a refined latent space
+6. Benchmarks embeddings using the chosen truth labels
+7. Creates a derived *projection round* to preserve clustering state
+
+Low-confidence cells are labeled as `Unknown` for supervision, preventing overfitting to noisy annotations.
+
+#### Required usage pattern
+
+You **must** explicitly set:
+
+* the input path (annotated dataset)
+* a new output name (there is no default)
+
+Example:
+
+```bash
+scomnom integrate \
+  --input-path results/cluster_and_annotate/adata.clustered.annotated.zarr \
+  --annotated-run \
+  --output-dir results/integrate_annotated/ \
+  --output-name adata.clustered.annotated.projected \
+  --benchmark-n-jobs 16
+```
+
+Notes:
+
+* The input must point to an **annotated** object
+* The output name is **not auto-derived**
+* Results are additive and non-destructive
+
+---
+
+### Output files
+
+Each integration run produces:
+
+* integrated `AnnData` object (`.zarr`, optionally `.h5ad`)
+* scIB metric tables (raw + scaled)
+* UMAPs and diagnostics saved under:
+
+```
+figures/
+├── png/
+│   └── integration_roundN/
+└── pdf/
+    └── integration_roundN/
+```
+
+Each run gets its own `integration_round*` subdirectory to keep results reproducible and auditable.
+
+---
+
+### Relationship to `cluster-and-annotate`
+
+The recommended high-level workflow is:
+
+```
+load-and-filter
+   ↓
+integrate
+   ↓
+cluster-and-annotate
+   ↓
+integrate --annotated-run (optional)
+```
+
+The secondary integration step is **purely optional** and should be used only when:
+
+* clustering and annotation are finalized
+* improved visualization or refined latent structure is desired
+
+---
 
 # Cluster and annotate (BISC + compaction)
 
@@ -573,19 +716,50 @@ For details on decoupler methods and resources, see:
 
 ## Reporting
 
-`cluster-and-annotate` generates a self-contained HTML report including:
+All modules generate a self-contained HTML report including:
 
-* resolution sweep diagnostics
-* stability and biological metric plots
-* UMAPs with multiple annotations
-* decoupler heatmaps, bar plots, and dot plots
-* compaction summaries (if enabled)
+* Run information
+* All genreated plots
 
 The report is written to:
 
 ```
-figures/cluster_and_annotate/cluster_and_annotate_report.html
+figures/<MODULE>/<MODULE>_report.html
 ```
+
+## Running on HPC / SLURM clusters
+
+Example SLURM job scripts are provided:
+
+```text
+slurm/
+├── scomnom_loadandfilter.job
+└── scomnom_integrate.job
+```
+
+These scripts are configured for **SURF’s Snellius** compute cluster. Users on other systems must adapt module names, CUDA/driver versions, and conda initialization paths.
+
+For large datasets, running on a **GPU partition is strongly recommended**, particularly for scVI/scANVI-based integration.
+
+### Performance reference (Snellius)
+
+Benchmarks obtained using **1× NVIDIA A100 GPU** and **18 CPU cores**.
+
+On Snellius, this CPU allocation implies a **minimum memory slice of 120 GB**, even though the example job scripts do not explicitly request that amount.
+
+- **~40k cells**
+  - `load-and-filter`: < 20 minutes
+  - `integrate`: < 30 minutes
+
+- **~400k cells**
+  - `load-and-filter`: < 1.5 hours
+  - `integrate`: < 7 hours
+
+In practice, the pipeline is likely to run with **substantially less memory (≈ ≤ 60 GB)**, depending on e.g., selected integration methods.
+
+When submitting jobs, ensure `sbatch` is called with appropriate wall time, CPU core reservations, and GPU resources.
+
+The provided SLURM scripts are intended as starting points, not drop-in solutions.
 
 
 ## License

@@ -37,10 +37,14 @@ def _resolve_scib_truth_label_key(
     adata: ad.AnnData,
     cfg: IntegrateConfig,
     *,
-    round_id: str | None,  # <- IMPORTANT: caller passes the already-selected round context
+    round_id: str | None,  # same round selector used for annotated-run labels (default active)
 ) -> tuple[str, str]:
     """
     Returns (truth_label_key_in_obs, truth_tag_for_filenames).
+
+    Supported values for cfg.scib_truth_label_key:
+      - "leiden" (default): uses adata.obs["leiden"]
+      - "final": uses the round-derived pretty cluster labels (annotation.pretty_cluster_key)
 
     round_id is the SAME round selector used elsewhere (default active).
     """
@@ -53,49 +57,46 @@ def _resolve_scib_truth_label_key(
         _ensure_label_key(adata, key)
         return key, "truth-leiden"
 
-    # 2) celltypist truth: resolve cell-level CT key from the chosen round
-    if requested_l in ("celltypist", "celltpyist", "ct"):
+    # 2) final labels from the chosen round (pretty cluster labels)
+    if requested_l in ("final", "annotated", "annotated_labels", "final_labels"):
         rid = round_id
         if rid is None:
             rid0 = adata.uns.get("active_cluster_round", None)
             rid = str(rid0) if rid0 else None
 
-        # try from round metadata
-        try:
-            rounds = adata.uns.get("cluster_rounds", {})
-            if rid and isinstance(rounds, dict) and rid in rounds:
-                rinfo = rounds[rid]
-                ann = rinfo.get("annotation", {}) if isinstance(rinfo, dict) else {}
-                if isinstance(ann, dict):
-                    ct_key = ann.get("celltypist_cell_key", None)
-                    if ct_key and str(ct_key) in adata.obs:
-                        return str(ct_key), f"truth-celltypist_{_sanitize_tag(rid)}"
-        except Exception:
-            pass
+        rounds = adata.uns.get("cluster_rounds", {})
+        if not rid or not isinstance(rounds, dict) or rid not in rounds:
+            raise RuntimeError(
+                "scIB truth requested as 'final', but no valid cluster round could be resolved.\n"
+                f"Resolved round_id={rid!r}, active_round={adata.uns.get('active_cluster_round', None)!r}."
+            )
 
-        # fallback to common column
-        if "celltypist_label" in adata.obs:
-            return "celltypist_label", f"truth-celltypist_{_sanitize_tag(rid) if rid else 'no-round'}"
+        rinfo = rounds[rid]
+        ann = rinfo.get("annotation", {}) if isinstance(rinfo, dict) else {}
+        if not isinstance(ann, dict):
+            ann = {}
+
+        pretty_key = ann.get("pretty_cluster_key", None)
+        if pretty_key and str(pretty_key) in adata.obs:
+            return str(pretty_key), f"truth-final_{_sanitize_tag(rid)}"
+
+        # fallback (should usually exist, but be defensive)
+        if "cluster_label" in adata.obs:
+            return "cluster_label", f"truth-final_{_sanitize_tag(rid)}"
 
         raise RuntimeError(
-            "scIB truth requested as 'celltypist', but no CellTypist cell-level labels were found.\n"
+            "scIB truth requested as 'final', but final labels were not found.\n"
             "Expected either:\n"
-            "  - adata.uns['cluster_rounds'][round_id]['annotation']['celltypist_cell_key'] present in adata.obs\n"
-            "  - or adata.obs['celltypist_label']\n"
+            "  - adata.uns['cluster_rounds'][round_id]['annotation']['pretty_cluster_key'] present in adata.obs\n"
+            "  - or adata.obs['cluster_label']\n"
             f"Resolved round_id={rid!r}."
         )
 
-    # 3) explicit obs key: allow passing an adata.obs column name directly
-    if requested in adata.obs:
-        return requested, f"truth-{_sanitize_tag(requested)}"
-
-    if requested_l in adata.obs:
-        return requested_l, f"truth-{_sanitize_tag(requested_l)}"
-
     raise RuntimeError(
-        f"--scib-truth-label-key={requested!r} not understood and not found in adata.obs.\n"
-        "Use 'leiden', 'celltypist', or an explicit adata.obs column name."
+        f"--scib-truth-label-key={requested!r} not understood.\n"
+        "Use 'leiden' (default) or 'final'."
     )
+
 
 
 def _get_scvi_layer(adata: ad.AnnData) -> Optional[str]:

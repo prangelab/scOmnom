@@ -1843,9 +1843,7 @@ def plot_scib_results_table(scaled: pd.DataFrame, *, stem: str = "scIB_results_t
     ax.tick_params(axis="both", which="both", length=0)
 
     plt.tight_layout()
-    save_multi(stem, Path("integration"))
-    plt.close(fig)
-
+    save_multi(stem, Path("integration"), fig=fig)
 
 
 # -------------------------------------------------------------------------
@@ -1987,42 +1985,34 @@ def plot_integration_umaps(
                 show=False,
                 return_fig=True,
             )
-            save_multi(f"umap_{emb}", figdir=base, fig=fig)
-            plt.close(fig)
+
+            # Use the UMAP-safe saver (prevents legend clipping)
+            save_umap_multi(f"umap_{emb}", figdir=base, fig=fig)
+
+            # NOTE: save_multi/save_umap_multi already closes; do NOT close again.
+            # plt.close(fig)
 
             # ---------------------------
             # Comparison vs Unintegrated
             # ---------------------------
             if emb != "Unintegrated" and "Unintegrated" in adata.obsm:
 
-                # ===============================
-                # Integrated embedding UMAP
-                # ===============================
                 tmp_int = adata.copy()
-
                 if emb == "BBKNN":
                     import bbknn
                     bbknn.bbknn(tmp_int, batch_key=batch_key, use_rep="X_pca")
                 else:
                     sc.pp.neighbors(tmp_int, use_rep=emb)
-
                 sc.tl.umap(tmp_int)
                 umap_int = tmp_int.obsm["X_umap"].copy()
 
-                # ===============================
-                # Unintegrated UMAP
-                # ===============================
                 tmp_raw = adata.copy()
                 sc.pp.neighbors(tmp_raw, use_rep="Unintegrated")
                 sc.tl.umap(tmp_raw)
                 umap_raw = tmp_raw.obsm["X_umap"].copy()
 
-                # ===============================
-                # Plot side-by-side
-                # ===============================
                 fig, axs = plt.subplots(1, 2, figsize=(10, 4))
 
-                # LEFT: integrated embedding UMAP — hide labels to reduce clutter
                 tmp_raw.obsm["X_umap"] = umap_int
                 sc.pl.umap(
                     tmp_raw,
@@ -2030,10 +2020,9 @@ def plot_integration_umaps(
                     ax=axs[0],
                     show=False,
                     title=emb,
-                    legend_loc=None,  # <-- IMPORTANT: no "on data" labels on the left
+                    legend_loc=None,
                 )
 
-                # RIGHT: unintegrated UMAP — show labels on data
                 tmp_raw.obsm["X_umap"] = umap_raw
                 sc.pl.umap(
                     tmp_raw,
@@ -2041,15 +2030,18 @@ def plot_integration_umaps(
                     ax=axs[1],
                     show=False,
                     title="Unintegrated",
-                    legend_loc="on data",  # <-- labels only on the right
+                    legend_loc="on data",
                 )
 
-                save_multi(
+                save_umap_multi(
                     f"umap_{emb}_vs_Unintegrated",
                     figdir=base,
                     fig=fig,
+                    right=0.92,  # side-by-side has wider right margin needs
                 )
-                plt.close(fig)
+
+                # again: saver closes; don’t close here
+                # plt.close(fig)
 
         except Exception as e:
             LOGGER.warning("Failed to plot UMAP for %s: %s", emb, e)
