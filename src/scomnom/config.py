@@ -160,6 +160,7 @@ class IntegrateConfig(BaseModel):
     # Annotated secondary integration (SECOND PASS; explicit + guarded)
     # ------------------------------------------------------------------
     annotated_run: bool = False
+    scib_truth_label_key: str = "leiden"
 
     # Which cluster round to source "final" labels from. If None -> use active_cluster_round.
     annotated_run_cluster_round: Optional[str] = None

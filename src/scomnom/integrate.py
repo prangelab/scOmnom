@@ -26,6 +26,77 @@ LOGGER = logging.getLogger(__name__)
 # ---------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------
+def _sanitize_tag(s: str) -> str:
+    import re
+    s = str(s or "").strip()
+    s = re.sub(r"[^A-Za-z0-9]+", "-", s).strip("-")
+    return s or "NA"
+
+
+def _resolve_scib_truth_label_key(
+    adata: ad.AnnData,
+    cfg: IntegrateConfig,
+    *,
+    round_id: str | None,  # <- IMPORTANT: caller passes the already-selected round context
+) -> tuple[str, str]:
+    """
+    Returns (truth_label_key_in_obs, truth_tag_for_filenames).
+
+    round_id is the SAME round selector used elsewhere (default active).
+    """
+    requested = str(getattr(cfg, "scib_truth_label_key", "leiden") or "leiden").strip()
+    requested_l = requested.lower()
+
+    # 1) default: leiden
+    if requested_l in ("leiden", "default"):
+        key = "leiden"
+        _ensure_label_key(adata, key)
+        return key, "truth-leiden"
+
+    # 2) celltypist truth: resolve cell-level CT key from the chosen round
+    if requested_l in ("celltypist", "celltpyist", "ct"):
+        rid = round_id
+        if rid is None:
+            rid0 = adata.uns.get("active_cluster_round", None)
+            rid = str(rid0) if rid0 else None
+
+        # try from round metadata
+        try:
+            rounds = adata.uns.get("cluster_rounds", {})
+            if rid and isinstance(rounds, dict) and rid in rounds:
+                rinfo = rounds[rid]
+                ann = rinfo.get("annotation", {}) if isinstance(rinfo, dict) else {}
+                if isinstance(ann, dict):
+                    ct_key = ann.get("celltypist_cell_key", None)
+                    if ct_key and str(ct_key) in adata.obs:
+                        return str(ct_key), f"truth-celltypist_{_sanitize_tag(rid)}"
+        except Exception:
+            pass
+
+        # fallback to common column
+        if "celltypist_label" in adata.obs:
+            return "celltypist_label", f"truth-celltypist_{_sanitize_tag(rid) if rid else 'no-round'}"
+
+        raise RuntimeError(
+            "scIB truth requested as 'celltypist', but no CellTypist cell-level labels were found.\n"
+            "Expected either:\n"
+            "  - adata.uns['cluster_rounds'][round_id]['annotation']['celltypist_cell_key'] present in adata.obs\n"
+            "  - or adata.obs['celltypist_label']\n"
+            f"Resolved round_id={rid!r}."
+        )
+
+    # 3) explicit obs key: allow passing an adata.obs column name directly
+    if requested in adata.obs:
+        return requested, f"truth-{_sanitize_tag(requested)}"
+
+    if requested_l in adata.obs:
+        return requested_l, f"truth-{_sanitize_tag(requested_l)}"
+
+    raise RuntimeError(
+        f"--scib-truth-label-key={requested!r} not understood and not found in adata.obs.\n"
+        "Use 'leiden', 'celltypist', or an explicit adata.obs column name."
+    )
+
 
 def _get_scvi_layer(adata: ad.AnnData) -> Optional[str]:
     if "counts_cb" in adata.layers:
@@ -1451,6 +1522,9 @@ def run_integrate(cfg: IntegrateConfig) -> ad.AnnData:
         source_round = getattr(cfg, "annotated_run_cluster_round", None)
         source_round = str(source_round) if source_round else None
 
+        truth_key, truth_tag = _resolve_scib_truth_label_key(adata, cfg, round_id=source_round)
+        LOGGER.info("scIB truth labels: key=%r (%s)", truth_key, truth_tag)
+
         # Compute annotated scANVI embedding (and write it)
         adata, created_keys, final_label_key, mask_key, meta = _run_annotated_scanvi_secondary_integration(
             adata,
@@ -1463,15 +1537,15 @@ def run_integrate(cfg: IntegrateConfig) -> ad.AnnData:
         # Benchmark all available embeddings using FINAL labels
         best = _select_best_embedding(
             adata,
-            embedding_keys=created_keys,  # created this run; function will also include pre-existing embeddings
+            embedding_keys=created_keys,
             batch_key=batch_key,
-            label_key=final_label_key,
+            label_key=truth_key,
             n_jobs=cfg.benchmark_n_jobs,
             output_dir=cfg.output_dir,
             benchmark_threshold=cfg.benchmark_threshold,
             benchmark_n_cells=cfg.benchmark_n_cells,
             benchmark_random_state=cfg.benchmark_random_state,
-            run_tag="annotated",
+            run_tag=f"annotated__{truth_tag}",
         )
 
         # Store the annotated selection without clobbering primary integration

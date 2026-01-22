@@ -499,6 +499,14 @@ def integrate(
         help="[Annotated secondary] Run secondary integration using final annotated labels from cluster-and-annotate. "
              "This mode is explicit and should be used with care.",
     ),
+    scib_truth_label_key: str = typer.Option(
+        "leiden",
+        "--scib-truth-label-key",
+        help="[scIB] Label key treated as 'truth' for scIB. "
+             "Defaults to 'leiden'. Set to 'celltypist' to use CellTypist cell-level labels "
+             "(resolved from the selected cluster round, default=active).",
+        case_sensitive=False,
+    ),
     annotated_run_cluster_round: Optional[str] = typer.Option(
         None,
         "--annotated-run-cluster-round",
@@ -587,6 +595,7 @@ def integrate(
         logfile=logfile,
         # annotated secondary integration
         annotated_run=annotated_run,
+        scib_truth_label_key=str(scib_truth_label_key).lower(),
         annotated_run_cluster_round=annotated_run_cluster_round,
         annotated_run_final_label_key=annotated_run_final_label_key,
         annotated_run_confidence_mask_key=annotated_run_confidence_mask_key,
