@@ -583,79 +583,103 @@ class ClusterAnnotateConfig(BaseModel):
 # ---------------------------------------------------------------------
 # MARKERS AND DE CONFIG
 # ---------------------------------------------------------------------
-class MarkersAndDEConfig(BaseModel):
+# src/scomnom/config_markers_and_de.py
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional, Sequence, Tuple
+
+
+@dataclass
+class MarkersAndDEConfig:
+    """
+    Config for the markers_and_de CLI orchestrator.
+
+    Notebook users should NOT use this; they should call the functions in `scomnom.de_utils`
+    (or your notebook-facing API) directly on an already-loaded AnnData.
+
+    This config is intentionally "flat" and mirrors the fields accessed by
+    `run_markers_and_de(cfg)` in src/scomnom/markers_and_de.py.
+    """
+
     # ------------------------------------------------------------------
-    # I/O
+    # IO / run scaffolding
     # ------------------------------------------------------------------
     input_path: Path
     output_dir: Path
-    output_name: str = "markers_and_de"
-    save_h5ad: bool = False
+    output_name: str = "adata.markers_and_de"
     logfile: Optional[Path] = None
 
+    # figures
+    figdir_name: str = "figures"
+    figure_formats: Sequence[str] = field(default_factory=lambda: ["png", "pdf"])
+    make_figures: bool = True
+
+    # outputs
+    save_h5ad: bool = False
+
     # ------------------------------------------------------------------
-    # Round-aware label selection
+    # Grouping / round awareness
     # ------------------------------------------------------------------
+    # If groupby is None, resolve from round/annotation (pretty labels by default).
+    groupby: Optional[str] = None
+    label_source: str = "pretty"  # forwarded to resolve_groupby_from_round
     round_id: Optional[str] = None
-    label_source: Literal["pretty", "cluster_key", "custom"] = "pretty"
-    groupby: Optional[str] = None  # used when label_source="custom"
 
-    # sample key (donor/patient/library)
-    sample_key: Optional[str] = None  # default: adata.uns["batch_key"]
+    # replicate key for pseudobulk (donor/patient/sample)
+    # orchestrator uses: sample_key or batch_key or adata.uns["batch_key"]
+    sample_key: Optional[str] = None
+    batch_key: Optional[str] = None
 
-    # condition DE (optional)
+    # ------------------------------------------------------------------
+    # Cell-level marker calling (scanpy rank_genes_groups)
+    # ------------------------------------------------------------------
+    markers_key: str = "cluster_markers_wilcoxon"
+    markers_method: str = "wilcoxon"  # "wilcoxon" | "t-test" | "logreg" (scanpy)
+    markers_n_genes: int = 100
+    markers_rankby_abs: bool = True
+    markers_use_raw: bool = False
+
+    # OOM guards for cell-level marker calling
+    markers_downsample_threshold: int = 500_000
+    markers_downsample_max_per_group: int = 2_000
+    random_state: int = 42
+
+    # ------------------------------------------------------------------
+    # Counts selection for pseudobulk DE
+    # ------------------------------------------------------------------
+    # preference order in AnnData.layers; fall back to .X only if allow_X_counts=True
+    counts_layers: Tuple[str, ...] = ("counts_cb", "counts_raw")
+    allow_X_counts: bool = True
+
+    # ------------------------------------------------------------------
+    # Pseudobulk DE: cluster vs rest
+    # ------------------------------------------------------------------
+    min_cells_target: int = 20
+    alpha: float = 0.05
+    store_key: str = "scomnom_de"
+
+    # ------------------------------------------------------------------
+    # Optional condition-within-cluster DE
+    # ------------------------------------------------------------------
     condition_key: Optional[str] = None
     condition_reference: Optional[str] = None
+    min_cells_condition: int = 20
 
     # ------------------------------------------------------------------
-    # Counts source
+    # Plot controls (used only by the orchestrator)
     # ------------------------------------------------------------------
-    counts_layer_preference: List[str] = Field(
-        default_factory=lambda: ["counts_raw", "counts_cb"]
-    )
-    allow_use_X: bool = True
+    plot_lfc_thresh: float = 1.0
+    plot_volcano_top_label_n: int = 15
 
-    # ------------------------------------------------------------------
-    # Pseudobulk aggregation
-    # ------------------------------------------------------------------
-    min_cells_per_group_sample: int = 20
-    min_pseudobulk_replicates: int = 2
+    # gene selection for expression plots (dotplot/heatmap/umap/violin)
+    plot_top_n_per_cluster: int = 10
+    plot_max_genes_total: int = 80
 
-    # ------------------------------------------------------------------
-    # DE parameters
-    # ------------------------------------------------------------------
-    de_backend: Literal["pydeseq2"] = "pydeseq2"
-    alpha: float = 0.05
-    lfc_threshold: float = 0.0  # optional post-filter thresholding; PyDESeq2 does Wald by default
+    # scanpy expression plotting source
+    plot_use_raw: bool = False
+    plot_layer: Optional[str] = None
 
-    # ------------------------------------------------------------------
-    # Markers (scanpy rank_genes_groups) + guardrails
-    # ------------------------------------------------------------------
-    run_markers: bool = True
-    markers_method: Literal["wilcoxon"] = "wilcoxon"
-    markers_n_genes: int = 100
-    markers_use_raw: bool = False
-    markers_rankby_abs: bool = True
-    markers_key: str = "cluster_markers_wilcoxon"
-
-    markers_max_cells: int = 500_000
-    markers_max_total_cells: int = 200_000
-    markers_max_cells_per_group: int = 2_000
-    markers_random_state: int = 42
-
-    # ------------------------------------------------------------------
-    # Output formatting
-    # ------------------------------------------------------------------
-    table_format: Literal["tsv", "parquet"] = "tsv"
-
-    @model_validator(mode="after")
-    def _check_keys(self):
-        if self.label_source == "custom" and not self.groupby:
-            raise ValueError("groupby is required when label_source='custom'")
-        if self.min_cells_per_group_sample < 0:
-            raise ValueError("min_cells_per_group_sample must be >= 0")
-        if self.min_pseudobulk_replicates < 2:
-            raise ValueError("min_pseudobulk_replicates must be >= 2")
-        if not (0.0 < self.alpha <= 1.0):
-            raise ValueError("alpha must be in (0, 1]")
-        return self
+    # umap features grid layout
+    plot_umap_ncols: int = 3

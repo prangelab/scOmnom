@@ -7,10 +7,12 @@ import warnings
 from .load_and_filter import run_load_and_filter
 from .integrate import run_integrate
 from .cluster_and_annotate import run_clustering
+from .markers_and_de import run_markers_and_de
 
-from .config import LoadAndFilterConfig, IntegrateConfig, ClusterAnnotateConfig
+from .config import LoadAndFilterConfig, IntegrateConfig, ClusterAnnotateConfig, MarkersAndDEConfig
 import logging
 from .logging_utils import init_logging
+
 
 
 ALLOWED_METHODS = {"scVI", "scANVI", "Harmony", "Scanorama", "BBKNN"}
@@ -1078,3 +1080,270 @@ def cluster_and_annotate(
 
 if __name__ == "__main__":
     app()
+
+
+# ======================================================================
+#  markers-and-de
+# ======================================================================
+@app.command(
+    "markers-and-de",
+    help="Cell-level discovery markers + pseudobulk DE (PyDESeq2): cluster-vs-rest and optional condition-within-cluster.",
+)
+def markers_and_de(
+    # -------------------------------------------------------------
+    # I/O
+    # -------------------------------------------------------------
+    input_path: Path = typer.Option(
+        ...,
+        "--input-path",
+        "-i",
+        help="[I/O] Clustered/annotated dataset (.zarr or .h5ad).",
+    ),
+    output_dir: Optional[Path] = typer.Option(
+        None,
+        "--output-dir",
+        "-o",
+        help="[I/O] Output directory (default = input parent).",
+    ),
+    output_name: str = typer.Option(
+        "adata.markers_and_de",
+        "--output-name",
+        help="[I/O] Base name for output dataset.",
+    ),
+    save_h5ad: bool = typer.Option(
+        False,
+        "--save-h5ad/--no-save-h5ad",
+        help="[I/O] Also write an .h5ad copy (WARNING: loads full matrix into RAM).",
+    ),
+
+    # -------------------------------------------------------------
+    # Figures
+    # -------------------------------------------------------------
+    make_figures: bool = typer.Option(
+        True,
+        "--make-figures/--no-make-figures",
+        help="[Figures] Enable/disable figure generation.",
+    ),
+    figdir_name: str = typer.Option(
+        "figures",
+        "--figdir-name",
+        help="[Figures] Name of figure directory.",
+    ),
+    figure_formats: List[str] = typer.Option(
+        ["png", "pdf"],
+        "--figure-formats",
+        "-F",
+        help="[Figures] Output figure formats.",
+    ),
+
+    # -------------------------------------------------------------
+    # Grouping / round selection
+    # -------------------------------------------------------------
+    groupby: Optional[str] = typer.Option(
+        None,
+        "--groupby",
+        help="[Grouping] obs key to use for groups (overrides round-aware resolution).",
+    ),
+    label_source: str = typer.Option(
+        "pretty",
+        "--label-source",
+        help="[Grouping] Label source for round-aware resolution (e.g. pretty).",
+    ),
+    round_id: Optional[str] = typer.Option(
+        None,
+        "--round-id",
+        help="[Grouping] Explicit cluster round id (default: active).",
+    ),
+
+    # replicate key
+    sample_key: Optional[str] = typer.Option(
+        None,
+        "--sample-key",
+        help="[Design] Replicate key in adata.obs (donor/patient/sample).",
+    ),
+    batch_key: Optional[str] = typer.Option(
+        None,
+        "--batch-key",
+        "-b",
+        help="[Design] Fallback replicate key (used if --sample-key not set).",
+    ),
+
+    # -------------------------------------------------------------
+    # Cell-level discovery markers (scanpy rank_genes_groups)
+    # -------------------------------------------------------------
+    markers_key: str = typer.Option(
+        "cluster_markers_wilcoxon",
+        "--markers-key",
+        help="[Markers] adata.uns key for cell-level markers.",
+    ),
+    markers_method: str = typer.Option(
+        "wilcoxon",
+        "--markers-method",
+        help="[Markers] scanpy method: wilcoxon, t-test, logreg.",
+    ),
+    markers_n_genes: int = typer.Option(
+        100,
+        "--markers-n-genes",
+        help="[Markers] Number of marker genes per group.",
+    ),
+    markers_rankby_abs: bool = typer.Option(
+        True,
+        "--markers-rankby-abs/--no-markers-rankby-abs",
+        help="[Markers] Rank by absolute effect.",
+    ),
+    markers_use_raw: bool = typer.Option(
+        False,
+        "--markers-use-raw/--no-markers-use-raw",
+        help="[Markers] Use adata.raw for scanpy marker calling.",
+    ),
+    markers_downsample_threshold: int = typer.Option(
+        500_000,
+        "--markers-downsample-threshold",
+        help="[Markers] Downsample marker calling if n_cells exceeds this.",
+    ),
+    markers_downsample_max_per_group: int = typer.Option(
+        2_000,
+        "--markers-downsample-max-per-group",
+        help="[Markers] Max cells per group when downsampling.",
+    ),
+    random_state: int = typer.Option(
+        42,
+        "--random-state",
+        help="[General] RNG seed for downsampling.",
+    ),
+
+    # -------------------------------------------------------------
+    # Pseudobulk DE: counts source + thresholds
+    # -------------------------------------------------------------
+    counts_layers: List[str] = typer.Option(
+        ["counts_cb", "counts_raw"],
+        "--counts-layers",
+        help="[DE] Priority list of layers to use as counts (first found wins).",
+    ),
+    allow_x_counts: bool = typer.Option(
+        True,
+        "--allow-x-counts/--no-allow-x-counts",
+        help="[DE] Allow falling back to adata.X if no counts layer found.",
+    ),
+    min_cells_target: int = typer.Option(
+        20,
+        "--min-cells-target",
+        help="[DE] Min cells per (sample, group) for cluster-vs-rest DE.",
+    ),
+    alpha: float = typer.Option(
+        0.05,
+        "--alpha",
+        help="[DE] Adjusted p-value cutoff.",
+    ),
+    store_key: str = typer.Option(
+        "scomnom_de",
+        "--store-key",
+        help="[DE] adata.uns key where DE outputs are stored.",
+    ),
+
+    # -------------------------------------------------------------
+    # Optional: condition DE within group
+    # -------------------------------------------------------------
+    condition_key: Optional[str] = typer.Option(
+        None,
+        "--condition-key",
+        help="[Condition DE] obs column (e.g. disease, sex). If set, run condition-within-cluster DE.",
+    ),
+    condition_reference: Optional[str] = typer.Option(
+        None,
+        "--condition-reference",
+        help="[Condition DE] Reference level. If None, module may pick a default (depending on your de_utils).",
+    ),
+    min_cells_condition: int = typer.Option(
+        20,
+        "--min-cells-condition",
+        help="[Condition DE] Min cells per (sample, condition) within a cluster.",
+    ),
+
+    # -------------------------------------------------------------
+    # Plot knobs (for orchestrator wiring to de_plot_utils + save_multi)
+    # -------------------------------------------------------------
+    plot_lfc_thresh: float = typer.Option(
+        1.0,
+        "--plot-lfc-thresh",
+        help="[Plots] Volcano log2FC threshold.",
+    ),
+    plot_volcano_top_label_n: int = typer.Option(
+        15,
+        "--plot-volcano-top-label-n",
+        help="[Plots] Number of labeled genes in volcano plots.",
+    ),
+    plot_top_n_per_cluster: int = typer.Option(
+        10,
+        "--plot-top-n-per-cluster",
+        help="[Plots] Top genes per cluster for dot/heatmap/violin/umap expression plots.",
+    ),
+    plot_max_genes_total: int = typer.Option(
+        80,
+        "--plot-max-genes-total",
+        help="[Plots] Cap total genes plotted across clusters (prevents huge dotplots).",
+    ),
+    plot_use_raw: bool = typer.Option(
+        False,
+        "--plot-use-raw/--no-plot-use-raw",
+        help="[Plots] Use adata.raw for expression plots.",
+    ),
+    plot_layer: Optional[str] = typer.Option(
+        None,
+        "--plot-layer",
+        help="[Plots] Layer for expression plots (if not using raw).",
+    ),
+    plot_umap_ncols: int = typer.Option(
+        3,
+        "--plot-umap-ncols",
+        help="[Plots] Columns for UMAP feature grid.",
+    ),
+):
+    # ---------------------------------------------------------
+    # Resolve output dir + logging
+    # ---------------------------------------------------------
+    out_dir = output_dir or input_path.parent
+    log_path = out_dir / "markers-and-de.log"
+    init_logging(log_path)
+
+    cfg = MarkersAndDEConfig(
+        input_path=input_path,
+        output_dir=out_dir,
+        output_name=output_name,
+        save_h5ad=save_h5ad,
+        logfile=log_path,
+        make_figures=make_figures,
+        figdir_name=figdir_name,
+        figure_formats=figure_formats,
+        groupby=groupby,
+        label_source=label_source,
+        round_id=round_id,
+        sample_key=sample_key,
+        batch_key=batch_key,
+        markers_key=markers_key,
+        markers_method=markers_method,
+        markers_n_genes=markers_n_genes,
+        markers_rankby_abs=markers_rankby_abs,
+        markers_use_raw=markers_use_raw,
+        markers_downsample_threshold=markers_downsample_threshold,
+        markers_downsample_max_per_group=markers_downsample_max_per_group,
+        random_state=random_state,
+        counts_layers=counts_layers,
+        allow_X_counts=allow_x_counts,
+        min_cells_target=min_cells_target,
+        alpha=alpha,
+        store_key=store_key,
+        condition_key=condition_key,
+        condition_reference=condition_reference,
+        min_cells_condition=min_cells_condition,
+        # plotting knobs
+        plot_lfc_thresh=plot_lfc_thresh,
+        plot_volcano_top_label_n=plot_volcano_top_label_n,
+        plot_top_n_per_cluster=plot_top_n_per_cluster,
+        plot_max_genes_total=plot_max_genes_total,
+        plot_use_raw=plot_use_raw,
+        plot_layer=plot_layer,
+        plot_umap_ncols=plot_umap_ncols,
+    )
+
+    run_markers_and_de(cfg)
