@@ -136,13 +136,104 @@ def run_markers_and_de(cfg) -> ad.AnnData:
         }
     )
 
-    # (Optional) plotting/reporting hooks can be added once plot_utils supports DE tables
+    from . import de_plot_utils
+
+    # ------------------------------------------------------------------
+    # Plotting
+    # ------------------------------------------------------------------
     if bool(getattr(cfg, "make_figures", True)):
-        try:
-            # placeholder: users can add volcano/dotplot helpers later from plot_utils
-            pass
-        except Exception as e:
-            LOGGER.warning("markers_and_de: plotting failed: %s", e)
+        figroot = figdir / "markers_and_de"
+
+        # --------------------------------------------------
+        # Cluster vs Rest DE plots
+        # --------------------------------------------------
+        figdir_cvr = figroot / "cluster_vs_rest"
+
+        # Overview / summary
+        fig = de_plot_utils.plot_de_manifest_overview(
+            manifest1,
+            title=f"Cluster vs Rest (alpha={alpha:g})",
+        )
+        plot_utils.save_multi(
+            stem="overview",
+            figdir=figdir_cvr,
+            fig=fig,
+        )
+
+        # Volcano grid
+        fig = de_plot_utils.plot_volcano_grid_from_manifest(
+            manifest1,
+            alpha=alpha,
+            max_panels=int(getattr(cfg, "volcano_max_panels", 16)),
+            top_n_labels=int(getattr(cfg, "volcano_top_n_labels", 10)),
+            title="Cluster vs Rest – volcano plots",
+        )
+        plot_utils.save_multi(
+            stem="volcano_grid",
+            figdir=figdir_cvr,
+            fig=fig,
+        )
+
+        # Dotplot
+        fig = de_plot_utils.plot_top_de_dotplot(
+            adata,
+            manifest1,
+            groupby=str(groupby),
+            alpha=alpha,
+            top_n_per_group=int(getattr(cfg, "dotplot_top_n_per_group", 10)),
+            use_raw=bool(getattr(cfg, "dotplot_use_raw", False)),
+            layer=getattr(cfg, "dotplot_layer", None),
+        )
+        plot_utils.save_multi(
+            stem="dotplot_top_de",
+            figdir=figdir_cvr,
+            fig=fig,
+        )
+
+        # Heatmap
+        fig = de_plot_utils.plot_top_de_heatmap(
+            adata,
+            manifest1,
+            groupby=str(groupby),
+            alpha=alpha,
+            top_n_per_group=int(getattr(cfg, "heatmap_top_n_per_group", 20)),
+            use_raw=bool(getattr(cfg, "heatmap_use_raw", False)),
+            layer=getattr(cfg, "heatmap_layer", None),
+        )
+        plot_utils.save_multi(
+            stem="heatmap_top_de",
+            figdir=figdir_cvr,
+            fig=fig,
+        )
+
+        # --------------------------------------------------
+        # Condition-within-cluster DE plots (if present)
+        # --------------------------------------------------
+        if manifest2 is not None:
+            figdir_cond = figroot / f"condition_within_cluster__{condition_key}"
+
+            fig = de_plot_utils.plot_de_manifest_overview(
+                manifest2,
+                title=f"Condition within cluster: {condition_key} (alpha={alpha:g})",
+            )
+            plot_utils.save_multi(
+                stem="overview",
+                figdir=figdir_cond,
+                fig=fig,
+            )
+
+            fig = de_plot_utils.plot_volcano_grid_from_manifest(
+                manifest2,
+                alpha=alpha,
+                max_panels=int(getattr(cfg, "volcano_max_panels", 16)),
+                top_n_labels=int(getattr(cfg, "volcano_top_n_labels", 10)),
+                title=f"{condition_key} – volcano plots",
+            )
+            plot_utils.save_multi(
+                stem="volcano_grid",
+                figdir=figdir_cond,
+                fig=fig,
+            )
 
     # Save
     out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.markers_and_de")) + ".zarr")
