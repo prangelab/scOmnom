@@ -583,14 +583,6 @@ class ClusterAnnotateConfig(BaseModel):
 # ---------------------------------------------------------------------
 # MARKERS AND DE CONFIG
 # ---------------------------------------------------------------------
-# src/scomnom/config_markers_and_de.py
-from __future__ import annotations
-
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Optional, Sequence, Tuple
-
-
 @dataclass
 class MarkersAndDEConfig:
     """
