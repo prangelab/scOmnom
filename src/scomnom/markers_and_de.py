@@ -76,6 +76,8 @@ def run_markers_and_de(cfg) -> ad.AnnData:
         rankby_abs=bool(getattr(cfg, "markers_rankby_abs", True)),
         max_cells_per_group=int(getattr(cfg, "markers_downsample_max_per_group", 2000)),
         random_state=int(getattr(cfg, "random_state", 42)),
+        min_pct=float(getattr(cfg, "min_pct", 0.25)),
+        min_diff_pct=float(getattr(cfg, "min_diff_pct", 0.25)),
     )
 
     markers_key = str(getattr(cfg, "markers_key", "cluster_markers_wilcoxon"))
@@ -112,6 +114,8 @@ def run_markers_and_de(cfg) -> ad.AnnData:
         min_samples_per_level=int(getattr(cfg, "min_samples_per_level", 2)),
         alpha=float(getattr(cfg, "alpha", 0.05)),
         shrink_lfc=bool(getattr(cfg, "shrink_lfc", True)),
+        min_pct=float(getattr(cfg, "min_pct", 0.25)),
+        min_diff_pct=float(getattr(cfg, "min_diff_pct", 0.25)),
     )
 
     LOGGER.info(
@@ -146,6 +150,8 @@ def run_markers_and_de(cfg) -> ad.AnnData:
             min_samples_per_level=int(getattr(cfg, "min_samples_per_level", 2)),
             alpha=float(getattr(cfg, "alpha", 0.05)),
             shrink_lfc=bool(getattr(cfg, "shrink_lfc", True)),
+            min_pct=float(getattr(cfg, "min_pct", 0.25)),
+            min_diff_pct=float(getattr(cfg, "min_diff_pct", 0.25)),
         )
 
         condition_contrasts = list(getattr(cfg, "condition_contrasts", [])) or None
@@ -266,6 +272,8 @@ def run_markers_and_de(cfg) -> ad.AnnData:
             lr_min_abs_coef=float(getattr(cfg, "contrast_lr_min_abs_coef", 0.25)),
             pb_min_abs_log2fc=float(getattr(cfg, "contrast_pb_min_abs_log2fc", 0.5)),
             random_state=int(getattr(cfg, "random_state", 42)),
+            min_pct=float(getattr(cfg, "min_pct", 0.25)),
+            min_diff_pct=float(getattr(cfg, "min_diff_pct", 0.25)),
         )
 
         _ = contrast_conditional_markers(

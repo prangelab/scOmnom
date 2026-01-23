@@ -1173,6 +1173,26 @@ def markers_and_de(
         help="[Design] Fallback replicate key (used if --sample-key not set).",
     ),
 
+    # ------------------------------------------------------------------
+    # Gene detection / prevalence filters (Seurat-like)
+    # ------------------------------------------------------------------
+    min_pct: float = typer.Option(
+        0.25,
+        "--min-pct",
+        help=(
+            "[Markers / DE] Minimum fraction of cells expressing a gene in at least "
+            "one group (Seurat-style min.pct). Applied to cell-level markers, "
+            "contrast-conditional markers, and as a gene pre-filter for pseudobulk DE."
+        ),
+    ),
+    min_diff_pct: float = typer.Option(
+        0.25,
+        "--min-diff-pct",
+        help=(
+            "[Markers / DE] Minimum absolute difference in expression fraction "
+            "between groups (|pct_A - pct_B|). Seurat-style min.diff.pct."
+        ),
+    ),
     # -------------------------------------------------------------
     # Cell-level discovery markers (scanpy rank_genes_groups)
     # -------------------------------------------------------------
@@ -1390,6 +1410,8 @@ def markers_and_de(
         round_id=round_id,
         sample_key=sample_key,
         batch_key=batch_key,
+        min_pct=min_pct,
+        min_diff_pct=min_diff_pct,
         markers_key=markers_key,
         markers_method=markers_method,
         markers_n_genes=markers_n_genes,
