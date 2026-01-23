@@ -616,8 +616,8 @@ class MarkersAndDEConfig(BaseModel):
     batch_key: Optional[str] = None
 
     # Cut-off for prevalence (seurat style)
-    min_pct: int = 25
-    min_diff_pct: int = 25
+    min_pct: float = 0.25
+    min_diff_pct: float = 0.25
 
     # ------------------------------------------------------------------
     # Cell-level marker calling (scanpy rank_genes_groups)
