@@ -405,10 +405,10 @@ def run_markers_and_de(cfg) -> ad.AnnData:
                 figdir=figdir_expr,
                 fig=fig,
             )
-
+            umap_genes = genes_for_expression_plots[:9]
             fig = de_plot_utils.umap_features_grid(
                 adata,
-                genes=genes_for_expression_plots,
+                genes=umap_genes,
                 use_raw=use_raw,
                 layer=layer,
                 ncols=ncols,

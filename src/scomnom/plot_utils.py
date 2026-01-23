@@ -184,14 +184,28 @@ def save_multi(stem: str, figdir: Path, fig=None, *, savefig_kwargs: dict | None
     if savefig_kwargs:
         kwargs.update(savefig_kwargs)
 
+    # --------------------------------------------------
+    # Save in all configured formats
+    # --------------------------------------------------
     for ext in FIGURE_FORMATS:
         outdir = ROOT_FIGDIR / ext / RUN_FIG_SUBDIR / rel_figdir
         outdir.mkdir(parents=True, exist_ok=True)
         outfile = outdir / f"{stem}.{ext}"
         LOGGER.info("Saving figure: %s", outfile)
-        plt.savefig(outfile, **kwargs)
 
-    plt.close()
+        if fig is not None:
+            # avoid pyplot global state
+            fig.savefig(outfile, **kwargs)
+        else:
+            plt.savefig(outfile, **kwargs)
+
+    # --------------------------------------------------
+    # Close safely
+    # --------------------------------------------------
+    if fig is not None:
+        plt.close(fig)  # closes exactly that figure
+    else:
+        plt.close()  # closes current figure
 
 
 def save_umap_multi(
