@@ -600,6 +600,8 @@ class MarkersAndDEConfig(BaseModel):
     # outputs
     save_h5ad: bool = False
 
+    n_jobs: int = 1
+
     # ------------------------------------------------------------------
     # Grouping / round awareness
     # ------------------------------------------------------------------

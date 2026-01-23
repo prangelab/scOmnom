@@ -277,6 +277,7 @@ def _run_pydeseq2(
     contrast: Tuple[str, str, str],
     alpha: float = 0.05,
     shrink_lfc: bool = True,
+    n_cpus: int = 1,
 ) -> pd.DataFrame:
     """
     Run PyDESeq2 for one contrast.
@@ -299,8 +300,7 @@ def _run_pydeseq2(
         metadata=metadata.copy(),
         design_factors=list(design_factors),
         ref_level={contrast[0]: contrast[2]},
-        n_cpus=1,
-    )
+        n_cpus=int(n_cpus),    )
     dds.deseq2()
 
     stat = DeseqStats(
@@ -308,6 +308,7 @@ def _run_pydeseq2(
         contrast=list(contrast),
         alpha=float(alpha),
         # shrinkage varies across versions; best-effort below
+        n_cpus=int(n_cpus),
     )
     stat.summary()
 
@@ -346,6 +347,7 @@ def de_cluster_vs_rest_pseudobulk(
     opts: PseudobulkDEOptions = PseudobulkDEOptions(),
     store_key: Optional[str] = "scomnom_de",
     store: bool = True,
+    n_cpus: int = 1,
 ) -> Dict[str, pd.DataFrame]:
     """
     Rigorous “cluster markers” via paired pseudobulk DE:
@@ -530,6 +532,7 @@ def de_cluster_vs_rest_pseudobulk(
                 contrast=("binary_cluster", "target", "rest"),
                 alpha=opts.alpha,
                 shrink_lfc=opts.shrink_lfc,
+                n_cpus=n_cpus,
             )
             results[str(cl)] = res
 
@@ -584,6 +587,7 @@ def de_condition_within_group_pseudobulk(
     opts: PseudobulkDEOptions = PseudobulkDEOptions(),
     store_key: Optional[str] = "scomnom_de",
     store: bool = True,
+    n_cpus: int = 1,
 ) -> pd.DataFrame:
     """
     Condition DE within a given group (e.g., cell type / cluster).
@@ -667,6 +671,7 @@ def de_condition_within_group_pseudobulk(
             contrast=(condition_key, str(test), str(reference)),
             alpha=opts.alpha,
             shrink_lfc=opts.shrink_lfc,
+            n_cpus=n_cpus,
         )
     except Exception as e:
         LOGGER.warning("PyDESeq2 failed for condition DE within %s=%s: %s", group_key, group_value, e)
@@ -1332,6 +1337,7 @@ def de_condition_within_group_pseudobulk_multi(
     contrasts: Sequence[str] | None = None,   # "A_vs_B"
     store_key: Optional[str] = "scomnom_de",
     store: bool = True,
+    n_cpus: int = 1,
 ) -> Dict[str, pd.DataFrame]:
     group_key = resolve_group_key(adata, groupby=groupby, round_id=round_id, prefer_pretty=True)
 
@@ -1368,6 +1374,7 @@ def de_condition_within_group_pseudobulk_multi(
             opts=opts,
             store_key=None,           # store ourselves with a better key
             store=False,
+            n_cpus=n_cpus,
         )
 
         out[f"{A}_vs_{B}"] = res

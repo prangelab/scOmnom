@@ -1115,6 +1115,11 @@ def markers_and_de(
         "--save-h5ad/--no-save-h5ad",
         help="[I/O] Also write an .h5ad copy (WARNING: loads full matrix into RAM).",
     ),
+    n_jobs: int = typer.Option(
+        1,
+        "--n-jobs",
+        help="[I/O] Number of jobs to run in parallel.",
+    ),
 
     # -------------------------------------------------------------
     # Figures
@@ -1375,6 +1380,7 @@ def markers_and_de(
         output_dir=out_dir,
         output_name=output_name,
         save_h5ad=save_h5ad,
+        n_jobs=n_jobs,
         logfile=log_path,
         make_figures=make_figures,
         figdir_name=figdir_name,

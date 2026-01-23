@@ -19,7 +19,7 @@ from .de_utils import (
     compute_markers_celllevel,
     de_cluster_vs_rest_pseudobulk,
     de_condition_within_group_pseudobulk,
-    resolve_group_key,
+    resolve_group_key, de_condition_within_group_pseudobulk_multi,
 )
 
 
@@ -122,6 +122,7 @@ def run_markers_and_de(cfg) -> ad.AnnData:
         opts=pb_opts,
         store_key=str(getattr(cfg, "store_key", "scomnom_de")),
         store=True,
+        n_cpus=int(getattr(cfg, "n_jobs", 1)),
     )
 
     # Optional condition DE
@@ -139,8 +140,6 @@ def run_markers_and_de(cfg) -> ad.AnnData:
             shrink_lfc=bool(getattr(cfg, "shrink_lfc", True)),
         )
 
-        from .de_utils import de_condition_within_group_pseudobulk_multi
-
         condition_contrasts = list(getattr(cfg, "condition_contrasts", [])) or None
 
         for g in groups:
@@ -155,6 +154,7 @@ def run_markers_and_de(cfg) -> ad.AnnData:
                 contrasts=condition_contrasts,
                 store_key=str(getattr(cfg, "store_key", "scomnom_de")),
                 store=True,
+                n_cpus=int(getattr(cfg, "n_jobs", 1)),
             )
     else:
         conditional_de_genes_all_clusters = None
