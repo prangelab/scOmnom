@@ -618,7 +618,7 @@ class MarkersAndDEConfig:
     # ------------------------------------------------------------------
     markers_key: str = "cluster_markers_wilcoxon"
     markers_method: str = "wilcoxon"  # "wilcoxon" | "t-test" | "logreg" (scanpy)
-    markers_n_genes: int = 100
+    markers_n_genes: int = 300
     markers_rankby_abs: bool = True
     markers_use_raw: bool = False
 

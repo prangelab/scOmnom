@@ -1182,7 +1182,7 @@ def markers_and_de(
         help="[Markers] scanpy method: wilcoxon, t-test, logreg.",
     ),
     markers_n_genes: int = typer.Option(
-        100,
+        300,
         "--markers-n-genes",
         help="[Markers] Number of marker genes per group.",
     ),
