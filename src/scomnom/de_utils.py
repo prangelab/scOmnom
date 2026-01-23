@@ -309,7 +309,7 @@ def _run_pydeseq2(
         # shrinkage varies across versions; best-effort below
         n_cpus=int(n_cpus),
     )
-    stat.summary()
+    stat.summary(print_result=False)
 
     res = stat.results_df.copy()
     # Standardize column names to match your older plotting expectations
