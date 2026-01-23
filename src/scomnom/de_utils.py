@@ -654,10 +654,10 @@ def de_condition_within_group_pseudobulk(
     min_total = int(getattr(opts, "min_total_counts", 10))  # optional new option
     keep = (counts.sum(axis=0) >= min_total)
     counts = counts.loc[:, keep]
+
     if counts.shape[1] == 0:
-        results[str(cl)] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
-        summary_rows.append({"cluster": str(cl), "status": "skipped", "reason": "no genes left after filtering"})
-        continue
+        # No genes left after filtering; nothing to test
+        return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
 
     # Run PyDESeq2
     try:
