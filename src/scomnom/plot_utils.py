@@ -1071,7 +1071,7 @@ def qc_violin_panels(adata, cfg, stage: str):
             adata,
             metric,
             groupby=batch_key,
-            rotation=90 if not horizontal else 0,
+            rotation=45 if horizontal else 0,
             show=False,
             stripplot=False,
             ax=ax,
@@ -3302,7 +3302,7 @@ def plot_decoupler_dotplot(
     features_disp = [_clean_feature_label(f, net_name) for f in sub_raw.columns]
 
     # --------------------------------------------------
-    # FIGURE SETUP (THIS WAS THE PART THAT LEAKED OUT)
+    # FIGURE SETUP
     # --------------------------------------------------
     fig_w = max(22.0, 12.0 + 0.6 * len(clusters))
     fig_h = max(12.0, 5.0 + 0.5 * len(features_disp))
