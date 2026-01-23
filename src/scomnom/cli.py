@@ -1263,20 +1263,61 @@ def markers_and_de(
     # -------------------------------------------------------------
     # Optional: Contrast-conditional mode
     # -------------------------------------------------------------
-    contrast_conditional_de: bool = typer.Option(False, "--contrast-conditional-de", help="[NEW] Pairwise A vs B within each cluster (n=1 conditions)."),
-    contrast_key: Optional[str] = typer.Option(None, "--contrast-key", help="[NEW] Column to contrast (defaults to sample_key)."),
-    contrast_methods: List[str] = typer.Option(["wilcoxon", "logreg"], "--contrast-methods", help="[NEW] Methods to combine."),
-
-    contrast_min_cells_per_level: int = typer.Option(50, "--contrast-min-cells-per-level"),
-    contrast_max_cells_per_level: int = typer.Option(2000, "--contrast-max-cells-per-level"),
-    contrast_min_total_counts: int = typer.Option(10, "--contrast-min-total-counts"),
-    contrast_pseudocount: float = typer.Option(1.0, "--contrast-pseudocount"),
-
-    contrast_cl_alpha: float = typer.Option(0.05, "--contrast-cl-alpha"),
-    contrast_cl_min_abs_logfc: float = typer.Option(0.25, "--contrast-cl-min-abs-logfc"),
-    contrast_lr_min_abs_coef: float = typer.Option(0.25, "--contrast-lr-min-abs-coef"),
-    contrast_pb_min_abs_log2fc: float = typer.Option(0.5, "--contrast-pb-min-abs-log2fc"),
-
+    contrast_conditional_de: bool = typer.Option(
+        False,
+        "--contrast-conditional-de",
+        help="[Contrast condition] Run conditional differential expression: pairwise A vs B within each cluster (requires exactly 2 condition levels).",
+    ),
+    contrast_key: Optional[str] = typer.Option(
+        None,
+        "--contrast-key",
+        help="[Contrast condition] obs column defining the condition to contrast (defaults to sample_key).",
+    ),
+    contrast_methods: List[str] = typer.Option(
+        ["wilcoxon", "logreg"],
+        "--contrast-methods",
+        help="[Contrast condition] Differential expression methods to run and combine (e.g. wilcoxon, logreg).",
+    ),
+    contrast_min_cells_per_level: int = typer.Option(
+        50,
+        "--contrast-min-cells-per-level",
+        help="[Contrast condition] Minimum number of cells required per condition level within a cluster.",
+    ),
+    contrast_max_cells_per_level: int = typer.Option(
+        2000,
+        "--contrast-max-cells-per-level",
+        help="[Contrast condition] Maximum number of cells per condition level (randomly subsampled if exceeded).",
+    ),
+    contrast_min_total_counts: int = typer.Option(
+        10,
+        "--contrast-min-total-counts",
+        help="[Contrast condition] Minimum total counts required for a gene to be tested.",
+    ),
+    contrast_pseudocount: float = typer.Option(
+        1.0,
+        "--contrast-pseudocount",
+        help="[Contrast condition] Pseudocount added before log fold-change computation.",
+    ),
+    contrast_cl_alpha: float = typer.Option(
+        0.05,
+        "--contrast-cl-alpha",
+        help="[Contrast condition] Significance threshold (adjusted p-value) for cluster-level DE results.",
+    ),
+    contrast_cl_min_abs_logfc: float = typer.Option(
+        0.25,
+        "--contrast-cl-min-abs-logfc",
+        help="[Contrast condition] Minimum absolute log fold-change for cluster-level DE filtering.",
+    ),
+    contrast_lr_min_abs_coef: float = typer.Option(
+        0.25,
+        "--contrast-lr-min-abs-coef",
+        help="[Contrast condition] Minimum absolute logistic-regression coefficient for logreg DE filtering.",
+    ),
+    contrast_pb_min_abs_log2fc: float = typer.Option(
+        0.5,
+        "--contrast-pb-min-abs-log2fc",
+        help="[Contrast condition] Minimum absolute log2 fold-change for pseudobulk DE filtering.",
+    ),
 
     # -------------------------------------------------------------
     # Plot knobs (for orchestrator wiring to de_plot_utils + save_multi)
