@@ -25,3 +25,6 @@ Improved layout of reports.
 ## 0.1.5 [20-01-2026]
 Optimised resolution sweep by removing full ARI table computation. Only adjacent ARIs are needed.
 Fixed bug preventing color values to be read from adata.
+
+## 0.1.6 [23-1-2026]
+Fixed bug causing violin labels to be drawn horizontal.
