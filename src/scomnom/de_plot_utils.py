@@ -370,46 +370,88 @@ def heatmap_top_genes(
 def violin_genes(
     adata,
     *,
-    genes: Sequence[str],
+    genes,
     groupby: str,
     use_raw: bool = False,
-    layer: Optional[str] = None,
-    log: bool = True,
-    multi_panel: bool = True,
-    stripplot: bool = False,
-    jitter: bool = False,
-    rotation: int = 90,
-    figsize: Optional[tuple[float, float]] = None,
+    layer: str | None = None,
     show: bool = False,
-) -> Figure:
-    genes = [str(g) for g in genes if g is not None and str(g) != ""]
-    if not genes:
-        fig, ax = plt.subplots(figsize=(7.5, 2.5))
-        ax.text(0.5, 0.5, "No genes to plot", ha="center", va="center")
-        ax.set_axis_off()
-        if show:
-            plt.show()
-        return fig
+    rotation: int | float | None = 90,
+    figsize=None,
+    **kwargs,
+):
+    """
+    Violin plot wrapper that is robust to kwargs leakage (e.g. figsize=None).
 
-    ret = sc.pl.violin(
+    IMPORTANT:
+      - Do NOT forward figsize=None into kwargs that may reach matplotlib artists.
+      - If figsize is provided, pass it only as a real tuple (w, h).
+    """
+    import scanpy as sc
+    import matplotlib.pyplot as plt
+
+    # ---- normalize genes
+    if genes is None:
+        return plt.gcf()
+    if isinstance(genes, (str, bytes)):
+        genes = [str(genes)]
+    genes = [str(g) for g in genes if g is not None]
+    if len(genes) == 0:
+        return plt.gcf()
+
+    # ---- sanitize kwargs: never forward figsize unless it's a valid tuple
+    # Users sometimes pass figsize=None via config; that must not reach artist.set(...)
+    if "figsize" in kwargs and (kwargs["figsize"] is None):
+        kwargs.pop("figsize", None)
+
+    # Accept figsize either via explicit arg or kwargs (explicit wins)
+    _figsize = figsize
+    if _figsize is None and "figsize" in kwargs:
+        _figsize = kwargs.pop("figsize")
+
+    # Only keep figsize if it is a real (w,h) tuple/list of length 2
+    if _figsize is not None:
+        try:
+            if not (isinstance(_figsize, (tuple, list)) and len(_figsize) == 2):
+                _figsize = None
+        except Exception:
+            _figsize = None
+
+    # ---- call scanpy
+    # NOTE: sc.pl.violin accepts figsize, but it must not be forwarded into seaborn/mpl element kwargs.
+    call_kwargs = dict(
+        use_raw=bool(use_raw),
+        layer=layer,
+        show=bool(show),
+    )
+
+    if _figsize is not None:
+        call_kwargs["figsize"] = _figsize
+
+    # Any remaining kwargs are assumed to be valid scanpy.violin parameters
+    call_kwargs.update(kwargs)
+
+    ax = sc.pl.violin(
         adata,
         keys=genes,
-        groupby=groupby,
-        use_raw=use_raw,
-        layer=layer,
-        log=log,
-        multi_panel=multi_panel,
-        stripplot=stripplot,
-        jitter=jitter,
-        rotation=rotation,
-        figsize=figsize,
-        show=False,
+        groupby=str(groupby),
+        **call_kwargs,
     )
-    fig = _get_fig_from_scanpy_return(ret)
-    fig.tight_layout()
-    if show:
-        plt.show()
-    return fig
+
+    # ---- rotate x tick labels (scanpy sometimes returns Axes or list of Axes)
+    axes = ax if isinstance(ax, (list, tuple)) else [ax]
+    if rotation is not None:
+        for a in axes:
+            if a is None:
+                continue
+            try:
+                for lab in a.get_xticklabels():
+                    lab.set_rotation(rotation)
+                    lab.set_ha("right" if float(rotation) != 0 else "center")
+            except Exception:
+                pass
+
+    return plt.gcf()
+
 
 
 def umap_features_grid(
