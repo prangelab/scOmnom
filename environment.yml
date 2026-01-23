@@ -27,6 +27,7 @@ dependencies:
   - h5py
   - scikit-learn
   - psutil
+  - xlsxwriter
 
   # Scanpy ecosystem
   - scanpy
