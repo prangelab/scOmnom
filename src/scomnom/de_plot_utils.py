@@ -299,6 +299,28 @@ def dotplot_top_genes(
     return fig
 
 
+def _normalize_scanpy_groupby_colors(adata, groupby: str) -> None:
+    k = f"{groupby}_colors"
+    if k not in adata.uns:
+        return
+
+    colors = adata.uns[k]
+
+    # zarr/serialization wrapper -> unwrap to list[str]
+    if isinstance(colors, dict) and "data" in colors:
+        colors = colors["data"]
+
+    # numpy array / pandas array -> list
+    try:
+        colors = list(np.asarray(colors).astype(str))
+    except Exception:
+        # if it's too weird, drop it and let scanpy regenerate
+        del adata.uns[k]
+        return
+
+    adata.uns[k] = colors
+
+
 def heatmap_top_genes(
     adata,
     *,
@@ -323,6 +345,7 @@ def heatmap_top_genes(
             plt.show()
         return fig
 
+    _normalize_scanpy_groupby_colors(adata, groupby)
     ret = sc.pl.heatmap(
         adata,
         var_names=genes,
