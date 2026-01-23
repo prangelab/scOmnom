@@ -422,7 +422,7 @@ def de_cluster_vs_rest_pseudobulk(
                 {
                     "cluster": str(cl),
                     "status": "skipped",
-                    "reason": f"target samples < {opts.min_samples_per_level}",
+                    "reason": f"only {n_target_samples} sample(s) with >= {opts.min_cells_per_sample_group} cells in target",
                     "n_target_samples": n_target_samples,
                     "min_cells_per_sample_group": int(opts.min_cells_per_sample_group),
                 }
@@ -498,6 +498,15 @@ def de_cluster_vs_rest_pseudobulk(
 
         counts = pd.DataFrame(out, index=clinical.index, columns=adata.var_names)
 
+        # Drop genes with extremely low total counts (helps speed/stability)
+        min_total = int(getattr(opts, "min_total_counts", 10))  # optional new option
+        keep = (counts.sum(axis=0) >= min_total)
+        counts = counts.loc[:, keep]
+        if counts.shape[1] == 0:
+            results[str(cl)] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
+            summary_rows.append({"cluster": str(cl), "status": "skipped", "reason": "no genes left after filtering"})
+            continue
+
         # Replicate check for both levels
         vc = clinical["binary_cluster"].value_counts()
         if int(vc.get("target", 0)) < int(opts.min_samples_per_level) or int(vc.get("rest", 0)) < int(opts.min_samples_per_level):
@@ -524,6 +533,8 @@ def de_cluster_vs_rest_pseudobulk(
                 shrink_lfc=opts.shrink_lfc,
             )
             results[str(cl)] = res
+
+            n_sig = int((pd.to_numeric(res["padj"], errors="coerce") < opts.alpha).sum()) if not res.empty else 0
             summary_rows.append(
                 {
                     "cluster": str(cl),
@@ -531,6 +542,7 @@ def de_cluster_vs_rest_pseudobulk(
                     "n_target_samples": int(len(samples)),
                     "n_libraries": int(counts.shape[0]),
                     "min_cells_per_sample_group": int(opts.min_cells_per_sample_group),
+                    "n_sig": n_sig
                 }
             )
         except Exception as e:
@@ -637,6 +649,15 @@ def de_condition_within_group_pseudobulk(
     # Densify counts (small)
     dense = counts_df.sparse.to_coo().toarray().astype(np.int64, copy=False)
     counts = pd.DataFrame(dense, index=counts_df.index, columns=counts_df.columns)
+
+    # Drop genes with extremely low total counts (helps speed/stability)
+    min_total = int(getattr(opts, "min_total_counts", 10))  # optional new option
+    keep = (counts.sum(axis=0) >= min_total)
+    counts = counts.loc[:, keep]
+    if counts.shape[1] == 0:
+        results[str(cl)] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
+        summary_rows.append({"cluster": str(cl), "status": "skipped", "reason": "no genes left after filtering"})
+        continue
 
     # Run PyDESeq2
     try:
