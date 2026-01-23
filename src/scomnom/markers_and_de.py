@@ -127,9 +127,6 @@ def run_markers_and_de(cfg) -> ad.AnnData:
     # Optional condition DE
     condition_key = getattr(cfg, "condition_key", None)
     if condition_key:
-        reference = getattr(cfg, "condition_reference", None)
-        if reference is None:
-            raise RuntimeError("markers_and_de: condition_reference must be set when condition_key is provided.")
 
         # per-cluster condition DE
         groups = pd.Index(pd.unique(adata.obs[groupby].astype(str))).sort_values()
@@ -142,20 +139,23 @@ def run_markers_and_de(cfg) -> ad.AnnData:
             shrink_lfc=bool(getattr(cfg, "shrink_lfc", True)),
         )
 
+        from .de_utils import de_condition_within_group_pseudobulk_multi
+
+        condition_contrasts = list(getattr(cfg, "condition_contrasts", [])) or None
+
         for g in groups:
-            res = de_condition_within_group_pseudobulk(
+            _ = de_condition_within_group_pseudobulk_multi(
                 adata,
                 group_value=str(g),
                 groupby=groupby,
                 round_id=getattr(cfg, "round_id", None),
                 condition_key=str(condition_key),
-                reference=str(reference),
                 spec=pb_spec,
                 opts=cond_opts,
+                contrasts=condition_contrasts,
                 store_key=str(getattr(cfg, "store_key", "scomnom_de")),
                 store=True,
             )
-            conditional_de_genes_all_clusters[str(g)] = res
     else:
         conditional_de_genes_all_clusters = None
 

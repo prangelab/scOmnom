@@ -645,7 +645,7 @@ class MarkersAndDEConfig(BaseModel):
     # Optional condition-within-cluster DE
     # ------------------------------------------------------------------
     condition_key: Optional[str] = None
-    condition_reference: Optional[str] = None
+    condition_contrasts: Tuple[str, ...] = ()
     min_cells_condition: int = 20
 
     # ------------------------------------------------------------------
@@ -654,7 +654,7 @@ class MarkersAndDEConfig(BaseModel):
     contrast_conditional_de: bool = False
     contrast_key: Optional[str] = None  # defaults to sample_key
     contrast_methods: Tuple[str, ...] = ("wilcoxon", "logreg")
-
+    contrast_contrasts: Tuple[str, ...] = ()
     contrast_min_cells_per_level: int = 50
     contrast_max_cells_per_level: int = 2000
     contrast_min_total_counts: int = 10

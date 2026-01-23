@@ -949,6 +949,41 @@ def _pb_effect_log2fc(
         }
     )
 
+def _normalize_pair(s: str) -> tuple[str, str]:
+    s = str(s).strip()
+    if "_vs_" in s:
+        a, b = s.split("_vs_", 1)
+    elif " vs " in s:
+        a, b = s.split(" vs ", 1)
+    else:
+        raise ValueError(f"Invalid contrast spec {s!r}. Use 'A_vs_B'.")
+    a = a.strip()
+    b = b.strip()
+    if not a or not b:
+        raise ValueError(f"Invalid contrast spec {s!r}. Use 'A_vs_B'.")
+    if a == b:
+        raise ValueError(f"Invalid contrast spec {s!r}: A and B must differ.")
+    return a, b
+
+
+def _select_pairs(levels: Sequence[str], requested: Sequence[str] | None) -> list[tuple[str, str]]:
+    lv = [str(x) for x in levels]
+    all_pairs = [(lv[i], lv[j]) for i in range(len(lv)) for j in range(i + 1, len(lv))]
+
+    if not requested:
+        return all_pairs
+
+    req_pairs = [_normalize_pair(x) for x in requested]
+    # Validate membership
+    lv_set = set(lv)
+    out = []
+    for a, b in req_pairs:
+        if a not in lv_set or b not in lv_set:
+            raise ValueError(f"Requested contrast {a}_vs_{b} not in levels={sorted(lv_set)}")
+        # keep direction as requested (important for sign)
+        out.append((a, b))
+    return out
+
 
 @dataclass(frozen=True)
 class ContrastConditionalSpec:
@@ -956,6 +991,7 @@ class ContrastConditionalSpec:
     Pairwise (A vs B) markers within each cluster, when sample-level replicates don't exist.
     """
     contrast_key: str  # e.g. batch_key / sample_id / group
+    contrasts: Tuple[str, ...] = ()
     methods: Tuple[Literal["wilcoxon", "logreg"], ...] = ("wilcoxon", "logreg")
 
     # guards
@@ -1027,115 +1063,115 @@ def contrast_conditional_markers(
             by_level_idx[str(lv)] = global_idx[np.where(m)[0]]
 
         # pairwise A vs B
-        for i in range(len(levels)):
-            for j in range(i + 1, len(levels)):
-                A = str(levels[i])
-                B = str(levels[j])
-                pair_key = f"{A}_vs_{B}"
+        levels = pd.Index(pd.unique(adata.obs[contrast_key].astype(str))).sort_values()
+        pairs = _select_pairs(levels.tolist(), list(spec.contrasts) if spec.contrasts else None)
 
-                idxA = by_level_idx.get(A, np.array([], dtype=int))
-                idxB = by_level_idx.get(B, np.array([], dtype=int))
+        for (A, B) in pairs:
+            pair_key = f"{A}_vs_{B}"
 
-                nA = int(idxA.size)
-                nB = int(idxB.size)
+            idxA = by_level_idx.get(A, np.array([], dtype=int))
+            idxB = by_level_idx.get(B, np.array([], dtype=int))
 
-                if nA < spec.min_cells_per_level_in_cluster or nB < spec.min_cells_per_level_in_cluster:
-                    out[str(cl)][pair_key] = {
-                        "wilcoxon": pd.DataFrame(),
-                        "logreg": pd.DataFrame(),
-                        "pseudobulk_effect": pd.DataFrame(),
-                        "combined": pd.DataFrame(),
+            nA = int(idxA.size)
+            nB = int(idxB.size)
+
+            if nA < spec.min_cells_per_level_in_cluster or nB < spec.min_cells_per_level_in_cluster:
+                out[str(cl)][pair_key] = {
+                    "wilcoxon": pd.DataFrame(),
+                    "logreg": pd.DataFrame(),
+                    "pseudobulk_effect": pd.DataFrame(),
+                    "combined": pd.DataFrame(),
+                }
+                summary_rows.append(
+                    dict(
+                        cluster=str(cl),
+                        contrast_key=contrast_key,
+                        A=A,
+                        B=B,
+                        status="skipped",
+                        reason="min_cells_per_level_in_cluster",
+                        n_cells_A=nA,
+                        n_cells_B=nB,
+                    )
+                )
+                continue
+
+            # Build subset AnnData for cell-level tests (downsampled)
+            maskA = np.zeros(adata.n_obs, dtype=bool); maskA[idxA] = True
+            maskB = np.zeros(adata.n_obs, dtype=bool); maskB[idxB] = True
+
+            adata_sub, ds_meta = _downsample_two_level_subset(
+                adata, maskA, maskB,
+                max_per_level=int(spec.max_cells_per_level_in_cluster),
+                random_state=int(spec.random_state),
+            )
+
+            # Ensure contrast_key exists and only A/B levels in subset
+            # (it should, but be explicit)
+            adata_sub = adata_sub[adata_sub.obs[contrast_key].astype(str).isin([A, B])].copy()
+
+            # ---- pseudobulk effect (all cells)
+            pb_df = _pb_effect_log2fc(
+                adata,
+                cluster_mask=cl_mask,
+                contrast_key=contrast_key,
+                level_A=A,
+                level_B=B,
+                counts_layer=counts_layer,
+                min_total_counts=int(spec.min_total_counts),
+                pseudocount=float(spec.pseudocount),
+            )
+
+            # ---- Wilcoxon
+            wilcoxon_df = pd.DataFrame()
+            if "wilcoxon" in spec.methods:
+                sc.tl.rank_genes_groups(
+                    adata_sub,
+                    groupby=contrast_key,
+                    groups=[A],
+                    reference=B,
+                    method="wilcoxon",
+                    use_raw=False,
+                    key_added="__tmp_wilcoxon",
+                    n_genes=adata_sub.n_vars,
+                    rankby_abs=False,
+                )
+                d = rank_genes_groups_df(adata_sub, group=A, key="__tmp_wilcoxon")
+                wilcoxon_df = d.rename(
+                    columns={
+                        "names": "gene",
+                        "logfoldchanges": "cl_logfc",
+                        "scores": "cl_score",
+                        "pvals": "cl_pval",
+                        "pvals_adj": "cl_padj",
                     }
-                    summary_rows.append(
-                        dict(
-                            cluster=str(cl),
-                            contrast_key=contrast_key,
-                            A=A,
-                            B=B,
-                            status="skipped",
-                            reason="min_cells_per_level_in_cluster",
-                            n_cells_A=nA,
-                            n_cells_B=nB,
-                        )
-                    )
-                    continue
-
-                # Build subset AnnData for cell-level tests (downsampled)
-                maskA = np.zeros(adata.n_obs, dtype=bool); maskA[idxA] = True
-                maskB = np.zeros(adata.n_obs, dtype=bool); maskB[idxB] = True
-
-                adata_sub, ds_meta = _downsample_two_level_subset(
-                    adata, maskA, maskB,
-                    max_per_level=int(spec.max_cells_per_level_in_cluster),
-                    random_state=int(spec.random_state),
                 )
+                wilcoxon_df["gene"] = wilcoxon_df["gene"].astype(str)
 
-                # Ensure contrast_key exists and only A/B levels in subset
-                # (it should, but be explicit)
-                adata_sub = adata_sub[adata_sub.obs[contrast_key].astype(str).isin([A, B])].copy()
-
-                # ---- pseudobulk effect (all cells)
-                pb_df = _pb_effect_log2fc(
-                    adata,
-                    cluster_mask=cl_mask,
-                    contrast_key=contrast_key,
-                    level_A=A,
-                    level_B=B,
-                    counts_layer=counts_layer,
-                    min_total_counts=int(spec.min_total_counts),
-                    pseudocount=float(spec.pseudocount),
+            # ---- Logreg
+            logreg_df = pd.DataFrame()
+            if "logreg" in spec.methods:
+                sc.tl.rank_genes_groups(
+                    adata_sub,
+                    groupby=contrast_key,
+                    groups=[A],
+                    reference=B,
+                    method="logreg",
+                    use_raw=False,
+                    key_added="__tmp_logreg",
+                    n_genes=adata_sub.n_vars,
+                    rankby_abs=False,
                 )
-
-                # ---- Wilcoxon
-                wilcoxon_df = pd.DataFrame()
-                if "wilcoxon" in spec.methods:
-                    sc.tl.rank_genes_groups(
-                        adata_sub,
-                        groupby=contrast_key,
-                        groups=[A],
-                        reference=B,
-                        method="wilcoxon",
-                        use_raw=False,
-                        key_added="__tmp_wilcoxon",
-                        n_genes=adata_sub.n_vars,
-                        rankby_abs=False,
-                    )
-                    d = rank_genes_groups_df(adata_sub, group=A, key="__tmp_wilcoxon")
-                    wilcoxon_df = d.rename(
-                        columns={
-                            "names": "gene",
-                            "logfoldchanges": "cl_logfc",
-                            "scores": "cl_score",
-                            "pvals": "cl_pval",
-                            "pvals_adj": "cl_padj",
-                        }
-                    )
-                    wilcoxon_df["gene"] = wilcoxon_df["gene"].astype(str)
-
-                # ---- Logreg
-                logreg_df = pd.DataFrame()
-                if "logreg" in spec.methods:
-                    sc.tl.rank_genes_groups(
-                        adata_sub,
-                        groupby=contrast_key,
-                        groups=[A],
-                        reference=B,
-                        method="logreg",
-                        use_raw=False,
-                        key_added="__tmp_logreg",
-                        n_genes=adata_sub.n_vars,
-                        rankby_abs=False,
-                    )
-                    d = rank_genes_groups_df(adata_sub, group=A, key="__tmp_logreg")
-                    # scanpy logreg exposes "scores" but coefficients may be stored in "logfoldchanges" depending on version.
-                    # We store both if present.
-                    d = d.rename(columns={"names": "gene"})
-                    if "logfoldchanges" in d.columns:
-                        d = d.rename(columns={"logfoldchanges": "lr_coef"})
-                    if "scores" in d.columns:
-                        d = d.rename(columns={"scores": "lr_score"})
-                    logreg_df = d[["gene"] + [c for c in ["lr_coef", "lr_score"] if c in d.columns]].copy()
-                    logreg_df["gene"] = logreg_df["gene"].astype(str)
+                d = rank_genes_groups_df(adata_sub, group=A, key="__tmp_logreg")
+                # scanpy logreg exposes "scores" but coefficients may be stored in "logfoldchanges" depending on version.
+                # We store both if present.
+                d = d.rename(columns={"names": "gene"})
+                if "logfoldchanges" in d.columns:
+                    d = d.rename(columns={"logfoldchanges": "lr_coef"})
+                if "scores" in d.columns:
+                    d = d.rename(columns={"scores": "lr_score"})
+                logreg_df = d[["gene"] + [c for c in ["lr_coef", "lr_score"] if c in d.columns]].copy()
+                logreg_df["gene"] = logreg_df["gene"].astype(str)
 
                 # ---- Combined merge
                 combined = None
@@ -1280,5 +1316,79 @@ def contrast_conditional_markers(
         }
         adata.uns[store_key]["contrast_conditional"]["summary"] = pd.DataFrame(summary_rows)
         adata.uns[store_key]["contrast_conditional"]["results"] = out
+
+    return out
+
+
+def de_condition_within_group_pseudobulk_multi(
+    adata: ad.AnnData,
+    *,
+    group_value: str,
+    groupby: Optional[str] = None,
+    round_id: Optional[str] = None,
+    condition_key: str,
+    spec: PseudobulkSpec = PseudobulkSpec(),
+    opts: PseudobulkDEOptions = PseudobulkDEOptions(),
+    contrasts: Sequence[str] | None = None,   # "A_vs_B"
+    store_key: Optional[str] = "scomnom_de",
+    store: bool = True,
+) -> Dict[str, pd.DataFrame]:
+    group_key = resolve_group_key(adata, groupby=groupby, round_id=round_id, prefer_pretty=True)
+
+    mask = adata.obs[group_key].astype(str).to_numpy() == str(group_value)
+    if mask.sum() == 0:
+        return {}
+
+    # get levels present *within this cluster*
+    levels = pd.Index(pd.unique(adata.obs.loc[mask, condition_key].astype(str))).sort_values().tolist()
+    if len(levels) < 2:
+        return {}
+
+    pairs = _select_pairs(levels, contrasts)
+
+    out: Dict[str, pd.DataFrame] = {}
+    for A, B in pairs:
+        # Run A vs B by calling your existing function,
+        # but it currently wants reference and assumes exactly 2 levels.
+        # We can *temporarily* treat reference=B and restrict to only A/B cells:
+        m2 = mask & adata.obs[condition_key].astype(str).isin([A, B]).to_numpy()
+        if m2.sum() == 0:
+            continue
+
+        # Call a slightly refactored internal helper that accepts restrict mask,
+        # OR easiest: duplicate the aggregation logic here (small).
+        res = de_condition_within_group_pseudobulk(
+            adata[m2].copy(),
+            group_value=str(group_value),
+            groupby=groupby,          # group_key resolution still OK, but now only one cluster present
+            round_id=round_id,
+            condition_key=condition_key,
+            reference=str(B),
+            spec=spec,
+            opts=opts,
+            store_key=None,           # store ourselves with a better key
+            store=False,
+        )
+
+        out[f"{A}_vs_{B}"] = res
+
+        if store and store_key:
+            adata.uns.setdefault(store_key, {})
+            adata.uns[store_key].setdefault("pseudobulk_condition_within_group_multi", {})
+            key = f"{group_key}={group_value}::{condition_key}::{A}_vs_{B}"
+            adata.uns[store_key]["pseudobulk_condition_within_group_multi"][key] = {
+                "group_key": str(group_key),
+                "group_value": str(group_value),
+                "condition_key": str(condition_key),
+                "test": str(A),
+                "reference": str(B),
+                "results": res,
+                "options": {
+                    "min_cells_per_sample_group": int(opts.min_cells_per_sample_group),
+                    "min_samples_per_level": int(opts.min_samples_per_level),
+                    "alpha": float(opts.alpha),
+                    "shrink_lfc": bool(opts.shrink_lfc),
+                },
+            }
 
     return out

@@ -1249,10 +1249,10 @@ def markers_and_de(
         "--condition-key",
         help="[Condition DE] obs column (e.g. disease, sex). If set, run condition-within-cluster DE.",
     ),
-    condition_reference: Optional[str] = typer.Option(
-        None,
-        "--condition-reference",
-        help="[Condition DE] Reference level. If None, module may pick a default (depending on your de_utils).",
+    condition_contrasts: List[str] = typer.Option(
+        [],
+        "--condition-contrasts",
+        help="[Condition DE] Optional list of contrasts to run, e.g. --condition-contrasts A_vs_B. If empty, run all pairwise contrasts among condition_key levels within each cluster.",
     ),
     min_cells_condition: int = typer.Option(
         20,
@@ -1272,6 +1272,11 @@ def markers_and_de(
         None,
         "--contrast-key",
         help="[Contrast condition] obs column defining the condition to contrast (defaults to sample_key).",
+    ),
+    contrast_contrasts: List[str] = typer.Option(
+        [],
+        "--contrast-contrasts",
+        help="[Contrast condition] Optional list of contrasts to run, e.g. --contrast-contrasts A_vs_B. If empty, run all pairwise contrasts among contrast_key levels within each cluster.",
     ),
     contrast_methods: List[str] = typer.Option(
         ["wilcoxon", "logreg"],
@@ -1393,10 +1398,11 @@ def markers_and_de(
         alpha=alpha,
         store_key=store_key,
         condition_key=condition_key,
-        condition_reference=condition_reference,
+        condition_contrasts=condition_contrasts,
         min_cells_condition=min_cells_condition,
         contrast_conditional_de=contrast_conditional_de,
         contrast_key=contrast_key,
+        contrast_contrasts=contrast_contrasts,
         contrast_methods=tuple([str(x).lower() for x in contrast_methods]),
         contrast_min_cells_per_level=contrast_min_cells_per_level,
         contrast_max_cells_per_level=contrast_max_cells_per_level,
