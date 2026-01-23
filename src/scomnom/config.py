@@ -649,6 +649,23 @@ class MarkersAndDEConfig:
     min_cells_condition: int = 20
 
     # ------------------------------------------------------------------
+    # Optional contrast-conditional mode
+    # ------------------------------------------------------------------
+    contrast_conditional_de: bool = False
+    contrast_key: Optional[str] = None  # defaults to sample_key
+    contrast_methods: Tuple[str, ...] = ("wilcoxon", "logreg")
+
+    contrast_min_cells_per_level: int = 50
+    contrast_max_cells_per_level: int = 2000
+    contrast_min_total_counts: int = 10
+    contrast_pseudocount: float = 1.0
+
+    contrast_cl_alpha: float = 0.05
+    contrast_cl_min_abs_logfc: float = 0.25
+    contrast_lr_min_abs_coef: float = 0.25
+    contrast_pb_min_abs_log2fc: float = 0.5
+
+    # ------------------------------------------------------------------
     # Plot controls (used only by the orchestrator)
     # ------------------------------------------------------------------
     plot_lfc_thresh: float = 1.0

@@ -50,13 +50,12 @@ class CellLevelMarkerSpec:
 
 @dataclass(frozen=True)
 class PseudobulkDEOptions:
-    """Options controlling pseudobulk replicate filtering and tests."""
     min_cells_per_sample_group: int = 20
-    min_samples_per_level: int = 2  # replicate requirement
+    min_samples_per_level: int = 2
     alpha: float = 0.05
-    lfc_threshold: float = 0.0  # currently not used by PyDESeq2 directly; kept for reporting
-    # If True, attempt to shrink LFCs (depends on PyDESeq2 version; best-effort).
+    lfc_threshold: float = 0.0
     shrink_lfc: bool = True
+    min_total_counts: int = 10
 
 
 # -----------------------------------------------------------------------------
@@ -827,4 +826,459 @@ def combine_celllevel_and_pseudobulk_hits(
     b = b.rename(columns={c: f"{pb_prefix}{c}" for c in b.columns if c != gene_col})
 
     out = a.merge(b, on=gene_col, how="outer")
+    return out
+
+
+def _downsample_two_level_subset(
+    adata: ad.AnnData,
+    mask_A: np.ndarray,
+    mask_B: np.ndarray,
+    *,
+    max_per_level: int,
+    random_state: int = 0,
+) -> Tuple[ad.AnnData, Dict[str, Any]]:
+    """
+    Returns (adata_subset, meta) where meta has counts and downsampling info.
+    Downsamples independently within A and B to max_per_level.
+    """
+    rng = np.random.default_rng(int(random_state))
+    idx_A = np.where(mask_A)[0]
+    idx_B = np.where(mask_B)[0]
+
+    nA = int(idx_A.size)
+    nB = int(idx_B.size)
+
+    used_A = idx_A
+    used_B = idx_B
+
+    downsampled = False
+    if max_per_level > 0 and nA > max_per_level:
+        used_A = rng.choice(idx_A, size=int(max_per_level), replace=False)
+        downsampled = True
+    if max_per_level > 0 and nB > max_per_level:
+        used_B = rng.choice(idx_B, size=int(max_per_level), replace=False)
+        downsampled = True
+
+    idx = np.concatenate([used_A, used_B])
+    rng.shuffle(idx)
+
+    meta = dict(
+        n_cells_A=nA,
+        n_cells_B=nB,
+        n_cells_A_used=int(used_A.size),
+        n_cells_B_used=int(used_B.size),
+        downsampled=bool(downsampled),
+    )
+
+    return adata[idx].copy(), meta
+
+
+def _pb_effect_log2fc(
+    adata: ad.AnnData,
+    *,
+    cluster_mask: np.ndarray,
+    contrast_key: str,
+    level_A: str,
+    level_B: str,
+    counts_layer: Optional[str],
+    min_total_counts: int = 10,
+    pseudocount: float = 1.0,
+) -> pd.DataFrame:
+    """
+    Pseudobulk effect size only (no p-values):
+      log2((sum_A + pc)/(sum_B + pc)) within the cluster.
+    """
+    # aggregate within cluster by contrast_key by treating contrast_key as sample_key
+    counts_df, meta_df = pseudobulk_aggregate(
+        adata,
+        sample_key=str(contrast_key),
+        group_key=None,
+        counts_layer=counts_layer,
+        min_cells_per_sample_group=1,
+        restrict_cells_mask=cluster_mask,
+    )
+    if meta_df.empty or counts_df.shape[0] == 0:
+        return pd.DataFrame(columns=["gene", "pb_log2fc", "pb_sum_A", "pb_sum_B", "pb_cpm_A", "pb_cpm_B"])
+
+    # meta_df index pb_id is "<level>|ALL" because group_key=None
+    # meta_df[contrast_key] contains the level
+    meta_df2 = meta_df.copy()
+    meta_df2["__level"] = meta_df2[str(contrast_key)].astype(str)
+
+    def _row_for(level: str) -> Optional[str]:
+        hits = meta_df2.index[meta_df2["__level"].to_numpy() == str(level)]
+        return str(hits[0]) if len(hits) > 0 else None
+
+    rid_A = _row_for(level_A)
+    rid_B = _row_for(level_B)
+    if rid_A is None or rid_B is None:
+        return pd.DataFrame(columns=["gene", "pb_log2fc", "pb_sum_A", "pb_sum_B", "pb_cpm_A", "pb_cpm_B"])
+
+    # densify 2 rows only
+    sub = counts_df.loc[[rid_A, rid_B]]
+    dense = sub.sparse.to_coo().toarray().astype(np.int64, copy=False)
+    sumA = dense[0, :]
+    sumB = dense[1, :]
+
+    # filter genes by total
+    tot = sumA + sumB
+    keep = tot >= int(min_total_counts)
+    if keep.sum() == 0:
+        return pd.DataFrame(columns=["gene", "pb_log2fc", "pb_sum_A", "pb_sum_B", "pb_cpm_A", "pb_cpm_B"])
+
+    sumA = sumA[keep]
+    sumB = sumB[keep]
+    genes = adata.var_names.to_numpy()[keep]
+
+    pc = float(pseudocount)
+    pb_log2fc = np.log2((sumA + pc) / (sumB + pc))
+
+    totA = float(sumA.sum()) if float(sumA.sum()) > 0 else 1.0
+    totB = float(sumB.sum()) if float(sumB.sum()) > 0 else 1.0
+    cpmA = (sumA / totA) * 1e6
+    cpmB = (sumB / totB) * 1e6
+
+    return pd.DataFrame(
+        {
+            "gene": genes.astype(str),
+            "pb_log2fc": pb_log2fc.astype(float),
+            "pb_sum_A": sumA.astype(np.int64),
+            "pb_sum_B": sumB.astype(np.int64),
+            "pb_cpm_A": cpmA.astype(float),
+            "pb_cpm_B": cpmB.astype(float),
+        }
+    )
+
+
+@dataclass(frozen=True)
+class ContrastConditionalSpec:
+    """
+    Pairwise (A vs B) markers within each cluster, when sample-level replicates don't exist.
+    """
+    contrast_key: str  # e.g. batch_key / sample_id / group
+    methods: Tuple[Literal["wilcoxon", "logreg"], ...] = ("wilcoxon", "logreg")
+
+    # guards
+    min_cells_per_level_in_cluster: int = 50
+    max_cells_per_level_in_cluster: int = 2000  # downsample per (cluster, level) for cell-level tests
+
+    # gene filter for pb effect (and optionally for cell-level tests)
+    min_total_counts: int = 10
+    pseudocount: float = 1.0
+
+    # thresholds for combined tiering
+    cl_alpha: float = 0.05
+    cl_min_abs_logfc: float = 0.25
+    lr_min_abs_coef: float = 0.25
+    pb_min_abs_log2fc: float = 0.5
+
+    random_state: int = 0
+
+
+def contrast_conditional_markers(
+    adata: ad.AnnData,
+    *,
+    groupby: Optional[str] = None,
+    round_id: Optional[str] = None,
+    spec: ContrastConditionalSpec,
+    pb_spec: PseudobulkSpec,
+    store_key: str = "scomnom_de",
+    store: bool = True,
+) -> Dict[str, Dict[str, Dict[str, pd.DataFrame]]]:
+    """
+    Returns nested dict:
+      out[cluster][f"{A}_vs_{B}"]["combined" | "wilcoxon" | "logreg" | "pseudobulk_effect"] = DataFrame
+    """
+    import scanpy as sc
+    from scanpy.get import rank_genes_groups_df
+
+    group_key = resolve_group_key(adata, groupby=groupby, round_id=round_id, prefer_pretty=True)
+    contrast_key = str(spec.contrast_key)
+
+    if contrast_key not in adata.obs:
+        raise KeyError(f"contrast_key={contrast_key!r} not in adata.obs")
+
+    # levels
+    levels = pd.Index(pd.unique(adata.obs[contrast_key].astype(str))).sort_values()
+    if len(levels) < 2:
+        raise ValueError(f"contrast_key={contrast_key!r} needs >=2 levels, got {list(levels)}")
+
+    clusters = pd.Index(pd.unique(adata.obs[group_key].astype(str))).sort_values()
+
+    out: Dict[str, Dict[str, Dict[str, pd.DataFrame]]] = {}
+    summary_rows: List[Dict[str, Any]] = []
+
+    counts_layer = pb_spec.counts_layer  # can be None
+
+    for cl in clusters:
+        cl_mask = (adata.obs[group_key].astype(str).to_numpy() == str(cl))
+        if cl_mask.sum() == 0:
+            continue
+
+        out[str(cl)] = {}
+
+        # precompute per-level masks within cluster
+        cl_contrast = adata.obs.loc[cl_mask, contrast_key].astype(str)
+        # map from global cell indices
+        global_idx = np.where(cl_mask)[0]
+        by_level_idx = {}
+        for lv in levels:
+            m = (cl_contrast.to_numpy() == str(lv))
+            by_level_idx[str(lv)] = global_idx[np.where(m)[0]]
+
+        # pairwise A vs B
+        for i in range(len(levels)):
+            for j in range(i + 1, len(levels)):
+                A = str(levels[i])
+                B = str(levels[j])
+                pair_key = f"{A}_vs_{B}"
+
+                idxA = by_level_idx.get(A, np.array([], dtype=int))
+                idxB = by_level_idx.get(B, np.array([], dtype=int))
+
+                nA = int(idxA.size)
+                nB = int(idxB.size)
+
+                if nA < spec.min_cells_per_level_in_cluster or nB < spec.min_cells_per_level_in_cluster:
+                    out[str(cl)][pair_key] = {
+                        "wilcoxon": pd.DataFrame(),
+                        "logreg": pd.DataFrame(),
+                        "pseudobulk_effect": pd.DataFrame(),
+                        "combined": pd.DataFrame(),
+                    }
+                    summary_rows.append(
+                        dict(
+                            cluster=str(cl),
+                            contrast_key=contrast_key,
+                            A=A,
+                            B=B,
+                            status="skipped",
+                            reason="min_cells_per_level_in_cluster",
+                            n_cells_A=nA,
+                            n_cells_B=nB,
+                        )
+                    )
+                    continue
+
+                # Build subset AnnData for cell-level tests (downsampled)
+                maskA = np.zeros(adata.n_obs, dtype=bool); maskA[idxA] = True
+                maskB = np.zeros(adata.n_obs, dtype=bool); maskB[idxB] = True
+
+                adata_sub, ds_meta = _downsample_two_level_subset(
+                    adata, maskA, maskB,
+                    max_per_level=int(spec.max_cells_per_level_in_cluster),
+                    random_state=int(spec.random_state),
+                )
+
+                # Ensure contrast_key exists and only A/B levels in subset
+                # (it should, but be explicit)
+                adata_sub = adata_sub[adata_sub.obs[contrast_key].astype(str).isin([A, B])].copy()
+
+                # ---- pseudobulk effect (all cells)
+                pb_df = _pb_effect_log2fc(
+                    adata,
+                    cluster_mask=cl_mask,
+                    contrast_key=contrast_key,
+                    level_A=A,
+                    level_B=B,
+                    counts_layer=counts_layer,
+                    min_total_counts=int(spec.min_total_counts),
+                    pseudocount=float(spec.pseudocount),
+                )
+
+                # ---- Wilcoxon
+                wilcoxon_df = pd.DataFrame()
+                if "wilcoxon" in spec.methods:
+                    sc.tl.rank_genes_groups(
+                        adata_sub,
+                        groupby=contrast_key,
+                        groups=[A],
+                        reference=B,
+                        method="wilcoxon",
+                        use_raw=False,
+                        key_added="__tmp_wilcoxon",
+                        n_genes=adata_sub.n_vars,
+                        rankby_abs=False,
+                    )
+                    d = rank_genes_groups_df(adata_sub, group=A, key="__tmp_wilcoxon")
+                    wilcoxon_df = d.rename(
+                        columns={
+                            "names": "gene",
+                            "logfoldchanges": "cl_logfc",
+                            "scores": "cl_score",
+                            "pvals": "cl_pval",
+                            "pvals_adj": "cl_padj",
+                        }
+                    )
+                    wilcoxon_df["gene"] = wilcoxon_df["gene"].astype(str)
+
+                # ---- Logreg
+                logreg_df = pd.DataFrame()
+                if "logreg" in spec.methods:
+                    sc.tl.rank_genes_groups(
+                        adata_sub,
+                        groupby=contrast_key,
+                        groups=[A],
+                        reference=B,
+                        method="logreg",
+                        use_raw=False,
+                        key_added="__tmp_logreg",
+                        n_genes=adata_sub.n_vars,
+                        rankby_abs=False,
+                    )
+                    d = rank_genes_groups_df(adata_sub, group=A, key="__tmp_logreg")
+                    # scanpy logreg exposes "scores" but coefficients may be stored in "logfoldchanges" depending on version.
+                    # We store both if present.
+                    d = d.rename(columns={"names": "gene"})
+                    if "logfoldchanges" in d.columns:
+                        d = d.rename(columns={"logfoldchanges": "lr_coef"})
+                    if "scores" in d.columns:
+                        d = d.rename(columns={"scores": "lr_score"})
+                    logreg_df = d[["gene"] + [c for c in ["lr_coef", "lr_score"] if c in d.columns]].copy()
+                    logreg_df["gene"] = logreg_df["gene"].astype(str)
+
+                # ---- Combined merge
+                combined = None
+                # Start from pseudobulk (stable base)
+                if pb_df is None or pb_df.empty:
+                    combined = pd.DataFrame({"gene": []})
+                else:
+                    combined = pb_df.copy()
+
+                if wilcoxon_df is not None and not wilcoxon_df.empty:
+                    combined = combined.merge(wilcoxon_df, on="gene", how="outer")
+
+                if logreg_df is not None and not logreg_df.empty:
+                    combined = combined.merge(logreg_df, on="gene", how="outer")
+
+                # attach meta columns
+                combined.insert(0, "cluster", str(cl))
+                combined.insert(1, "contrast_key", contrast_key)
+                combined.insert(2, "A", A)
+                combined.insert(3, "B", B)
+                combined.insert(4, "n_cells_A", int(ds_meta["n_cells_A"]))
+                combined.insert(5, "n_cells_B", int(ds_meta["n_cells_B"]))
+                combined.insert(6, "downsampled", bool(ds_meta["downsampled"]))
+                combined.insert(7, "n_cells_A_used", int(ds_meta["n_cells_A_used"]))
+                combined.insert(8, "n_cells_B_used", int(ds_meta["n_cells_B_used"]))
+
+                # consensus flags
+                def _sgn(x):
+                    if x is None or not np.isfinite(x):
+                        return 0
+                    if x > 0:
+                        return 1
+                    if x < 0:
+                        return -1
+                    return 0
+
+                # safe numeric columns
+                for col in ["cl_logfc", "cl_padj", "lr_coef", "pb_log2fc"]:
+                    if col in combined.columns:
+                        combined[col] = pd.to_numeric(combined[col], errors="coerce")
+
+                combined["hit_wilcoxon"] = False
+                if "cl_padj" in combined.columns and "cl_logfc" in combined.columns:
+                    combined["hit_wilcoxon"] = (combined["cl_padj"] < float(spec.cl_alpha)) & (
+                        combined["cl_logfc"].abs() >= float(spec.cl_min_abs_logfc)
+                    )
+
+                combined["hit_logreg"] = False
+                if "lr_coef" in combined.columns:
+                    combined["hit_logreg"] = combined["lr_coef"].abs() >= float(spec.lr_min_abs_coef)
+
+                combined["hit_pseudobulk"] = False
+                if "pb_log2fc" in combined.columns:
+                    combined["hit_pseudobulk"] = combined["pb_log2fc"].abs() >= float(spec.pb_min_abs_log2fc)
+
+                combined["sign_agree_pb_wilcoxon"] = False
+                if "pb_log2fc" in combined.columns and "cl_logfc" in combined.columns:
+                    combined["sign_agree_pb_wilcoxon"] = (
+                        combined["pb_log2fc"].apply(_sgn) == combined["cl_logfc"].apply(_sgn)
+                    )
+
+                # tier
+                hits = combined[["hit_wilcoxon", "hit_logreg", "hit_pseudobulk"]].sum(axis=1)
+                tier = np.where(
+                    (hits == 3) & (combined.get("sign_agree_pb_wilcoxon", True)),
+                    "Tier1",
+                    np.where(hits >= 2, "Tier2", np.where(hits >= 1, "Tier3", "None")),
+                )
+                combined["consensus_tier"] = tier
+
+                # consensus score
+                score = hits.astype(int)
+                score = score + np.where(combined["consensus_tier"] == "Tier1", 2, 0)
+
+                # penalty for sign disagreement when both effects meaningful
+                if "pb_log2fc" in combined.columns and "cl_logfc" in combined.columns:
+                    disagree = (combined["sign_agree_pb_wilcoxon"] == False) & (
+                        combined["pb_log2fc"].abs() > 0.5
+                    ) & (combined["cl_logfc"].abs() > 0.25)
+                    score = score - np.where(disagree, 1, 0)
+
+                combined["consensus_score"] = score.astype(int)
+
+                # sort
+                # tier order: Tier1, Tier2, Tier3, None
+                tier_cat = pd.Categorical(
+                    combined["consensus_tier"],
+                    categories=["Tier1", "Tier2", "Tier3", "None"],
+                    ordered=True,
+                )
+                combined["__tier_order"] = tier_cat
+                sort_cols = ["__tier_order"]
+                asc = [True]
+                if "cl_padj" in combined.columns:
+                    sort_cols.append("cl_padj"); asc.append(True)
+                if "pb_log2fc" in combined.columns:
+                    sort_cols.append("pb_log2fc"); asc.append(False)
+                if "lr_coef" in combined.columns:
+                    sort_cols.append("lr_coef"); asc.append(False)
+                combined = combined.sort_values(sort_cols, ascending=asc).drop(columns=["__tier_order"])
+
+                out[str(cl)][pair_key] = {
+                    "wilcoxon": wilcoxon_df,
+                    "logreg": logreg_df,
+                    "pseudobulk_effect": pb_df,
+                    "combined": combined,
+                }
+
+                # summary row
+                n_t1 = int((combined["consensus_tier"] == "Tier1").sum()) if "consensus_tier" in combined.columns else 0
+                n_t2 = int((combined["consensus_tier"] == "Tier2").sum()) if "consensus_tier" in combined.columns else 0
+                n_t3 = int((combined["consensus_tier"] == "Tier3").sum()) if "consensus_tier" in combined.columns else 0
+                top10 = combined.loc[combined["consensus_tier"] == "Tier1", "gene"].head(10).tolist() if "gene" in combined.columns else []
+                summary_rows.append(
+                    dict(
+                        cluster=str(cl),
+                        contrast_key=contrast_key,
+                        A=A,
+                        B=B,
+                        status="ok",
+                        reason="",
+                        n_cells_A=nA,
+                        n_cells_B=nB,
+                        downsampled=bool(ds_meta["downsampled"]),
+                        n_genes_tested=int(combined.shape[0]),
+                        n_tier1=n_t1,
+                        n_tier2=n_t2,
+                        n_tier3=n_t3,
+                        top10_tier1_genes=",".join(map(str, top10)),
+                    )
+                )
+
+    if store:
+        adata.uns.setdefault(store_key, {})
+        adata.uns[store_key].setdefault("contrast_conditional", {})
+        adata.uns[store_key]["contrast_conditional"]["group_key"] = str(group_key)
+        adata.uns[store_key]["contrast_conditional"]["contrast_key"] = str(contrast_key)
+        adata.uns[store_key]["contrast_conditional"]["counts_layer"] = str(counts_layer) if counts_layer else None
+        adata.uns[store_key]["contrast_conditional"]["spec"] = {
+            **spec.__dict__,
+            "methods": list(spec.methods),
+        }
+        adata.uns[store_key]["contrast_conditional"]["summary"] = pd.DataFrame(summary_rows)
+        adata.uns[store_key]["contrast_conditional"]["results"] = out
+
     return out

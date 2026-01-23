@@ -2072,3 +2072,76 @@ def export_rank_genes_groups_excel(
                 dfg = dfg.head(int(max_genes))
             sheet = _safe_excel_sheet_name(str(g))
             dfg.to_excel(writer, sheet_name=sheet, index=False)
+
+
+# --- add to io_utils.py ---
+
+def export_contrast_conditional_markers_tables(
+    adata: ad.AnnData,
+    *,
+    output_dir: Path,
+    store_key: str = "scomnom_de",
+    filename: str = "contrast_conditional_de__combined.xlsx",
+) -> None:
+    """
+    Writes contrast-conditional (pairwise) marker results:
+      - CSV folder per (cluster, A_vs_B)
+      - One XLSX workbook with one sheet per (cluster, A_vs_B)
+      - Summary CSV
+    """
+    output_dir = Path(output_dir)
+    out_dir = output_dir / "marker_tables" / "contrast_conditional_de"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    block = adata.uns.get(store_key, {})
+    cc = block.get("contrast_conditional", {})
+    if not isinstance(cc, dict):
+        return
+
+    results = cc.get("results", {})
+    summary = cc.get("summary", None)
+
+    if isinstance(summary, pd.DataFrame) and not summary.empty:
+        summary.to_csv(out_dir / "__summary.csv", index=False)
+
+    if not isinstance(results, dict) or not results:
+        return
+
+    # CSVs
+    for cluster, pairs in results.items():
+        if not isinstance(pairs, dict):
+            continue
+        for pair_key, payload in pairs.items():
+            if not isinstance(payload, dict):
+                continue
+            stem = f"cluster__{_safe_filename(cluster)}__{_safe_filename(pair_key)}"
+            subdir = out_dir / stem
+            subdir.mkdir(parents=True, exist_ok=True)
+
+            for kind in ["combined", "wilcoxon", "logreg", "pseudobulk_effect"]:
+                df = payload.get(kind, None)
+                if df is None or getattr(df, "empty", True):
+                    pd.DataFrame().to_csv(subdir / f"{stem}__{kind}.csv", index=False)
+                else:
+                    df.to_csv(subdir / f"{stem}__{kind}.csv", index=False)
+
+    # XLSX (combined only)
+    out_xlsx = output_dir / "marker_tables" / filename
+    out_xlsx.parent.mkdir(parents=True, exist_ok=True)
+
+    with pd.ExcelWriter(out_xlsx, engine="xlsxwriter") as writer:
+        for cluster, pairs in results.items():
+            if not isinstance(pairs, dict):
+                continue
+            for pair_key, payload in pairs.items():
+                if not isinstance(payload, dict):
+                    continue
+                df = payload.get("combined", None)
+                if df is None:
+                    continue
+
+                sheet = _safe_excel_sheet_name(f"{cluster}__{pair_key}")
+                if getattr(df, "empty", True):
+                    pd.DataFrame().to_excel(writer, sheet_name=sheet, index=False)
+                else:
+                    df.to_excel(writer, sheet_name=sheet, index=False)

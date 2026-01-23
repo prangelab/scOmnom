@@ -1261,6 +1261,24 @@ def markers_and_de(
     ),
 
     # -------------------------------------------------------------
+    # Optional: Contrast-conditional mode
+    # -------------------------------------------------------------
+    contrast_conditional_de: bool = typer.Option(False, "--contrast-conditional-de", help="[NEW] Pairwise A vs B within each cluster (n=1 conditions)."),
+    contrast_key: Optional[str] = typer.Option(None, "--contrast-key", help="[NEW] Column to contrast (defaults to sample_key)."),
+    contrast_methods: List[str] = typer.Option(["wilcoxon", "logreg"], "--contrast-methods", help="[NEW] Methods to combine."),
+
+    contrast_min_cells_per_level: int = typer.Option(50, "--contrast-min-cells-per-level"),
+    contrast_max_cells_per_level: int = typer.Option(2000, "--contrast-max-cells-per-level"),
+    contrast_min_total_counts: int = typer.Option(10, "--contrast-min-total-counts"),
+    contrast_pseudocount: float = typer.Option(1.0, "--contrast-pseudocount"),
+
+    contrast_cl_alpha: float = typer.Option(0.05, "--contrast-cl-alpha"),
+    contrast_cl_min_abs_logfc: float = typer.Option(0.25, "--contrast-cl-min-abs-logfc"),
+    contrast_lr_min_abs_coef: float = typer.Option(0.25, "--contrast-lr-min-abs-coef"),
+    contrast_pb_min_abs_log2fc: float = typer.Option(0.5, "--contrast-pb-min-abs-log2fc"),
+
+
+    # -------------------------------------------------------------
     # Plot knobs (for orchestrator wiring to de_plot_utils + save_multi)
     # -------------------------------------------------------------
     plot_lfc_thresh: float = typer.Option(
@@ -1336,7 +1354,17 @@ def markers_and_de(
         condition_key=condition_key,
         condition_reference=condition_reference,
         min_cells_condition=min_cells_condition,
-        # plotting knobs
+        contrast_conditional_de=contrast_conditional_de,
+        contrast_key=contrast_key,
+        contrast_methods=tuple([str(x).lower() for x in contrast_methods]),
+        contrast_min_cells_per_level=contrast_min_cells_per_level,
+        contrast_max_cells_per_level=contrast_max_cells_per_level,
+        contrast_min_total_counts=contrast_min_total_counts,
+        contrast_pseudocount=contrast_pseudocount,
+        contrast_cl_alpha=contrast_cl_alpha,
+        contrast_cl_min_abs_logfc=contrast_cl_min_abs_logfc,
+        contrast_lr_min_abs_coef=contrast_lr_min_abs_coef,
+        contrast_pb_min_abs_log2fc=contrast_pb_min_abs_log2fc,
         plot_lfc_thresh=plot_lfc_thresh,
         plot_volcano_top_label_n=plot_volcano_top_label_n,
         plot_top_n_per_cluster=plot_top_n_per_cluster,
