@@ -271,7 +271,7 @@ def _require_pydeseq2():
 
 def _run_pydeseq2(
     counts: pd.DataFrame,
-    clinical: pd.DataFrame,
+    metadata: pd.DataFrame,
     *,
     design_factors: Sequence[str],
     contrast: Tuple[str, str, str],
@@ -282,7 +282,7 @@ def _run_pydeseq2(
     Run PyDESeq2 for one contrast.
 
     counts: samples x genes (integers)
-    clinical: samples x covariates (categorical recommended)
+    metadata: samples x covariates (categorical recommended)
     contrast: (factor_name, test_level, ref_level)
     """
     _require_pydeseq2()
@@ -290,13 +290,13 @@ def _run_pydeseq2(
     from pydeseq2.ds import DeseqStats
 
     # Defensive copies, ensure alignment
-    counts = counts.loc[clinical.index]
+    counts = counts.loc[metadata.index]
     # PyDESeq2 expects non-negative ints
     counts_i = counts.round().astype(np.int64)
 
     dds = DeseqDataSet(
         counts=counts_i,
-        clinical=clinical.copy(),
+        metadata=metadata.copy(),
         design_factors=list(design_factors),
         ref_level={contrast[0]: contrast[2]},
         n_cpus=1,
@@ -434,7 +434,7 @@ def de_cluster_vs_rest_pseudobulk(
 
         # Build the paired libraries (target + rest) per sample
         pb_index = []
-        clinical_rows = []
+        metadata_rows = []
         target_rows = []
         total_rows = []
 
@@ -449,12 +449,12 @@ def de_cluster_vs_rest_pseudobulk(
                 continue
 
             pb_index.append(f"{s}|{cl}|target")
-            clinical_rows.append({sample_key: str(s), "binary_cluster": "target"})
+            metadata_rows.append({sample_key: str(s), "binary_cluster": "target"})
             target_rows.append(rid_target)
             total_rows.append(rid_total)
 
             pb_index.append(f"{s}|{cl}|rest")
-            clinical_rows.append({sample_key: str(s), "binary_cluster": "rest"})
+            metadata_rows.append({sample_key: str(s), "binary_cluster": "rest"})
             target_rows.append(rid_target)  # reuse for shape; we compute rest later
             total_rows.append(rid_total)
 
@@ -472,12 +472,12 @@ def de_cluster_vs_rest_pseudobulk(
             )
             continue
 
-        clinical = pd.DataFrame(clinical_rows, index=pd.Index(pb_index, name="pb_id"))
-        clinical[sample_key] = clinical[sample_key].astype("category")
-        clinical["binary_cluster"] = pd.Categorical(clinical["binary_cluster"], categories=["rest", "target"])
+        metadata = pd.DataFrame(metadata_rows, index=pd.Index(pb_index, name="pb_id"))
+        metadata[sample_key] = metadata[sample_key].astype("category")
+        metadata["binary_cluster"] = pd.Categorical(metadata["binary_cluster"], categories=["rest", "target"])
 
         # Slice counts (small): use sparse frames and densify now
-        # Get dense arrays for target and total (same order as clinical rows, but we want per-row)
+        # Get dense arrays for target and total (same order as metadata rows, but we want per-row)
         # Build counts as samples x genes DataFrame
         # target rows alternate with rest rows; compute row-wise accordingly.
         target_mat = counts_sc.loc[pd.Index(target_rows)].sparse.to_coo().toarray()
@@ -495,7 +495,7 @@ def de_cluster_vs_rest_pseudobulk(
                 v[v < 0] = 0
                 out[i, :] = v.astype(np.int64, copy=False)
 
-        counts = pd.DataFrame(out, index=clinical.index, columns=adata.var_names)
+        counts = pd.DataFrame(out, index=metadata.index, columns=adata.var_names)
 
         # Drop genes with extremely low total counts (helps speed/stability)
         min_total = int(getattr(opts, "min_total_counts", 10))  # optional new option
@@ -507,7 +507,7 @@ def de_cluster_vs_rest_pseudobulk(
             continue
 
         # Replicate check for both levels
-        vc = clinical["binary_cluster"].value_counts()
+        vc = metadata["binary_cluster"].value_counts()
         if int(vc.get("target", 0)) < int(opts.min_samples_per_level) or int(vc.get("rest", 0)) < int(opts.min_samples_per_level):
             results[str(cl)] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
             summary_rows.append(
@@ -525,7 +525,7 @@ def de_cluster_vs_rest_pseudobulk(
         try:
             res = _run_pydeseq2(
                 counts,
-                clinical.rename(columns={sample_key: "sample"}),  # keep sample column stable
+                metadata.rename(columns={sample_key: "sample"}),  # keep sample column stable
                 design_factors=["sample", "binary_cluster"],
                 contrast=("binary_cluster", "target", "rest"),
                 alpha=opts.alpha,
@@ -641,9 +641,9 @@ def de_condition_within_group_pseudobulk(
     if int(vc.get(str(reference), 0)) < int(opts.min_samples_per_level) or int(vc.get(str(test), 0)) < int(opts.min_samples_per_level):
         return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
 
-    clinical = meta_df[[sample_key, condition_key]].copy()
-    clinical[sample_key] = clinical[sample_key].astype("category")
-    clinical[condition_key] = pd.Categorical(clinical[condition_key].astype(str), categories=[str(reference), str(test)])
+    metadata = meta_df[[sample_key, condition_key]].copy()
+    metadata[sample_key] = metadata[sample_key].astype("category")
+    metadata[condition_key] = pd.Categorical(metadata[condition_key].astype(str), categories=[str(reference), str(test)])
 
     # Densify counts (small)
     dense = counts_df.sparse.to_coo().toarray().astype(np.int64, copy=False)
@@ -662,7 +662,7 @@ def de_condition_within_group_pseudobulk(
     try:
         res = _run_pydeseq2(
             counts,
-            clinical.rename(columns={sample_key: "sample"}),
+            metadata.rename(columns={sample_key: "sample"}),
             design_factors=["sample", condition_key],
             contrast=(condition_key, str(test), str(reference)),
             alpha=opts.alpha,

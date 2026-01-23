@@ -43,7 +43,7 @@ def run_markers_and_de(cfg) -> ad.AnnData:
       - de settings: min_cells, alpha, condition_key, etc. (optional)
     """
     init_logging(getattr(cfg, "logfile", None))
-    LOGGER.info("Starting markers_and_de orchestrator")
+    LOGGER.info("Starting markers-and-de...")
 
     output_dir = Path(getattr(cfg, "output_dir"))
     output_dir.mkdir(parents=True, exist_ok=True)
