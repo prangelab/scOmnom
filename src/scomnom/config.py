@@ -3,7 +3,7 @@ from __future__ import annotations
 from numba.core.types import Boolean
 from pydantic import BaseModel, Field, validator, model_validator, field_validator
 from pathlib import Path
-from typing import Optional, Dict, List, Literal
+from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 from matplotlib.figure import Figure
 import multiprocessing
 
