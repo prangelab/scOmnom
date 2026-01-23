@@ -294,9 +294,13 @@ def run_markers_and_de(cfg) -> ad.AnnData:
 
         use_raw = bool(getattr(cfg, "plot_use_raw", False))
         layer = getattr(cfg, "plot_layer", None)
-        ncols = int(getattr(cfg, "plot_umap_ncols", 3))
 
-        figroot = figdir / "markers_and_de"
+        # Cap UMAP grid to 3x3 (9 genes) regardless of ncols knob
+        ncols = 3
+
+        # IMPORTANT: save_multi expects figdir to be RELATIVE and start with the run key.
+        # Do NOT prefix with output_dir or "figures" here.
+        figroot = Path("markers_and_de")
 
         # ---------------------------
         # helpers
@@ -372,7 +376,8 @@ def run_markers_and_de(cfg) -> ad.AnnData:
                     limit=max_genes_total,
                 )
         else:
-            LOGGER.warning("markers_and_de: no pseudobulk_cluster_vs_rest results found under adata.uns[%r].", store_key)
+            LOGGER.warning("markers_and_de: no pseudobulk_cluster_vs_rest results found under adata.uns[%r].",
+                           store_key)
 
         # If we collected genes, make scanpy expression plots once
         if genes_for_expression_plots:
@@ -387,7 +392,7 @@ def run_markers_and_de(cfg) -> ad.AnnData:
                 show=False,
             )
             plot_utils.save_multi(
-                stem=f"dotplot__cluster_vs_rest__topgenes",
+                stem="dotplot__cluster_vs_rest__topgenes",
                 figdir=figdir_expr,
                 fig=fig,
             )
@@ -401,10 +406,12 @@ def run_markers_and_de(cfg) -> ad.AnnData:
                 show=False,
             )
             plot_utils.save_multi(
-                stem=f"heatmap__cluster_vs_rest__topgenes",
+                stem="heatmap__cluster_vs_rest__topgenes",
                 figdir=figdir_expr,
                 fig=fig,
             )
+
+            # HARD CAP: 3x3 grid max (9 genes)
             umap_genes = genes_for_expression_plots[:9]
             fig = de_plot_utils.umap_features_grid(
                 adata,
@@ -415,7 +422,7 @@ def run_markers_and_de(cfg) -> ad.AnnData:
                 show=False,
             )
             plot_utils.save_multi(
-                stem=f"umap_features__cluster_vs_rest__topgenes",
+                stem="umap_features__cluster_vs_rest__topgenes",
                 figdir=figdir_expr,
                 fig=fig,
             )
@@ -429,7 +436,7 @@ def run_markers_and_de(cfg) -> ad.AnnData:
                 show=False,
             )
             plot_utils.save_multi(
-                stem=f"violin__cluster_vs_rest__topgenes",
+                stem="violin__cluster_vs_rest__topgenes",
                 figdir=figdir_expr,
                 fig=fig,
             )
@@ -464,7 +471,10 @@ def run_markers_and_de(cfg) -> ad.AnnData:
                     fig=fig,
                 )
         elif condition_key:
-            LOGGER.info("markers_and_de: no pseudobulk_condition_within_group results found for condition_key=%r.", condition_key)
+            LOGGER.info(
+                "markers_and_de: no pseudobulk_condition_within_group results found for condition_key=%r.",
+                condition_key,
+            )
 
         # ------------------------------------------------------------------
         # Contrast-conditional plots (pairwise A vs B within each cluster)
@@ -486,17 +496,18 @@ def run_markers_and_de(cfg) -> ad.AnnData:
             max_pairs_to_plot = int(getattr(cfg, "contrast_plot_max_pairs", 2000))
             max_clusters_to_plot = int(getattr(cfg, "contrast_plot_max_clusters", 2000))
 
-            use_raw = bool(getattr(cfg, "plot_use_raw", False))
-            layer = getattr(cfg, "plot_layer", None)
-            ncols = int(getattr(cfg, "plot_umap_ncols", 3))
+            # cap UMAP grid here too
+            ncols = 3
 
             cc = adata.uns.get(store_key, {}).get("contrast_conditional", {})
             cc_results = cc.get("results", {}) if isinstance(cc, dict) else {}
             contrast_key = cc.get("contrast_key", None) if isinstance(cc, dict) else None
 
             if not isinstance(cc_results, dict) or not cc_results:
-                LOGGER.warning("markers_and_de: contrast_conditional enabled but no results found under adata.uns[%r].",
-                               store_key)
+                LOGGER.warning(
+                    "markers_and_de: contrast_conditional enabled but no results found under adata.uns[%r].",
+                    store_key,
+                )
             else:
                 if not contrast_key:
                     # fallback: use sample_key
@@ -625,7 +636,6 @@ def run_markers_and_de(cfg) -> ad.AnnData:
                         if isinstance(pair_key, str) and "_vs_" in pair_key:
                             A, B = pair_key.split("_vs_", 1)
                         else:
-                            # fallback: skip if can't parse
                             continue
 
                         df_w = payload.get("wilcoxon", None)
@@ -666,7 +676,8 @@ def run_markers_and_de(cfg) -> ad.AnnData:
 
                                 # keep only A/B for clean groupby ordering
                                 adata_plot = adata_plot[
-                                    adata_plot.obs[contrast_key].astype(str).isin([str(A), str(B)])].copy()
+                                    adata_plot.obs[contrast_key].astype(str).isin([str(A), str(B)])
+                                ].copy()
 
                                 figdir_expr = figroot_cc / "expression" / f"{cl}__{A}_vs_{B}"
 
@@ -698,11 +709,11 @@ def run_markers_and_de(cfg) -> ad.AnnData:
                                     fig=fig,
                                 )
 
-                                # UMAP feature grid only if UMAP exists
+                                # UMAP feature grid only if UMAP exists; cap to 3x3 visually
                                 if "X_umap" in adata_plot.obsm:
                                     fig = de_plot_utils.umap_features_grid(
                                         adata_plot,
-                                        genes=genes,
+                                        genes=genes[:9],
                                         use_raw=use_raw,
                                         layer=layer,
                                         ncols=int(ncols),
@@ -729,7 +740,6 @@ def run_markers_and_de(cfg) -> ad.AnnData:
                                 )
 
                         n_pairs_done += 1
-
 
     # Save
     out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.markers_and_de")) + ".zarr")
