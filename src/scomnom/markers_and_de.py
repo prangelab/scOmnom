@@ -89,6 +89,15 @@ def run_markers_and_de(cfg) -> ad.AnnData:
     )
 
     # DE: cluster vs rest
+    LOGGER.info(
+        "Pseudobulk Markers: cluster-vs-rest "
+        "(sample_key=%r, counts_layer=%r, min_cells_per_sample_group=%d, min_samples_per_level=%d)",
+        pb_spec.sample_key,
+        pb_spec.counts_layer,
+        pb_opts.min_cells_per_sample_group,
+        pb_opts.min_samples_per_level,
+    )
+
     # Choose first available layer from cfg.counts_layers; else fall back to X if allowed.
     layer_candidates = list(getattr(cfg, "counts_layers", ["counts_cb", "counts_raw"]))
     counts_layer = None
