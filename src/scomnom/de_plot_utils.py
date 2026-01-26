@@ -379,53 +379,39 @@ def heatmap_top_genes(
     groupby: str,
     use_raw: bool = False,
     layer: Optional[str] = None,
-    standard_scale: str = "var",
     cmap: str = "bwr",
-    show_gene_labels: bool = True,
     figsize: Optional[tuple[float, float]] = None,
+    show_gene_labels: bool = True,
+    z_clip: float | None = 3.0,
     show: bool = False,
 ) -> Figure:
     """
-    Seurat-style heatmap of genes across groups.
-
-    New signature:
-      - provide either `genes` OR `genes_by_cluster`
-      - clusters ordered largest -> smallest
-      - uses `{groupby}_colors` for the top annotation bar when available
-      - no dendrogram
-      - standard_scale='var' -> z-score per gene (Seurat-ish)
-
-    Notes:
-      - If genes_by_cluster is provided, genes are flattened in cluster-order blocks.
+    Z-score heatmap (true z, not scanpy standard_scale).
+    - groups (clusters) are COLUMNS with labels on TOP
+    - values are per-group mean expression, z-scored per gene
     """
-    import matplotlib.pyplot as plt
     import numpy as np
     import pandas as pd
-    import scanpy as sc
+    import matplotlib.pyplot as plt
+    import seaborn as sns
 
     if groupby not in adata.obs:
         raise KeyError(f"groupby={groupby!r} not found in adata.obs")
 
-    # ------------------------------
-    # resolve gene list
-    # ------------------------------
+    # ---- resolve genes
     if genes_by_cluster is not None:
-        # order clusters by size, then flatten genes_by_cluster in that order
         vc = adata.obs[groupby].astype(str).value_counts()
         cluster_order = vc.index.astype(str).tolist()
-
-        flat: list[str] = []
-        seen: set[str] = set()
+        flat, seen = [], set()
         for cl in cluster_order:
-            g_list = genes_by_cluster.get(str(cl), []) or []
-            for g in g_list:
+            for g in (genes_by_cluster.get(str(cl), []) or []):
                 g = str(g)
                 if g and g not in seen:
                     flat.append(g)
                     seen.add(g)
         genes = flat
 
-    genes = [str(g) for g in (genes or []) if g is not None and str(g) != ""]
+    genes = [str(g) for g in (genes or []) if g and str(g) != ""]
     if not genes:
         fig, ax = plt.subplots(figsize=(7.5, 2.5))
         ax.text(0.5, 0.5, "No genes to plot", ha="center", va="center")
@@ -434,79 +420,83 @@ def heatmap_top_genes(
             plt.show()
         return fig
 
-    # ------------------------------
-    # preserve original state
-    # ------------------------------
-    obs_orig = adata.obs[groupby].copy()
-
-    colors_key = f"{groupby}_colors"
-    colors_orig = None
-    if colors_key in adata.uns and adata.uns[colors_key] is not None:
-        try:
-            colors_orig = list(adata.uns[colors_key])
-        except Exception:
-            colors_orig = None
-
-    # ------------------------------
-    # reorder clusters: biggest -> smallest
-    # ------------------------------
+    # ---- group order: biggest -> smallest
     vc = adata.obs[groupby].astype(str).value_counts()
-    order = vc.index.astype(str).tolist()
+    groups = vc.index.astype(str).tolist()
 
-    adata.obs[groupby] = pd.Categorical(
-        adata.obs[groupby].astype(str),
-        categories=order,
-        ordered=True,
-    )
+    # ---- get expression matrix for requested genes
+    sub = adata[:, genes]
+    if layer is not None:
+        X = sub.layers[layer]
+    elif use_raw and sub.raw is not None:
+        X = sub.raw.X
+    else:
+        X = sub.X
 
-    # reorder colors to match category order
-    if colors_orig is not None:
-        try:
-            old_cats = list(pd.Categorical(obs_orig.astype(str)).categories.astype(str))
-            color_by_cat = {
-                cat: colors_orig[i]
-                for i, cat in enumerate(old_cats)
-                if i < len(colors_orig)
-            }
-            new_colors = [color_by_cat.get(cat, "#808080") for cat in order]
-            adata.uns[colors_key] = np.array(new_colors, dtype=object)
-        except Exception:
-            pass
+    # dense small matrix (cells x genes) is OK here (genes list is small)
+    try:
+        X = X.toarray()
+    except Exception:
+        X = np.asarray(X)
 
-    _normalize_scanpy_groupby_colors(adata, groupby)
+    df_x = pd.DataFrame(X, columns=genes)
+    df_x[groupby] = adata.obs[groupby].astype(str).values
 
-    # ------------------------------
-    # plot
-    # ------------------------------
-    ret = sc.pl.heatmap(
-        adata,
-        var_names=genes,
-        groupby=groupby,
-        use_raw=use_raw,
-        layer=layer,
-        standard_scale=standard_scale,
+    # ---- per-group mean expression (groups x genes)
+    mean = df_x.groupby(groupby, observed=True)[genes].mean()
+    mean = mean.reindex([g for g in groups if g in mean.index])  # enforce order
+
+    # ---- z-score per gene across groups
+    M = mean.to_numpy(dtype=float)
+    mu = np.nanmean(M, axis=0, keepdims=True)
+    sd = np.nanstd(M, axis=0, keepdims=True)
+    sd[sd == 0] = 1.0
+    Z = (M - mu) / sd
+
+    if z_clip is not None:
+        Z = np.clip(Z, -float(z_clip), float(z_clip))
+
+    zdf = pd.DataFrame(Z, index=mean.index, columns=mean.columns)
+
+    # ---- plot: genes rows, clusters columns (labels on top)
+    # transpose so rows=genes, cols=clusters
+    plot_mat = zdf.T
+
+    if figsize is None:
+        # heuristics
+        w = max(10.0, 0.55 * plot_mat.shape[1] + 2.0)   # columns=clusters
+        h = max(6.0, 0.12 * plot_mat.shape[0] + 2.0)    # rows=genes
+        figsize = (min(28.0, w), min(16.0, h))
+
+    fig, ax = plt.subplots(figsize=figsize)
+    sns.heatmap(
+        plot_mat,
+        ax=ax,
         cmap=cmap,
-        dendrogram=False,
-        swap_axes=False,          # genes rows, groups columns
-        show_gene_labels=show_gene_labels,
-        figsize=figsize,
-        show=False,
+        center=0.0,
+        vmin=(-z_clip if z_clip is not None else None),
+        vmax=(z_clip if z_clip is not None else None),
+        cbar_kws={"label": "z-score"},
     )
 
-    fig = _get_fig_from_scanpy_return(ret)
-    fig.tight_layout()
+    ax.xaxis.set_ticks_position("top")
+    ax.xaxis.set_label_position("top")
+    ax.tick_params(axis="x", labeltop=True, labelbottom=False, rotation=45)
+    for lab in ax.get_xticklabels():
+        lab.set_ha("left")
 
-    # restore
-    adata.obs[groupby] = obs_orig
-    if colors_orig is not None:
-        try:
-            adata.uns[colors_key] = np.array(colors_orig, dtype=object)
-        except Exception:
-            pass
+    if not show_gene_labels:
+        ax.set_yticklabels([])
+        ax.tick_params(axis="y", length=0)
+
+    ax.set_xlabel(groupby)
+    ax.set_ylabel("genes")
+    fig.tight_layout()
 
     if show:
         plt.show()
     return fig
+
 
 def violin_grid_genes(
     adata,
@@ -578,6 +568,22 @@ def violin_grid_genes(
     for j in range(n, nrows * ncols):
         r, c = divmod(j, ncols)
         axes[r][c].axis("off")
+
+    # Hide cluster/category labels except on bottom row
+    for r in range(nrows):
+        for c in range(ncols):
+            ax = axes[r][c]
+            if not ax.get_visible():
+                continue
+            if r != nrows - 1:
+                ax.tick_params(axis="x", labelbottom=False)
+                ax.set_xlabel("")
+            else:
+                # bottom row: keep labels, but make them readable
+                ax.tick_params(axis="x", labelbottom=True)
+                for lab in ax.get_xticklabels():
+                    lab.set_rotation(rotation)
+                    lab.set_ha("right" if float(rotation) != 0 else "center")
 
     fig.tight_layout()
     if show:
