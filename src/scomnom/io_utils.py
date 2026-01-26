@@ -12,6 +12,8 @@ import re
 import json
 import urllib.request
 import urllib.error
+import hashlib
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -21,6 +23,53 @@ CELLTYPIST_REGISTRY_URL = "https://celltypist.cog.sanger.ac.uk/models/models.jso
 # Local cache directory for downloaded models
 CELLTYPIST_CACHE = Path.home() / ".cache" / "scomnom" / "celltypist_models"
 CELLTYPIST_CACHE.mkdir(parents=True, exist_ok=True)
+
+
+def sanitize_identifier(
+    x: Any,
+    *,
+    max_len: int = 180,
+    allow_spaces: bool = True,
+) -> str:
+    """
+    Shared sanitizer for:
+      - filenames (cross-platform safe; no ':', '/', '\\')
+      - Zarr group keys (no '/' or '\\')
+      - general identifiers used in output artifacts
+
+    Behavior:
+      - replaces '/', '\\', ':' with '_'
+      - normalizes whitespace
+      - keeps only [A-Za-z0-9 ._-] (or [A-Za-z0-9._-] if allow_spaces=False)
+      - collapses repeated underscores
+      - strips leading/trailing punctuation
+      - truncates to max_len
+
+    Returns a non-empty string.
+    """
+    s = str(x)
+
+    # hard disallow
+    s = s.replace("/", "_").replace("\\", "_").replace(":", "_")
+
+    # whitespace normalization
+    s = re.sub(r"\s+", " ", s).strip()
+
+    # conservative character set
+    if allow_spaces:
+        s = re.sub(r"[^A-Za-z0-9 ._-]+", "_", s)
+    else:
+        s = re.sub(r"[^A-Za-z0-9._-]+", "_", s)
+
+    s = re.sub(r"_+", "_", s).strip("._-")
+
+    if not s:
+        s = "x"
+
+    if len(s) > max_len:
+        s = s[:max_len].rstrip("._-") or "x"
+
+    return s
 
 
 def _downgrade_nullable_strings(df: pd.DataFrame) -> pd.DataFrame:
@@ -875,16 +924,11 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr") -> None:
     """
     Save an AnnData object either as .zarr or .h5ad.
 
-    Automatically makes adata.uns (and nested structures) safe for H5AD/Zarr by:
-      - converting any nested pandas.DataFrame into a tagged, json-compatible dict
-      - converting numpy arrays to lists where needed (
-      - ensuring keys are strings
-
-    This is done on a shallow copy of adata so the in-memory object remains unchanged.
-    Large numerical arrays should never be stored in .uns. Arrays found here are assumed to be small metadata.
-
-    Additionally:
-      - Emits WARNINGS (only) if adata.uns or individual entries are large.
+    Makes adata.uns safe for H5AD/Zarr by:
+      - tagging pandas.DataFrame / Series
+      - converting numpy arrays + scalars
+      - sanitizing ALL dict keys using sanitize_identifier()
+      - stabilizing key collisions with a hash suffix
     """
     import copy
     import sys
@@ -898,30 +942,48 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr") -> None:
         try:
             if isinstance(obj, np.ndarray):
                 return int(obj.nbytes)
-
             if isinstance(obj, pd.DataFrame):
                 return int(obj.memory_usage(deep=True).sum())
-
             if isinstance(obj, dict):
                 return sum(_estimate_size_bytes(v) for v in obj.values())
-
             if isinstance(obj, (list, tuple)):
                 return sum(_estimate_size_bytes(v) for v in obj)
-
             return int(sys.getsizeof(obj))
         except Exception:
             return 0
 
     # ------------------------------------------------------------
-    # Sanitization helpers
+    # Key sanitization + collision handling
+    # ------------------------------------------------------------
+    _keymap: dict[str, str] = {}
+    _seen_keys: set[str] = set()
+
+    def _dedupe_key(safe: str, original: str) -> str:
+        if safe not in _seen_keys:
+            _seen_keys.add(safe)
+            _keymap[safe] = original
+            return safe
+
+        if _keymap.get(safe) == original:
+            return safe
+
+        h = hashlib.sha1(original.encode("utf-8")).hexdigest()[:8]
+        alt = f"{safe}__{h}"
+
+        if alt in _seen_keys:
+            h2 = hashlib.sha1((original + "|2").encode("utf-8")).hexdigest()[:8]
+            alt = f"{safe}__{h2}"
+
+        _seen_keys.add(alt)
+        _keymap[alt] = original
+        return alt
+
+    # ------------------------------------------------------------
+    # Payload tagging
     # ------------------------------------------------------------
     def _df_to_tagged_payload(df: pd.DataFrame) -> dict:
-        payload = df.to_dict(orient="split")  # keys: index, columns, data
-        return {
-            "__type__": "pandas.DataFrame",
-            "orient": "split",
-            "payload": payload,
-        }
+        payload = df.to_dict(orient="split")
+        return {"__type__": "pandas.DataFrame", "orient": "split", "payload": payload}
 
     def _ndarray_to_payload(a: np.ndarray) -> dict:
         return {
@@ -932,9 +994,6 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr") -> None:
         }
 
     def _sanitize(obj):
-        """
-        Recursively sanitize nested structures to be storage-friendly.
-        """
         if isinstance(obj, pd.DataFrame):
             return _df_to_tagged_payload(obj)
 
@@ -956,9 +1015,12 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr") -> None:
                 return str(obj)
 
         if isinstance(obj, dict):
-            out = {}
+            out: dict[str, object] = {}
             for k, v in obj.items():
-                out[str(k)] = _sanitize(v)
+                orig = str(k)
+                safe = sanitize_identifier(orig, max_len=180, allow_spaces=True)
+                safe = _dedupe_key(safe, orig)
+                out[safe] = _sanitize(v)
             return out
 
         if isinstance(obj, (list, tuple)):
@@ -1016,6 +1078,11 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr") -> None:
     adata_to_write = adata.copy()
     try:
         adata_to_write.uns = _sanitize(copy.deepcopy(adata_to_write.uns))
+        if _keymap:
+            adata_to_write.uns["__scomnom_keymap__"] = {
+                "__type__": "scomnom.keymap.v1",
+                "safe_to_original": _keymap,
+            }
     except Exception as e:
         LOGGER.warning(
             "Failed to fully sanitize adata.uns; attempting best-effort write anyway. (%s)",
@@ -1029,17 +1096,16 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr") -> None:
     # Write dataset
     # ------------------------------------------------------------
     if fmt == "zarr":
-        LOGGER.info(f"Saving dataset as Zarr → {out_path}")
+        LOGGER.info("Saving dataset as Zarr → %s", out_path)
         adata_to_write.write_zarr(str(out_path), chunks=None)
-
     elif fmt == "h5ad":
-        LOGGER.info(f"Saving dataset as H5AD → {out_path}")
+        LOGGER.info("Saving dataset as H5AD → %s", out_path)
         adata_to_write.write_h5ad(str(out_path), compression="gzip")
-
     else:
         raise ValueError(f"Unknown dataset format '{fmt}'. Expected 'zarr' or 'h5ad'.")
 
-    LOGGER.info(f"Finished writing dataset → {out_path}")
+    LOGGER.info("Finished writing dataset → %s", out_path)
+
 
 
 def load_dataset(path: Path) -> ad.AnnData:
@@ -1652,16 +1718,7 @@ def resolve_msigdb_gene_sets(
 
 
 def _safe_filename(s: str, max_len: int = 180) -> str:
-    s = str(s)
-    s = s.replace("/", "_").replace("\\", "_").replace(":", "_")
-    s = re.sub(r"\s+", " ", s).strip()
-    s = re.sub(r"[^A-Za-z0-9._-]+", "_", s)
-    s = re.sub(r"_+", "_", s).strip("._-")
-    if not s:
-        s = "x"
-    if len(s) > max_len:
-        s = s[:max_len].rstrip("._-")
-    return s
+    return sanitize_identifier(s, max_len=max_len, allow_spaces=False)
 
 
 def export_pseudobulk_de_tables(
