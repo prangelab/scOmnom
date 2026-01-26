@@ -412,5 +412,5 @@ def run_markers_and_de(cfg) -> ad.AnnData:
         LOGGER.warning("Writing additional H5AD output (loads full matrix into RAM): %s", out_h5ad)
         io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
 
-    LOGGER.info("Finished markers_and_de orchestrator")
+    LOGGER.info("Finished!")
     return adata

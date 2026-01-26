@@ -294,12 +294,16 @@ def dotplot_top_genes(
     groupby: str,
     use_raw: bool = False,
     layer: Optional[str] = None,
-    standard_scale: str = "var",
-    dendrogram: bool = True,
+    standard_scale: Optional[str] = "var",
+    dendrogram: bool = False,
     color_map: str = "viridis",
     figsize: Optional[tuple[float, float]] = None,
     show: bool = False,
 ) -> Figure:
+    import matplotlib.pyplot as plt
+    from matplotlib.figure import Figure
+    import scanpy as sc
+
     genes = [str(g) for g in genes if g is not None and str(g) != ""]
     if not genes:
         fig, ax = plt.subplots(figsize=(7.5, 2.5))
@@ -319,29 +323,44 @@ def dotplot_top_genes(
         dendrogram=dendrogram,
         color_map=color_map,
         figsize=figsize,
-        show=False,  # always false; caller controls display
+        show=False,
         return_fig=True,
     )
 
-    # return_fig=True yields a DotPlot object with .make_figure()
-    # but scanpy often returns it directly.
-    try:
-        fig = ret.figure if hasattr(ret, "figure") else None
-        if isinstance(fig, Figure):
-            if show:
-                plt.show()
-            return fig
-    except Exception:
-        pass
+    # ---- robustly obtain the matplotlib Figure
+    fig = None
+    if hasattr(ret, "figure") and isinstance(ret.figure, Figure):
+        fig = ret.figure
+    else:
+        try:
+            if hasattr(ret, "make_figure"):
+                ret.make_figure()
+            fig = plt.gcf()
+        except Exception:
+            fig = plt.gcf()
 
-    # Fallback: attempt to make a figure, then use gcf
-    try:
-        if hasattr(ret, "make_figure"):
-            ret.make_figure()
-    except Exception:
-        pass
+    # ---- cosmetics -------------------------------------------------
+    # 1) avoid cutoff of rotated gene labels
+    fig.subplots_adjust(
+        left=0.25,   # space for long cluster names
+        bottom=0.25  # space for rotated gene labels
+    )
 
-    fig = _get_fig_from_scanpy_return(ret)
+    # 2) remove gridlines everywhere
+    for ax in fig.axes:
+        ax.grid(False)
+        ax.xaxis.grid(False)
+        ax.yaxis.grid(False)
+        for gl in ax.get_ygridlines():
+            gl.set_visible(False)
+
+    # 3) cleaner look (optional but recommended)
+    for ax in fig.axes:
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+    fig.tight_layout(rect=(0.25, 0.25, 1, 1))
+
     if show:
         plt.show()
     return fig
@@ -397,6 +416,8 @@ def heatmap_top_genes(
 
     if groupby not in adata.obs:
         raise KeyError(f"groupby={groupby!r} not found in adata.obs")
+
+    sns.set_style("white")
 
     # ---- resolve genes
     if genes_by_cluster is not None:
@@ -585,6 +606,17 @@ def violin_grid_genes(
                     lab.set_rotation(rotation)
                     lab.set_ha("right" if float(rotation) != 0 else "center")
 
+    for a in axes:
+        if a is None:
+            continue
+        for gl in a.get_ygridlines():
+            gl.set_visible(False)
+        a.grid(False)
+        a.yaxis.grid(False)
+        a.xaxis.grid(False)
+        a.spines["top"].set_visible(False)
+        a.spines["right"].set_visible(False)
+
     fig.tight_layout()
     if show:
         plt.show()
@@ -674,6 +706,17 @@ def violin_genes(
                     lab.set_ha("right" if float(rotation) != 0 else "center")
             except Exception:
                 pass
+
+    for a in axes:
+        if a is None:
+            continue
+        for gl in a.get_ygridlines():
+            gl.set_visible(False)
+        a.grid(False)
+        a.yaxis.grid(False)
+        a.xaxis.grid(False)
+        a.spines["top"].set_visible(False)
+        a.spines["right"].set_visible(False)
 
     return plt.gcf()
 
