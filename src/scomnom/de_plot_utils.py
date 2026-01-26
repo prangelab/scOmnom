@@ -818,8 +818,8 @@ def plot_marker_genes_pseudobulk(
             groupby=str(groupby),
             use_raw=bool(use_raw),
             layer=layer,
-            standard_scale="var",
             cmap="bwr",
+            z_clip=3.0,
             show=False,
         )
         plot_utils.save_multi(stem="heatmap__marker_genes__all_clusters", figdir=d_heat, fig=fig)
@@ -949,8 +949,9 @@ def plot_marker_genes_ranksum(
             groupby=str(groupby),
             use_raw=bool(use_raw),
             layer=layer,
-            standard_scale="var",
             cmap="bwr",
+            show_gene_labels=True,
+            z_clip=3.0,
             show=False,
         )
         plot_utils.save_multi(stem="heatmap__marker_genes__all_clusters", figdir=d_heat, fig=fig)
@@ -1102,9 +1103,9 @@ def plot_condition_within_cluster(
                 groupby=str(condition_key),
                 use_raw=bool(use_raw),
                 layer=layer,
-                standard_scale="var",
                 cmap="bwr",
                 show_gene_labels=True,
+                z_clip=3.0,
                 show=False,
             )
             plot_utils.save_multi(stem=f"heatmap__top{int(heatmap_top_n)}up_down__{k}", figdir=out_heat, fig=fig)
