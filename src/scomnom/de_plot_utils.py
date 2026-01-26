@@ -523,12 +523,17 @@ def violin_grid_genes(
 ) -> Figure:
     """
     Pretty multi-panel violin grid (API-callable).
-    Uses Scanpy's multi_panel=True behavior.
+
+    IMPORTANT:
+      - Does NOT pass ncols into scanpy (scanpy.violin doesn't accept it reliably).
+      - Instead, creates a matplotlib grid and plots one gene per axis via ax=...
     """
     import matplotlib.pyplot as plt
+    import numpy as np
     import scanpy as sc
 
     genes = [str(g) for g in genes if g is not None and str(g) != ""]
+    genes = _unique_keep_order(genes)
     if not genes:
         fig, ax = plt.subplots(figsize=(7.5, 2.5))
         ax.text(0.5, 0.5, "No genes to plot", ha="center", va="center")
@@ -537,31 +542,48 @@ def violin_grid_genes(
             plt.show()
         return fig
 
+    ncols = int(max(1, ncols))
+    n = len(genes)
+    nrows = int(np.ceil(n / ncols))
+
     # heuristic sizing if not given
     if figsize is None:
-        n = len(genes)
-        nrows = int(np.ceil(n / max(1, int(ncols))))
-        figsize = (max(8.0, 3.2 * min(int(ncols), n)), max(4.0, 2.2 * nrows))
+        figsize = (max(8.0, 3.4 * min(ncols, n)), max(4.0, 2.6 * nrows))
 
-    ret = sc.pl.violin(
-        adata,
-        keys=genes,
-        groupby=str(groupby),
-        use_raw=bool(use_raw),
-        layer=layer,
-        show=False,
-        stripplot=bool(stripplot),
-        rotation=rotation,
-        multi_panel=True,
-        ncols=int(max(1, ncols)),
-        figsize=figsize,
-    )
+    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=figsize, squeeze=False)
 
-    fig = _get_fig_from_scanpy_return(ret)
+    for i, g in enumerate(genes):
+        r, c = divmod(i, ncols)
+        ax = axes[r][c]
+
+        sc.pl.violin(
+            adata,
+            keys=[g],
+            groupby=str(groupby),
+            use_raw=bool(use_raw),
+            layer=layer,
+            show=False,
+            stripplot=bool(stripplot),
+            rotation=rotation,
+            ax=ax,
+        )
+
+        # Scanpy sets titles/labels inconsistently across versions; normalize a bit
+        try:
+            ax.set_title(str(g))
+        except Exception:
+            pass
+
+    # turn off unused axes
+    for j in range(n, nrows * ncols):
+        r, c = divmod(j, ncols)
+        axes[r][c].axis("off")
+
     fig.tight_layout()
     if show:
         plt.show()
     return fig
+
 
 
 def violin_genes(
