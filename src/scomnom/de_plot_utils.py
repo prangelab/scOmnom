@@ -17,6 +17,54 @@ import scanpy as sc
 # -----------------------------------------------------------------------------
 # Small helpers
 # -----------------------------------------------------------------------------
+def _unique_keep_order(xs: Sequence[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for x in xs:
+        x = str(x)
+        if x and x not in seen:
+            out.append(x)
+            seen.add(x)
+    return out
+
+
+def _select_top_signed(
+    df: pd.DataFrame,
+    *,
+    gene_col: str = "gene",
+    padj_col: str = "padj",
+    lfc_col: str = "log2FoldChange",
+    padj_thresh: float = 0.05,
+    top_n: int = 10,
+    direction: str = "up",  # "up" (lfc>0) or "down" (lfc<0)
+) -> list[str]:
+    if df is None or df.empty:
+        return []
+    g = _safe_series(df, gene_col).astype(str)
+    padj = pd.to_numeric(_safe_series(df, padj_col), errors="coerce")
+    lfc = pd.to_numeric(_safe_series(df, lfc_col), errors="coerce")
+
+    tmp = pd.DataFrame({gene_col: g, padj_col: padj, lfc_col: lfc}).dropna(
+        subset=[gene_col, padj_col, lfc_col]
+    )
+    tmp = tmp[tmp[padj_col] < float(padj_thresh)]
+    if tmp.empty:
+        return []
+
+    if direction == "down":
+        tmp = tmp[tmp[lfc_col] < 0]
+        tmp["__rank"] = tmp[lfc_col].abs()
+    else:
+        tmp = tmp[tmp[lfc_col] > 0]
+        tmp["__rank"] = tmp[lfc_col].abs()
+
+    if tmp.empty:
+        return []
+
+    tmp = tmp.sort_values([padj_col, "__rank"], ascending=[True, False])
+    return _unique_keep_order(tmp[gene_col].head(int(top_n)).astype(str).tolist())
+
+
 def _as_list(x: Optional[Iterable[str]]) -> list[str]:
     if x is None:
         return []
@@ -321,21 +369,165 @@ def _normalize_scanpy_groupby_colors(adata, groupby: str) -> None:
     adata.uns[k] = colors
 
 
+from typing import Mapping, Any, Dict  # add at top
+
 def heatmap_top_genes(
+    adata,
+    *,
+    genes: Sequence[str] | None = None,
+    genes_by_cluster: Mapping[str, Sequence[str]] | None = None,
+    groupby: str,
+    use_raw: bool = False,
+    layer: Optional[str] = None,
+    standard_scale: str = "var",
+    cmap: str = "bwr",
+    show_gene_labels: bool = True,
+    figsize: Optional[tuple[float, float]] = None,
+    show: bool = False,
+) -> Figure:
+    """
+    Seurat-style heatmap of genes across groups.
+
+    New signature:
+      - provide either `genes` OR `genes_by_cluster`
+      - clusters ordered largest -> smallest
+      - uses `{groupby}_colors` for the top annotation bar when available
+      - no dendrogram
+      - standard_scale='var' -> z-score per gene (Seurat-ish)
+
+    Notes:
+      - If genes_by_cluster is provided, genes are flattened in cluster-order blocks.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+    import scanpy as sc
+
+    if groupby not in adata.obs:
+        raise KeyError(f"groupby={groupby!r} not found in adata.obs")
+
+    # ------------------------------
+    # resolve gene list
+    # ------------------------------
+    if genes_by_cluster is not None:
+        # order clusters by size, then flatten genes_by_cluster in that order
+        vc = adata.obs[groupby].astype(str).value_counts()
+        cluster_order = vc.index.astype(str).tolist()
+
+        flat: list[str] = []
+        seen: set[str] = set()
+        for cl in cluster_order:
+            g_list = genes_by_cluster.get(str(cl), []) or []
+            for g in g_list:
+                g = str(g)
+                if g and g not in seen:
+                    flat.append(g)
+                    seen.add(g)
+        genes = flat
+
+    genes = [str(g) for g in (genes or []) if g is not None and str(g) != ""]
+    if not genes:
+        fig, ax = plt.subplots(figsize=(7.5, 2.5))
+        ax.text(0.5, 0.5, "No genes to plot", ha="center", va="center")
+        ax.set_axis_off()
+        if show:
+            plt.show()
+        return fig
+
+    # ------------------------------
+    # preserve original state
+    # ------------------------------
+    obs_orig = adata.obs[groupby].copy()
+
+    colors_key = f"{groupby}_colors"
+    colors_orig = None
+    if colors_key in adata.uns and adata.uns[colors_key] is not None:
+        try:
+            colors_orig = list(adata.uns[colors_key])
+        except Exception:
+            colors_orig = None
+
+    # ------------------------------
+    # reorder clusters: biggest -> smallest
+    # ------------------------------
+    vc = adata.obs[groupby].astype(str).value_counts()
+    order = vc.index.astype(str).tolist()
+
+    adata.obs[groupby] = pd.Categorical(
+        adata.obs[groupby].astype(str),
+        categories=order,
+        ordered=True,
+    )
+
+    # reorder colors to match category order
+    if colors_orig is not None:
+        try:
+            old_cats = list(pd.Categorical(obs_orig.astype(str)).categories.astype(str))
+            color_by_cat = {
+                cat: colors_orig[i]
+                for i, cat in enumerate(old_cats)
+                if i < len(colors_orig)
+            }
+            new_colors = [color_by_cat.get(cat, "#808080") for cat in order]
+            adata.uns[colors_key] = np.array(new_colors, dtype=object)
+        except Exception:
+            pass
+
+    _normalize_scanpy_groupby_colors(adata, groupby)
+
+    # ------------------------------
+    # plot
+    # ------------------------------
+    ret = sc.pl.heatmap(
+        adata,
+        var_names=genes,
+        groupby=groupby,
+        use_raw=use_raw,
+        layer=layer,
+        standard_scale=standard_scale,
+        cmap=cmap,
+        dendrogram=False,
+        swap_axes=False,          # genes rows, groups columns
+        show_gene_labels=show_gene_labels,
+        figsize=figsize,
+        show=False,
+    )
+
+    fig = _get_fig_from_scanpy_return(ret)
+    fig.tight_layout()
+
+    # restore
+    adata.obs[groupby] = obs_orig
+    if colors_orig is not None:
+        try:
+            adata.uns[colors_key] = np.array(colors_orig, dtype=object)
+        except Exception:
+            pass
+
+    if show:
+        plt.show()
+    return fig
+
+def violin_grid_genes(
     adata,
     *,
     genes: Sequence[str],
     groupby: str,
     use_raw: bool = False,
-    layer: Optional[str] = None,
-    standard_scale: str = "var",
-    dendrogram: bool = True,
-    cmap: str = "bwr",
-    swap_axes: bool = True,
-    show_gene_labels: bool = True,
-    figsize: Optional[tuple[float, float]] = None,
+    layer: str | None = None,
+    ncols: int = 3,
+    stripplot: bool = False,
+    rotation: float = 90,
+    figsize: tuple[float, float] | None = None,
     show: bool = False,
 ) -> Figure:
+    """
+    Pretty multi-panel violin grid (API-callable).
+    Uses Scanpy's multi_panel=True behavior.
+    """
+    import matplotlib.pyplot as plt
+    import scanpy as sc
+
     genes = [str(g) for g in genes if g is not None and str(g) != ""]
     if not genes:
         fig, ax = plt.subplots(figsize=(7.5, 2.5))
@@ -345,21 +537,26 @@ def heatmap_top_genes(
             plt.show()
         return fig
 
-    _normalize_scanpy_groupby_colors(adata, groupby)
-    ret = sc.pl.heatmap(
+    # heuristic sizing if not given
+    if figsize is None:
+        n = len(genes)
+        nrows = int(np.ceil(n / max(1, int(ncols))))
+        figsize = (max(8.0, 3.2 * min(int(ncols), n)), max(4.0, 2.2 * nrows))
+
+    ret = sc.pl.violin(
         adata,
-        var_names=genes,
-        groupby=groupby,
-        use_raw=use_raw,
+        keys=genes,
+        groupby=str(groupby),
+        use_raw=bool(use_raw),
         layer=layer,
-        swap_axes=swap_axes,
-        standard_scale=standard_scale,
-        cmap=cmap,
-        dendrogram=dendrogram,
-        show_gene_labels=show_gene_labels,
-        figsize=figsize,
         show=False,
+        stripplot=bool(stripplot),
+        rotation=rotation,
+        multi_panel=True,
+        ncols=int(max(1, ncols)),
+        figsize=figsize,
     )
+
     fig = _get_fig_from_scanpy_return(ret)
     fig.tight_layout()
     if show:
@@ -493,3 +690,445 @@ def umap_features_grid(
     if show:
         plt.show()
     return fig
+
+
+def plot_marker_genes_pseudobulk(
+    adata,
+    *,
+    groupby: str,
+    store_key: str = "scomnom_de",
+    alpha: float = 0.05,
+    lfc_thresh: float = 1.0,
+    top_label_n: int = 15,
+    top_n_genes: int = 9,
+    use_raw: bool = False,
+    layer: str | None = None,
+    umap_ncols: int = 3,
+) -> None:
+    """
+    Pseudobulk cluster-vs-rest plots.
+    Saves under: marker_genes/pseudobulk/{volcano,dotplot,violin,umap,heatmap}/
+    """
+    from pathlib import Path
+    from . import plot_utils
+
+    figroot = Path("marker_genes") / "pseudobulk"
+    d_volcano = figroot / "volcano"
+    d_dot = figroot / "dotplot"
+    d_violin = figroot / "violin"
+    d_umap = figroot / "umap"
+    d_heat = figroot / "heatmap"
+
+    pb_block = adata.uns.get(store_key, {}).get("pseudobulk_cluster_vs_rest", {})
+    pb_results = pb_block.get("results", {}) if isinstance(pb_block, dict) else {}
+    if not isinstance(pb_results, dict) or not pb_results:
+        return
+
+    genes_by_cluster: dict[str, list[str]] = {}
+
+    for cl, df_de in pb_results.items():
+        fig = volcano(
+            df_de,
+            padj_thresh=float(alpha),
+            lfc_thresh=float(lfc_thresh),
+            top_label_n=int(top_label_n),
+            title=f"Pseudobulk marker genes: {cl} vs rest",
+            show=False,
+        )
+        plot_utils.save_multi(stem=f"volcano__{cl}", figdir=d_volcano, fig=fig)
+
+        topg = _select_top_genes(
+            df_de,
+            gene_col="gene",
+            padj_col="padj",
+            lfc_col="log2FoldChange",
+            padj_thresh=float(alpha),
+            top_n=int(top_n_genes),
+            require_sig=True,
+        )
+        genes_by_cluster[str(cl)] = topg
+
+        if topg:
+            fig = dotplot_top_genes(
+                adata,
+                genes=topg,
+                groupby=str(groupby),
+                use_raw=bool(use_raw),
+                layer=layer,
+                dendrogram=True,
+                show=False,
+            )
+            plot_utils.save_multi(stem=f"dotplot__{cl}", figdir=d_dot, fig=fig)
+
+            fig = violin_grid_genes(
+                adata,
+                genes=topg,
+                groupby=str(groupby),
+                use_raw=bool(use_raw),
+                layer=layer,
+                ncols=int(max(1, umap_ncols)),
+                stripplot=False,
+                show=False,
+            )
+            plot_utils.save_multi(stem=f"violin__{cl}", figdir=d_violin, fig=fig)
+
+            fig = umap_features_grid(
+                adata,
+                genes=topg,
+                use_raw=bool(use_raw),
+                layer=layer,
+                ncols=int(max(1, umap_ncols)),
+                show=False,
+            )
+            plot_utils.save_multi(stem=f"umap__{cl}__top{int(top_n_genes)}", figdir=d_umap, fig=fig)
+
+    # combined Seurat-style heatmap across clusters
+    if any(v for v in genes_by_cluster.values()):
+        fig = heatmap_top_genes(
+            adata,
+            genes_by_cluster=genes_by_cluster,
+            groupby=str(groupby),
+            use_raw=bool(use_raw),
+            layer=layer,
+            standard_scale="var",
+            cmap="bwr",
+            show=False,
+        )
+        plot_utils.save_multi(stem="heatmap__marker_genes__all_clusters", figdir=d_heat, fig=fig)
+
+
+def plot_marker_genes_ranksum(
+    adata,
+    *,
+    groupby: str,
+    markers_key: str,
+    alpha: float = 0.05,
+    lfc_thresh: float = 1.0,
+    top_label_n: int = 15,
+    top_n_genes: int = 9,
+    use_raw: bool = False,
+    layer: str | None = None,
+    umap_ncols: int = 3,
+) -> None:
+    """
+    Cell-level rank_genes_groups plots.
+    Saves under: marker_genes/ranksum/{volcano,dotplot,violin,umap,heatmap}/
+    """
+    from pathlib import Path
+    from . import plot_utils
+    from scanpy.get import rank_genes_groups_df
+
+    figroot = Path("marker_genes") / "ranksum"
+    d_volcano = figroot / "volcano"
+    d_dot = figroot / "dotplot"
+    d_violin = figroot / "violin"
+    d_umap = figroot / "umap"
+    d_heat = figroot / "heatmap"
+
+    block = adata.uns.get(str(markers_key), None)
+    if not isinstance(block, dict) or not block:
+        return
+
+    groups = None
+    try:
+        if "names" in block and hasattr(block["names"], "dtype") and block["names"].dtype.names:
+            groups = list(block["names"].dtype.names)
+    except Exception:
+        groups = None
+    if not groups:
+        return
+
+    genes_by_cluster: dict[str, list[str]] = {}
+
+    for cl in groups:
+        try:
+            df = rank_genes_groups_df(adata, group=str(cl), key=str(markers_key))
+        except Exception:
+            continue
+
+        df_v = df.rename(
+            columns={
+                "names": "gene",
+                "logfoldchanges": "log2FoldChange",
+                "pvals_adj": "padj",
+                "pvals": "pval",
+                "scores": "score",
+            }
+        )
+
+        fig = volcano(
+            df_v,
+            gene_col="gene",
+            padj_col="padj",
+            lfc_col="log2FoldChange",
+            padj_thresh=float(alpha),
+            lfc_thresh=float(lfc_thresh),
+            top_label_n=int(top_label_n),
+            title=f"Ranksum marker genes: {cl} vs rest",
+            show=False,
+        )
+        plot_utils.save_multi(stem=f"volcano__{cl}", figdir=d_volcano, fig=fig)
+
+        topg = _select_top_genes(
+            df_v,
+            gene_col="gene",
+            padj_col="padj",
+            lfc_col="log2FoldChange",
+            padj_thresh=float(alpha),
+            top_n=int(top_n_genes),
+            require_sig=True,
+        )
+        genes_by_cluster[str(cl)] = topg
+
+        if topg:
+            fig = dotplot_top_genes(
+                adata,
+                genes=topg,
+                groupby=str(groupby),
+                use_raw=bool(use_raw),
+                layer=layer,
+                dendrogram=True,
+                show=False,
+            )
+            plot_utils.save_multi(stem=f"dotplot__{cl}", figdir=d_dot, fig=fig)
+
+            fig = violin_grid_genes(
+                adata,
+                genes=topg,
+                groupby=str(groupby),
+                use_raw=bool(use_raw),
+                layer=layer,
+                ncols=int(max(1, umap_ncols)),
+                stripplot=False,
+                show=False,
+            )
+            plot_utils.save_multi(stem=f"violin__{cl}", figdir=d_violin, fig=fig)
+
+            fig = umap_features_grid(
+                adata,
+                genes=topg,
+                use_raw=bool(use_raw),
+                layer=layer,
+                ncols=int(max(1, umap_ncols)),
+                show=False,
+            )
+            plot_utils.save_multi(stem=f"umap__{cl}__top{int(top_n_genes)}", figdir=d_umap, fig=fig)
+
+    if any(v for v in genes_by_cluster.values()):
+        fig = heatmap_top_genes(
+            adata,
+            genes_by_cluster=genes_by_cluster,
+            groupby=str(groupby),
+            use_raw=bool(use_raw),
+            layer=layer,
+            standard_scale="var",
+            cmap="bwr",
+            show=False,
+        )
+        plot_utils.save_multi(stem="heatmap__marker_genes__all_clusters", figdir=d_heat, fig=fig)
+
+
+def plot_condition_within_cluster(
+    adata,
+    *,
+    cluster_key: str,
+    condition_key: str,
+    store_key: str = "scomnom_de",
+    alpha: float = 0.05,
+    lfc_thresh: float = 1.0,
+    top_label_n: int = 15,
+    dotplot_top_n: int = 9,
+    violin_top_n: int = 9,
+    heatmap_top_n: int = 25,
+    use_raw: bool = False,
+    layer: str | None = None,
+) -> None:
+    """
+    For each stored conditional DE result (per cluster, per contrast):
+      - volcano
+      - dotplot (top 9 up + top 9 down)
+      - violin grid (top 9 up + top 9 down)
+      - heatmap (top 25 up + top 25 down), within-cluster, grouped by condition
+
+    Saves under:
+      marker_genes/pseudobulk/condition_within_cluster__<condition_key>/<contrast_key>/{volcano,dotplot,violin,heatmap}/
+    """
+    from pathlib import Path
+    from . import plot_utils
+
+    block = adata.uns.get(store_key, {}).get("pseudobulk_condition_within_group", {})
+    if not isinstance(block, dict) or not block:
+        return
+
+    base = Path("marker_genes") / "pseudobulk" / f"condition_within_cluster__{condition_key}"
+
+    for k, payload in block.items():
+        if not isinstance(payload, dict):
+            continue
+        df_de = payload.get("results", None)
+        if df_de is None or getattr(df_de, "empty", True):
+            continue
+
+        # cluster id for subsetting
+        group_value = payload.get("group_value", None)
+        if group_value is None:
+            # fallback heuristic: prefix before "__"
+            group_value = str(k).split("__", 1)[0]
+
+        # subset to this cluster only (expression plots should be within-cluster)
+        if cluster_key not in adata.obs:
+            continue
+        mask = adata.obs[cluster_key].astype(str) == str(group_value)
+        if not np.any(mask):
+            continue
+        sub = adata[mask].copy()
+
+        # output folder per contrast key
+        safe_k = str(k)
+        out_volcano = base / safe_k / "volcano"
+        out_dot = base / safe_k / "dotplot"
+        out_violin = base / safe_k / "violin"
+        out_heat = base / safe_k / "heatmap"
+
+        # volcano
+        fig = volcano(
+            df_de,
+            padj_thresh=float(alpha),
+            lfc_thresh=float(lfc_thresh),
+            top_label_n=int(top_label_n),
+            title=str(k),
+            show=False,
+        )
+        plot_utils.save_multi(stem=f"volcano__{k}", figdir=out_volcano, fig=fig)
+
+        # top up/down for dot/violin
+        up9 = _select_top_signed(
+            df_de,
+            gene_col="gene",
+            padj_col="padj",
+            lfc_col="log2FoldChange",
+            padj_thresh=float(alpha),
+            top_n=int(dotplot_top_n),
+            direction="up",
+        )
+        down9 = _select_top_signed(
+            df_de,
+            gene_col="gene",
+            padj_col="padj",
+            lfc_col="log2FoldChange",
+            padj_thresh=float(alpha),
+            top_n=int(dotplot_top_n),
+            direction="down",
+        )
+        genes_9_9 = _unique_keep_order(list(up9) + list(down9))
+
+        if genes_9_9 and condition_key in sub.obs:
+            fig = dotplot_top_genes(
+                sub,
+                genes=genes_9_9,
+                groupby=str(condition_key),
+                use_raw=bool(use_raw),
+                layer=layer,
+                dendrogram=False,
+                show=False,
+            )
+            plot_utils.save_multi(stem=f"dotplot__top{int(dotplot_top_n)}up_down__{k}", figdir=out_dot, fig=fig)
+
+            fig = violin_grid_genes(
+                sub,
+                genes=genes_9_9,
+                groupby=str(condition_key),
+                use_raw=bool(use_raw),
+                layer=layer,
+                ncols=3,
+                stripplot=False,
+                show=False,
+            )
+            plot_utils.save_multi(stem=f"violin__top{int(violin_top_n)}up_down__{k}", figdir=out_violin, fig=fig)
+
+        # heatmap: top 25 up + top 25 down
+        up25 = _select_top_signed(
+            df_de,
+            gene_col="gene",
+            padj_col="padj",
+            lfc_col="log2FoldChange",
+            padj_thresh=float(alpha),
+            top_n=int(heatmap_top_n),
+            direction="up",
+        )
+        down25 = _select_top_signed(
+            df_de,
+            gene_col="gene",
+            padj_col="padj",
+            lfc_col="log2FoldChange",
+            padj_thresh=float(alpha),
+            top_n=int(heatmap_top_n),
+            direction="down",
+        )
+        genes_25_25 = _unique_keep_order(list(up25) + list(down25))
+
+        if genes_25_25 and condition_key in sub.obs:
+            fig = heatmap_top_genes(
+                sub,
+                genes=genes_25_25,
+                groupby=str(condition_key),
+                use_raw=bool(use_raw),
+                layer=layer,
+                standard_scale="var",
+                cmap="bwr",
+                show_gene_labels=True,
+                show=False,
+            )
+            plot_utils.save_multi(stem=f"heatmap__top{int(heatmap_top_n)}up_down__{k}", figdir=out_heat, fig=fig)
+
+
+def plot_condition_within_cluster_all(
+    adata,
+    *,
+    cluster_key: str,
+    condition_key: str,
+    store_key: str = "scomnom_de",
+    alpha: float = 0.05,
+    lfc_thresh: float = 1.0,
+    top_label_n: int = 15,
+    dotplot_top_n: int = 9,
+    violin_top_n: int = 9,
+    heatmap_top_n: int = 25,
+    use_raw: bool = False,
+    layer: str | None = None,
+) -> None:
+    """
+    Full conditional-DE plotting suite:
+      1) global UMAP colored by condition_key (once)
+      2) per-cluster/per-contrast plots via plot_condition_within_cluster()
+
+    Saves UMAP under:
+      marker_genes/pseudobulk/condition_within_cluster__<condition_key>/umap/
+    """
+    from pathlib import Path
+    from . import plot_utils
+
+    # 1) global condition UMAP (ONCE)
+    if condition_key in adata.obs:
+        plot_utils.umap_by(
+            adata,
+            keys=str(condition_key),
+            figdir=Path("marker_genes") / "pseudobulk" / f"condition_within_cluster__{condition_key}" / "umap",
+            stem=f"umap__{condition_key}",
+        )
+
+    # 2) per-cluster/per-contrast plots
+    plot_condition_within_cluster(
+        adata,
+        cluster_key=str(cluster_key),
+        condition_key=str(condition_key),
+        store_key=str(store_key),
+        alpha=float(alpha),
+        lfc_thresh=float(lfc_thresh),
+        top_label_n=int(top_label_n),
+        dotplot_top_n=int(dotplot_top_n),
+        violin_top_n=int(violin_top_n),
+        heatmap_top_n=int(heatmap_top_n),
+        use_raw=bool(use_raw),
+        layer=layer,
+    )
