@@ -304,6 +304,8 @@ def dotplot_top_genes(
     from matplotlib.figure import Figure
     import scanpy as sc
 
+    _normalize_scanpy_groupby_colors(adata, str(groupby))
+
     genes = [str(g) for g in genes if g is not None and str(g) != ""]
     if not genes:
         fig, ax = plt.subplots(figsize=(7.5, 2.5))
@@ -373,22 +375,29 @@ def _normalize_scanpy_groupby_colors(adata, groupby: str) -> None:
 
     colors = adata.uns[k]
 
-    # zarr/serialization wrapper -> unwrap to list[str]
-    if isinstance(colors, dict) and "data" in colors:
-        colors = colors["data"]
+    # unwrap common serialization wrappers
+    if isinstance(colors, dict):
+        if "data" in colors:
+            colors = colors["data"]
+        elif "payload" in colors and isinstance(colors["payload"], dict) and "data" in colors["payload"]:
+            colors = colors["payload"]["data"]
 
-    # numpy array / pandas array -> list
     try:
         colors = list(np.asarray(colors).astype(str))
     except Exception:
-        # if it's too weird, drop it and let scanpy regenerate
         del adata.uns[k]
         return
 
     adata.uns[k] = colors
 
 
+
 from typing import Mapping, Any, Dict  # add at top
+
+from typing import Mapping, Sequence, Optional
+import numpy as np
+import pandas as pd
+
 
 def heatmap_top_genes(
     adata,
@@ -398,20 +407,31 @@ def heatmap_top_genes(
     groupby: str,
     use_raw: bool = False,
     layer: Optional[str] = None,
-    cmap: str = "bwr",
+    # ---- NEW: nicer, colorblind-friendlier diverging map with DARK center (0)
+    cmap: str | None = None,
+    # ---- NEW: Seurat-like cosmetics
+    show_cluster_colorbar: bool = True,
+    scale_columns_by_size: bool = False,
+    min_col_width: float = 0.35,   # prevents tiny columns from disappearing when scaling
+    max_col_width: float = 3.0,    # prevents one giant cluster from dominating
     figsize: Optional[tuple[float, float]] = None,
     show_gene_labels: bool = True,
     z_clip: float | None = 3.0,
     show: bool = False,
-) -> Figure:
+):
     """
     Z-score heatmap (true z, not scanpy standard_scale).
-    - groups (clusters) are COLUMNS with labels on TOP
-    - values are per-group mean expression, z-scored per gene
+      - clusters are COLUMNS with labels on TOP
+      - genes are ROWS
+      - values are per-cluster mean expression, z-scored per gene across clusters
+
+    New features:
+      - Colorblind-friendlier diverging cmap with DARK 0 (Seurat-ish vibe)
+      - Optional: column widths scale with cluster size
+      - Optional: cluster color bar on top (uses adata.uns[f"{groupby}_colors"])
     """
-    import numpy as np
-    import pandas as pd
     import matplotlib.pyplot as plt
+    import matplotlib.colors as mcolors
     import seaborn as sns
 
     if groupby not in adata.obs:
@@ -419,12 +439,14 @@ def heatmap_top_genes(
 
     sns.set_style("white")
 
-    # ---- resolve genes
+    # -----------------------------
+    # Resolve gene list
+    # -----------------------------
     if genes_by_cluster is not None:
-        vc = adata.obs[groupby].astype(str).value_counts()
-        cluster_order = vc.index.astype(str).tolist()
+        vc0 = adata.obs[groupby].astype(str).value_counts()
+        cluster_order0 = vc0.index.astype(str).tolist()
         flat, seen = [], set()
-        for cl in cluster_order:
+        for cl in cluster_order0:
             for g in (genes_by_cluster.get(str(cl), []) or []):
                 g = str(g)
                 if g and g not in seen:
@@ -441,11 +463,16 @@ def heatmap_top_genes(
             plt.show()
         return fig
 
-    # ---- group order: biggest -> smallest
+    # -----------------------------
+    # Group order + sizes
+    # -----------------------------
     vc = adata.obs[groupby].astype(str).value_counts()
     groups = vc.index.astype(str).tolist()
+    sizes = vc.reindex(groups).astype(float).to_numpy()
 
-    # ---- get expression matrix for requested genes
+    # -----------------------------
+    # Extract expression matrix for genes
+    # -----------------------------
     sub = adata[:, genes]
     if layer is not None:
         X = sub.layers[layer]
@@ -454,7 +481,6 @@ def heatmap_top_genes(
     else:
         X = sub.X
 
-    # dense small matrix (cells x genes) is OK here (genes list is small)
     try:
         X = X.toarray()
     except Exception:
@@ -463,60 +489,182 @@ def heatmap_top_genes(
     df_x = pd.DataFrame(X, columns=genes)
     df_x[groupby] = adata.obs[groupby].astype(str).values
 
-    # ---- per-group mean expression (groups x genes)
+    # per-group mean expression (groups x genes)
     mean = df_x.groupby(groupby, observed=True)[genes].mean()
     mean = mean.reindex([g for g in groups if g in mean.index])  # enforce order
+    groups = mean.index.astype(str).tolist()  # in case any got dropped
+    sizes = vc.reindex(groups).astype(float).to_numpy()
 
-    # ---- z-score per gene across groups
-    M = mean.to_numpy(dtype=float)
+    # -----------------------------
+    # Z-score per gene across groups
+    # -----------------------------
+    M = mean.to_numpy(dtype=float)  # shape: (n_groups, n_genes)
     mu = np.nanmean(M, axis=0, keepdims=True)
     sd = np.nanstd(M, axis=0, keepdims=True)
     sd[sd == 0] = 1.0
-    Z = (M - mu) / sd
+    Z = (M - mu) / sd  # (groups x genes)
 
     if z_clip is not None:
         Z = np.clip(Z, -float(z_clip), float(z_clip))
 
-    zdf = pd.DataFrame(Z, index=mean.index, columns=mean.columns)
+    # heatmap matrix: genes x groups
+    plot_mat = Z.T
+    gene_labels = list(mean.columns.astype(str))
 
-    # ---- plot: genes rows, clusters columns (labels on top)
-    # transpose so rows=genes, cols=clusters
-    plot_mat = zdf.T
+    # -----------------------------
+    # Colormap: diverging with DARK center (0)
+    # -----------------------------
+    # If user passed cmap, respect it; else use a custom diverging map:
+    # deep blue -> dark gray (0) -> yellow/orange (colorblind-friendly-ish)
+    if cmap is None:
+        cmap = mcolors.LinearSegmentedColormap.from_list(
+            "scomnom_dark0_div",
+            ["#2b6cb0", "#1f1f1f", "#f6c026"],  # neg, zero, pos
+            N=256,
+        )
 
+    # -----------------------------
+    # Column widths (optional)
+    # -----------------------------
+    n_groups = len(groups)
+    if scale_columns_by_size and n_groups > 0:
+        w = sizes / max(1.0, float(np.nanmean(sizes)))
+        w = np.clip(w, float(min_col_width), float(max_col_width))
+    else:
+        w = np.ones(n_groups, dtype=float)
+
+    x_edges = np.concatenate([[0.0], np.cumsum(w)])
+    x_centers = (x_edges[:-1] + x_edges[1:]) / 2.0
+
+    y_edges = np.arange(plot_mat.shape[0] + 1, dtype=float)  # genes
+    y_centers = (y_edges[:-1] + y_edges[1:]) / 2.0
+
+    # -----------------------------
+    # Cluster color bar (optional)
+    # -----------------------------
+    if show_cluster_colorbar:
+        # normalize scanpy group colors into list[str]
+        try:
+            _normalize_scanpy_groupby_colors(adata, str(groupby))
+        except Exception:
+            pass
+
+        colors = adata.uns.get(f"{groupby}_colors", None)
+        if isinstance(colors, dict) and "data" in colors:
+            colors = colors["data"]
+        try:
+            colors = list(np.asarray(colors).astype(str)) if colors is not None else None
+        except Exception:
+            colors = None
+
+        if not colors or len(colors) != len(groups):
+            # if mismatch, disable bar (scanpy can regenerate later)
+            colors = None
+    else:
+        colors = None
+
+    # -----------------------------
+    # Figure sizing
+    # -----------------------------
     if figsize is None:
-        # heuristics
-        w = max(10.0, 0.55 * plot_mat.shape[1] + 2.0)   # columns=clusters
-        h = max(6.0, 0.12 * plot_mat.shape[0] + 2.0)    # rows=genes
-        figsize = (min(28.0, w), min(16.0, h))
+        # width scales with total x span, height with #genes
+        W = max(10.0, 0.40 * float(x_edges[-1]) + 5.0)
+        H = max(6.0, 0.18 * plot_mat.shape[0] + 2.5)
+        figsize = (min(32.0, W), min(18.0, H))
 
-    fig, ax = plt.subplots(figsize=figsize)
-    sns.heatmap(
+    # -----------------------------
+    # Plot with GridSpec: optional top color bar + heatmap + cbar
+    # -----------------------------
+    fig = plt.figure(figsize=figsize)
+
+    if colors is not None:
+        gs = fig.add_gridspec(
+            nrows=2, ncols=2,
+            height_ratios=[0.18, 1.0],
+            width_ratios=[1.0, 0.06],
+            hspace=0.02, wspace=0.15,
+        )
+        ax_top = fig.add_subplot(gs[0, 0])
+        ax = fig.add_subplot(gs[1, 0], sharex=ax_top)
+        cax = fig.add_subplot(gs[1, 1])
+    else:
+        gs = fig.add_gridspec(
+            nrows=1, ncols=2,
+            width_ratios=[1.0, 0.06],
+            wspace=0.15,
+        )
+        ax = fig.add_subplot(gs[0, 0])
+        cax = fig.add_subplot(gs[0, 1])
+        ax_top = None
+
+    # --- heatmap (pcolormesh supports variable column widths)
+    mesh = ax.pcolormesh(
+        x_edges,
+        y_edges,
         plot_mat,
-        ax=ax,
         cmap=cmap,
-        center=0.0,
-        vmin=(-z_clip if z_clip is not None else None),
-        vmax=(z_clip if z_clip is not None else None),
-        cbar_kws={"label": "z-score"},
+        shading="flat",
+        vmin=(-float(z_clip) if z_clip is not None else None),
+        vmax=(float(z_clip) if z_clip is not None else None),
     )
 
+    # colorbar
+    cb = fig.colorbar(mesh, cax=cax)
+    cb.set_label("z-score")
+
+    # axes cosmetics
+    ax.set_ylabel("genes")
+    ax.set_xlabel(groupby)
+
+    # cluster labels on top
     ax.xaxis.set_ticks_position("top")
     ax.xaxis.set_label_position("top")
-    ax.tick_params(axis="x", labeltop=True, labelbottom=False, rotation=45)
-    for lab in ax.get_xticklabels():
-        lab.set_ha("left")
+    ax.set_xticks(x_centers)
+    ax.set_xticklabels(groups, rotation=45, ha="left")
 
-    if not show_gene_labels:
+    # gene labels
+    ax.set_yticks(y_centers)
+    if show_gene_labels:
+        ax.set_yticklabels(gene_labels)
+    else:
         ax.set_yticklabels([])
         ax.tick_params(axis="y", length=0)
 
-    ax.set_xlabel(groupby)
-    ax.set_ylabel("genes")
+    # invert y so first gene is at top (Seurat-like)
+    ax.invert_yaxis()
+
+    # remove spines/grid
+    ax.grid(False)
+    for sp in ["top", "right", "left", "bottom"]:
+        ax.spines[sp].set_visible(False)
+
+    # --- top cluster color bar
+    if ax_top is not None:
+        # Build a 1xN "image" row as RGB values, then pcolormesh with same x_edges
+        rgb = np.array([mcolors.to_rgb(c) for c in colors], dtype=float)  # (N,3)
+        # make it shape (1, N, 3) then pcolormesh expects (M, N) scalar;
+        # easiest: draw rectangles
+        ax_top.set_xlim(x_edges[0], x_edges[-1])
+        ax_top.set_ylim(0, 1)
+        for i in range(len(groups)):
+            ax_top.add_patch(
+                plt.Rectangle(
+                    (x_edges[i], 0),
+                    x_edges[i + 1] - x_edges[i],
+                    1,
+                    color=rgb[i],
+                    linewidth=0,
+                )
+            )
+        ax_top.axis("off")
+
     fig.tight_layout()
 
     if show:
         plt.show()
+
     return fig
+
 
 
 def violin_grid_genes(
@@ -544,6 +692,8 @@ def violin_grid_genes(
     import scanpy as sc
     from matplotlib.axes import Axes
     from matplotlib.figure import Figure
+
+    _normalize_scanpy_groupby_colors(adata, str(groupby))
 
     genes = [str(g) for g in genes if g is not None and str(g) != ""]
     genes = _unique_keep_order(genes)
@@ -653,6 +803,8 @@ def violin_genes(
     import scanpy as sc
     import matplotlib.pyplot as plt
 
+    _normalize_scanpy_groupby_colors(adata, str(groupby))
+
     # ---- normalize genes
     if genes is None:
         return plt.gcf()
@@ -742,6 +894,9 @@ def umap_features_grid(
     size: Optional[float] = None,
     show: bool = False,
 ) -> Figure:
+
+    _normalize_scanpy_groupby_colors(adata, str(groupby))
+
     genes = [str(g) for g in genes if g is not None and str(g) != ""]
     if not genes:
         fig, ax = plt.subplots(figsize=(7.5, 2.5))
@@ -789,6 +944,8 @@ def plot_marker_genes_pseudobulk(
     """
     from pathlib import Path
     from . import plot_utils
+
+    _normalize_scanpy_groupby_colors(adata, str(groupby))
 
     figroot = Path("marker_genes") / "pseudobulk"
     d_volcano = figroot / "volcano"
@@ -901,6 +1058,8 @@ def plot_marker_genes_ranksum(
     from pathlib import Path
     from . import plot_utils
     from scanpy.get import rank_genes_groups_df
+
+    _normalize_scanpy_groupby_colors(adata, str(groupby))
 
     figroot = Path("marker_genes") / "ranksum"
     d_volcano = figroot / "volcano"
