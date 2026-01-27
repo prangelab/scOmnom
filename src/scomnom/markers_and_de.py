@@ -53,6 +53,8 @@ def run_markers_and_de(cfg) -> ad.AnnData:
 
     adata = io_utils.load_dataset(getattr(cfg, "input_path"))
 
+    positive_only = bool(getattr(cfg, "positive_only", True))
+
     # Resolve groupby key (round-aware by default)
     groupby = resolve_group_key(
         adata,
