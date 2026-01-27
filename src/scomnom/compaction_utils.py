@@ -136,21 +136,7 @@ def compact_clusters_by_multiview_agreement(
     """
     Compaction decision engine.
 
-    Behavior:
-      - Honors zscore_scope:
-          * "global": z-score across all clusters (recommended default)
-          * "within_celltypist_label": z-score within each CellTypist label group
-            (guardrailed: falls back to global if too few clusters in a label)
-      - MSigDB per-GMT floors: HALLMARK~0.60, REACTOME~0.45, default~0.50.
-        User-provided thresholds act as CAPS (max strictness); adaptive can relax down to floors.
-      - MSigDB majority rule special-case: if n_gmts==2, require 1 passing GMT (1-of-2).
-      - MSigDB Top-K union similarity uses K=25.
-      - Adaptive thresholds are q90 per CellTypist label computed on the *effective* z-scored vectors.
-
-    Output:
-      - components / maps
-      - edges dataframe (pairwise audit)
-      - decision_log (component-level)
+    IMPORTANT: compaction must be confined within CellTypist label groups.
     """
     import numpy as np
     import pandas as pd
@@ -203,54 +189,87 @@ def compact_clusters_by_multiview_agreement(
         LOGGER.warning("Compaction: unknown zscore_scope=%r; falling back to 'global'.", zscore_scope)
         zscope = "global"
 
-    # Guardrail for within-label z: too few clusters => unstable zscore -> use global
     WITHIN_LABEL_MIN_CLUSTERS = 4
 
-    # Precompute GLOBAL z-scored views (always available as fallback)
     prog_z_global = _zscore_cols(prog)
     doro_z_global = _zscore_cols(doro)
     msig_z_global = {g: _zscore_cols(df) for g, df in msig_by_gmt.items()}
 
     # ------------------------------------------------------------------
     # Determine cluster grouping label (CellTypist majority per cluster)
-    # Prefer round-scoped cluster-level CT label if present in round annotation linkage.
     # ------------------------------------------------------------------
+    def _normalize_ct_label(x: Any) -> str:
+        s = str(x).strip()
+        if s == "" or s.lower() in {"nan", "none", "null", "na"}:
+            return "UNKNOWN"
+        return s
+
     ann = round_snapshot.get("annotation", {})
     ann = ann if isinstance(ann, dict) else {}
     ct_cluster_key = ann.get("celltypist_cluster_key", None)
 
+    # If there is a cluster-level CT column, it should be CONSTANT within each cluster.
+    # But in practice this may contain NaNs or mixed values. So:
+    #   - normalize unknowns
+    #   - take MAJORITY vote (not iloc[0])
     if isinstance(ct_cluster_key, str) and ct_cluster_key in adata.obs:
         tmp = pd.DataFrame(
-            {"cluster": cluster_per_cell.values, "ct_cluster": adata.obs[ct_cluster_key].astype(str).values}
+            {
+                "cluster": cluster_per_cell.values,
+                "ct_cluster": adata.obs[ct_cluster_key].map(_normalize_ct_label).values,
+            }
         )
         majority_ct: Dict[str, str] = (
             tmp.groupby("cluster", observed=True)["ct_cluster"]
-            .agg(lambda x: str(x.iloc[0]) if len(x) else "UNKNOWN")
+            .agg(lambda x: x.value_counts().index[0] if len(x) else "UNKNOWN")
             .astype(str)
             .to_dict()
         )
+        LOGGER.info(
+            "Compaction: using cluster-level CT key %r for gating (majority vote).",
+            str(ct_cluster_key),
+        )
     else:
-        tmp = pd.DataFrame({"cluster": cluster_per_cell.values, "ct": celltypist_per_cell.values})
+        tmp = pd.DataFrame(
+            {
+                "cluster": cluster_per_cell.values,
+                "ct": adata.obs[celltypist_obs_key].map(_normalize_ct_label).values,
+            }
+        )
         majority_ct = (
             tmp.groupby("cluster", observed=True)["ct"]
             .agg(lambda x: x.value_counts().index[0] if len(x) else "UNKNOWN")
             .astype(str)
             .to_dict()
         )
+        LOGGER.info(
+            "Compaction: using cell-level CT key %r for gating (majority vote).",
+            str(celltypist_obs_key),
+        )
 
     label_to_clusters: Dict[str, List[str]] = {}
     for cl in all_clusters:
         if min_cells and int(cluster_sizes.get(cl, 0)) < int(min_cells):
             continue
-        lab = str(majority_ct.get(cl, "UNKNOWN"))
+        lab = _normalize_ct_label(majority_ct.get(cl, "UNKNOWN"))
         label_to_clusters.setdefault(lab, []).append(cl)
 
+    # Optionally skip unknown-like groups (including "nan"/""/"None")
     if skip_unknown_celltypist_groups:
-        label_to_clusters.pop("Unknown", None)
-        label_to_clusters.pop("UNKNOWN", None)
+        for k in list(label_to_clusters.keys()):
+            if _normalize_ct_label(k) == "UNKNOWN":
+                label_to_clusters.pop(k, None)
 
-    edge_rows: List[Dict[str, Any]] = []
-    adjacency: Dict[str, List[Tuple[str, str]]] = {}
+    # HARD sanity checks / debug logging
+    # 1) each cluster appears in exactly one CT group
+    all_seen = [c for xs in label_to_clusters.values() for c in xs]
+    if len(all_seen) != len(set(all_seen)):
+        raise RuntimeError("Compaction bug: a cluster appears in multiple CellTypist label groups")
+
+    # 2) log largest groups (catches the 'everything became nan' failure mode)
+    counts = {k: len(v) for k, v in label_to_clusters.items()}
+    top = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:10]
+    LOGGER.info("Compaction: label_to_clusters top groups (label, n_clusters): %s", top)
 
     # ------------------------------------------------------------------
     # Thresholds + MSigDB majority + MSigDB top-K union
@@ -258,7 +277,6 @@ def compact_clusters_by_multiview_agreement(
     TOPK_MSIGDB = 25
     ADAPT_Q = 0.90
 
-    # Floors (minimum strictness)
     FLOOR_PROG = 0.70
     FLOOR_DORO = 0.60
 
@@ -306,22 +324,21 @@ def compact_clusters_by_multiview_agreement(
         need = int(np.ceil(float(frac) * float(n_gmts)))
         return int(max(1, min(n_gmts, need)))
 
+    edge_rows: List[Dict[str, Any]] = []
+    adjacency: Dict[str, List[Tuple[str, str]]] = {}
     pass_edges_by_label: Dict[str, List[Tuple[str, str]]] = {}
     adaptive_thresholds_by_label: Dict[str, Dict[str, Any]] = {}
 
-    # Helper: choose effective z-scored views for this label
-    def _effective_z_views_for_label(clusters_for_label: List[str]) -> tuple[pd.DataFrame, pd.DataFrame, Dict[str, pd.DataFrame], str]:
-        """
-        Returns (prog_z, doro_z, msig_z_by_gmt, effective_scope_string)
-        """
+    def _effective_z_views_for_label(
+        clusters_for_label: List[str],
+    ) -> tuple[pd.DataFrame, pd.DataFrame, Dict[str, pd.DataFrame], str]:
         c = [str(x) for x in clusters_for_label]
         if zscope == "within_celltypist_label" and len(c) >= WITHIN_LABEL_MIN_CLUSTERS:
-            # z-score only within this label's clusters (stable enough)
             prog_z_loc = _zscore_cols(prog.loc[c])
             doro_z_loc = _zscore_cols(doro.loc[c])
             msig_z_loc = {g: _zscore_cols(msig_by_gmt[g].loc[c]) for g in msig_by_gmt.keys()}
             return prog_z_loc, doro_z_loc, msig_z_loc, "within_celltypist_label"
-        # fallback/global
+
         return (
             prog_z_global.loc[c],
             doro_z_global.loc[c],
@@ -334,10 +351,8 @@ def compact_clusters_by_multiview_agreement(
         if len(clusters) < 2:
             continue
 
-        # pick effective z-scoring for this label (honors config with guardrail)
         prog_z, doro_z, msig_z, effective_scope = _effective_z_views_for_label(clusters)
 
-        # 1) compute similarity distributions within ct_label
         prog_sims: List[float] = []
         doro_sims: List[float] = []
         msig_sims_by_gmt: Dict[str, List[float]] = {g: [] for g in msig_z.keys()}
@@ -360,7 +375,6 @@ def compact_clusters_by_multiview_agreement(
         thr_prog_ct = max(FLOOR_PROG, float(q_prog))
         thr_doro_ct = max(FLOOR_DORO, float(q_doro))
 
-        # caps (max strictness)
         if thr_progeny is not None:
             thr_prog_ct = min(float(thr_progeny), float(thr_prog_ct))
         if thr_dorothea is not None:
@@ -400,7 +414,6 @@ def compact_clusters_by_multiview_agreement(
 
         passed_edges: List[Tuple[str, str]] = []
 
-        # 2) evaluate all pairs in ct_label
         for i in range(len(clusters)):
             a = clusters[i]
             va_prog = prog_z.loc[a].to_numpy()
@@ -487,7 +500,6 @@ def compact_clusters_by_multiview_agreement(
                     row[f"thr_msigdb__{gmt}"] = float(thr_g)
                     row[f"pass_msigdb__{gmt}"] = bool(s >= thr_g)
 
-                # backward-ish compatibility: field name kept, semantics are "majority"
                 row["pass_msigdb_all_gmt"] = bool(pass_msigdb)
 
                 edge_rows.append(row)
@@ -572,7 +584,6 @@ def compact_clusters_by_multiview_agreement(
 
     cluster_renumbering = {k: k for k in reverse_map.keys()}
 
-    # Summary logging
     try:
         n_clusters_considered = sum(len(v) for v in label_to_clusters.values())
         n_labels = len(label_to_clusters)
@@ -584,7 +595,7 @@ def compact_clusters_by_multiview_agreement(
         LOGGER.info(
             "Compaction summary: considered=%d clusters across %d CellTypist groups; "
             "merge_groups=%d; clusters_in_merged_groups=%d; total_components=%d; "
-            "min_cells=%d; grouping=%s; zscore_scope(arg)=%s; zscore_scope_effective=per_label; "
+            "min_cells=%d; grouping=%s; zscore_scope(arg)=%s; "
             "msigdb_required=%s; skip_unknown_groups=%s; adaptive_q=%.2f; msigdb_topk=%d; msigdb_majority=%.2f",
             int(n_clusters_considered),
             int(n_labels),
@@ -612,6 +623,7 @@ def compact_clusters_by_multiview_agreement(
         adjacency=adjacency,
         decision_log=decision_log,
     )
+
 
 
 
@@ -708,6 +720,7 @@ def create_compacted_round_from_parent_round(
     compacting_payload = {
         "parent_round_id": str(parent_round_id),
         "within_celltypist_label_only": True,
+        "celltypist_gating_key": str(celltypist_obs_key),
         "similarity_metric": "cosine_zscore",
         "params": {
             "min_cells": int(min_cells),
