@@ -2315,16 +2315,9 @@ def plot_compaction_flow(
     """
     Visualize compaction as a 2-level flow graph (parent clusters -> compacted clusters).
 
-    Nodes:
-      - ("parent", parent_cluster_id)
-      - ("child",  child_cluster_id)
-
-    Edges:
-      - weighted by fraction of the parent cluster that maps to the child cluster
-        (usually 1.0 since compaction is a merge-only mapping)
-
-    This is intentionally similar to plot_cluster_tree(), but specialized for
-    compaction (two levels only).
+    Patch (Option A):
+      - node labels use round cluster_display_map when available,
+        so the flow chart matches UMAP/decoupler "pretty" cluster labels.
     """
     import numpy as np
     import pandas as pd
@@ -2341,8 +2334,11 @@ def plot_compaction_flow(
         LOGGER.warning("compaction_flow: rounds %r or %r not found.", parent_round_id, child_round_id)
         return
 
-    parent_obs_key = str(rounds[parent_round_id].get("labels_obs_key", ""))
-    child_obs_key = str(rounds[child_round_id].get("labels_obs_key", ""))
+    parent_round = rounds[parent_round_id]
+    child_round = rounds[child_round_id]
+
+    parent_obs_key = str(parent_round.get("labels_obs_key", ""))
+    child_obs_key = str(child_round.get("labels_obs_key", ""))
 
     if parent_obs_key not in adata.obs or child_obs_key not in adata.obs:
         LOGGER.warning(
@@ -2352,13 +2348,26 @@ def plot_compaction_flow(
         )
         return
 
-    # Color lookup by cluster id
+    # ------------------------------------------------------------------
+    # Display labels (pretty labels)
+    # ------------------------------------------------------------------
+    parent_dm = _round_display_map(parent_round)
+    child_dm = _round_display_map(child_round)
+
+    # robust color lookup by cluster id
     if palette is not None:
         palette = list(palette)
-        color_lookup = lambda cid: palette[int(cid) % len(palette)]
+
+        def color_lookup(cid: str):
+            idx = _safe_cluster_color_index(cid)
+            return palette[idx % len(palette)]
+
     else:
         cmap = plt.get_cmap("tab20")
-        color_lookup = lambda cid: cmap(int(cid) % cmap.N)
+
+        def color_lookup(cid: str):
+            idx = _safe_cluster_color_index(cid)
+            return cmap(idx % cmap.N)
 
     parent = adata.obs[parent_obs_key].astype(str).to_numpy()
     child = adata.obs[child_obs_key].astype(str).to_numpy()
@@ -2443,6 +2452,21 @@ def plot_compaction_flow(
         alpha = float(max(0.05, min(alpha, 1.0)))
         edge_alphas.append(alpha)
 
+    # ------------------------------------------------------------------
+    # Labels: Option A (pretty labels from display maps)
+    # ------------------------------------------------------------------
+    parent_labels = {str(p): parent_dm.get(str(p), str(p)) for p in parents_sorted}
+    child_labels = {str(c): child_dm.get(str(c), str(c)) for c in children_sorted}
+
+    parent_labels = _make_unique_labels(parent_labels)
+    child_labels = _make_unique_labels(child_labels)
+
+    def _label(node):
+        kind, cid = node
+        if kind == "parent":
+            return parent_labels.get(str(cid), str(cid))
+        return child_labels.get(str(cid), str(cid))
+
     # Plot
     fig_h = max(5.0, 0.35 * max(len(parents_sorted), len(children_sorted)))
     fig, ax = plt.subplots(figsize=(13, fig_h))
@@ -2476,15 +2500,10 @@ def plot_compaction_flow(
     except Exception:
         pass
 
-    # Labels: compact but readable
-    def _label(node):
-        kind, cid = node
-        return f"{cid}" if kind == "child" else f"{cid}"
-
-    # annotate only nodes (optional: could use pretty labels if you want)
+    # annotate only nodes
     for node, (x, y) in pos.items():
         ax.text(
-            x + (0.02 if node[0] == "parent" else 0.02),
+            x + 0.02,
             y,
             _label(node),
             fontsize=9,
@@ -2504,6 +2523,7 @@ def plot_compaction_flow(
     plt.tight_layout()
 
     save_multi(stem, figdir, fig)
+
 
 
 # ----------------------------------------------------------------------
@@ -3680,4 +3700,72 @@ def plot_decoupler_all_styles(
         stem=f"{stem_prefix}dotplot_top_",
         title_prefix=title_prefix,
     )
+
+
+def _round_display_map(round_snapshot: dict) -> dict[str, str]:
+    """
+    Best-effort fetch of cluster pretty labels for a round.
+
+    Expected primary location:
+      round_snapshot["cluster_display_map"] : {raw_cluster_id -> "Cxx: Label"}
+
+    Also checks a couple common nested locations used elsewhere.
+    """
+    if not isinstance(round_snapshot, dict):
+        return {}
+
+    # 1) canonical
+    dm = round_snapshot.get("cluster_display_map", None)
+    if isinstance(dm, dict) and dm:
+        return {str(k): str(v) for k, v in dm.items()}
+
+    # 2) sometimes stored under annotation payload
+    ann = round_snapshot.get("annotation", None)
+    if isinstance(ann, dict):
+        dm = ann.get("cluster_display_map", None)
+        if isinstance(dm, dict) and dm:
+            return {str(k): str(v) for k, v in dm.items()}
+
+    # 3) sometimes stored under decoupler payload
+    dec = round_snapshot.get("decoupler", None)
+    if isinstance(dec, dict):
+        dm = dec.get("cluster_display_map", None)
+        if isinstance(dm, dict) and dm:
+            return {str(k): str(v) for k, v in dm.items()}
+
+    return {}
+
+
+def _safe_cluster_color_index(cid: str) -> int:
+    """
+    Convert cluster id to a stable non-negative int for palette indexing.
+    Works for '0', '12', 'C03', 'UNKNOWN', etc.
+    """
+    s = str(cid)
+    m = re.search(r"\d+", s)
+    if m:
+        try:
+            return int(m.group(0))
+        except Exception:
+            pass
+    # stable-ish fallback
+    return abs(hash(s)) % 10_000_000
+
+
+def _make_unique_labels(labels: dict[str, str]) -> dict[str, str]:
+    """
+    If multiple raw ids map to the same display label, disambiguate by appending [raw].
+    """
+    # invert
+    rev: dict[str, list[str]] = {}
+    for raw, disp in labels.items():
+        rev.setdefault(str(disp), []).append(str(raw))
+
+    out = dict(labels)
+    for disp, raws in rev.items():
+        if len(raws) <= 1:
+            continue
+        for raw in raws:
+            out[raw] = f"{disp} [{raw}]"
+    return out
 
