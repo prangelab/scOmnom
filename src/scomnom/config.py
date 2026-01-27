@@ -679,6 +679,7 @@ class MarkersAndDEConfig(BaseModel):
 
     # gene selection for expression plots (dotplot/heatmap/umap/violin)
     plot_top_n_per_cluster: int = 10
+    plot_dotplot_top_n_genes: int = 15
     plot_max_genes_total: int = 80
 
     # scanpy expression plotting source

@@ -400,269 +400,150 @@ import pandas as pd
 
 
 def heatmap_top_genes(
-    adata,
-    *,
-    genes: Sequence[str] | None = None,
-    genes_by_cluster: Mapping[str, Sequence[str]] | None = None,
-    groupby: str,
-    use_raw: bool = False,
-    layer: Optional[str] = None,
-    cmap: str | None = None,
-    show_cluster_colorbar: bool = True,
-    scale_columns_by_size: bool = True,
-    min_col_width: float = 0.35,   # prevents tiny columns from disappearing when scaling
-    max_col_width: float = 3.0,    # prevents one giant cluster from dominating
-    figsize: Optional[tuple[float, float]] = None,
-    show_gene_labels: bool = True,
-    z_clip: float | None = 3.0,
-    show: bool = False,
+        adata,
+        *,
+        genes: Sequence[str] | None = None,
+        genes_by_cluster: Mapping[str, Sequence[str]] | None = None,
+        groupby: str,
+        use_raw: bool = False,
+        layer: Optional[str] = None,
+        cmap: str | None = None,
+        show_cluster_colorbar: bool = True,
+        scale_columns_by_size: bool = True,
+        min_col_width: float = 0.5,
+        max_col_width: float = 5.0,
+        figsize: Optional[tuple[float, float]] = None,
+        show_gene_labels: bool = True,
+        z_clip: float | None = 2.5,
+        show: bool = False,
 ):
-    """
-    Z-score heatmap (true z, not scanpy standard_scale).
-      - clusters are COLUMNS with labels on TOP
-      - genes are ROWS
-      - values are per-cluster mean expression, z-scored per gene across clusters
-
-    New features:
-      - Colorblind-friendlier diverging cmap with DARK 0 (Seurat-ish vibe)
-      - Optional: column widths scale with cluster size
-      - Optional: cluster color bar on top (uses adata.uns[f"{groupby}_colors"])
-    """
     import matplotlib.pyplot as plt
     import matplotlib.colors as mcolors
     import seaborn as sns
+    import numpy as np
+    import pandas as pd
 
     if groupby not in adata.obs:
         raise KeyError(f"groupby={groupby!r} not found in adata.obs")
 
-    sns.set_style("white")
+    # -----------------------------
+    # 1. Seurat-like Color Palette (Purple-Black-Yellow)
+    # -----------------------------
+    if cmap is None:
+        # Seurat's 'DoHeatmap' default is often Purple (#FF00FF or similar) to Black to Yellow
+        # This version is a slightly more polished "Magma-esque" diverging set
+        cmap = mcolors.LinearSegmentedColormap.from_list(
+            "seurat_style",
+            ["#440154", "#000000", "#fde725"],  # Deep Purple -> Black -> Bright Yellow
+            N=256,
+        )
 
-    # -----------------------------
-    # Resolve gene list
-    # -----------------------------
+    # --- Resolve gene list ---
     if genes_by_cluster is not None:
+        # Get order from cluster sizes (largest to smallest)
         vc0 = adata.obs[groupby].astype(str).value_counts()
         cluster_order0 = vc0.index.astype(str).tolist()
         flat, seen = [], set()
         for cl in cluster_order0:
             for g in (genes_by_cluster.get(str(cl), []) or []):
-                g = str(g)
                 if g and g not in seen:
                     flat.append(g)
                     seen.add(g)
         genes = flat
 
     genes = [str(g) for g in (genes or []) if g and str(g) != ""]
-    if not genes:
-        fig, ax = plt.subplots(figsize=(7.5, 2.5))
-        ax.text(0.5, 0.5, "No genes to plot", ha="center", va="center")
-        ax.set_axis_off()
-        if show:
-            plt.show()
-        return fig
 
-    # -----------------------------
-    # Group order + sizes
-    # -----------------------------
+    # --- Data Extraction & Z-scoring ---
     vc = adata.obs[groupby].astype(str).value_counts()
     groups = vc.index.astype(str).tolist()
-    sizes = vc.reindex(groups).astype(float).to_numpy()
 
-    # -----------------------------
-    # Extract expression matrix for genes
-    # -----------------------------
     sub = adata[:, genes]
-    if layer is not None:
-        X = sub.layers[layer]
-    elif use_raw and sub.raw is not None:
-        X = sub.raw.X
-    else:
-        X = sub.X
-
-    try:
-        X = X.toarray()
-    except Exception:
-        X = np.asarray(X)
+    X = sub.layers[layer] if layer else (sub.raw.X if use_raw and sub.raw else sub.X)
+    X = X.toarray() if hasattr(X, "toarray") else np.asarray(X)
 
     df_x = pd.DataFrame(X, columns=genes)
     df_x[groupby] = adata.obs[groupby].astype(str).values
+    mean = df_x.groupby(groupby, observed=True)[genes].mean().reindex(groups)
 
-    # per-group mean expression (groups x genes)
-    mean = df_x.groupby(groupby, observed=True)[genes].mean()
-    mean = mean.reindex([g for g in groups if g in mean.index])  # enforce order
-    groups = mean.index.astype(str).tolist()  # in case any got dropped
-    sizes = vc.reindex(groups).astype(float).to_numpy()
-
-    # -----------------------------
-    # Z-score per gene across groups
-    # -----------------------------
-    M = mean.to_numpy(dtype=float)  # shape: (n_groups, n_genes)
-    mu = np.nanmean(M, axis=0, keepdims=True)
-    sd = np.nanstd(M, axis=0, keepdims=True)
+    M = mean.to_numpy(dtype=float)
+    mu, sd = np.nanmean(M, axis=0), np.nanstd(M, axis=0)
     sd[sd == 0] = 1.0
-    Z = (M - mu) / sd  # (groups x genes)
-
-    if z_clip is not None:
-        Z = np.clip(Z, -float(z_clip), float(z_clip))
-
-    # heatmap matrix: genes x groups
+    Z = (M - mu) / sd
+    if z_clip: Z = np.clip(Z, -z_clip, z_clip)
     plot_mat = Z.T
-    gene_labels = list(mean.columns.astype(str))
 
-    # -----------------------------
-    # Colormap: diverging with DARK center (0)
-    # -----------------------------
-    # If user passed cmap, respect it; else use a custom diverging map:
-    # deep blue -> dark gray (0) -> yellow/orange (colorblind-friendly-ish)
-    if cmap is None:
-        cmap = mcolors.LinearSegmentedColormap.from_list(
-            "scomnom_dark0_div",
-            ["#2b6cb0", "#1f1f1f", "#f6c026"],  # neg, zero, pos
-            N=256,
-        )
-
-    # -----------------------------
-    # Column widths (optional)
-    # -----------------------------
-    n_groups = len(groups)
-    if scale_columns_by_size and n_groups > 0:
-        w = sizes / max(1.0, float(np.nanmean(sizes)))
-        w = np.clip(w, float(min_col_width), float(max_col_width))
+    # --- 2. Dynamic Column Widths ---
+    sizes = vc.reindex(groups).values
+    if scale_columns_by_size:
+        # Normalize widths relative to the mean cluster size
+        w = sizes / np.mean(sizes)
+        w = np.clip(w, min_col_width, max_col_width)
     else:
-        w = np.ones(n_groups, dtype=float)
+        w = np.ones(len(groups))
 
     x_edges = np.concatenate([[0.0], np.cumsum(w)])
     x_centers = (x_edges[:-1] + x_edges[1:]) / 2.0
+    y_edges = np.arange(plot_mat.shape[0] + 1)
 
-    y_edges = np.arange(plot_mat.shape[0] + 1, dtype=float)  # genes
-    y_centers = (y_edges[:-1] + y_edges[1:]) / 2.0
-
-    # -----------------------------
-    # Cluster color bar (optional)
-    # -----------------------------
+    # --- Cluster Colors (Keep your mandatory normalization) ---
+    colors = None
     if show_cluster_colorbar:
-        # normalize scanpy group colors into list[str]
         try:
             _normalize_scanpy_groupby_colors(adata, str(groupby))
-        except Exception:
+            colors = adata.uns.get(f"{groupby}_colors")
+            if isinstance(colors, dict) and "data" in colors: colors = colors["data"]
+            colors = list(np.asarray(colors).astype(str))
+        except:
             pass
 
-        colors = adata.uns.get(f"{groupby}_colors", None)
-        if isinstance(colors, dict) and "data" in colors:
-            colors = colors["data"]
-        try:
-            colors = list(np.asarray(colors).astype(str)) if colors is not None else None
-        except Exception:
-            colors = None
-
-        if not colors or len(colors) != len(groups):
-            # if mismatch, disable bar (scanpy can regenerate later)
-            colors = None
-    else:
-        colors = None
-
-    # -----------------------------
-    # Figure sizing
-    # -----------------------------
+    # --- 3. Figure & GridSpec (Thinner Colorbar) ---
     if figsize is None:
-        # width scales with total x span, height with #genes
-        W = max(10.0, 0.40 * float(x_edges[-1]) + 5.0)
-        H = max(6.0, 0.18 * plot_mat.shape[0] + 2.5)
-        figsize = (min(32.0, W), min(18.0, H))
+        W = max(8.0, 0.3 * x_edges[-1] + 3.0)
+        H = max(5.0, 0.2 * plot_mat.shape[0] + 2.0)
+        figsize = (W, H)
 
-    # -----------------------------
-    # Plot with GridSpec: optional top color bar + heatmap + cbar
-    # -----------------------------
     fig = plt.figure(figsize=figsize)
-
-    if colors is not None:
-        gs = fig.add_gridspec(
-            nrows=2, ncols=2,
-            height_ratios=[0.18, 1.0],
-            width_ratios=[1.0, 0.06],
-            hspace=0.02, wspace=0.15,
-        )
-        ax_top = fig.add_subplot(gs[0, 0])
-        ax = fig.add_subplot(gs[1, 0], sharex=ax_top)
-        cax = fig.add_subplot(gs[1, 1])
-    else:
-        gs = fig.add_gridspec(
-            nrows=1, ncols=2,
-            width_ratios=[1.0, 0.06],
-            wspace=0.15,
-        )
-        ax = fig.add_subplot(gs[0, 0])
-        cax = fig.add_subplot(gs[0, 1])
-        ax_top = None
-
-    # --- heatmap (pcolormesh supports variable column widths)
-    mesh = ax.pcolormesh(
-        x_edges,
-        y_edges,
-        plot_mat,
-        cmap=cmap,
-        shading="flat",
-        vmin=(-float(z_clip) if z_clip is not None else None),
-        vmax=(float(z_clip) if z_clip is not None else None),
+    # The 'width_ratios' [1.0, 0.02] makes the colorbar axis extremely narrow
+    gs = fig.add_gridspec(
+        nrows=2 if colors is not None else 1,
+        ncols=2,
+        height_ratios=[0.03, 1.0] if colors is not None else [1.0],
+        width_ratios=[1.0, 0.02],
+        hspace=0.01, wspace=0.05
     )
 
-    # colorbar
+    ax = fig.add_subplot(gs[-1, 0])
+    cax = fig.add_subplot(gs[-1, 1])
+
+    # Heatmap
+    mesh = ax.pcolormesh(x_edges, y_edges, plot_mat, cmap=cmap, shading="flat")
+
+    # Colorbar styling
     cb = fig.colorbar(mesh, cax=cax)
-    cb.set_label("z-score")
+    cb.outline.set_visible(False)
+    cax.tick_params(labelsize=9, length=0)
+    cax.set_ylabel("Z-score", fontsize=9)
 
-    # axes cosmetics
-    ax.set_ylabel("genes")
-    ax.set_xlabel(groupby)
-
-    # cluster labels on top
-    ax.xaxis.set_ticks_position("top")
-    ax.xaxis.set_label_position("top")
-    ax.set_xticks(x_centers)
-    ax.set_xticklabels(groups, rotation=45, ha="left")
-
-    # gene labels
-    ax.set_yticks(y_centers)
-    if show_gene_labels:
-        ax.set_yticklabels(gene_labels)
-    else:
-        ax.set_yticklabels([])
-        ax.tick_params(axis="y", length=0)
-
-    # invert y so first gene is at top (Seurat-like)
+    # Axes Cosmetics
     ax.invert_yaxis()
+    ax.set_yticks(np.arange(len(genes)) + 0.5)
+    ax.set_yticklabels(genes if show_gene_labels else [], fontsize=10)
+    ax.set_xticks(x_centers)
+    ax.set_xticklabels(groups, rotation=90, fontsize=11)
+    ax.tick_params(axis='both', which='both', length=0)
+    sns.despine(left=True, bottom=True)
 
-    # remove spines/grid
-    ax.grid(False)
-    for sp in ["top", "right", "left", "bottom"]:
-        ax.spines[sp].set_visible(False)
-
-    # --- top cluster color bar
-    if ax_top is not None:
-        # Build a 1xN "image" row as RGB values, then pcolormesh with same x_edges
-        rgb = np.array([mcolors.to_rgb(c) for c in colors], dtype=float)  # (N,3)
-        # make it shape (1, N, 3) then pcolormesh expects (M, N) scalar;
-        # easiest: draw rectangles
-        ax_top.set_xlim(x_edges[0], x_edges[-1])
-        ax_top.set_ylim(0, 1)
+    # --- Top Cluster Bar ---
+    if colors is not None:
+        ax_top = fig.add_subplot(gs[0, 0], sharex=ax)
         for i in range(len(groups)):
-            ax_top.add_patch(
-                plt.Rectangle(
-                    (x_edges[i], 0),
-                    x_edges[i + 1] - x_edges[i],
-                    1,
-                    color=rgb[i],
-                    linewidth=0,
-                )
-            )
+            ax_top.add_patch(plt.Rectangle((x_edges[i], 0), w[i], 1, color=colors[i], lw=0))
+        ax_top.set_xlim(0, x_edges[-1])
+        ax_top.set_ylim(0, 1)
         ax_top.axis("off")
 
-    fig.tight_layout()
-
-    if show:
-        plt.show()
-
+    if show: plt.show()
     return fig
-
 
 
 def violin_grid_genes(
@@ -930,6 +811,7 @@ def plot_marker_genes_pseudobulk(
     lfc_thresh: float = 1.0,
     top_label_n: int = 15,
     top_n_genes: int = 9,
+    dotplot_top_n_genes: int | None = None,
     use_raw: bool = False,
     layer: str | None = None,
     umap_ncols: int = 3,
@@ -942,6 +824,7 @@ def plot_marker_genes_pseudobulk(
     from . import plot_utils
 
     _normalize_scanpy_groupby_colors(adata, str(groupby))
+    dot_n = int(dotplot_top_n_genes) if dotplot_top_n_genes is not None else int(top_n_genes)
 
     figroot = Path("marker_genes") / "pseudobulk"
     d_volcano = figroot / "volcano"
@@ -977,12 +860,21 @@ def plot_marker_genes_pseudobulk(
             top_n=int(top_n_genes),
             require_sig=True,
         )
+        topg_dot = _select_top_genes(
+            df_v,
+            gene_col="gene",
+            padj_col="padj",
+            lfc_col="log2FoldChange",
+            padj_thresh=float(alpha),
+            top_n=int(dot_n),
+            require_sig=True,
+        )
         genes_by_cluster[str(cl)] = topg
 
-        if topg:
+        if topg_dot:
             fig = dotplot_top_genes(
                 adata,
-                genes=topg,
+                genes=topg_dot,
                 groupby=str(groupby),
                 use_raw=bool(use_raw),
                 layer=layer,
@@ -991,6 +883,7 @@ def plot_marker_genes_pseudobulk(
             )
             plot_utils.save_multi(stem=f"dotplot__{cl}", figdir=d_dot, fig=fig)
 
+        if topg:
             fig = violin_grid_genes(
                 adata,
                 genes=topg,
@@ -1037,6 +930,7 @@ def plot_marker_genes_ranksum(
     lfc_thresh: float = 1.0,
     top_label_n: int = 15,
     top_n_genes: int = 9,
+    dotplot_top_n_genes: int | None = None,
     use_raw: bool = False,
     layer: str | None = None,
     umap_ncols: int = 3,
@@ -1056,6 +950,7 @@ def plot_marker_genes_ranksum(
     from scanpy.get import rank_genes_groups_df
 
     _normalize_scanpy_groupby_colors(adata, str(groupby))
+    dot_n = int(dotplot_top_n_genes) if dotplot_top_n_genes is not None else int(top_n_genes)
 
     figroot = Path("marker_genes") / "ranksum"
     d_volcano = figroot / "volcano"
@@ -1183,10 +1078,20 @@ def plot_marker_genes_ranksum(
         )
         genes_by_cluster[str(cl)] = topg
 
-        if topg:
+        topg_dot = _select_top_genes(
+            df_v,
+            gene_col="gene",
+            padj_col="padj",
+            lfc_col="log2FoldChange",
+            padj_thresh=float(alpha),
+            top_n=int(dot_n),
+            require_sig=True,
+        )
+
+        if topg_dot:
             fig = dotplot_top_genes(
                 adata,
-                genes=topg,
+                genes=topg_dot,
                 groupby=str(groupby),
                 use_raw=bool(use_raw),
                 layer=layer,
@@ -1195,6 +1100,7 @@ def plot_marker_genes_ranksum(
             )
             plot_utils.save_multi(stem=f"dotplot__{cl}", figdir=d_dot, fig=fig)
 
+        if topg:
             fig = violin_grid_genes(
                 adata,
                 genes=topg,

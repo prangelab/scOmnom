@@ -1365,7 +1365,12 @@ def markers_and_de(
     plot_top_n_per_cluster: int = typer.Option(
         10,
         "--plot-top-n-per-cluster",
-        help="[Plots] Top genes per cluster for dot/heatmap/violin/umap expression plots.",
+        help="[Plots] Top genes per cluster for heatmap/violin/umap expression plots.",
+    ),
+    plot_dotplot_top_n_genes: int = typer.Option(
+        15,
+        "--plot-dotplot-top-n-per-cluster",
+        help="[Plots] Top genes per cluster for dotplots.",
     ),
     plot_max_genes_total: int = typer.Option(
         80,
@@ -1442,6 +1447,7 @@ def markers_and_de(
         contrast_pb_min_abs_log2fc=contrast_pb_min_abs_log2fc,
         plot_lfc_thresh=plot_lfc_thresh,
         plot_volcano_top_label_n=plot_volcano_top_label_n,
+        plot_dotplot_top_n_genes=plot_dotplot_top_n_genes,
         plot_top_n_per_cluster=plot_top_n_per_cluster,
         plot_max_genes_total=plot_max_genes_total,
         plot_use_raw=plot_use_raw,

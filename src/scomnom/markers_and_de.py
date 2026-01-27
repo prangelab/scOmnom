@@ -371,6 +371,7 @@ def run_markers_and_de(cfg) -> ad.AnnData:
         lfc_thresh = float(getattr(cfg, "plot_lfc_thresh", 1.0))
         top_label_n = int(getattr(cfg, "plot_volcano_top_label_n", 15))
         top_n_genes = int(getattr(cfg, "plot_top_n_genes", 9))
+        dotplot_top_n_genes = int(getattr(cfg, "plot_dotplot_top_n_genes", 15))
         use_raw = bool(getattr(cfg, "plot_use_raw", False))
         layer = getattr(cfg, "plot_layer", None)
         ncols = int(getattr(cfg, "plot_umap_ncols", 3))
@@ -384,6 +385,7 @@ def run_markers_and_de(cfg) -> ad.AnnData:
             lfc_thresh=lfc_thresh,
             top_label_n=top_label_n,
             top_n_genes=top_n_genes,
+            dotplot_top_n_genes=dotplot_top_n_genes,
             use_raw=use_raw,
             layer=layer,
             umap_ncols=ncols,
@@ -399,6 +401,7 @@ def run_markers_and_de(cfg) -> ad.AnnData:
                 lfc_thresh=lfc_thresh,
                 top_label_n=top_label_n,
                 top_n_genes=top_n_genes,
+                dotplot_top_n_genes=dotplot_top_n_genes,
                 use_raw=use_raw,
                 layer=layer,
                 umap_ncols=ncols,
@@ -413,7 +416,7 @@ def run_markers_and_de(cfg) -> ad.AnnData:
                     alpha=alpha,
                     lfc_thresh=lfc_thresh,
                     top_label_n=top_label_n,
-                    dotplot_top_n=9,
+                    dotplot_top_n=15,
                     violin_top_n=9,
                     heatmap_top_n=25,
                     use_raw=use_raw,
