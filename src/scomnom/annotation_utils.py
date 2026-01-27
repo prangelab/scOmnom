@@ -189,6 +189,125 @@ def _store_cluster_pseudobulk(
         expr_mat.shape[1],
     )
 
+def clone_decoupler_from_parent_round(
+    adata: ad.AnnData,
+    *,
+    parent_round_id: str,
+    child_round_id: str,
+    publish_to_top_level_if_active: bool = True,
+) -> None:
+    _ensure_cluster_rounds(adata)
+    rounds = adata.uns.get("cluster_rounds", {})
+    if parent_round_id not in rounds or child_round_id not in rounds:
+        raise KeyError("clone_decoupler: parent/child round not found")
+
+    parent = rounds[parent_round_id]
+    child = rounds[child_round_id]
+
+    # need parent decoupler payloads
+    pdec = parent.get("decoupler", {})
+    if not isinstance(pdec, dict) or not pdec:
+        raise KeyError("clone_decoupler: parent round has no decoupler dict")
+
+    # mapping old->new from child's compacting reverse_map
+    comp = child.get("compacting", {}) if isinstance(child.get("compacting", {}), dict) else {}
+    rev = comp.get("reverse_map", None)
+    if not isinstance(rev, dict) or not rev:
+        raise KeyError("clone_decoupler: child round missing compacting.reverse_map")
+
+    old_to_new = {}
+    for new_id, olds in rev.items():
+        if not isinstance(olds, (list, tuple)) or len(olds) != 1:
+            # this clone helper is meant for no-merge compaction only
+            continue
+        old_to_new[str(olds[0])] = str(new_id)
+
+    if not old_to_new:
+        raise ValueError("clone_decoupler: could not construct old->new mapping")
+
+    labels_obs_key = child.get("labels_obs_key", None)
+    if not labels_obs_key or str(labels_obs_key) not in adata.obs:
+        raise KeyError("clone_decoupler: child labels_obs_key missing/not in obs")
+    labels_obs_key = str(labels_obs_key)
+
+    # 1) build child pseudobulk store (cheap; keeps round self-contained)
+    pb_key = f"pseudobulk__{child_round_id}"
+    _store_cluster_pseudobulk(
+        adata,
+        cluster_key=labels_obs_key,
+        agg=getattr(adata.uns.get("cluster_rounds", {}).get(parent_round_id, {}).get("decoupler", {}), "decoupler_pseudobulk_agg", "mean"),
+        use_raw_like=True,
+        prefer_layers=("counts_raw", "counts_cb"),
+        store_key=pb_key,
+    )
+
+    child.setdefault("decoupler", {})
+    child["decoupler"]["pseudobulk_store_key"] = pb_key
+
+    # 2) clone each resource activity and reindex clusters
+    def _reindex_activity(df: pd.DataFrame) -> pd.DataFrame:
+        x = df.copy()
+        x.index = x.index.astype(str).map(lambda c: old_to_new.get(str(c), str(c)))
+        return x
+
+    for res in ("msigdb", "progeny", "dorothea"):
+        payload = pdec.get(res, None)
+        if not isinstance(payload, dict) or "activity" not in payload:
+            continue
+
+        new_payload = dict(payload)
+        act = payload["activity"]
+        if isinstance(act, pd.DataFrame):
+            new_payload["activity"] = _reindex_activity(act)
+
+        # msigdb extras
+        if res == "msigdb":
+            abg = payload.get("activity_by_gmt", None)
+            if isinstance(abg, dict):
+                new_abg = {}
+                for gmt, df in abg.items():
+                    if isinstance(df, pd.DataFrame):
+                        new_abg[str(gmt)] = _reindex_activity(df)
+                new_payload["activity_by_gmt"] = new_abg
+
+        # patch config round_id
+        cfg0 = new_payload.get("config", {})
+        if isinstance(cfg0, dict):
+            cfg1 = dict(cfg0)
+            cfg1["round_id"] = str(child_round_id)
+            cfg1["cloned_from_round_id"] = str(parent_round_id)
+            new_payload["config"] = cfg1
+
+        _round_put_decoupler(adata, round_id=child_round_id, resource=res, payload=new_payload)
+
+    # 3) rebuild display metadata for child
+    display_map = _round_cluster_display_map(
+        adata,
+        round_id=child_round_id,
+        labels_obs_key=labels_obs_key,
+        cluster_label_key=CLUSTER_LABEL_KEY,
+    )
+    child["decoupler"]["cluster_display_map"] = dict(display_map)
+
+    # cluster order: prefer round["cluster_order"]
+    clusters = child.get("cluster_order", None)
+    if isinstance(clusters, (list, tuple)) and clusters:
+        clusters = [str(x) for x in clusters]
+    else:
+        pb_store = adata.uns.get(pb_key, None)
+        clusters = [str(x) for x in np.asarray(pb_store.get("clusters", []), dtype=object).tolist()] if isinstance(pb_store, dict) else []
+
+    child["decoupler"]["cluster_display_labels"] = [display_map.get(c, c) for c in clusters] if clusters else None
+    child["decoupler"]["cluster_order"] = clusters if clusters else None
+
+    rounds[child_round_id] = child
+    adata.uns["cluster_rounds"] = rounds
+
+    # 4) publish if active
+    active = adata.uns.get("active_cluster_round", None)
+    if publish_to_top_level_if_active and active is not None and str(active) == str(child_round_id):
+        _publish_decoupler_from_round_to_top_level(adata, round_id=child_round_id)
+
 
 # -------------------------------------------------------------------------
 # MSigDB utilities (activity_by_gmt)

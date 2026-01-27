@@ -539,11 +539,7 @@ def compact_clusters_by_multiview_agreement(
 
     # Any cluster not covered yet becomes its own singleton (this includes UNKNOWN clusters we excluded above)
     covered = set(c for comp in all_components for c in comp)
-    missing = [
-        c
-        for c in all_clusters
-        if (min_cells == 0 or int(cluster_sizes.get(c, 0)) >= int(min_cells)) and c not in covered
-    ]
+    missing = [c for c in all_clusters if c not in covered]
     for c in missing:
         all_components.append([c])
 
@@ -647,6 +643,8 @@ def create_compacted_round_from_parent_round(
         msigdb_required=msigdb_required,
     )
 
+    did_merge = any(len(members) > 1 for members in outputs.reverse_map.values())
+
     if labels_obs_key_new is None:
         labels_obs_key_new = f"{parent_cluster_key}__{new_round_id}"
     if labels_obs_key_new in adata.obs:
@@ -684,6 +682,7 @@ def create_compacted_round_from_parent_round(
         },
         "components": None,
         "decision_log": outputs.decision_log,
+        "did_merge": bool(did_merge),
         "reverse_map": outputs.reverse_map,
     }
 

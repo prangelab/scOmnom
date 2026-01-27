@@ -466,11 +466,30 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                 except Exception as e:
                     LOGGER.warning("Compaction: failed to rebuild CellTypist labels for '%s': %s", new_round_id, e)
 
-                # decoupler for compacted round
+                # decoupler for compacted round (skip expensive run if no merges)
                 try:
+                    comp = adata.uns["cluster_rounds"][new_round_id].get("compacting", {})
+                    did_merge = bool(comp.get("did_merge", True))  # default True => safe behavior
+                except Exception:
+                    did_merge = True
+
+                if not did_merge:
+                    LOGGER.info("Compaction[%s]: no clusters merged; cloning decoupler results from %s.", new_round_id,
+                                parent_round_id)
+                    try:
+                        from .annotation_utils import clone_decoupler_from_parent_round
+                        clone_decoupler_from_parent_round(
+                            adata,
+                            parent_round_id=parent_round_id,
+                            child_round_id=new_round_id,
+                            publish_to_top_level_if_active=True,
+                        )
+                    except Exception as e:
+                        LOGGER.warning("Compaction[%s]: clone decoupler failed; falling back to full run: %s",
+                                       new_round_id, e)
+                        run_decoupler_for_round(adata, cfg, round_id=new_round_id)
+                else:
                     run_decoupler_for_round(adata, cfg, round_id=new_round_id)
-                except Exception as e:
-                    LOGGER.warning("Compaction: decoupler failed for compacted round '%s': %s", new_round_id, e)
 
                 # quick sanity log: did we publish resources?
                 try:
