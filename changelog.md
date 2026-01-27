@@ -28,3 +28,6 @@ Fixed bug preventing color values to be read from adata.
 
 ## 0.1.6 [23-1-2026]
 Fixed bug causing violin labels to be drawn horizontal.
+
+## 0.1.7 [27-1-2026]
+Fixed bug were cluster-and-annotate was using raw counts instead of cellbender counts.
