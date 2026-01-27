@@ -893,8 +893,6 @@ def umap_features_grid(
     show: bool = False,
 ) -> Figure:
 
-    _normalize_scanpy_groupby_colors(adata, str(groupby))
-
     genes = [str(g) for g in genes if g is not None and str(g) != ""]
     if not genes:
         fig, ax = plt.subplots(figsize=(7.5, 2.5))
