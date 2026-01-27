@@ -976,6 +976,10 @@ def _run_integrations(
             LOGGER.info("Training scVI backbone on HVGs for integration")
 
             layer = _get_scvi_layer(adata_hvg)
+            if layer is None:
+                raise RuntimeError(
+                    "No counts layer found (counts_cb or counts_raw). Refusing to run scVI/scANVI on adata.X.")
+
             scvi_model = _train_scvi(
                 adata_hvg,
                 batch_key=batch_key,

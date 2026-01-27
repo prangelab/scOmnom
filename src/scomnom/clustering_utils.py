@@ -308,7 +308,7 @@ def _precompute_celltypist(
         picked_layer: Optional[str] = None
         X_src = None
 
-        for layer in ("counts_raw", "counts_cb"):
+        for layer in ("counts_cb", "counts_raw"):
             if layer in adata.layers:
                 picked_layer = layer
                 X_src = adata.layers[layer]
@@ -484,7 +484,7 @@ def _run_celltypist_annotation(
             LOGGER.info("Running CellTypist on scratch AnnData (fallback; non-mutating).")
             picked_layer: Optional[str] = None
             X_src = None
-            for layer in ("counts_raw", "counts_cb"):
+            for layer in ("counts_cb", "counts_raw"):
                 if layer in adata.layers:
                     picked_layer = layer
                     X_src = adata.layers[layer]

@@ -563,7 +563,12 @@ def run_solo_with_scvi(
 
     LOGGER.info("Running SOLO doublet detection (global)")
 
-    layer = "counts_raw" if "counts_raw" in adata.layers else None
+    layer = None
+    if "counts_cb" in adata.layers:
+        layer = "counts_cb"
+    elif "counts_raw" in adata.layers:
+        layer = "counts_raw"
+
     scvi_model = _train_scvi(
         adata,
         batch_key=batch_key,

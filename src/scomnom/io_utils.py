@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import anndata as ad
 import scanpy as sc
 import pandas as pd
+import numpy as np
 from pathlib import Path
 import shutil
 import os
