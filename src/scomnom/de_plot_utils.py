@@ -542,6 +542,8 @@ def violin_grid_genes(
     import matplotlib.pyplot as plt
     import numpy as np
     import scanpy as sc
+    from matplotlib.axes import Axes
+    from matplotlib.figure import Figure
 
     genes = [str(g) for g in genes if g is not None and str(g) != ""]
     genes = _unique_keep_order(genes)
@@ -563,6 +565,7 @@ def violin_grid_genes(
 
     fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=figsize, squeeze=False)
 
+    # ---- plot one gene per axis
     for i, g in enumerate(genes):
         r, c = divmod(i, ncols)
         ax = axes[r][c]
@@ -579,43 +582,47 @@ def violin_grid_genes(
             ax=ax,
         )
 
-        # Scanpy sets titles/labels inconsistently across versions; normalize a bit
+        # normalize titles
         try:
             ax.set_title(str(g))
         except Exception:
             pass
 
-    # turn off unused axes
+    # ---- turn off unused axes
     for j in range(n, nrows * ncols):
         r, c = divmod(j, ncols)
         axes[r][c].axis("off")
 
-    # Hide cluster/category labels except on bottom row
+    # ---- Hide cluster/category labels except on bottom row
     for r in range(nrows):
         for c in range(ncols):
             ax = axes[r][c]
-            if not ax.get_visible():
+            if not isinstance(ax, Axes) or not ax.get_visible():
                 continue
+
             if r != nrows - 1:
                 ax.tick_params(axis="x", labelbottom=False)
                 ax.set_xlabel("")
             else:
-                # bottom row: keep labels, but make them readable
                 ax.tick_params(axis="x", labelbottom=True)
                 for lab in ax.get_xticklabels():
                     lab.set_rotation(rotation)
                     lab.set_ha("right" if float(rotation) != 0 else "center")
 
-    for a in axes:
-        if a is None:
+    # ---- clean all axes (IMPORTANT: flatten the grid)
+    for ax in np.ravel(axes):
+        if not isinstance(ax, Axes) or not ax.get_visible():
             continue
-        for gl in a.get_ygridlines():
-            gl.set_visible(False)
-        a.grid(False)
-        a.yaxis.grid(False)
-        a.xaxis.grid(False)
-        a.spines["top"].set_visible(False)
-        a.spines["right"].set_visible(False)
+        try:
+            for gl in ax.get_ygridlines():
+                gl.set_visible(False)
+        except Exception:
+            pass
+        ax.grid(False)
+        ax.yaxis.grid(False)
+        ax.xaxis.grid(False)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
 
     fig.tight_layout()
     if show:
