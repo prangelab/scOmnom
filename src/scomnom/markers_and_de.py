@@ -117,27 +117,36 @@ def run_markers_and_de(cfg) -> ad.AnnData:
     # ------------------------------------------------------------------
     # DE: cluster vs rest (pseudobulk) [guarded]
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # DE: cluster vs rest (pseudobulk) [guarded]
+    # ------------------------------------------------------------------
     marker_genes_all_clusters = {}
-    # Hard policy: counts_cb first, else counts_raw, else None (.X if allowed)
-    if "counts_cb" in adata.layers:
-        counts_layer = "counts_cb"
-    elif "counts_raw" in adata.layers:
-        counts_layer = "counts_raw"
-    else:
-        counts_layer = None
 
-    LOGGER.info(
-        "Pseudobulk counts layer selection: preferred counts_cb→counts_raw→X. "
-        "counts_layer_used=%r, available_layers=%s, allow_X_counts=%r",
-        counts_layer,
-        list(adata.layers.keys()),
-        bool(getattr(cfg, "allow_X_counts", True)),
-    )
+    # Define these regardless of whether pseudobulk runs, so provenance never NameErrors.
+    counts_layer = None
+    layer_candidates = list(getattr(cfg, "counts_layers", ["counts_cb", "counts_raw"]))
 
-    if counts_layer is None and not bool(getattr(cfg, "allow_X_counts", True)):
-        raise RuntimeError(
-            "markers_and_de: neither counts_cb nor counts_raw found in adata.layers, and allow_X_counts=False"
+    if run_pseudobulk:
+        # Hard policy: counts_cb first, else counts_raw, else None (.X if allowed)
+        if "counts_cb" in adata.layers:
+            counts_layer = "counts_cb"
+        elif "counts_raw" in adata.layers:
+            counts_layer = "counts_raw"
+        else:
+            counts_layer = None
+
+        LOGGER.info(
+            "Pseudobulk counts layer selection: preferred counts_cb→counts_raw→X. "
+            "counts_layer_used=%r, available_layers=%s, allow_X_counts=%r",
+            counts_layer,
+            list(adata.layers.keys()),
+            bool(getattr(cfg, "allow_X_counts", True)),
         )
+
+        if counts_layer is None and not bool(getattr(cfg, "allow_X_counts", True)):
+            raise RuntimeError(
+                "markers_and_de: neither counts_cb nor counts_raw found in adata.layers, and allow_X_counts=False"
+            )
 
         pb_spec = PseudobulkSpec(
             sample_key=str(sample_key),
