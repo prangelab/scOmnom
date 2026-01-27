@@ -532,7 +532,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                         LOGGER.warning("Compaction: failed to plot compacted-round UMAPs: %s", e)
 
                     # --- decoupler plots for the compacted round ---
-                    if getattr(cfg, "run_decoupler", False):
+                    if getattr(cfg, "run_decoupler", False) and did_merge:
                         try:
                             figdir_round = Path("cluster_and_annotate") / new_round_id
 
