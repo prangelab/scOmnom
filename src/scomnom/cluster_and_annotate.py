@@ -442,9 +442,6 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                         getattr(cfg, "compact_grouping", "connected_components")
                         or "connected_components"
                     ),
-                    skip_unknown_celltypist_groups=bool(
-                        getattr(cfg, "compact_skip_unknown_celltypist_groups", False)
-                    ),
                     thr_progeny=float(getattr(cfg, "thr_progeny", 0.98) or 0.98),
                     thr_dorothea=float(getattr(cfg, "thr_dorothea", 0.98) or 0.98),
                     thr_msigdb_default=float(getattr(cfg, "thr_msigdb_default", 0.98) or 0.98),
