@@ -543,7 +543,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                                     net_name=f"MSigDB",
                                     figdir=figdir_round,
                                     heatmap_top_k=30,
-                                    bar_top_n=10,
+                                    bar_top_n=25,
                                     dotplot_top_k=30,
                                 )
 
@@ -553,9 +553,9 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                                     net_key="progeny",
                                     net_name=f"PROGENy",
                                     figdir=figdir_round,
-                                    heatmap_top_k=14,
-                                    bar_top_n=8,
-                                    dotplot_top_k=14,
+                                    heatmap_top_k=30,
+                                    bar_top_n=25,
+                                    dotplot_top_k=30,
                                 )
 
                             if "dorothea" in adata.uns:
@@ -564,9 +564,9 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                                     net_key="dorothea",
                                     net_name=f"DoRothEA",
                                     figdir=figdir_round,
-                                    heatmap_top_k=40,
-                                    bar_top_n=10,
-                                    dotplot_top_k=35,
+                                    heatmap_top_k=30,
+                                    bar_top_n=25,
+                                    dotplot_top_k=30,
                                 )
 
                         except Exception as e:
