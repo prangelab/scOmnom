@@ -131,12 +131,13 @@ def compact_clusters_by_multiview_agreement(
     thr_msigdb_default: float = 0.98,
     thr_msigdb_by_gmt: Optional[Dict[str, float]] = None,
     msigdb_required: bool = True,
-    skip_unknown_celltypist_groups: bool = False,
 ) -> CompactionOutputs:
     """
     Compaction decision engine.
 
-    IMPORTANT: compaction must be confined within CellTypist label groups.
+    HARD GUARANTEE:
+      - Compaction is confined within CellTypist label groups.
+      - Clusters assigned to UNKNOWN/Unknown are NEVER compacted (always singletons).
     """
     import numpy as np
     import pandas as pd
@@ -202,16 +203,16 @@ def compact_clusters_by_multiview_agreement(
         s = str(x).strip()
         if s == "" or s.lower() in {"nan", "none", "null", "na"}:
             return "UNKNOWN"
+        # treat any "unknown" spelling/casing as UNKNOWN
+        if s.strip().lower() == "unknown":
+            return "UNKNOWN"
         return s
 
     ann = round_snapshot.get("annotation", {})
     ann = ann if isinstance(ann, dict) else {}
     ct_cluster_key = ann.get("celltypist_cluster_key", None)
 
-    # If there is a cluster-level CT column, it should be CONSTANT within each cluster.
-    # But in practice this may contain NaNs or mixed values. So:
-    #   - normalize unknowns
-    #   - take MAJORITY vote (not iloc[0])
+    # If there is a cluster-level CT column, take MAJORITY vote (robust to NaNs/mixed)
     if isinstance(ct_cluster_key, str) and ct_cluster_key in adata.obs:
         tmp = pd.DataFrame(
             {
@@ -254,19 +255,24 @@ def compact_clusters_by_multiview_agreement(
         lab = _normalize_ct_label(majority_ct.get(cl, "UNKNOWN"))
         label_to_clusters.setdefault(lab, []).append(cl)
 
-    # Optionally skip unknown-like groups (including "nan"/""/"None")
-    if skip_unknown_celltypist_groups:
-        for k in list(label_to_clusters.keys()):
-            if _normalize_ct_label(k) == "UNKNOWN":
-                label_to_clusters.pop(k, None)
+    # ------------------------------------------------------------------
+    # HARD POLICY: UNKNOWN clusters are NEVER compacted (always singleton).
+    # Remove UNKNOWN group from compaction graph construction.
+    # Those clusters will be re-added as singleton components via "missing".
+    # ------------------------------------------------------------------
+    if "UNKNOWN" in label_to_clusters:
+        n_unknown = len(label_to_clusters.get("UNKNOWN", []))
+        LOGGER.info(
+            "Compaction: excluding %d UNKNOWN clusters from compaction (policy: never compact Unknown).",
+            int(n_unknown),
+        )
+        label_to_clusters.pop("UNKNOWN", None)
 
-    # HARD sanity checks / debug logging
-    # 1) each cluster appears in exactly one CT group
+    # HARD sanity check: each cluster appears at most once in label_to_clusters
     all_seen = [c for xs in label_to_clusters.values() for c in xs]
     if len(all_seen) != len(set(all_seen)):
         raise RuntimeError("Compaction bug: a cluster appears in multiple CellTypist label groups")
 
-    # 2) log largest groups (catches the 'everything became nan' failure mode)
     counts = {k: len(v) for k, v in label_to_clusters.items()}
     top = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:10]
     LOGGER.info("Compaction: label_to_clusters top groups (label, n_clusters): %s", top)
@@ -395,18 +401,6 @@ def compact_clusters_by_multiview_agreement(
             "adaptive_quantile": float(ADAPT_Q),
             "msigdb_topk": int(TOPK_MSIGDB),
             "msigdb_majority_frac": float(MSIGDB_MAJORITY_FRAC),
-            "floors": {
-                "floor_prog": float(FLOOR_PROG),
-                "floor_doro": float(FLOOR_DORO),
-                "floor_msig_default": float(FLOOR_MSIG_DEFAULT),
-                "floor_msig_by_gmt": {k: float(v) for k, v in MSIGDB_FLOOR_BY_GMT.items()},
-            },
-            "caps": {
-                "cap_prog": None if thr_progeny is None else float(thr_progeny),
-                "cap_doro": None if thr_dorothea is None else float(thr_dorothea),
-                "cap_msig_default": None if thr_msigdb_default is None else float(thr_msigdb_default),
-                "cap_msig_by_gmt": {str(g): float(v) for g, v in (thr_msigdb_by_gmt or {}).items()},
-            },
             "zscore_scope_arg": str(zscore_scope),
             "zscore_scope_effective": str(effective_scope),
             "within_label_min_clusters_for_zscore": int(WITHIN_LABEL_MIN_CLUSTERS),
@@ -427,9 +421,9 @@ def compact_clusters_by_multiview_agreement(
                 pass_prog = bool(sim_prog >= float(thr_prog_ct))
                 pass_doro = bool(sim_doro >= float(thr_doro_ct))
 
-                msig_sims: Dict[str, float] = {}
                 msig_pass_flags: Dict[str, bool] = {}
                 msig_fail_gmts: List[str] = []
+                msig_sims: Dict[str, float] = {}
 
                 for gmt, dfz in msig_z.items():
                     s = _cosine_topk_union(dfz.loc[a].to_numpy(), dfz.loc[b].to_numpy(), k=TOPK_MSIGDB)
@@ -501,27 +495,10 @@ def compact_clusters_by_multiview_agreement(
                     row[f"pass_msigdb__{gmt}"] = bool(s >= thr_g)
 
                 row["pass_msigdb_all_gmt"] = bool(pass_msigdb)
-
                 edge_rows.append(row)
 
         pass_edges_by_label[ct_label] = passed_edges
         adjacency[ct_label] = passed_edges
-
-        try:
-            LOGGER.info(
-                "Compaction[%s] adaptive thresholds: thr_prog=%.3f thr_doro=%.3f msig_gmts=%d "
-                "(q=%.2f, topk=%d, msig_majority=%.2f, z=%s)",
-                str(ct_label),
-                float(thr_prog_ct),
-                float(thr_doro_ct),
-                int(len(thr_msig_ct)),
-                float(ADAPT_Q),
-                int(TOPK_MSIGDB),
-                float(MSIGDB_MAJORITY_FRAC),
-                str(effective_scope),
-            )
-        except Exception:
-            pass
 
     edges_df = pd.DataFrame(edge_rows)
 
@@ -560,6 +537,7 @@ def compact_clusters_by_multiview_agreement(
             )
         all_components.extend([list(c) for c in comps])
 
+    # Any cluster not covered yet becomes its own singleton (this includes UNKNOWN clusters we excluded above)
     covered = set(c for comp in all_components for c in comp)
     missing = [
         c
@@ -584,36 +562,6 @@ def compact_clusters_by_multiview_agreement(
 
     cluster_renumbering = {k: k for k in reverse_map.keys()}
 
-    try:
-        n_clusters_considered = sum(len(v) for v in label_to_clusters.values())
-        n_labels = len(label_to_clusters)
-
-        merged_components = [c for c in reverse_map.values() if isinstance(c, list) and len(c) > 1]
-        n_merge_groups = len(merged_components)
-        n_merged_clusters = sum(len(c) for c in merged_components)
-
-        LOGGER.info(
-            "Compaction summary: considered=%d clusters across %d CellTypist groups; "
-            "merge_groups=%d; clusters_in_merged_groups=%d; total_components=%d; "
-            "min_cells=%d; grouping=%s; zscore_scope(arg)=%s; "
-            "msigdb_required=%s; skip_unknown_groups=%s; adaptive_q=%.2f; msigdb_topk=%d; msigdb_majority=%.2f",
-            int(n_clusters_considered),
-            int(n_labels),
-            int(n_merge_groups),
-            int(n_merged_clusters),
-            int(len(reverse_map)),
-            int(min_cells),
-            str(grouping),
-            str(zscore_scope),
-            bool(msigdb_required),
-            bool(skip_unknown_celltypist_groups),
-            float(ADAPT_Q),
-            int(TOPK_MSIGDB),
-            float(MSIGDB_MAJORITY_FRAC),
-        )
-    except Exception as e:
-        LOGGER.warning("Compaction summary logging failed: %s", e)
-
     return CompactionOutputs(
         components=[list(m) for m in reverse_map.values()],
         cluster_id_map=cluster_id_map,
@@ -623,7 +571,6 @@ def compact_clusters_by_multiview_agreement(
         adjacency=adjacency,
         decision_log=decision_log,
     )
-
 
 
 
@@ -655,7 +602,6 @@ def create_compacted_round_from_parent_round(
     min_cells: int = 0,
     zscore_scope: str = "within_celltypist_label",
     grouping: str = "connected_components",
-    skip_unknown_celltypist_groups: bool = False,
     thr_progeny: float = 0.98,
     thr_dorothea: float = 0.98,
     thr_msigdb_default: float = 0.98,
@@ -665,10 +611,8 @@ def create_compacted_round_from_parent_round(
     """
     Creates a new COMPACTED round derived from a parent round.
 
-    Requires parent round to have decoupler outputs (and MSigDB activity_by_gmt if msigdb_required=True).
-    Writes:
-      - adata.obs[labels_obs_key_new] with new compacted cluster ids
-      - adata.uns["cluster_rounds"][new_round_id] registered with mapping + compacting payload
+    HARD GUARANTEE:
+      - UNKNOWN clusters are never compacted (forced).
     """
     _ensure_cluster_rounds(adata)
 
@@ -688,6 +632,7 @@ def create_compacted_round_from_parent_round(
     if msigdb_required:
         ensure_round_msigdb_activity_by_gmt(parent)
 
+    # Force policy: Unknown clusters are never compacted.
     outputs = compact_clusters_by_multiview_agreement(
         adata=adata,
         round_snapshot=parent,
@@ -700,10 +645,8 @@ def create_compacted_round_from_parent_round(
         thr_msigdb_default=thr_msigdb_default,
         thr_msigdb_by_gmt=thr_msigdb_by_gmt,
         msigdb_required=msigdb_required,
-        skip_unknown_celltypist_groups=skip_unknown_celltypist_groups,
     )
 
-    # New obs key storing compacted cluster ids for this round
     if labels_obs_key_new is None:
         labels_obs_key_new = f"{parent_cluster_key}__{new_round_id}"
     if labels_obs_key_new in adata.obs:
@@ -721,12 +664,12 @@ def create_compacted_round_from_parent_round(
         "parent_round_id": str(parent_round_id),
         "within_celltypist_label_only": True,
         "celltypist_gating_key": str(celltypist_obs_key),
+        "unknown_policy": "never_compact_unknown",  # NEW explicit audit field
         "similarity_metric": "cosine_zscore",
         "params": {
             "min_cells": int(min_cells),
             "zscore_scope": str(zscore_scope),
             "grouping": str(grouping),
-            "skip_unknown_celltypist_groups": bool(skip_unknown_celltypist_groups),
             "msigdb_required": bool(msigdb_required),
         },
         "thresholds": {
@@ -744,13 +687,10 @@ def create_compacted_round_from_parent_round(
         "reverse_map": outputs.reverse_map,
     }
 
-    # Register new round (schema-complete)
     cfg_snapshot = None
     try:
-        # keep consistent with your existing pattern
         if hasattr(cfg, "__dataclass_fields__"):
             from dataclasses import asdict
-
             cfg_snapshot = asdict(cfg)
     except Exception:
         cfg_snapshot = None

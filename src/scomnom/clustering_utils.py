@@ -475,19 +475,55 @@ def _run_celltypist_annotation(
                     adata.uns["celltypist_proba_columns"] = list(pm.columns.astype(str))
             celltypist_ok = True
 
-        else:
-            # Fallback path (kept for safety)
-            LOGGER.info("Running CellTypist on main AnnData for annotation (fallback).")
-            sc.pp.normalize_total(adata, target_sum=1e4)
-            sc.pp.log1p(adata)
 
+        else:
+
+            # Fallback path (kept for safety) — IMPORTANT:
+            # Do NOT mutate `adata` (normalize_total/log1p are in-place).
+            # Build a minimal scratch AnnData that copies ONLY the expression matrix.
+            LOGGER.info("Running CellTypist on scratch AnnData (fallback; non-mutating).")
+            picked_layer: Optional[str] = None
+            X_src = None
+            for layer in ("counts_raw", "counts_cb"):
+                if layer in adata.layers:
+                    picked_layer = layer
+                    X_src = adata.layers[layer]
+                    break
+
+            if X_src is None:
+                # Last resort: use adata.X, but must copy to avoid mutating original
+                X_src = adata.X
+                LOGGER.warning(
+                    "CellTypist fallback input: no counts-like layers found ('counts_raw'/'counts_cb'). "
+                    "Using adata.X, but copying matrix to avoid in-place mutation."
+                )
+            else:
+                LOGGER.info("CellTypist fallback input: using counts-like layer adata.layers[%r].", picked_layer)
+            # Copy ONLY the matrix (sparse-preserving). This is the minimal safe copy.
+            try:
+                X_ct = X_src.copy()
+            except Exception:
+                # extremely defensive fallback; should be rare
+                import numpy as _np
+                X_ct = _np.array(X_src, copy=True)
+            # Build minimal AnnData: avoids copying obsm/uns/etc; just what CellTypist needs
+            adata_ct = ad.AnnData(
+                X=X_ct,
+                obs=adata.obs.copy(),
+                var=adata.var.copy(),
+            )
+            adata_ct.obs_names = adata.obs_names.copy()
+            adata_ct.var_names = adata.var_names.copy()
+
+            # Apply standard preproc on scratch object only
+            sc.pp.normalize_total(adata_ct, target_sum=1e4)
+            sc.pp.log1p(adata_ct)
             model_path = get_celltypist_model(cfg.celltypist_model)
             from celltypist.models import Model
             import celltypist
-
             model = Model.load(str(model_path))
             predictions = celltypist.annotate(
-                adata,
+                adata_ct,
                 model=model,
                 majority_voting=cfg.celltypist_majority_voting,
             )
@@ -495,17 +531,21 @@ def _run_celltypist_annotation(
             raw = predictions.predicted_labels
             if isinstance(raw, dict) and "majority_voting" in raw:
                 cell_level_labels = raw["majority_voting"]
+
             else:
                 cell_level_labels = raw
 
-            # write cell-level labels
+            # write cell-level labels (to real adata)
             if isinstance(cell_level_labels, (pd.Series, pd.DataFrame)):
                 s = cell_level_labels.squeeze()
                 adata.obs[cell_key] = s.astype(str).astype("category")
-            else:
-                adata.obs[cell_key] = pd.Series(np.asarray(cell_level_labels).ravel(), index=adata.obs_names).astype(str).astype("category")
 
-            # probability matrix if available
+            else:
+                adata.obs[cell_key] = pd.Series(
+                    np.asarray(cell_level_labels).ravel(), index=adata.obs_names
+                ).astype(str).astype("category")
+
+            # probability matrix if available (to real adata)
             if hasattr(predictions, "probability_matrix"):
                 pm = predictions.probability_matrix
                 if isinstance(pm, pd.DataFrame) and not pm.empty:

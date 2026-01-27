@@ -432,11 +432,6 @@ class ClusterAnnotateConfig(BaseModel):
         description="How to form compaction groups from pairwise-pass edges.",
     )
 
-    compact_skip_unknown_celltypist_groups: bool = Field(
-        False,
-        description="If True, do not compact clusters whose round-scoped CellTypist cluster label is Unknown/UNKNOWN.",
-    )
-
     # Thresholds used by compaction decision engine
     thr_progeny: float = Field(
         0.98,

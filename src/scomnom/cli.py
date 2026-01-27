@@ -885,11 +885,6 @@ def cluster_and_annotate(
         "--compact-grouping",
         help="[Compaction] How to form compaction groups from pass edges.",
     ),
-    compact_skip_unknown_celltypist_groups: bool = typer.Option(
-        False,
-        "--compact-skip-unknown/--no-compact-skip-unknown",
-        help="[Compaction] Skip compaction for Unknown/UNKNOWN CellTypist cluster-label groups.",
-    ),
     thr_progeny: float = typer.Option(
         0.98,
         "--thr-progeny",
@@ -1051,7 +1046,6 @@ def cluster_and_annotate(
         compact_min_cells=compact_min_cells,
         compact_zscore_scope=compact_zscore_scope,
         compact_grouping=compact_grouping,
-        compact_skip_unknown_celltypist_groups=compact_skip_unknown_celltypist_groups,
         thr_progeny=thr_progeny,
         thr_dorothea=thr_dorothea,
         thr_msigdb_default=thr_msigdb_default,
