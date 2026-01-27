@@ -63,7 +63,7 @@ def _store_cluster_pseudobulk(
     cluster_key: str,
     agg: str = "mean",
     use_raw_like: bool = True,
-    prefer_layers: tuple[str, ...] = ("counts_raw", "counts_cb"),
+    prefer_layers: tuple[str, ...] = ("counts_cb", "counts_raw"),
     store_key: str = "pseudobulk",
 ) -> None:
     """
@@ -110,10 +110,6 @@ def _store_cluster_pseudobulk(
 
         if picked is not None:
             LOGGER.info("Pseudobulk using adata.layers[%r].", picked)
-        elif adata.raw is not None:
-            LOGGER.info("Pseudobulk using adata.raw.X.")
-            X = adata.raw.X
-            genes = adata.raw.var_names
         else:
             LOGGER.info("Pseudobulk requested raw-like but none found; using adata.X.")
 
@@ -927,7 +923,7 @@ def run_decoupler_for_round(
         cluster_key=labels_obs_key,
         agg=getattr(cfg, "decoupler_pseudobulk_agg", "mean"),
         use_raw_like=bool(getattr(cfg, "decoupler_use_raw", True)),
-        prefer_layers=("counts_raw", "counts_cb"),
+        prefer_layers=("counts_cb", "counts_raw"),
         store_key=pb_key,
     )
 
