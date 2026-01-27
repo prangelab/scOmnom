@@ -47,6 +47,7 @@ class CellLevelMarkerSpec:
     random_state: int = 0
     min_pct: float = 0.0
     min_diff_pct: float = 0.0
+    positive_only: bool = True
 
 @dataclass(frozen=True)
 class PseudobulkDEOptions:
@@ -58,6 +59,7 @@ class PseudobulkDEOptions:
     min_total_counts: int = 10
     min_pct: float = 0.0
     min_diff_pct: float = 0.0
+    positive_only: bool = True
 
 
 # -----------------------------------------------------------------------------
@@ -536,6 +538,11 @@ def de_cluster_vs_rest_pseudobulk(
                 shrink_lfc=opts.shrink_lfc,
                 n_cpus=n_cpus,
             )
+
+            # ---- POSITIVE ONLY gate
+            if opts.positive_only and not res.empty and "log2FoldChange" in res.columns:
+                res = res.loc[res["log2FoldChange"] > 0].copy()
+
             results[str(cl)] = res
 
             n_sig = int((pd.to_numeric(res["padj"], errors="coerce") < opts.alpha).sum()) if not res.empty else 0
@@ -742,13 +749,11 @@ def compute_markers_celllevel(
     Cell-level discovery markers using scanpy.tl.rank_genes_groups.
 
     Adds Seurat-like prevalence filtering using scanpy pts/pts_rest:
-      - min_pct: gene detected in >= min_pct of cells in group OR rest
-      - min_diff_pct: abs(pts - pts_rest) >= min_diff_pct
+      - min_pct
+      - min_diff_pct
 
-    Stores:
-      - adata.uns[key_added] = raw scanpy output (+ scomnom_meta)
-      - adata.uns[key_added]["filtered_by_group"][group] = filtered DataFrame (optional)
-      - adata.uns[key_added]["filtered"] = concatenated filtered DataFrame with 'group' column (optional)
+    Additionally:
+      - if spec.positive_only=True (default), keeps only logFC > 0
     """
     import scanpy as sc
     from scanpy.get import rank_genes_groups_df
@@ -756,14 +761,12 @@ def compute_markers_celllevel(
     group_key = resolve_group_key(adata, groupby=groupby, round_id=round_id, prefer_pretty=True)
     labels = adata.obs[group_key].astype(str).to_numpy()
 
-    # Downsample if needed
+    # ---- downsample
     n = int(adata.n_obs)
     max_per = int(spec.max_cells_per_group)
     do_down = max_per > 0 and (n > max_per * max(2, int(pd.unique(labels).size)))
     if do_down:
         idx = _stratified_downsample_indices(labels, max_per_label=max_per, random_state=spec.random_state)
-        if idx.size == 0:
-            raise RuntimeError("Downsampling produced 0 cells (unexpected).")
         adata_run = adata[idx].copy()
         LOGGER.info(
             "Cell-level markers: downsampled %d → %d cells (max_per_group=%d, n_groups=%d).",
@@ -772,7 +775,7 @@ def compute_markers_celllevel(
     else:
         adata_run = adata
 
-    # Run scanpy markers with prevalence fractions
+    # ---- run scanpy
     sc.tl.rank_genes_groups(
         adata_run,
         groupby=group_key,
@@ -782,60 +785,74 @@ def compute_markers_celllevel(
         key_added=key_added,
         n_genes=int(spec.n_genes),
         rankby_abs=bool(spec.rankby_abs),
-        pts=True,  # <-- critical for Seurat-like filtering
+        pts=True,
     )
 
-    if store:
-        # Store raw result back onto original adata
-        adata.uns[key_added] = dict(adata_run.uns[key_added])
+    if not store:
+        return key_added
 
-        # provenance
-        adata.uns[key_added]["scomnom_meta"] = {
-            "group_key": str(group_key),
-            "method": str(spec.method),
-            "n_genes": int(spec.n_genes),
-            "use_raw": bool(spec.use_raw),
-            "layer": spec.layer,
-            "rankby_abs": bool(spec.rankby_abs),
-            "max_cells_per_group": int(spec.max_cells_per_group),
-            "random_state": int(spec.random_state),
-            "downsampled": bool(do_down),
-            "n_cells_used": int(adata_run.n_obs),
-            "n_cells_total": int(adata.n_obs),
-            "min_pct": float(getattr(spec, "min_pct", 0.0)),
-            "min_diff_pct": float(getattr(spec, "min_diff_pct", 0.0)),
-        }
+    # ---- store raw output
+    adata.uns[key_added] = dict(adata_run.uns[key_added])
 
-        # Optional filtering into friendly tables (does not mutate scanpy arrays)
-        min_pct = float(getattr(spec, "min_pct", 0.0))
-        min_diff_pct = float(getattr(spec, "min_diff_pct", 0.0))
+    adata.uns[key_added]["scomnom_meta"] = {
+        "group_key": str(group_key),
+        "method": str(spec.method),
+        "n_genes": int(spec.n_genes),
+        "use_raw": bool(spec.use_raw),
+        "layer": spec.layer,
+        "rankby_abs": bool(spec.rankby_abs),
+        "max_cells_per_group": int(spec.max_cells_per_group),
+        "random_state": int(spec.random_state),
+        "downsampled": bool(do_down),
+        "n_cells_used": int(adata_run.n_obs),
+        "n_cells_total": int(adata.n_obs),
+        "min_pct": float(spec.min_pct),
+        "min_diff_pct": float(spec.min_diff_pct),
+        "positive_only": bool(spec.positive_only),
+    }
 
-        if min_pct > 0.0 or min_diff_pct > 0.0:
-            groups = list(adata_run.uns[key_added]["names"].dtype.names)  # scanpy stores per-group recarrays
-            filtered_by_group: dict[str, pd.DataFrame] = {}
-            all_rows = []
+    # ---- filtering
+    min_pct = float(spec.min_pct)
+    min_diff_pct = float(spec.min_diff_pct)
 
-            for g in groups:
-                df = rank_genes_groups_df(adata_run, group=g, key=key_added)
-                # normalize prevalence cols then filter
-                df = _coerce_pts_columns(df)
-                df = df.rename(
-                    columns={
-                        "names": "gene",
-                        "logfoldchanges": "logfoldchanges",
-                        "pvals_adj": "pvals_adj",
-                        "pvals": "pvals",
-                        "scores": "scores",
-                    }
-                )
-                # apply gate
-                df_f = _apply_min_pct_filters_celllevel(df, min_pct=min_pct, min_diff_pct=min_diff_pct)
-                df_f.insert(0, "group", str(g))
-                filtered_by_group[str(g)] = df_f
-                all_rows.append(df_f)
+    if min_pct > 0.0 or min_diff_pct > 0.0 or spec.positive_only:
+        groups = list(adata_run.uns[key_added]["names"].dtype.names)
+        filtered_by_group: dict[str, pd.DataFrame] = {}
+        all_rows = []
 
-            adata.uns[key_added]["filtered_by_group"] = filtered_by_group
-            adata.uns[key_added]["filtered"] = pd.concat(all_rows, axis=0, ignore_index=True) if all_rows else pd.DataFrame()
+        for g in groups:
+            df = rank_genes_groups_df(adata_run, group=g, key=key_added)
+            df = _coerce_pts_columns(df)
+
+            df = df.rename(
+                columns={
+                    "names": "gene",
+                    "logfoldchanges": "logfoldchanges",
+                    "pvals_adj": "pvals_adj",
+                    "pvals": "pvals",
+                    "scores": "scores",
+                }
+            )
+
+            # Seurat-like prevalence gates
+            df_f = _apply_min_pct_filters_celllevel(
+                df,
+                min_pct=min_pct,
+                min_diff_pct=min_diff_pct,
+            )
+
+            # ---- POSITIVE ONLY gate (NEW)
+            if spec.positive_only and "logfoldchanges" in df_f.columns:
+                df_f = df_f.loc[df_f["logfoldchanges"] > 0].copy()
+
+            df_f.insert(0, "group", str(g))
+            filtered_by_group[str(g)] = df_f
+            all_rows.append(df_f)
+
+        adata.uns[key_added]["filtered_by_group"] = filtered_by_group
+        adata.uns[key_added]["filtered"] = (
+            pd.concat(all_rows, axis=0, ignore_index=True) if all_rows else pd.DataFrame()
+        )
 
     return key_added
 

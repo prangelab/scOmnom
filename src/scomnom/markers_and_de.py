@@ -83,6 +83,7 @@ def run_markers_and_de(cfg) -> ad.AnnData:
         random_state=int(getattr(cfg, "random_state", 42)),
         min_pct=float(getattr(cfg, "min_pct", 0.25)),
         min_diff_pct=float(getattr(cfg, "min_diff_pct", 0.25)),
+        positive_only=bool(getattr(cfg, "positive_only", True)),
     )
 
     markers_key = str(getattr(cfg, "markers_key", "cluster_markers_wilcoxon"))
@@ -142,6 +143,7 @@ def run_markers_and_de(cfg) -> ad.AnnData:
             shrink_lfc=bool(getattr(cfg, "shrink_lfc", True)),
             min_pct=float(getattr(cfg, "min_pct", 0.25)),
             min_diff_pct=float(getattr(cfg, "min_diff_pct", 0.25)),
+            positive_only=bool(getattr(cfg, "positive_only", True)),
         )
 
         LOGGER.info(
@@ -230,6 +232,7 @@ def run_markers_and_de(cfg) -> ad.AnnData:
             "pseudobulk_enabled": bool(run_pseudobulk),
             "pseudobulk_guard_min_total_samples": int(_MIN_TOTAL_SAMPLES_FOR_PSEUDOBULK),
             "pseudobulk_n_unique_samples": int(n_samples_total),
+            "positive_only_markers": bool(positive_only),
         }
     )
 
