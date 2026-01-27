@@ -543,7 +543,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                                     net_name=f"MSigDB",
                                     figdir=figdir_round,
                                     heatmap_top_k=30,
-                                    bar_top_n=25,
+                                    bar_top_n=20,
                                     dotplot_top_k=30,
                                 )
 
@@ -554,7 +554,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                                     net_name=f"PROGENy",
                                     figdir=figdir_round,
                                     heatmap_top_k=30,
-                                    bar_top_n=25,
+                                    bar_top_n=20,
                                     dotplot_top_k=30,
                                 )
 
@@ -565,7 +565,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                                     net_name=f"DoRothEA",
                                     figdir=figdir_round,
                                     heatmap_top_k=30,
-                                    bar_top_n=25,
+                                    bar_top_n=20,
                                     dotplot_top_k=30,
                                 )
 
