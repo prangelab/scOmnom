@@ -407,11 +407,9 @@ def heatmap_top_genes(
     groupby: str,
     use_raw: bool = False,
     layer: Optional[str] = None,
-    # ---- NEW: nicer, colorblind-friendlier diverging map with DARK center (0)
     cmap: str | None = None,
-    # ---- NEW: Seurat-like cosmetics
     show_cluster_colorbar: bool = True,
-    scale_columns_by_size: bool = False,
+    scale_columns_by_size: bool = True,
     min_col_width: float = 0.35,   # prevents tiny columns from disappearing when scaling
     max_col_width: float = 3.0,    # prevents one giant cluster from dominating
     figsize: Optional[tuple[float, float]] = None,
