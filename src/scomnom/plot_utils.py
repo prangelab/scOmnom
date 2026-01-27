@@ -3170,53 +3170,41 @@ def plot_decoupler_cluster_topn_barplots(
         if top.empty:
             continue
 
-        # Get values for plotting
         vals = s.loc[top.index] if use_abs else top
-
-        # Sort so highest enrichment is at the TOP of the plot
         vals_plot = vals.sort_values(ascending=True)
-
-        # Clean MSigDB/Network labels
         clean_labels = [_clean_feature_label(l, net_name) for l in vals_plot.index]
 
         # Dynamic layout adjustments
         left = _dynamic_left_margin_from_labels(clean_labels, base=0.25)
         fig_w = _dynamic_fig_width_for_barplot(clean_labels, min_w=12.0, max_w=28.0)
-        fig_h = max(3.5, 0.75 * len(vals_plot) + 1.5)
+
+        # Height logic: reduce the multiplier slightly for high N to prevent extreme heights
+        fig_h = max(4.0, 0.45 * len(vals_plot) + 1.5)
 
         fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-        # Add space for the top header text
-        fig.subplots_adjust(left=left, right=0.96, top=0.80, bottom=0.15)
 
-        # Progeny specific color logic: Green (+) and Red (-)
+        top_margin = 1.0 - (0.8 / fig_h)  # Reserves ~0.8 inches for titles
+        fig.subplots_adjust(left=left, right=0.96, top=top_margin, bottom=0.15)
+
         if net_name.lower() == "progeny":
             bar_colors = ["#d62728" if v < 0 else "#2ca02c" for v in vals_plot.values]
         else:
-            bar_colors = "#3b84a8"  # Default blue
+            bar_colors = "#3b84a8"
 
         y = np.arange(len(vals_plot))
-        ax.barh(
-            y=y,
-            width=vals_plot.values,
-            color=bar_colors,
-            edgecolor="#1f2d3a",
-            linewidth=0.8,
-            zorder=3,
-        )
+        ax.barh(y=y, width=vals_plot.values, color=bar_colors, edgecolor="#1f2d3a", linewidth=0.8, zorder=3)
 
         ax.set_yticks(y)
         ax.set_yticklabels(clean_labels, fontsize=12)
         ax.set_xlabel("Activity Score", fontsize=12, labelpad=10)
 
-        # Remove chart junk
         ax.grid(False)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
 
-        # Main Title and Subtitle
         main_title = f"{title_prefix} • {cl}" if title_prefix else cl
-        ax.text(0.5, 1.12, main_title, transform=ax.transAxes, ha="center", weight="bold", fontsize=22)
-        ax.text(0.5, 1.05, str(net_name).upper(), transform=ax.transAxes, ha="center", color="#666666", fontsize=14)
+        ax.text(0.5, 1.08, main_title, transform=ax.transAxes, ha="center", weight="bold", fontsize=22)
+        ax.text(0.5, 1.02, str(net_name).upper(), transform=ax.transAxes, ha="center", color="#666666", fontsize=14)
 
         stem = f"{stem_prefix}_{cl}__top{int(n)}_bar"
         save_multi(stem, outdir, fig)

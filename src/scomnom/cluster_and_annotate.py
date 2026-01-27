@@ -381,7 +381,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                     net_name=f"MSigDB",
                     figdir=figdir_round,
                     heatmap_top_k=30,
-                    bar_top_n=20,
+                    bar_top_n=15,
                     dotplot_top_k=25,
                 )
             if "progeny" in adata.uns:
@@ -391,7 +391,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                     net_name=f"PROGENy",
                     figdir=figdir_round,
                     heatmap_top_k=30,
-                    bar_top_n=20,
+                    bar_top_n=15,
                     dotplot_top_k=25,
                 )
             if "dorothea" in adata.uns:
@@ -401,7 +401,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                     net_name=f"DoRothEA",
                     figdir=figdir_round,
                     heatmap_top_k=30,
-                    bar_top_n=20,
+                    bar_top_n=15,
                     dotplot_top_k=25,
                 )
 
@@ -543,7 +543,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                                     net_name=f"MSigDB",
                                     figdir=figdir_round,
                                     heatmap_top_k=30,
-                                    bar_top_n=20,
+                                    bar_top_n=15,
                                     dotplot_top_k=25,
                                 )
 
@@ -554,7 +554,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                                     net_name=f"PROGENy",
                                     figdir=figdir_round,
                                     heatmap_top_k=30,
-                                    bar_top_n=20,
+                                    bar_top_n=15,
                                     dotplot_top_k=25,
                                 )
 
@@ -565,7 +565,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                                     net_name=f"DoRothEA",
                                     figdir=figdir_round,
                                     heatmap_top_k=30,
-                                    bar_top_n=20,
+                                    bar_top_n=15,
                                     dotplot_top_k=25,
                                 )
 
