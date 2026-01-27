@@ -891,6 +891,12 @@ def plot_marker_genes_ranksum(
     """
     Cell-level rank_genes_groups plots.
     Saves under: marker_genes/ranksum/{volcano,dotplot,violin,umap,heatmap}/
+
+    IMPORTANT BEHAVIOR:
+      - If adata.uns[markers_key]["filtered_by_group"] exists (scomnom posthoc filtering),
+        plotting uses that as the canonical marker table per cluster.
+      - Otherwise falls back to scanpy.get.rank_genes_groups_df.
+      - Never hard-returns just because Scanpy's structured 'names' array is missing.
     """
     from pathlib import Path
     from . import plot_utils
@@ -907,33 +913,96 @@ def plot_marker_genes_ranksum(
     if not isinstance(block, dict) or not block:
         return
 
-    groups = None
-    try:
-        if "names" in block and hasattr(block["names"], "dtype") and block["names"].dtype.names:
-            groups = list(block["names"].dtype.names)
-    except Exception:
-        groups = None
+    # ----------------------------
+    # Resolve groups robustly
+    # ----------------------------
+    filtered_by_group = None
+    if "filtered_by_group" in block and isinstance(block["filtered_by_group"], dict) and block["filtered_by_group"]:
+        filtered_by_group = block["filtered_by_group"]
+        groups = [str(k) for k in filtered_by_group.keys()]
+    else:
+        # fallback: derive from obs[groupby] (robust even if scanpy payload is odd)
+        if groupby in adata.obs:
+            groups = pd.Index(pd.unique(adata.obs[groupby].astype(str))).sort_values().tolist()
+        else:
+            # final fallback: try scanpy structured names array
+            groups = None
+            try:
+                nm = block.get("names", None)
+                if nm is not None and hasattr(nm, "dtype") and getattr(nm.dtype, "names", None):
+                    groups = list(nm.dtype.names)
+            except Exception:
+                groups = None
+            groups = groups or []
+
     if not groups:
         return
+
+    def _normalize_df_for_volcano(df_in: pd.DataFrame) -> pd.DataFrame:
+        """
+        Accept either:
+          - scanpy rank_genes_groups_df output (names/logfoldchanges/pvals_adj/...)
+          - scomnom filtered_by_group tables (gene/logfoldchanges/pvals_adj/...)
+          - already-normalized (gene/log2FoldChange/padj)
+
+        Returns df with columns: gene, log2FoldChange, padj, plus whatever else.
+        """
+        if df_in is None or getattr(df_in, "empty", True):
+            return pd.DataFrame(columns=["gene", "log2FoldChange", "padj", "pval", "score"])
+
+        d = df_in.copy()
+
+        # gene
+        if "gene" not in d.columns:
+            if "names" in d.columns:
+                d = d.rename(columns={"names": "gene"})
+            else:
+                # try index
+                d = d.reset_index().rename(columns={"index": "gene"})
+
+        # lfc
+        if "log2FoldChange" not in d.columns:
+            if "logfoldchanges" in d.columns:
+                d = d.rename(columns={"logfoldchanges": "log2FoldChange"})
+
+        # padj/pval/score
+        if "padj" not in d.columns:
+            if "pvals_adj" in d.columns:
+                d = d.rename(columns={"pvals_adj": "padj"})
+        if "pval" not in d.columns:
+            if "pvals" in d.columns:
+                d = d.rename(columns={"pvals": "pval"})
+        if "score" not in d.columns:
+            if "scores" in d.columns:
+                d = d.rename(columns={"scores": "score"})
+
+        # keep at least required columns
+        for col in ["gene", "log2FoldChange", "padj"]:
+            if col not in d.columns:
+                # create missing columns as NaN so volcano can still render a placeholder
+                d[col] = np.nan
+
+        d["gene"] = d["gene"].astype(str)
+        return d
 
     genes_by_cluster: dict[str, list[str]] = {}
 
     for cl in groups:
-        try:
-            df = rank_genes_groups_df(adata, group=str(cl), key=str(markers_key))
-        except Exception:
-            continue
+        # ----------------------------
+        # Fetch marker table per cluster
+        # ----------------------------
+        df = None
+        if filtered_by_group is not None:
+            df = filtered_by_group.get(str(cl), None)
+        if df is None or getattr(df, "empty", True):
+            try:
+                df = rank_genes_groups_df(adata, group=str(cl), key=str(markers_key))
+            except Exception:
+                df = None
 
-        df_v = df.rename(
-            columns={
-                "names": "gene",
-                "logfoldchanges": "log2FoldChange",
-                "pvals_adj": "padj",
-                "pvals": "pval",
-                "scores": "score",
-            }
-        )
+        df_v = _normalize_df_for_volcano(df)
 
+        # If df_v has no valid numeric rows, still save a placeholder volcano
         fig = volcano(
             df_v,
             gene_col="gene",
@@ -947,6 +1016,7 @@ def plot_marker_genes_ranksum(
         )
         plot_utils.save_multi(stem=f"volcano__{cl}", figdir=d_volcano, fig=fig)
 
+        # top genes for expression plots
         topg = _select_top_genes(
             df_v,
             gene_col="gene",
@@ -992,6 +1062,7 @@ def plot_marker_genes_ranksum(
             )
             plot_utils.save_multi(stem=f"umap__{cl}__top{int(top_n_genes)}", figdir=d_umap, fig=fig)
 
+    # combined Seurat-style heatmap across clusters
     if any(v for v in genes_by_cluster.values()):
         fig = heatmap_top_genes(
             adata,
