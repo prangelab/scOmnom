@@ -381,8 +381,8 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                     net_name=f"MSigDB",
                     figdir=figdir_round,
                     heatmap_top_k=30,
-                    bar_top_n=10,
-                    dotplot_top_k=30,
+                    bar_top_n=20,
+                    dotplot_top_k=25,
                 )
             if "progeny" in adata.uns:
                 plot_utils.plot_decoupler_all_styles(
@@ -390,9 +390,9 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                     net_key="progeny",
                     net_name=f"PROGENy",
                     figdir=figdir_round,
-                    heatmap_top_k=14,
-                    bar_top_n=8,
-                    dotplot_top_k=14,
+                    heatmap_top_k=30,
+                    bar_top_n=20,
+                    dotplot_top_k=25,
                 )
             if "dorothea" in adata.uns:
                 plot_utils.plot_decoupler_all_styles(
@@ -400,9 +400,9 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                     net_key="dorothea",
                     net_name=f"DoRothEA",
                     figdir=figdir_round,
-                    heatmap_top_k=40,
-                    bar_top_n=10,
-                    dotplot_top_k=35,
+                    heatmap_top_k=30,
+                    bar_top_n=20,
+                    dotplot_top_k=25,
                 )
 
     # ------------------------------------------------------------------
@@ -544,7 +544,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                                     figdir=figdir_round,
                                     heatmap_top_k=30,
                                     bar_top_n=20,
-                                    dotplot_top_k=30,
+                                    dotplot_top_k=25,
                                 )
 
                             if "progeny" in adata.uns:
@@ -555,7 +555,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                                     figdir=figdir_round,
                                     heatmap_top_k=30,
                                     bar_top_n=20,
-                                    dotplot_top_k=30,
+                                    dotplot_top_k=25,
                                 )
 
                             if "dorothea" in adata.uns:
@@ -566,7 +566,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                                     figdir=figdir_round,
                                     heatmap_top_k=30,
                                     bar_top_n=20,
-                                    dotplot_top_k=30,
+                                    dotplot_top_k=25,
                                 )
 
                         except Exception as e:
