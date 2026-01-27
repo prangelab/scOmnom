@@ -870,105 +870,49 @@ def compute_markers_celllevel(
     """
     Cell-level discovery markers using scanpy.tl.rank_genes_groups.
 
-    - Downsamples per group to be OOM-safe.
-    - Applies Seurat-like prevalence filtering using pts/pts_rest:
-        * min_pct
-        * min_diff_pct
-    - If spec.positive_only=True, keeps only logFC > 0.
-    - IMPORTANT: rank_genes_groups should run on log1p data for wilcoxon/t-test.
-      We log1p-transform the *temporary* marker-calling AnnData (adata_run) when the
-      input looks like raw counts.
+    Adds Seurat-like prevalence filtering using scanpy pts/pts_rest:
+      - min_pct
+      - min_diff_pct
+
+    Additionally:
+      - if spec.positive_only=True (default), keeps only logFC > 0
+
+    IMPORTANT:
+      - After filtering, this function OVERWRITES the rank_genes_groups payload in adata.uns[key_added]
+        so downstream plots/exports that read rank_genes_groups cannot "see" negative-FC genes.
     """
     import scanpy as sc
     from scanpy.get import rank_genes_groups_df
 
+    def _pick_lfc_col(df: pd.DataFrame) -> Optional[str]:
+        for c in ("logfoldchanges", "log2FoldChange", "logfoldchange"):
+            if c in df.columns:
+                return c
+        return None
+
     group_key = resolve_group_key(adata, groupby=groupby, round_id=round_id, prefer_pretty=True)
     labels = adata.obs[group_key].astype(str).to_numpy()
 
-    # ---- downsample
+    # ---- downsample (OOM-safe)
     n = int(adata.n_obs)
     max_per = int(spec.max_cells_per_group)
-    do_down = max_per > 0 and (n > max_per * max(2, int(pd.unique(labels).size)))
+    n_groups = int(pd.unique(labels).size)
+    do_down = max_per > 0 and (n > max_per * max(2, n_groups))
     if do_down:
         idx = _stratified_downsample_indices(labels, max_per_label=max_per, random_state=spec.random_state)
         adata_run = adata[idx].copy()
         LOGGER.info(
             "Cell-level markers: downsampled %d → %d cells (max_per_group=%d, n_groups=%d).",
-            n, int(adata_run.n_obs), max_per, int(pd.unique(labels).size),
+            n, int(adata_run.n_obs), max_per, n_groups,
         )
     else:
         adata_run = adata
 
-    # ------------------------------------------------------------------
-    # Ensure the data used for rank_genes_groups is log1p.
-    #
-    # Rules:
-    # - If use_raw=True: user knows what they are doing; don't interfere.
-    # - Else if spec.layer is provided: use that layer as source, log1p into X for the run.
-    # - Else: inspect X; if it looks like raw counts (non-negative, mostly integer-ish,
-    #   and no existing adata.uns["log1p"]), log1p the temporary object.
-    #
-    # This affects only adata_run (which is either a copy due to downsampling
-    # or the original adata). If adata_run is the original adata, we copy before log1p.
-    # ------------------------------------------------------------------
-    if not bool(spec.use_raw):
-        if spec.layer is not None:
-            # Use the specified layer as source, but run rank_genes_groups on X.
-            if spec.layer not in adata_run.layers:
-                raise KeyError(
-                    f"markers layer={spec.layer!r} not found in adata.layers. "
-                    f"Available: {list(adata_run.layers.keys())}"
-                )
-            # Make sure we don't mutate the caller's adata if adata_run is a view of it.
-            if adata_run is adata:
-                adata_run = adata_run.copy()
-
-            Xsrc = adata_run.layers[spec.layer]
-            if sp.issparse(Xsrc):
-                Xsrc = Xsrc.tocsr().astype(np.float32)
-                Xsrc.data = np.log1p(Xsrc.data)
-                adata_run.X = Xsrc
-            else:
-                adata_run.X = np.log1p(np.asarray(Xsrc, dtype=np.float32))
-
-            # We have now moved the layer into X for this run.
-            layer_for_scanpy = None
-            LOGGER.info("Cell-level markers: using layer=%r as source and applying log1p into X.", spec.layer)
-        else:
-            layer_for_scanpy = None  # rank_genes_groups will read X
-
-            # Detect "raw counts-like" X
-            looks_logged_already = isinstance(getattr(adata_run, "uns", {}), dict) and ("log1p" in adata_run.uns)
-
-            try:
-                X = adata_run.X
-                if sp.issparse(X):
-                    data = X.data
-                    if data.size == 0:
-                        looks_like_counts = False
-                    else:
-                        # counts-like if non-negative and mostly integer-ish
-                        nonneg = bool(np.nanmin(data) >= 0)
-                        frac_int = float(np.mean(np.isclose(data, np.round(data)))) if data.size else 0.0
-                        looks_like_counts = nonneg and (frac_int > 0.95)
-                else:
-                    arr = np.asarray(X)
-                    if arr.size == 0:
-                        looks_like_counts = False
-                    else:
-                        nonneg = bool(np.nanmin(arr) >= 0)
-                        frac_int = float(np.mean(np.isclose(arr, np.round(arr))))
-                        looks_like_counts = nonneg and (frac_int > 0.95)
-            except Exception:
-                looks_like_counts = False
-
-            if (not looks_logged_already) and looks_like_counts:
-                if adata_run is adata:
-                    adata_run = adata_run.copy()
-                sc.pp.log1p(adata_run)
-                LOGGER.info("Cell-level markers: adata_run.X looked like raw counts; applied sc.pp.log1p() for rank_genes_groups.")
-    else:
-        layer_for_scanpy = spec.layer  # let scanpy handle raw
+    # If user wants positive-only, ranking by abs just promotes big negative genes into top-N
+    rankby_abs = bool(spec.rankby_abs)
+    if bool(spec.positive_only) and rankby_abs:
+        LOGGER.info("Cell-level markers: positive_only=True → forcing rankby_abs=False.")
+        rankby_abs = False
 
     # ---- run scanpy
     sc.tl.rank_genes_groups(
@@ -976,17 +920,17 @@ def compute_markers_celllevel(
         groupby=group_key,
         method=str(spec.method),
         use_raw=bool(spec.use_raw),
-        layer=layer_for_scanpy,
+        layer=spec.layer,
         key_added=key_added,
         n_genes=int(spec.n_genes),
-        rankby_abs=bool(spec.rankby_abs),
+        rankby_abs=bool(rankby_abs),
         pts=True,
     )
 
     if not store:
         return key_added
 
-    # ---- store raw output
+    # ---- store raw output payload first
     adata.uns[key_added] = dict(adata_run.uns[key_added])
 
     adata.uns[key_added]["scomnom_meta"] = {
@@ -995,7 +939,7 @@ def compute_markers_celllevel(
         "n_genes": int(spec.n_genes),
         "use_raw": bool(spec.use_raw),
         "layer": spec.layer,
-        "rankby_abs": bool(spec.rankby_abs),
+        "rankby_abs": bool(rankby_abs),
         "max_cells_per_group": int(spec.max_cells_per_group),
         "random_state": int(spec.random_state),
         "downsampled": bool(do_down),
@@ -1006,48 +950,96 @@ def compute_markers_celllevel(
         "positive_only": bool(spec.positive_only),
     }
 
-    # ---- filtering
+    # ---- filtering + payload rewrite
     min_pct = float(spec.min_pct)
     min_diff_pct = float(spec.min_diff_pct)
+    do_filter = (min_pct > 0.0) or (min_diff_pct > 0.0) or bool(spec.positive_only)
 
-    if min_pct > 0.0 or min_diff_pct > 0.0 or spec.positive_only:
-        groups = list(adata_run.uns[key_added]["names"].dtype.names)
-        filtered_by_group: dict[str, pd.DataFrame] = {}
-        all_rows = []
+    if not do_filter:
+        return key_added
 
-        for g in groups:
-            df = rank_genes_groups_df(adata_run, group=g, key=key_added)
-            df = _coerce_pts_columns(df)
+    # Scanpy stores groups as field names in a structured array
+    groups = list(adata_run.uns[key_added]["names"].dtype.names)
 
-            df = df.rename(
-                columns={
-                    "names": "gene",
-                    "logfoldchanges": "logfoldchanges",
-                    "pvals_adj": "pvals_adj",
-                    "pvals": "pvals",
-                    "scores": "scores",
-                }
-            )
+    filtered_by_group: dict[str, pd.DataFrame] = {}
+    all_rows = []
 
-            # Seurat-like prevalence gates
-            df_f = _apply_min_pct_filters_celllevel(
-                df,
-                min_pct=min_pct,
-                min_diff_pct=min_diff_pct,
-            )
+    # We will rebuild these arrays to EXACTLY spec.n_genes per group (padding with NaN/None)
+    n_keep = int(spec.n_genes)
+    dtype_obj = [(g, object) for g in groups]
+    dtype_flt = [(g, np.float64) for g in groups]
 
-            # ---- POSITIVE ONLY gate
-            if spec.positive_only and "logfoldchanges" in df_f.columns:
-                df_f = df_f.loc[df_f["logfoldchanges"] > 0].copy()
+    names_arr = np.empty(n_keep, dtype=dtype_obj)
+    scores_arr = np.full(n_keep, np.nan, dtype=dtype_flt)
+    lfc_arr = np.full(n_keep, np.nan, dtype=dtype_flt)
+    pvals_arr = np.full(n_keep, np.nan, dtype=dtype_flt)
+    padj_arr = np.full(n_keep, np.nan, dtype=dtype_flt)
+    pts_arr = np.full(n_keep, np.nan, dtype=dtype_flt)
+    pts_rest_arr = np.full(n_keep, np.nan, dtype=dtype_flt)
 
-            df_f.insert(0, "group", str(g))
-            filtered_by_group[str(g)] = df_f
-            all_rows.append(df_f)
+    for g in groups:
+        names_arr[g] = np.array([None] * n_keep, dtype=object)
 
-        adata.uns[key_added]["filtered_by_group"] = filtered_by_group
-        adata.uns[key_added]["filtered"] = (
-            pd.concat(all_rows, axis=0, ignore_index=True) if all_rows else pd.DataFrame()
-        )
+    for g in groups:
+        df = rank_genes_groups_df(adata_run, group=g, key=key_added)
+        df = _coerce_pts_columns(df)
+
+        # normalize gene column name
+        if "names" in df.columns and "gene" not in df.columns:
+            df = df.rename(columns={"names": "gene"})
+        df["gene"] = df["gene"].astype(str)
+
+        # apply Seurat-like prevalence gates
+        df_f = _apply_min_pct_filters_celllevel(df, min_pct=min_pct, min_diff_pct=min_diff_pct)
+
+        # positive-only post hoc
+        if bool(spec.positive_only):
+            lfc_col = _pick_lfc_col(df_f)
+            if lfc_col is not None:
+                df_f[lfc_col] = pd.to_numeric(df_f[lfc_col], errors="coerce")
+                df_f = df_f.loc[df_f[lfc_col] > 0].copy()
+
+        df_f.insert(0, "group", str(g))
+        filtered_by_group[str(g)] = df_f
+        all_rows.append(df_f)
+
+        # ---- write into rebuilt arrays (top n_keep)
+        k = min(n_keep, int(df_f.shape[0]))
+        if k <= 0:
+            continue
+
+        genes = df_f["gene"].to_numpy()[:k]
+
+        # columns: scanpy usually uses logfoldchanges/scores/pvals/pvals_adj
+        lfc_col = _pick_lfc_col(df_f)
+        lfc = pd.to_numeric(df_f[lfc_col], errors="coerce").to_numpy()[:k] if lfc_col else np.full(k, np.nan)
+
+        scores = pd.to_numeric(df_f.get("scores", np.nan), errors="coerce").to_numpy()[:k] if "scores" in df_f.columns else np.full(k, np.nan)
+        pvals = pd.to_numeric(df_f.get("pvals", np.nan), errors="coerce").to_numpy()[:k] if "pvals" in df_f.columns else np.full(k, np.nan)
+        padj = pd.to_numeric(df_f.get("pvals_adj", np.nan), errors="coerce").to_numpy()[:k] if "pvals_adj" in df_f.columns else np.full(k, np.nan)
+
+        pts = pd.to_numeric(df_f.get("pts", np.nan), errors="coerce").to_numpy()[:k] if "pts" in df_f.columns else np.full(k, np.nan)
+        pts_rest = pd.to_numeric(df_f.get("pts_rest", np.nan), errors="coerce").to_numpy()[:k] if "pts_rest" in df_f.columns else np.full(k, np.nan)
+
+        names_arr[g][:k] = genes
+        lfc_arr[g][:k] = lfc
+        scores_arr[g][:k] = scores
+        pvals_arr[g][:k] = pvals
+        padj_arr[g][:k] = padj
+        pts_arr[g][:k] = pts
+        pts_rest_arr[g][:k] = pts_rest
+
+    adata.uns[key_added]["filtered_by_group"] = filtered_by_group
+    adata.uns[key_added]["filtered"] = pd.concat(all_rows, axis=0, ignore_index=True) if all_rows else pd.DataFrame()
+
+    # ---- CRITICAL: overwrite the rank_genes_groups payload so exports/plots can't see negatives
+    adata.uns[key_added]["names"] = names_arr
+    adata.uns[key_added]["logfoldchanges"] = lfc_arr
+    adata.uns[key_added]["scores"] = scores_arr
+    adata.uns[key_added]["pvals"] = pvals_arr
+    adata.uns[key_added]["pvals_adj"] = padj_arr
+    adata.uns[key_added]["pts"] = pts_arr
+    adata.uns[key_added]["pts_rest"] = pts_rest_arr
 
     return key_added
 
