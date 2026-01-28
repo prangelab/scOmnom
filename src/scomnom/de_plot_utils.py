@@ -407,7 +407,7 @@ def heatmap_top_genes(
     groupby: str,
     use_raw: bool = False,
     layer: Optional[str] = None,
-    cmap: str | None = None,  # kept for API compat; ignored unless you pass a real cmap
+    cmap: str | None = None,
     show_cluster_colorbar: bool = True,
     scale_columns_by_size: bool = True,
     min_col_width: float = 0.5,
@@ -467,8 +467,8 @@ def heatmap_top_genes(
     mu = np.nanmean(M, axis=0)
     sd = np.nanstd(M, axis=0)
     sd[sd == 0] = 1.0
-    Z = (M - mu) / sd
 
+    Z = (M - mu) / sd
     if z_clip is not None:
         Z = np.clip(Z, -float(z_clip), float(z_clip))
 
@@ -478,9 +478,9 @@ def heatmap_top_genes(
     # 2) Dynamic column widths (cluster sizes)
     # -----------------------------
     sizes = vc.reindex(groups).values.astype(float)
+
     if scale_columns_by_size:
-        denom = float(np.mean(sizes)) if np.mean(sizes) > 0 else 1.0
-        w = sizes / denom
+        w = sizes / float(np.mean(sizes)) if np.mean(sizes) > 0 else np.ones_like(sizes)
         w = np.clip(w, float(min_col_width), float(max_col_width))
     else:
         w = np.ones(len(groups), dtype=float)
@@ -505,23 +505,19 @@ def heatmap_top_genes(
             colors = None
 
     # -----------------------------
-    # 4) Colormap: SEURAT MAGENTA-BLACK-YELLOW (0 = black)
+    # 4) Colormap: SEURAT MAGENTA-BLACK-YELLOW (0 pinned to black)
     # -----------------------------
     if cmap is None:
-        cmap_obj = mcolors.LinearSegmentedColormap.from_list(
-            "seurat_mby",
-            ["#FF00FF", "#000000", "#FFFF00"],
-            N=256,
-        )
+        colors_list = ["#FF00FF", "#000000", "#FFFF00"]  # Magenta, Black, Yellow
+        cmap_seurat = mcolors.LinearSegmentedColormap.from_list("seurat", colors_list, N=256)
     else:
-        # allow passing a cmap name or cmap object
-        cmap_obj = plt.get_cmap(cmap) if isinstance(cmap, str) else cmap
+        cmap_seurat = plt.get_cmap(cmap) if isinstance(cmap, str) else cmap
 
     if z_clip is not None:
         norm = mcolors.TwoSlopeNorm(vmin=-float(z_clip), vcenter=0.0, vmax=float(z_clip))
     else:
-        vabs = float(max(abs(np.nanmin(plot_mat)), abs(np.nanmax(plot_mat)))) if np.isfinite(plot_mat).any() else 1.0
-        norm = mcolors.TwoSlopeNorm(vmin=-vabs, vcenter=0.0, vmax=vabs)
+        vabs = max(abs(np.nanmin(plot_mat)), abs(np.nanmax(plot_mat)))
+        norm = mcolors.TwoSlopeNorm(vmin=-float(vabs), vcenter=0.0, vmax=float(vabs))
 
     # -----------------------------
     # 5) Figure & GridSpec
@@ -546,38 +542,44 @@ def heatmap_top_genes(
     cax = fig.add_subplot(gs[-1, 1])
 
     # -----------------------------
-    # 6) Heatmap draw (NO SEAMS)
-    #    We force RGBA facecolors to kill "gridlines" in vector renderers.
+    # 6) Heatmap draw (KEEP COLORS, KILL SEAMS)
     # -----------------------------
-    rgba = cmap_obj(norm(plot_mat))  # genes x clusters x 4
-
     mesh = ax.pcolormesh(
         x_edges,
         y_edges,
         plot_mat,
         shading="flat",
-        antialiased=False,
+        cmap=cmap_seurat,
+        norm=norm,
+        # These two are the big seam killers for QuadMesh in PDF/SVG:
+        edgecolors="face",
         linewidth=0.0,
-        edgecolors="none",
-        rasterized=True,
+        antialiased=False,
+        snap=True,
     )
 
-    # Force exact colors + ensure no edges at all
-    mesh.set_facecolors(rgba.reshape(-1, 4))
-    mesh.set_edgecolor("none")
-    mesh.set_linewidth(0.0)
-    mesh.set_antialiased(False)
-    mesh.set_array(None)  # prevents backend from re-mapping values to cmap
+    # Make sure the artist is rasterized when saving vector formats
+    # (prevents hairline cracks from vector tiling)
+    try:
+        mesh.set_rasterized(True)
+    except Exception:
+        pass
+
+    # Extra paranoia: enforce after creation too
+    try:
+        mesh.set_edgecolor("face")
+        mesh.set_linewidth(0.0)
+        mesh.set_antialiased(False)
+        mesh.set_snap(True)
+    except Exception:
+        pass
 
     ax.grid(False)
 
     # -----------------------------
-    # 7) Colorbar (independent ScalarMappable)
+    # 7) Colorbar
     # -----------------------------
-    sm = mpl.cm.ScalarMappable(norm=norm, cmap=cmap_obj)
-    sm.set_array([])
-
-    cb = fig.colorbar(sm, cax=cax)
+    cb = fig.colorbar(mesh, cax=cax)
     cb.outline.set_visible(False)
     cax.tick_params(labelsize=8, length=0)
     cax.set_ylabel("Z-score", fontsize=8, labelpad=2)
@@ -610,11 +612,11 @@ def heatmap_top_genes(
                     float(w[i]),
                     1.0,
                     color=colors[i],
-                    lw=0.0,
+                    lw=0,
                 )
             )
-        ax_top.set_xlim(0.0, float(x_edges[-1]))
-        ax_top.set_ylim(0.0, 1.0)
+        ax_top.set_xlim(0, float(x_edges[-1]))
+        ax_top.set_ylim(0, 1)
         ax_top.axis("off")
         ax_top.grid(False)
 
@@ -622,6 +624,7 @@ def heatmap_top_genes(
         plt.show()
 
     return fig
+
 
 
 def violin_grid_genes(
