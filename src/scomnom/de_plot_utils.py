@@ -505,75 +505,45 @@ def heatmap_top_genes(
         except Exception:
             colors = None
 
-    # -----------------------------
-    # 4) Colormap (Seurat-ish purple -> black -> yellow), force 0->black
-    # -----------------------------
-    if cmap is None or str(cmap).lower() in {"seurat", "seurat_style", "seurat_purple_black_yellow"}:
-        cmap_obj = mcolors.LinearSegmentedColormap.from_list(
-            "seurat_purple_black_yellow",
-            ["#3B0F70", "#000000", "#FDE725"],
-            N=256,
+        # -----------------------------
+        # 4) Colormap: PURPLE -> BLACK -> YELLOW (The Seurat "DoHeatmap" Look)
+        # -----------------------------
+        # Explicitly creating the colormap object
+        colors_list = ["#FF00FF", "#000000", "#FFFF00"]  # Magenta, Black, Yellow
+        cmap_seurat = mcolors.LinearSegmentedColormap.from_list("seurat", colors_list, N=256)
+
+        # Force the normalization to center on 0
+        norm = mcolors.TwoSlopeNorm(vmin=-z_clip, vcenter=0.0, vmax=z_clip)
+
+        # -----------------------------
+        # 5) Figure layout (Thinner bars)
+        # -----------------------------
+        gs = fig.add_gridspec(
+            nrows=2 if colors is not None else 1,
+            ncols=2,
+            height_ratios=[0.02, 1.0] if colors is not None else [1.0],  # Thinner top bar
+            width_ratios=[1.0, 0.01],  # MUCH thinner colorbar
+            hspace=0.01, wspace=0.02  # Tighten it up
         )
-    else:
-        cmap_obj = plt.get_cmap(cmap) if isinstance(cmap, str) else cmap
 
-    if z_clip is not None:
-        norm = mpl.colors.TwoSlopeNorm(
-            vmin=-float(z_clip),
-            vcenter=0.0,
-            vmax=float(z_clip),
-        )
-    else:
-        vmin = float(np.nanmin(plot_mat))
-        vmax = float(np.nanmax(plot_mat))
-        norm = mpl.colors.TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax)
+        ax = fig.add_subplot(gs[-1, 0])
+        cax = fig.add_subplot(gs[-1, 1])
 
-    # -----------------------------
-    # 5) Figure layout
-    #   - thinner top color bar (height_ratios ~ 0.015)
-    #   - narrow colorbar (width_ratios ~ 0.02)
-    # -----------------------------
-    if figsize is None:
-        W = max(8.0, 0.3 * float(x_edges[-1]) + 3.0)
-        H = max(5.0, 0.2 * float(plot_mat.shape[0]) + 2.0)
-        figsize = (W, H)
-
-    fig = plt.figure(figsize=figsize)
-    gs = fig.add_gridspec(
-        nrows=2 if colors is not None else 1,
-        ncols=2,
-        height_ratios=[0.015, 1.0] if colors is not None else [1.0],
-        width_ratios=[1.0, 0.02],
-        hspace=0.01,
-        wspace=0.05,
-    )
-
-    ax = fig.add_subplot(gs[-1, 0])
-    cax = fig.add_subplot(gs[-1, 1])
-
-    # -----------------------------
-    # 6) Heatmap draw
-    # -----------------------------
-    with mpl.rc_context({"image.cmap": cmap_obj}):
+        # -----------------------------
+        # 6) Heatmap draw
+        # -----------------------------
+        # Remove the rc_context and just pass the objects directly to pcolormesh
         mesh = ax.pcolormesh(
             x_edges,
             y_edges,
             plot_mat,
             shading="flat",
-            cmap=cmap_obj,
+            cmap=cmap_seurat,
             norm=norm,
             antialiased=False,
+            rasterized=True
         )
 
-    mesh.set_cmap(cmap_obj)
-    try:
-        mesh.set_edgecolor("face")
-        mesh.set_linewidth(0.0)
-    except Exception:
-        pass
-
-    # Kill any accidental gridlines
-    ax.grid(False)
 
     # -----------------------------
     # 7) Colorbar
