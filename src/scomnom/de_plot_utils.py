@@ -407,7 +407,7 @@ def heatmap_top_genes(
     groupby: str,
     use_raw: bool = False,
     layer: Optional[str] = None,
-    cmap: str | None = None,
+    cmap: str | None = None,  # kept for API compat; ignored unless you pass a real cmap
     show_cluster_colorbar: bool = True,
     scale_columns_by_size: bool = True,
     min_col_width: float = 0.5,
@@ -431,7 +431,6 @@ def heatmap_top_genes(
     # 0) Resolve gene list
     # -----------------------------
     if genes_by_cluster is not None:
-        # Order clusters by size (largest -> smallest) for consistent gene ordering
         vc0 = adata.obs[groupby].astype(str).value_counts()
         cluster_order0 = vc0.index.astype(str).tolist()
 
@@ -464,12 +463,12 @@ def heatmap_top_genes(
 
     mean = df_x.groupby(groupby, observed=True)[genes].mean().reindex(groups)
 
-    M = mean.to_numpy(dtype=float)  # shape: n_clusters x n_genes
+    M = mean.to_numpy(dtype=float)  # n_clusters x n_genes
     mu = np.nanmean(M, axis=0)
     sd = np.nanstd(M, axis=0)
     sd[sd == 0] = 1.0
-
     Z = (M - mu) / sd
+
     if z_clip is not None:
         Z = np.clip(Z, -float(z_clip), float(z_clip))
 
@@ -479,9 +478,9 @@ def heatmap_top_genes(
     # 2) Dynamic column widths (cluster sizes)
     # -----------------------------
     sizes = vc.reindex(groups).values.astype(float)
-
     if scale_columns_by_size:
-        w = sizes / float(np.mean(sizes)) if np.mean(sizes) > 0 else np.ones_like(sizes)
+        denom = float(np.mean(sizes)) if np.mean(sizes) > 0 else 1.0
+        w = sizes / denom
         w = np.clip(w, float(min_col_width), float(max_col_width))
     else:
         w = np.ones(len(groups), dtype=float)
@@ -491,7 +490,7 @@ def heatmap_top_genes(
     y_edges = np.arange(plot_mat.shape[0] + 1, dtype=float)
 
     # -----------------------------
-    # 3) Cluster colors (Scanpy palette, normalized via your helper)
+    # 3) Cluster colors (Scanpy palette)
     # -----------------------------
     colors = None
     if show_cluster_colorbar:
@@ -505,62 +504,80 @@ def heatmap_top_genes(
         except Exception:
             colors = None
 
-
     # -----------------------------
-    # 4) Colormap: SEURAT MAGENTA-BLACK-YELLOW
+    # 4) Colormap: SEURAT MAGENTA-BLACK-YELLOW (0 = black)
     # -----------------------------
-    # Explicitly define the Seurat-style palette
-    colors_list = ["#FF00FF", "#000000", "#FFFF00"]  # Magenta, Black, Yellow
-    cmap_seurat = mcolors.LinearSegmentedColormap.from_list("seurat", colors_list, N=256)
+    if cmap is None:
+        cmap_obj = mcolors.LinearSegmentedColormap.from_list(
+            "seurat_mby",
+            ["#FF00FF", "#000000", "#FFFF00"],
+            N=256,
+        )
+    else:
+        # allow passing a cmap name or cmap object
+        cmap_obj = plt.get_cmap(cmap) if isinstance(cmap, str) else cmap
 
-    # Pin 0 to Black using TwoSlopeNorm
     if z_clip is not None:
         norm = mcolors.TwoSlopeNorm(vmin=-float(z_clip), vcenter=0.0, vmax=float(z_clip))
     else:
-        vabs = max(abs(np.nanmin(plot_mat)), abs(np.nanmax(plot_mat)))
+        vabs = float(max(abs(np.nanmin(plot_mat)), abs(np.nanmax(plot_mat)))) if np.isfinite(plot_mat).any() else 1.0
         norm = mcolors.TwoSlopeNorm(vmin=-vabs, vcenter=0.0, vmax=vabs)
 
     # -----------------------------
-    # 5) Figure & GridSpec (Fixed initialization)
+    # 5) Figure & GridSpec
     # -----------------------------
     if figsize is None:
         W = max(8.0, 0.3 * float(x_edges[-1]) + 3.0)
         H = max(5.0, 0.2 * float(plot_mat.shape[0]) + 2.0)
         figsize = (W, H)
 
-    # MUST create fig before calling add_gridspec
     fig = plt.figure(figsize=figsize)
 
-    # width_ratios=[1.0, 0.01] makes the colorbar extremely thin
     gs = fig.add_gridspec(
         nrows=2 if colors is not None else 1,
         ncols=2,
         height_ratios=[0.02, 1.0] if colors is not None else [1.0],
         width_ratios=[1.0, 0.01],
-        hspace=0.01, wspace=0.02
+        hspace=0.01,
+        wspace=0.02,
     )
 
     ax = fig.add_subplot(gs[-1, 0])
     cax = fig.add_subplot(gs[-1, 1])
 
     # -----------------------------
-    # 6) Heatmap Draw (The direct approach)
+    # 6) Heatmap draw (NO SEAMS)
+    #    We force RGBA facecolors to kill "gridlines" in vector renderers.
     # -----------------------------
+    rgba = cmap_obj(norm(plot_mat))  # genes x clusters x 4
+
     mesh = ax.pcolormesh(
         x_edges,
         y_edges,
         plot_mat,
         shading="flat",
-        cmap=cmap_seurat,
-        norm=norm,
         antialiased=False,
-        rasterized=True  # Crucial for keeping colors sharp in snRNA-seq plots
+        linewidth=0.0,
+        edgecolors="none",
+        rasterized=True,
     )
 
+    # Force exact colors + ensure no edges at all
+    mesh.set_facecolors(rgba.reshape(-1, 4))
+    mesh.set_edgecolor("none")
+    mesh.set_linewidth(0.0)
+    mesh.set_antialiased(False)
+    mesh.set_array(None)  # prevents backend from re-mapping values to cmap
+
+    ax.grid(False)
+
     # -----------------------------
-    # 7) Thinner Colorbar Style
+    # 7) Colorbar (independent ScalarMappable)
     # -----------------------------
-    cb = fig.colorbar(mesh, cax=cax)
+    sm = mpl.cm.ScalarMappable(norm=norm, cmap=cmap_obj)
+    sm.set_array([])
+
+    cb = fig.colorbar(sm, cax=cax)
     cb.outline.set_visible(False)
     cax.tick_params(labelsize=8, length=0)
     cax.set_ylabel("Z-score", fontsize=8, labelpad=2)
@@ -577,9 +594,9 @@ def heatmap_top_genes(
     ax.set_xticklabels(groups, rotation=90, fontsize=11)
 
     ax.tick_params(axis="both", which="both", length=0)
+    ax.minorticks_off()
 
-    # no seaborn grid style; just despine
-    sns.despine(left=True, bottom=True)
+    sns.despine(ax=ax, left=True, bottom=True)
 
     # -----------------------------
     # 9) Top cluster color bar (thin)
@@ -589,15 +606,15 @@ def heatmap_top_genes(
         for i in range(len(groups)):
             ax_top.add_patch(
                 plt.Rectangle(
-                    (x_edges[i], 0.0),
+                    (float(x_edges[i]), 0.0),
                     float(w[i]),
                     1.0,
                     color=colors[i],
-                    lw=0,
+                    lw=0.0,
                 )
             )
-        ax_top.set_xlim(0, float(x_edges[-1]))
-        ax_top.set_ylim(0, 1)
+        ax_top.set_xlim(0.0, float(x_edges[-1]))
+        ax_top.set_ylim(0.0, 1.0)
         ax_top.axis("off")
         ax_top.grid(False)
 
@@ -605,7 +622,6 @@ def heatmap_top_genes(
         plt.show()
 
     return fig
-
 
 
 def violin_grid_genes(
