@@ -542,7 +542,7 @@ def heatmap_top_genes(
     cax = fig.add_subplot(gs[-1, 1])
 
     # -----------------------------
-    # 6) Heatmap draw (KEEP COLORS, KILL SEAMS)
+    # 6) Heatmap draw (FIXED: No seams, Guaranteed Colors)
     # -----------------------------
     mesh = ax.pcolormesh(
         x_edges,
@@ -551,29 +551,14 @@ def heatmap_top_genes(
         shading="flat",
         cmap=cmap_seurat,
         norm=norm,
-        # These two are the big seam killers for QuadMesh in PDF/SVG:
         edgecolors="face",
-        linewidth=0.0,
-        antialiased=False,
-        snap=True,
+        linewidth=0.01,  # A tiny bit of overlap prevents the seam
+        antialiased=True,  # Set to True when using edgecolor='face'
+        rasterized=True  # CRITICAL: keeps the file small and colors punchy
     )
 
-    # Make sure the artist is rasterized when saving vector formats
-    # (prevents hairline cracks from vector tiling)
-    try:
-        mesh.set_rasterized(True)
-    except Exception:
-        pass
-
-    # Extra paranoia: enforce after creation too
-    try:
-        mesh.set_edgecolor("face")
-        mesh.set_linewidth(0.0)
-        mesh.set_antialiased(False)
-        mesh.set_snap(True)
-    except Exception:
-        pass
-
+    # Clean up the axes to ensure no grid lines or spines interfere
+    ax.set_facecolor("black")  # Sets background to black so any micro-gaps are invisible
     ax.grid(False)
 
     # -----------------------------
