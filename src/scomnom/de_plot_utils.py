@@ -505,53 +505,65 @@ def heatmap_top_genes(
         except Exception:
             colors = None
 
-        # -----------------------------
-        # 4) Colormap: PURPLE -> BLACK -> YELLOW (The Seurat "DoHeatmap" Look)
-        # -----------------------------
-        # Explicitly creating the colormap object
-        colors_list = ["#FF00FF", "#000000", "#FFFF00"]  # Magenta, Black, Yellow
-        cmap_seurat = mcolors.LinearSegmentedColormap.from_list("seurat", colors_list, N=256)
-
-        # Force the normalization to center on 0
-        norm = mcolors.TwoSlopeNorm(vmin=-z_clip, vcenter=0.0, vmax=z_clip)
-
-        # -----------------------------
-        # 5) Figure layout (Thinner bars)
-        # -----------------------------
-        gs = fig.add_gridspec(
-            nrows=2 if colors is not None else 1,
-            ncols=2,
-            height_ratios=[0.02, 1.0] if colors is not None else [1.0],  # Thinner top bar
-            width_ratios=[1.0, 0.01],  # MUCH thinner colorbar
-            hspace=0.01, wspace=0.02  # Tighten it up
-        )
-
-        ax = fig.add_subplot(gs[-1, 0])
-        cax = fig.add_subplot(gs[-1, 1])
-
-        # -----------------------------
-        # 6) Heatmap draw
-        # -----------------------------
-        # Remove the rc_context and just pass the objects directly to pcolormesh
-        mesh = ax.pcolormesh(
-            x_edges,
-            y_edges,
-            plot_mat,
-            shading="flat",
-            cmap=cmap_seurat,
-            norm=norm,
-            antialiased=False,
-            rasterized=True
-        )
-
 
     # -----------------------------
-    # 7) Colorbar
+    # 4) Colormap: SEURAT MAGENTA-BLACK-YELLOW
+    # -----------------------------
+    # Explicitly define the Seurat-style palette
+    colors_list = ["#FF00FF", "#000000", "#FFFF00"]  # Magenta, Black, Yellow
+    cmap_seurat = mcolors.LinearSegmentedColormap.from_list("seurat", colors_list, N=256)
+
+    # Pin 0 to Black using TwoSlopeNorm
+    if z_clip is not None:
+        norm = mcolors.TwoSlopeNorm(vmin=-float(z_clip), vcenter=0.0, vmax=float(z_clip))
+    else:
+        vabs = max(abs(np.nanmin(plot_mat)), abs(np.nanmax(plot_mat)))
+        norm = mcolors.TwoSlopeNorm(vmin=-vabs, vcenter=0.0, vmax=vabs)
+
+    # -----------------------------
+    # 5) Figure & GridSpec (Fixed initialization)
+    # -----------------------------
+    if figsize is None:
+        W = max(8.0, 0.3 * float(x_edges[-1]) + 3.0)
+        H = max(5.0, 0.2 * float(plot_mat.shape[0]) + 2.0)
+        figsize = (W, H)
+
+    # MUST create fig before calling add_gridspec
+    fig = plt.figure(figsize=figsize)
+
+    # width_ratios=[1.0, 0.01] makes the colorbar extremely thin
+    gs = fig.add_gridspec(
+        nrows=2 if colors is not None else 1,
+        ncols=2,
+        height_ratios=[0.02, 1.0] if colors is not None else [1.0],
+        width_ratios=[1.0, 0.01],
+        hspace=0.01, wspace=0.02
+    )
+
+    ax = fig.add_subplot(gs[-1, 0])
+    cax = fig.add_subplot(gs[-1, 1])
+
+    # -----------------------------
+    # 6) Heatmap Draw (The direct approach)
+    # -----------------------------
+    mesh = ax.pcolormesh(
+        x_edges,
+        y_edges,
+        plot_mat,
+        shading="flat",
+        cmap=cmap_seurat,
+        norm=norm,
+        antialiased=False,
+        rasterized=True  # Crucial for keeping colors sharp in snRNA-seq plots
+    )
+
+    # -----------------------------
+    # 7) Thinner Colorbar Style
     # -----------------------------
     cb = fig.colorbar(mesh, cax=cax)
     cb.outline.set_visible(False)
-    cax.tick_params(labelsize=9, length=0)
-    cax.set_ylabel("Z-score", fontsize=9)
+    cax.tick_params(labelsize=8, length=0)
+    cax.set_ylabel("Z-score", fontsize=8, labelpad=2)
 
     # -----------------------------
     # 8) Axes cosmetics
