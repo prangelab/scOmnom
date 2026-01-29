@@ -3,7 +3,7 @@ from __future__ import annotations
 from numba.core.types import Boolean
 from pydantic import BaseModel, Field, validator, model_validator, field_validator
 from pathlib import Path
-from typing import Optional, Dict, List, Literal
+from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 from matplotlib.figure import Figure
 import multiprocessing
 
@@ -573,3 +573,113 @@ class ClusterAnnotateConfig(BaseModel):
                 raise ValueError(f"thr_msigdb_by_gmt[{k!r}] must be in [-1, 1]")
             out[str(k)] = vv
         return out
+
+
+# ---------------------------------------------------------------------
+# MARKERS AND DE CONFIG
+# ---------------------------------------------------------------------
+class MarkersAndDEConfig(BaseModel):
+    # ------------------------------------------------------------------
+    # IO / run scaffolding
+    # ------------------------------------------------------------------
+    input_path: Path
+    output_dir: Path
+    output_name: str = "adata.markers_and_de"
+    logfile: Optional[Path] = None
+
+    # figures
+    figdir_name: str = "figures"
+    figure_formats: Sequence[str] = Field(default_factory=lambda: ["png", "pdf"])
+    make_figures: bool = True
+
+    # outputs
+    save_h5ad: bool = False
+
+    n_jobs: int = 1
+
+    # ------------------------------------------------------------------
+    # Grouping / round awareness
+    # ------------------------------------------------------------------
+    # If groupby is None, resolve from round/annotation (pretty labels by default).
+    groupby: Optional[str] = None
+    label_source: str = "pretty"  # forwarded to resolve_groupby_from_round
+    round_id: Optional[str] = None
+
+    # replicate key for pseudobulk (donor/patient/sample)
+    # orchestrator uses: sample_key or batch_key or adata.uns["batch_key"]
+    sample_key: Optional[str] = None
+    batch_key: Optional[str] = None
+
+    # Cut-off for prevalence (seurat style)
+    min_pct: float = 0.25
+    min_diff_pct: float = 0.25
+
+    # ------------------------------------------------------------------
+    # Cell-level marker calling (scanpy rank_genes_groups)
+    # ------------------------------------------------------------------
+    markers_key: str = "cluster_markers_wilcoxon"
+    markers_method: str = "wilcoxon"  # "wilcoxon" | "t-test" | "logreg" (scanpy)
+    markers_n_genes: int = 300
+    markers_rankby_abs: bool = True
+    markers_use_raw: bool = False
+
+    # OOM guards for cell-level marker calling
+    markers_downsample_threshold: int = 500_000
+    markers_downsample_max_per_group: int = 2_000
+    random_state: int = 42
+
+    # ------------------------------------------------------------------
+    # Counts selection for pseudobulk DE
+    # ------------------------------------------------------------------
+    # preference order in AnnData.layers; fall back to .X only if allow_X_counts=True
+    counts_layers: Tuple[str, ...] = ("counts_cb", "counts_raw")
+    allow_X_counts: bool = True
+
+    # ------------------------------------------------------------------
+    # Pseudobulk DE: cluster vs rest
+    # ------------------------------------------------------------------
+    min_cells_target: int = 20
+    alpha: float = 0.05
+    store_key: str = "scomnom_de"
+
+    # ------------------------------------------------------------------
+    # Optional condition-within-cluster DE
+    # ------------------------------------------------------------------
+    condition_key: Optional[str] = None
+    condition_contrasts: Tuple[str, ...] = ()
+    min_cells_condition: int = 20
+
+    # ------------------------------------------------------------------
+    # Optional contrast-conditional mode
+    # ------------------------------------------------------------------
+    contrast_conditional_de: bool = False
+    contrast_key: Optional[str] = None  # defaults to sample_key
+    contrast_methods: Tuple[str, ...] = ("wilcoxon", "logreg")
+    contrast_contrasts: Tuple[str, ...] = ()
+    contrast_min_cells_per_level: int = 50
+    contrast_max_cells_per_level: int = 2000
+    contrast_min_total_counts: int = 10
+    contrast_pseudocount: float = 1.0
+
+    contrast_cl_alpha: float = 0.05
+    contrast_cl_min_abs_logfc: float = 0.25
+    contrast_lr_min_abs_coef: float = 0.25
+    contrast_pb_min_abs_log2fc: float = 0.5
+
+    # ------------------------------------------------------------------
+    # Plot controls (used only by the orchestrator)
+    # ------------------------------------------------------------------
+    plot_lfc_thresh: float = 1.0
+    plot_volcano_top_label_n: int = 15
+
+    # gene selection for expression plots (dotplot/heatmap/umap/violin)
+    plot_top_n_per_cluster: int = 10
+    plot_dotplot_top_n_genes: int = 15
+    plot_max_genes_total: int = 80
+
+    # scanpy expression plotting source
+    plot_use_raw: bool = False
+    plot_layer: Optional[str] = None
+
+    # umap features grid layout
+    plot_umap_ncols: int = 3

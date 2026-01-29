@@ -27,6 +27,7 @@ dependencies:
   - h5py
   - scikit-learn
   - psutil
+  - xlsxwriter
 
   # Scanpy ecosystem
   - scanpy
@@ -67,3 +68,4 @@ dependencies:
       - umap-learn
       - requests
       - types-pytz
+      - pydeseq2

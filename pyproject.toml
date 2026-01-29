@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scomnom"
-version = "0.1.7"
+version = "0.1.8"
 description = "Modular scRNA-seq preprocessing and analysis pipeline built on the scVerse ecosystem."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -36,6 +36,7 @@ dependencies = [
   "requests",
   "decoupler",
   "scvi-tools",
+  "pydeseq2",
 ]
 
 [project.scripts]

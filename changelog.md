@@ -31,3 +31,6 @@ Fixed bug causing violin labels to be drawn horizontal.
 
 ## 0.1.7 [27-1-2026]
 Fixed bug were cluster-and-annotate was using raw counts instead of cellbender counts.
+
+## 0.1.8 [29-01-2026]
+Added first working version of marker calling in the DE module. Module is still under construction, do not use yet.
