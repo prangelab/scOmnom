@@ -1566,12 +1566,12 @@ def run_integrate(cfg: IntegrateConfig) -> ad.AnnData:
             try:
                 plot_utils.plot_annotated_run_umaps(
                     adata,
-                    round_id=round_id_for_title,
-                    pre_umap_key=pre_key,
-                    post_umap_key=post_key,
+                    batch_key=batch_key,
                     final_label_key=final_label_key,
+                    round_id=round_id_for_title,
                     figdir="integration",
                 )
+
             except Exception as e:
                 LOGGER.warning("ANNOTATED RUN: failed to plot annotated-run UMAPs: %s", e)
 
@@ -1608,6 +1608,22 @@ def run_integrate(cfg: IntegrateConfig) -> ad.AnnData:
 
         # Optional projection round bookkeeping
         try:
+            ro = adata.uns.get("cluster_round_order", None)
+            if ro is None:
+                adata.uns["cluster_round_order"] = []
+            elif not isinstance(ro, list):
+                adata.uns["cluster_round_order"] = list(ro)  # handles np.ndarray / tuple / pd.Index
+        except Exception:
+            pass
+
+        try:
+            rounds = adata.uns.get("cluster_rounds", None)
+            if rounds is None:
+                adata.uns["cluster_rounds"] = {}
+        except Exception:
+            pass
+
+        try:
             parent_round = meta.get("source_round_id", None)
             if parent_round:
                 proj_round = _create_projection_round_for_secondary_integration(
@@ -1625,8 +1641,11 @@ def run_integrate(cfg: IntegrateConfig) -> ad.AnnData:
                 fig_root=cfg.figdir,
                 version=__version__,
                 adata=adata,
+                batch_key=batch_key,
+                final_label_key=final_label_key,
                 round_id=round_id_for_title,
             )
+
         except Exception as e:
             LOGGER.warning("ANNOTATED RUN: failed to generate annotated integration report: %s", e)
 
