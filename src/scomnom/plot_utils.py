@@ -1960,19 +1960,98 @@ def plot_integration_umaps(
     embedding_keys,
     batch_key: str,
     color: str,
+    *,
+    # Optional: only relevant for annotated runs (keeps backwards compatibility)
+    annotated_round_id: str | None = None,
 ) -> None:
     """
     Plot UMAPs for unintegrated + integrated embeddings.
+
+    Special behavior (annotated runs):
+      If adata.obsm contains:
+        - "X_umap_pre_annotated" (stashed previous active UMAP)
+        - "X_umap" (current active UMAP, expected to be annotated)
+      then we save:
+        - integration/umap_pre_annotated__<round_id>.png
+        - integration/umap_annotated__<round_id>.png
+      and we DO NOT recompute UMAP for those.
     """
     from pathlib import Path
+    import logging
+    import re
+
     import matplotlib.pyplot as plt
     import scanpy as sc
-    import logging
 
     LOGGER = logging.getLogger(__name__)
-
     base = Path("integration")
 
+    def _sanitize_tag(s: str | None) -> str:
+        s = str(s or "").strip()
+        s = re.sub(r"[^A-Za-z0-9]+", "-", s).strip("-")
+        return s or "NA"
+
+    # ------------------------------------------------------------------
+    # Annotated-run: emit pre/post UMAP PNGs (no recompute)
+    # ------------------------------------------------------------------
+    has_pre = hasattr(adata, "obsm") and ("X_umap_pre_annotated" in adata.obsm)
+    has_post = hasattr(adata, "obsm") and ("X_umap" in adata.obsm)
+
+    # Try to infer round id if not provided (from integration provenance)
+    rid = annotated_round_id
+    if rid is None:
+        try:
+            runs = getattr(adata, "uns", {}).get("integration", {}).get("runs", [])
+            if isinstance(runs, list) and runs:
+                last = runs[-1] if isinstance(runs[-1], dict) else {}
+                if isinstance(last, dict) and str(last.get("mode", "")).lower() == "annotated_secondary":
+                    rid = str(last.get("source_round_id", "") or "") or None
+        except Exception:
+            rid = None
+
+    if has_pre and has_post:
+        tag = _sanitize_tag(rid)
+
+        try:
+            # --- PRE ---
+            tmp_pre = adata.copy()
+            tmp_pre.obsm["X_umap"] = tmp_pre.obsm["X_umap_pre_annotated"].copy()
+
+            fig_pre = sc.pl.umap(
+                tmp_pre,
+                color=color,
+                title="Pre integration UMAP",
+                show=False,
+                return_fig=True,
+            )
+            # Ensure filename contains "umap" and "pre"
+            save_umap_multi(f"umap_pre_annotated__{tag}", figdir=base, fig=fig_pre)
+
+            # --- POST (active, annotated) ---
+            tmp_post = adata.copy()
+            # tmp_post.obsm["X_umap"] is already active; keep it
+            title_post = f"scANVI annotated on {rid}" if rid else "scANVI annotated"
+
+            fig_post = sc.pl.umap(
+                tmp_post,
+                color=color,
+                title=title_post,
+                show=False,
+                return_fig=True,
+            )
+            # Ensure filename contains "umap" and "annotated"
+            save_umap_multi(f"umap_annotated__{tag}", figdir=base, fig=fig_post)
+
+        except Exception as e:
+            LOGGER.warning("Failed to plot annotated pre/post UMAPs: %s", e)
+
+        # Continue on to normal per-embedding plotting as well (unless you want to skip).
+        # If annotated runs should ONLY show pre/post, uncomment this early return:
+        # return
+
+    # ------------------------------------------------------------------
+    # Standard behavior: per-embedding recompute + save
+    # ------------------------------------------------------------------
     for emb in embedding_keys:
         if emb not in adata.obsm and emb != "BBKNN":
             LOGGER.warning("Embedding '%s' missing; skipping", emb)
@@ -1980,7 +2059,7 @@ def plot_integration_umaps(
 
         try:
             # ---------------------------
-            # Single UMAP
+            # Single UMAP (recomputed)
             # ---------------------------
             tmp = adata.copy()
 
@@ -2000,17 +2079,12 @@ def plot_integration_umaps(
                 return_fig=True,
             )
 
-            # Use the UMAP-safe saver (prevents legend clipping)
             save_umap_multi(f"umap_{emb}", figdir=base, fig=fig)
-
-            # NOTE: save_multi/save_umap_multi already closes; do NOT close again.
-            # plt.close(fig)
 
             # ---------------------------
             # Comparison vs Unintegrated
             # ---------------------------
             if emb != "Unintegrated" and "Unintegrated" in adata.obsm:
-
                 tmp_int = adata.copy()
                 if emb == "BBKNN":
                     import bbknn
@@ -2051,11 +2125,8 @@ def plot_integration_umaps(
                     f"umap_{emb}_vs_Unintegrated",
                     figdir=base,
                     fig=fig,
-                    right=0.92,  # side-by-side has wider right margin needs
+                    right=0.92,
                 )
-
-                # again: saver closes; don’t close here
-                # plt.close(fig)
 
         except Exception as e:
             LOGGER.warning("Failed to plot UMAP for %s: %s", emb, e)

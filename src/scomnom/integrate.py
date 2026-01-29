@@ -1517,18 +1517,28 @@ def run_integrate(cfg: IntegrateConfig) -> ad.AnnData:
     annotated_run = bool(getattr(cfg, "annotated_run", False))
     if annotated_run:
         # ----------------------------
-        # Annotated secondary integration (explicit + guarded)
+        # Annotated secondary integration (NO scIB, NO selection)
         # ----------------------------
-        LOGGER.warning("ANNOTATED RUN enabled: will compute ONLY scANVI__annotated (plus scVI backbone as needed).")
-
-        methods = ["scANVI__annotated"]
+        LOGGER.warning(
+            "ANNOTATED RUN enabled: will recompute ONLY scANVI__annotated, "
+            "set its UMAP as the active X_umap (stashing any prior), "
+            "and will NOT modify X_integrated."
+        )
 
         # Determine source round
         source_round = getattr(cfg, "annotated_run_cluster_round", None)
         source_round = str(source_round) if source_round else None
 
-        truth_key, truth_tag = _resolve_scib_truth_label_key(adata, cfg, round_id=source_round)
-        LOGGER.info("scIB truth labels: key=%r (%s)", truth_key, truth_tag)
+        # ----------------------------
+        # Stash current ACTIVE UMAP (if present) under the key expected by plotting/reporting
+        # ----------------------------
+        if "X_umap" in adata.obsm:
+            try:
+                adata.obsm["X_umap_pre_annotated"] = np.asarray(adata.obsm["X_umap"])
+            except Exception:
+                LOGGER.warning(
+                    "ANNOTATED RUN: failed to stash existing X_umap to X_umap_pre_annotated"
+                )
 
         # Compute annotated scANVI embedding (and write it)
         adata, created_keys, final_label_key, mask_key, meta = _run_annotated_scanvi_secondary_integration(
@@ -1539,64 +1549,57 @@ def run_integrate(cfg: IntegrateConfig) -> ad.AnnData:
             out_embedding_key="scANVI__annotated",
         )
 
-        # Benchmark all available embeddings using FINAL labels
-        best = _select_best_embedding(
-            adata,
-            embedding_keys=created_keys,
-            batch_key=batch_key,
-            label_key=truth_key,
-            n_jobs=cfg.benchmark_n_jobs,
-            output_dir=cfg.output_dir,
-            benchmark_threshold=cfg.benchmark_threshold,
-            benchmark_n_cells=cfg.benchmark_n_cells,
-            benchmark_random_state=cfg.benchmark_random_state,
-            run_tag=f"annotated__{truth_tag}",
+        # Resolve round id for title
+        round_id_for_title = (
+            str(meta.get("source_round_id"))
+            if meta.get("source_round_id") is not None
+            else (source_round if source_round is not None else str(adata.uns.get("active_cluster_round", "active")))
         )
+        plot_title = f"scANVI annotated on {round_id_for_title}"
 
-        # Store the annotated selection without clobbering primary integration
-        if best.lower().startswith("bbknn"):
-            LOGGER.warning("ANNOTATED RUN: BBKNN selected as best; X_integrated_annotated will reference PCA.")
-            adata.obsm["X_integrated_annotated"] = adata.obsm["X_pca"]
-            # neighbors graph for annotated visualization
-            sc.pp.neighbors(adata, use_rep="X_pca")
-        else:
-            adata.obsm["X_integrated_annotated"] = adata.obsm[best]
-            sc.pp.neighbors(adata, use_rep="X_integrated_annotated")
+        # ----------------------------
+        # Make annotated UMAP the ACTIVE UMAP
+        # ----------------------------
+        sc.pp.neighbors(adata, use_rep="scANVI__annotated")
+        sc.tl.umap(adata)  # writes active UMAP into adata.obsm["X_umap"]
+        adata.obsm["X_umap__scANVI__annotated"] = np.asarray(adata.obsm["X_umap"])
 
-        # Compute an annotated UMAP without overwriting existing UMAP
-        old_umap = adata.obsm.get("X_umap", None)
-        sc.tl.umap(adata)
-        adata.obsm["X_umap_annotated"] = np.asarray(adata.obsm["X_umap"])
-        if old_umap is not None:
-            adata.obsm["X_umap"] = old_umap
-
-        # Plot UMAPs: batch + final labels
-        # (plot_utils.plot_integration_umaps likely uses X_umap; so we temporarily swap)
+        # ----------------------------
+        # Save the TWO UMAP PNGs needed for the annotated-run report
+        #   - pre:  uses adata.obsm["X_umap_pre_annotated"]
+        #   - post: uses active adata.obsm["X_umap"]
+        #
+        # We save them via plot_utils.plot_integration_umaps(), which (with the patched
+        # version you pasted earlier) will emit:
+        #   integration/umap_pre_annotated__<round>.png
+        #   integration/umap_annotated__<round>.png
+        #
+        # IMPORTANT: use color=final_label_key so the report comparison is meaningful.
+        # ----------------------------
         if getattr(cfg, "make_figures", True):
             try:
-                tmp_umap = adata.obsm.get("X_umap", None)
-                adata.obsm["X_umap"] = adata.obsm["X_umap_annotated"]
+                # Ensure the "post" plot uses the requested title (without changing plotting util internals)
+                # We temporarily stash a title hint in uns (plotting util can ignore this; harmless).
+                adata.uns.setdefault("integration", {})
+                adata.uns["integration"].setdefault("annotated_run", {})
+                adata.uns["integration"]["annotated_run"].update(
+                    {"round_id": str(round_id_for_title), "title": str(plot_title)}
+                )
 
                 plot_utils.plot_integration_umaps(
                     adata,
-                    embedding_keys=["X_integrated_annotated"],
-                    batch_key=batch_key,
-                    color=batch_key,
-                )
-                plot_utils.plot_integration_umaps(
-                    adata,
-                    embedding_keys=["X_integrated_annotated"],
+                    embedding_keys=["scANVI__annotated"],
                     batch_key=batch_key,
                     color=final_label_key,
+                    annotated_round_id=round_id_for_title,
                 )
-                if tmp_umap is not None:
-                    adata.obsm["X_umap"] = tmp_umap
-            except Exception as e:
-                LOGGER.warning("ANNOTATED RUN: failed to plot annotated UMAPs: %s", e)
-                if old_umap is not None:
-                    adata.obsm["X_umap"] = old_umap
 
-        # Integration provenance
+            except Exception as e:
+                LOGGER.warning("ANNOTATED RUN: failed to save pre/post annotated UMAP PNGs: %s", e)
+
+        # ----------------------------
+        # Integration provenance (append; do not overwrite primary integration selection)
+        # ----------------------------
         adata.uns.setdefault("integration", {})
         adata.uns["integration"].setdefault("runs", [])
         try:
@@ -1604,41 +1607,66 @@ def run_integrate(cfg: IntegrateConfig) -> ad.AnnData:
                 {
                     "mode": "annotated_secondary",
                     "embedding_key_created": "scANVI__annotated",
-                    "selected_embedding": str(best),
+                    "umap_key_active": "X_umap",
+                    "umap_key_created": "X_umap__scANVI__annotated",
+                    "umap_key_stashed_prev": "X_umap_pre_annotated" if "X_umap_pre_annotated" in adata.obsm else None,
                     "final_label_key": str(final_label_key),
                     "confidence_mask_key": str(mask_key),
                     "source_round_id": str(meta.get("source_round_id")),
                     "mask_stats": meta.get("mask_stats", None),
                     "timestamp_utc": datetime.utcnow().isoformat(),
+                    "note": (
+                        "No scIB benchmarking/selection in annotated_run; "
+                        "active X_umap computed from scANVI__annotated; X_integrated left unchanged."
+                    ),
                 }
             )
         except Exception:
             pass
 
-        # Create derived projection round to keep state clear (no reclustering)
+        # Keep an 'available embeddings' list without changing X_integrated
+        try:
+            adata.uns["integration"].setdefault("available_embeddings", [])
+            avail = list(adata.uns["integration"]["available_embeddings"])
+            if "scANVI__annotated" not in avail:
+                avail.append("scANVI__annotated")
+            adata.uns["integration"]["available_embeddings"] = avail
+        except Exception:
+            pass
+
+        # Optional projection round bookkeeping (keep lineage tracking)
         try:
             parent_round = meta.get("source_round_id", None)
             if parent_round:
                 proj_round = _create_projection_round_for_secondary_integration(
                     adata,
                     parent_round_id=str(parent_round),
-                    integration_key="X_integrated_annotated",
+                    integration_key="scANVI__annotated",
                 )
-                LOGGER.info("ANNOTATED RUN: created projection round '%s' (parent='%s').", proj_round, parent_round)
+                LOGGER.info(
+                    "ANNOTATED RUN: created projection round '%s' (parent='%s').",
+                    proj_round,
+                    parent_round,
+                )
         except Exception as e:
             LOGGER.warning("ANNOTATED RUN: failed to create projection round: %s", e)
 
-        # Report generation: reuse existing report (it will see new obsm keys / tables)
-        reporting.generate_integration_report(
-            fig_root=cfg.figdir,
-            version=__version__,
-            adata=adata,
-            batch_key=batch_key,
-            label_key=final_label_key,
-            methods=["scANVI__annotated"],
-            benchmark_n_jobs=cfg.benchmark_n_jobs,
-            selected_embedding=best,
-        )
+        # ----------------------------
+        # Annotated-run integration report (lightweight; relies on your patched reporting.py)
+        # ----------------------------
+        try:
+            reporting.generate_integration_report(
+                fig_root=cfg.figdir,
+                version=__version__,
+                adata=adata,
+                batch_key=batch_key,
+                label_key=final_label_key,
+                methods=["scANVI__annotated"],
+                selected_embedding="scANVI__annotated",
+                benchmark_n_jobs=getattr(cfg, "benchmark_n_jobs", 1),
+            )
+        except Exception as e:
+            LOGGER.warning("ANNOTATED RUN: failed to generate integration report: %s", e)
 
     else:
         # ----------------------------
@@ -1683,6 +1711,7 @@ def run_integrate(cfg: IntegrateConfig) -> ad.AnnData:
                 "BBKNN selected as best integration; using BBKNN neighbor graph (graph-based integration)."
             )
             import bbknn
+
             bbknn.bbknn(
                 adata,
                 batch_key=batch_key,
