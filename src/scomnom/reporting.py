@@ -822,20 +822,30 @@ def generate_annotated_integration_report(
     pre_short_png: str | None = None,
     post_short_png: str | None = None,
     pre_post_png: str | None = None,
+    # NEW (optional overrides for batch plots)
+    pre_batch_full_png: str | None = None,
+    post_batch_full_png: str | None = None,
+    pre_post_batch_png: str | None = None,
 ) -> None:
     """
     Write: <fig_root>/integration_report_annotated.html
 
     Annotated-run report:
       - NO scIB benchmarking
-      - Only the 5 annotated-run UMAP figures produced by plot_annotated_run_umaps()
+      - Only annotated-run UMAP figures emitted by plot_annotated_run_umaps()
 
     Expected stems (written by plot_annotated_run_umaps via save_umap_multi):
-      - umap_pre__<tag>__fulllegend
-      - umap_post__<tag>__fulllegend
-      - umap_pre__<tag>__shortlegend
-      - umap_post__<tag>__shortlegend
-      - umap_pre_vs_post__<tag>__shortlegend
+      FINAL LABELS (5):
+        - umap_pre__<tag>__fulllegend
+        - umap_post__<tag>__fulllegend
+        - umap_pre__<tag>__shortlegend
+        - umap_post__<tag>__shortlegend
+        - umap_pre_vs_post__<tag>__shortlegend
+
+      BATCH (3):
+        - umap_pre__<tag>__batch__fulllegend
+        - umap_post__<tag>__batch__fulllegend
+        - umap_pre_vs_post__<tag>__batch
     """
     from datetime import datetime
     from pathlib import Path
@@ -848,7 +858,6 @@ def generate_annotated_integration_report(
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     rel_imgs = _collect_pngs(fig_root)
-
     rid = str(round_id)
 
     def _sanitize_tag(s: str) -> str:
@@ -864,42 +873,81 @@ def generate_annotated_integration_report(
         p = Path(x)
         return p if not p.is_absolute() else p.relative_to(fig_root)
 
-    def _find_first_contains(substr: str) -> Path | None:
-        # rel_imgs are already relative-to-fig_root paths
+    def _find_first_all(tokens: list[str]) -> Path | None:
+        """Find first image whose path contains ALL tokens (substring match)."""
         for p in rel_imgs:
-            if substr in p.as_posix():
+            s = p.as_posix()
+            if all(t in s for t in tokens):
                 return p
         return None
 
-    # If user passes explicit files, respect them; else auto-infer by the stems your plotter uses.
-    pre_full_path = _as_relpath(pre_full_png) or _find_first_contains(f"umap_pre__{tag}__fulllegend")
-    post_full_path = _as_relpath(post_full_png) or _find_first_contains(f"umap_post__{tag}__fulllegend")
-    pre_short_path = _as_relpath(pre_short_png) or _find_first_contains(f"umap_pre__{tag}__shortlegend")
-    post_short_path = _as_relpath(post_short_png) or _find_first_contains(f"umap_post__{tag}__shortlegend")
-    pre_post_path = _as_relpath(pre_post_png) or _find_first_contains(f"umap_pre_vs_post__{tag}__shortlegend")
+    # -----------------------------
+    # Resolve FINAL LABEL plots (5)
+    # -----------------------------
+    pre_full_path = _as_relpath(pre_full_png) or _find_first_all([f"umap_pre__{tag}", "__fulllegend"])
+    post_full_path = _as_relpath(post_full_png) or _find_first_all([f"umap_post__{tag}", "__fulllegend"])
+    pre_short_path = _as_relpath(pre_short_png) or _find_first_all([f"umap_pre__{tag}", "__shortlegend"])
+    post_short_path = _as_relpath(post_short_png) or _find_first_all([f"umap_post__{tag}", "__shortlegend"])
+    pre_post_path = _as_relpath(pre_post_png) or _find_first_all([f"umap_pre_vs_post__{tag}", "__shortlegend"])
 
-    # last-resort fallback (if tag mismatch) — pick “any tag”
+    # Tag-mismatch fallback (any tag, but correct suffix)
     if pre_full_path is None:
-        pre_full_path = _find_first_contains("umap_pre__") and _find_first_contains("__fulllegend")
+        pre_full_path = _find_first_all(["umap_pre__", "__fulllegend"])
     if post_full_path is None:
-        post_full_path = _find_first_contains("umap_post__") and _find_first_contains("__fulllegend")
+        post_full_path = _find_first_all(["umap_post__", "__fulllegend"])
     if pre_short_path is None:
-        pre_short_path = _find_first_contains("umap_pre__") and _find_first_contains("__shortlegend")
+        pre_short_path = _find_first_all(["umap_pre__", "__shortlegend"])
     if post_short_path is None:
-        post_short_path = _find_first_contains("umap_post__") and _find_first_contains("__shortlegend")
+        post_short_path = _find_first_all(["umap_post__", "__shortlegend"])
     if pre_post_path is None:
-        pre_post_path = _find_first_contains("umap_pre_vs_post__") and _find_first_contains("__shortlegend")
+        pre_post_path = _find_first_all(["umap_pre_vs_post__", "__shortlegend"])
 
-    # Order: 2-panel first, then post/pre fulllegend, then post/pre shortlegend
-    cards_sorted: list[Path] = []
+    # -----------------------------
+    # Resolve BATCH plots (3)
+    # -----------------------------
+    pre_batch_full_path = _as_relpath(pre_batch_full_png) or _find_first_all([f"umap_pre__{tag}", "__batch__fulllegend"])
+    post_batch_full_path = _as_relpath(post_batch_full_png) or _find_first_all([f"umap_post__{tag}", "__batch__fulllegend"])
+    pre_post_batch_path = _as_relpath(pre_post_batch_png) or _find_first_all([f"umap_pre_vs_post__{tag}", "__batch"])
+
+    # Tag-mismatch fallback (any tag, but correct suffix)
+    if pre_batch_full_path is None:
+        pre_batch_full_path = _find_first_all(["umap_pre__", "__batch__fulllegend"])
+    if post_batch_full_path is None:
+        post_batch_full_path = _find_first_all(["umap_post__", "__batch__fulllegend"])
+    if pre_post_batch_path is None:
+        pre_post_batch_path = _find_first_all(["umap_pre_vs_post__", "__batch"])
+
+    # -----------------------------
+    # Order within groups
+    # -----------------------------
+    final_cards: list[Path] = []
     for p in [pre_post_path, post_full_path, pre_full_path, post_short_path, pre_short_path]:
         if p is not None:
-            cards_sorted.append(p)
+            final_cards.append(p)
 
-    # Deduplicate while keeping order
-    seen = set()
-    cards_sorted = [p for p in cards_sorted if not (p in seen or seen.add(p))]
+    batch_cards: list[Path] = []
+    for p in [pre_post_batch_path, post_batch_full_path, pre_batch_full_path]:
+        if p is not None:
+            batch_cards.append(p)
 
+    # Deduplicate within each group, preserve order
+    def _dedup_keep_order(paths: list[Path]) -> list[Path]:
+        seen: set[str] = set()
+        out: list[Path] = []
+        for p in paths:
+            k = p.as_posix()
+            if k in seen:
+                continue
+            seen.add(k)
+            out.append(p)
+        return out
+
+    final_cards = _dedup_keep_order(final_cards)
+    batch_cards = _dedup_keep_order(batch_cards)
+
+    # -----------------------------
+    # Summary
+    # -----------------------------
     summary: dict[str, Any] = {
         "mode": "annotated_secondary",
         "version": version,
@@ -910,13 +958,15 @@ def generate_annotated_integration_report(
         "round_tag": tag,
         "active_umap_key": "X_umap",
         "stashed_pre_umap_key": "X_umap__pre_annotated_run",
-        "plots_expected": 5,
-        "plots_found": len(cards_sorted),
-        "plots": [p.as_posix() for p in cards_sorted],
+        "plots_expected_final": 5,
+        "plots_found_final": len(final_cards),
+        "plots_expected_batch": 3,
+        "plots_found_batch": len(batch_cards),
+        "plots_final": [p.as_posix() for p in final_cards],
+        "plots_batch": [p.as_posix() for p in batch_cards],
     }
 
     summary_json = _safe(json.dumps(summary, indent=2, default=str))
-
     rows = []
     for k, v in summary.items():
         vv = ", ".join(map(str, v)) if isinstance(v, (list, tuple)) else str(v)
@@ -943,7 +993,8 @@ def generate_annotated_integration_report(
 
     toc_sections: List[Tuple[str, str]] = [
         ("summary", "Summary"),
-        ("umaps", "UMAPs (pre/post)"),
+        ("umaps-final", "UMAPs (final labels)"),
+        ("umaps-batch", "UMAPs (batch)"),
     ]
     toc_html = _toc(toc_sections)
 
@@ -951,29 +1002,61 @@ def generate_annotated_integration_report(
     blocks.append('<div id="summary"></div>')
     blocks.append(_details_block("Summary", summary_table, open_by_default=True))
 
-    blocks.append('<div id="umaps"></div>')
-    if cards_sorted:
+    # -----------------------------
+    # UMAPs: FINAL labels
+    # -----------------------------
+    blocks.append('<div id="umaps-final"></div>')
+    if final_cards:
         note = (
-            "Figures produced by the annotated-run UMAP helper:\n"
-            "• Fulllegend plots show the full pretty labels with a right-side legend.\n"
+            "Final-label UMAPs:\n"
+            "• Fulllegend plots show full pretty labels with a right-side legend.\n"
             "• Shortlegend plots replace legends with on-data Cnn IDs at cluster centroids.\n"
             "• The 2-panel plot compares Pre vs Post side-by-side using short labels."
         )
         inner = (
             f"<p class='note'>{_safe(note)}</p>"
             + '<div class="grid grid2">'
-            + "".join([_render_image_card(p) for p in cards_sorted])
+            + "".join([_render_image_card(p) for p in final_cards])
             + "</div>"
         )
-        title_html = f"UMAPs (annotated run on { _safe(rid) }) <span class='pill'>{len(cards_sorted)} plots</span>"
+        title_html = f"UMAPs (final labels; annotated run on { _safe(rid) }) <span class='pill'>{len(final_cards)} plots</span>"
         blocks.append(_details_block(title_html, inner, open_by_default=True))
     else:
         blocks.append(
             _details_block(
-                f"UMAPs (annotated run on { _safe(rid) })",
-                "<p class='note'><em>No annotated-run UMAP plots were found under fig_root/png. "
-                "Expected files like <code>png/integration/umap_*__&lt;tag&gt;__fulllegend.png</code> and "
-                "<code>png/integration/umap_*__&lt;tag&gt;__shortlegend.png</code>.</em></p>",
+                f"UMAPs (final labels; annotated run on { _safe(rid) })",
+                "<p class='note'><em>No final-label annotated-run UMAP plots were found under fig_root/png. "
+                "Expected files like <code>png/integration/umap_pre__&lt;tag&gt;__fulllegend.png</code> and "
+                "<code>png/integration/umap_pre_vs_post__&lt;tag&gt;__shortlegend.png</code>.</em></p>",
+                open_by_default=True,
+            )
+        )
+
+    # -----------------------------
+    # UMAPs: BATCH
+    # -----------------------------
+    blocks.append('<div id="umaps-batch"></div>')
+    if batch_cards:
+        note = (
+            f"Batch-key UMAPs (color={batch_key}):\n"
+            "• Pre/Post single panels use a right-side legend.\n"
+            "• The 2-panel plot compares Pre vs Post without a legend."
+        )
+        inner = (
+            f"<p class='note'>{_safe(note)}</p>"
+            + '<div class="grid grid2">'
+            + "".join([_render_image_card(p) for p in batch_cards])
+            + "</div>"
+        )
+        title_html = f"UMAPs (batch; annotated run on { _safe(rid) }) <span class='pill'>{len(batch_cards)} plots</span>"
+        blocks.append(_details_block(title_html, inner, open_by_default=True))
+    else:
+        blocks.append(
+            _details_block(
+                f"UMAPs (batch; annotated run on { _safe(rid) })",
+                "<p class='note'><em>No batch annotated-run UMAP plots were found under fig_root/png. "
+                "Expected files like <code>png/integration/umap_pre__&lt;tag&gt;__batch__fulllegend.png</code> and "
+                "<code>png/integration/umap_pre_vs_post__&lt;tag&gt;__batch.png</code>.</em></p>",
                 open_by_default=True,
             )
         )

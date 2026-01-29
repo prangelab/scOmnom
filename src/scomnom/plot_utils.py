@@ -2167,13 +2167,16 @@ def plot_annotated_run_umaps(
     figdir="integration",
 ) -> None:
     """
-    Emit 5 annotated-run UMAP plots:
+    Emit 58annotated-run UMAP plots:
 
       1) Pre  (full legend; full pretty labels)
       2) Post (full legend; full pretty labels)
       3) Pre  (short legend; Cnn labels on clusters; no legend)
       4) Post (short legend; Cnn labels on clusters; no legend)
       5) Pre vs Post (short legend; 2-panel; Cnn labels; no legend)
+      6) Pre batchkey
+      7) Post batchkey
+      8) Pre vs Post batchkey
 
     Requires:
       - adata.obsm["X_umap__pre_annotated_run"] exists (pre)
@@ -2405,6 +2408,75 @@ def plot_annotated_run_umaps(
     except Exception as e:
         LOGGER.warning("Annotated UMAP (pre-vs-post/shortlegend) failed: %s", e)
 
+    # ----------------------------
+    # 6) PRE (batch; full legend)
+    # ----------------------------
+    try:
+        tmp_pre = _tmp_with_umap(pre_umap)
+        fig_pre_batch = sc.pl.umap(
+            tmp_pre,
+            color=batch_key,
+            title=f"Pre scANVI annotated integration on {rid} (batch)",
+            show=False,
+            return_fig=True,
+            legend_loc="right margin",
+        )
+        save_umap_multi(f"umap_pre__{tag}__batch__fulllegend", figdir=base, fig=fig_pre_batch)
+    except Exception as e:
+        LOGGER.warning("Annotated UMAP (pre/batch/fulllegend) failed: %s", e)
+
+    # ----------------------------
+    # 7) POST (batch; full legend)
+    # ----------------------------
+    try:
+        tmp_post = _tmp_with_umap(post_umap)
+        fig_post_batch = sc.pl.umap(
+            tmp_post,
+            color=batch_key,
+            title=f"Post scANVI annotated integration on {rid} (batch)",
+            show=False,
+            return_fig=True,
+            legend_loc="right margin",
+        )
+        save_umap_multi(f"umap_post__{tag}__batch__fulllegend", figdir=base, fig=fig_post_batch)
+    except Exception as e:
+        LOGGER.warning("Annotated UMAP (post/batch/fulllegend) failed: %s", e)
+
+    # ----------------------------
+    # 8) PRE vs POST (batch; 2-panel; no legend)
+    # ----------------------------
+    try:
+        tmp = adata.copy()
+        fig, axs = plt.subplots(1, 2, figsize=(10, 4))
+
+        tmp.obsm["X_umap"] = pre_umap
+        sc.pl.umap(
+            tmp,
+            color=batch_key,
+            ax=axs[0],
+            show=False,
+            title=f"Pre scANVI annotated integration on {rid} (batch)",
+            legend_loc=None,
+        )
+
+        tmp.obsm["X_umap"] = post_umap
+        sc.pl.umap(
+            tmp,
+            color=batch_key,
+            ax=axs[1],
+            show=False,
+            title=f"Post scANVI annotated integration on {rid} (batch)",
+            legend_loc=None,
+        )
+
+        save_umap_multi(
+            f"umap_pre_vs_post__{tag}__batch",
+            figdir=base,
+            fig=fig,
+            right=0.92,
+        )
+    except Exception as e:
+        LOGGER.warning("Annotated UMAP (pre-vs-post/batch) failed: %s", e)
 
 
 # ----------------------------------------------------------------------
