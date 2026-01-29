@@ -25,3 +25,6 @@ Improved layout of reports.
 ## 0.1.5 [20-01-2026]
 Optimised resolution sweep by removing full ARI table computation. Only adjacent ARIs are needed.
 Fixed bug preventing color values to be read from adata.
+
+## 0.1.8 [29-01-2026]
+Added first working version of marker calling in the DE module. Module is still under construction, do not use yet.
