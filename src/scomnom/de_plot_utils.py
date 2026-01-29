@@ -400,22 +400,22 @@ import pandas as pd
 
 
 def heatmap_top_genes(
-    adata,
-    *,
-    genes: Sequence[str] | None = None,
-    genes_by_cluster: Mapping[str, Sequence[str]] | None = None,
-    groupby: str,
-    use_raw: bool = False,
-    layer: Optional[str] = None,
-    cmap: str | None = None,
-    show_cluster_colorbar: bool = True,
-    scale_columns_by_size: bool = True,
-    min_col_width: float = 0.5,
-    max_col_width: float = 5.0,
-    figsize: Optional[tuple[float, float]] = None,
-    show_gene_labels: bool = True,
-    z_clip: float | None = 2.5,
-    show: bool = False,
+        adata,
+        *,
+        genes: Sequence[str] | None = None,
+        genes_by_cluster: Mapping[str, Sequence[str]] | None = None,
+        groupby: str,
+        use_raw: bool = False,
+        layer: Optional[str] = None,
+        cmap: str | None = None,
+        show_cluster_colorbar: bool = True,
+        scale_columns_by_size: bool = True,
+        min_col_width: float = 0.5,
+        max_col_width: float = 5.0,
+        figsize: Optional[tuple[float, float]] = None,
+        show_gene_labels: bool = True,
+        z_clip: float | None = 2.5,
+        show: bool = False,
 ):
     import numpy as np
     import pandas as pd
@@ -443,8 +443,6 @@ def heatmap_top_genes(
         genes = flat
 
     genes = [str(g) for g in (genes or []) if g is not None and str(g) != ""]
-    if not genes:
-        raise ValueError("No genes provided.")
 
     # -----------------------------
     # 1) Aggregate and Z-score
@@ -469,7 +467,7 @@ def heatmap_top_genes(
     plot_mat = Z.T
 
     # -----------------------------
-    # 2) Column widths (X-axis)
+    # 2) Column widths
     # -----------------------------
     sizes = vc.reindex(groups).values.astype(float)
     if scale_columns_by_size:
@@ -508,25 +506,28 @@ def heatmap_top_genes(
     # 5) Figure & GridSpec
     # -----------------------------
     if figsize is None:
-        W = max(8.0, 0.3 * float(x_edges[-1]) + 3.0)
-        H = max(5.0, 0.2 * float(plot_mat.shape[0]) + 2.0)
+        W = max(8.0, 0.3 * float(x_edges[-1]) + 4.0)  # Iets breder voor labels
+        H = max(5.0, 0.2 * float(plot_mat.shape[0]) + 2.5)
         figsize = (W, H)
 
     fig = plt.figure(figsize=figsize)
+    # Vergroot wspace en pas de rechter marge aan in subplots_adjust later
     gs = fig.add_gridspec(
         nrows=2 if colors is not None else 1,
         ncols=2,
         height_ratios=[0.02, 1.0] if colors is not None else [1.0],
-        width_ratios=[1.0, 0.008],
-        hspace=0.01, wspace=0.02
+        width_ratios=[1.0, 0.01],
+        hspace=0.01, wspace=0.05
     )
 
     ax = fig.add_subplot(gs[-1, 0])
     cax = fig.add_subplot(gs[-1, 1])
 
     # -----------------------------
-    # 6) Heatmap Draw (No Seams Fix)
+    # 6) Heatmap Draw (KILL GRID & SEAMS)
     # -----------------------------
+    ax.grid(False)  # FORCEER GRID UIT voor plotten
+
     mesh = ax.pcolormesh(
         x_edges,
         y_edges,
@@ -555,86 +556,38 @@ def heatmap_top_genes(
     ax.set_yticks(np.arange(len(genes)) + 0.5)
     ax.set_yticklabels(genes if show_gene_labels else [], fontsize=10)
     ax.set_xticks([])
-    ax.tick_params(axis="both", which="both", length=0)
+    ax.tick_params(axis="both", which="both", length=0, zorder=10)
     sns.despine(ax=ax, left=True, bottom=True)
 
     # -----------------------------
-    # 9) Top color bar + Angled Labels
+    # 9) Top color bar + Labels (Fixed Clip)
     # -----------------------------
     if colors is not None:
         ax_top = fig.add_subplot(gs[0, 0], sharex=ax)
+        ax_top.grid(False)  # Zorg dat hier ook geen grid staat
         for i in range(len(groups)):
             ax_top.add_patch(
                 plt.Rectangle((float(x_edges[i]), 0.0), float(w[i]), 1.0, color=colors[i], lw=0)
             )
-            # FIX: Schuine labels (45 graden) om overlap te voorkomen
             ax_top.text(
                 x_centers[i], 1.2, groups[i],
-                ha='left',           # 'left' i.c.m. rotatie zorgt voor mooie uitlijning
-                va='bottom',
-                rotation=45,         # Schuine hoek
-                fontsize=11,
-                fontweight='bold',
-                transform=ax_top.get_xaxis_transform()
+                ha='left', va='bottom',
+                rotation=45,
+                fontsize=11, fontweight='bold',
+                transform=ax_top.get_xaxis_transform(),
+                clip_on=False  # VOORKOMT AFSNIJDEN
             )
         ax_top.set_xlim(0, float(x_edges[-1]))
         ax_top.set_ylim(0, 1)
         ax_top.axis("off")
 
-    if show:
-        plt.show()
-
-    return fig
-
-    # -----------------------------
-    # 7) Colorbar
-    # -----------------------------
-    cb = fig.colorbar(mesh, cax=cax)
-    cb.outline.set_visible(False)
-    cax.tick_params(labelsize=8, length=0)
-    cax.set_ylabel("Z-score", fontsize=8, labelpad=2)
-
-    # -----------------------------
-    # 8) Axes cosmetics
-    # -----------------------------
-    ax.invert_yaxis()
-
-    ax.set_yticks(np.arange(len(genes)) + 0.5)
-    ax.set_yticklabels(genes if show_gene_labels else [], fontsize=10)
-
-    ax.set_xticks(x_centers)
-    ax.set_xticklabels(groups, rotation=90, fontsize=11)
-
-    ax.tick_params(axis="both", which="both", length=0)
-    ax.minorticks_off()
-
-    sns.despine(ax=ax, left=True, bottom=True)
-
-    # -----------------------------
-    # 9) Top cluster color bar (thin)
-    # -----------------------------
-    if colors is not None:
-        ax_top = fig.add_subplot(gs[0, 0], sharex=ax)
-        for i in range(len(groups)):
-            ax_top.add_patch(
-                plt.Rectangle(
-                    (float(x_edges[i]), 0.0),
-                    float(w[i]),
-                    1.0,
-                    color=colors[i],
-                    lw=0,
-                )
-            )
-        ax_top.set_xlim(0, float(x_edges[-1]))
-        ax_top.set_ylim(0, 1)
-        ax_top.axis("off")
-        ax_top.grid(False)
+    # Extra ruimte aan de rechterkant voor de schuine labels
+    fig.subplots_adjust(right=0.90)
 
     if show:
         plt.show()
 
     return fig
-
 
 
 def violin_grid_genes(
