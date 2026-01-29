@@ -337,7 +337,13 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
 
         plot_utils.umap_by(adata, keys=ann_keys["celltypist_cell_key"], figdir=figdir_ct, stem="umap_celltypist_celllevel")
         plot_utils.umap_by(adata, keys=ann_keys["celltypist_cluster_key"], figdir=figdir_ct, stem="umap_celltypist_clusterlevel")
-        plot_utils.umap_by(adata, keys=ann_keys["pretty_cluster_key"], figdir=figdir_ct, stem="umap_pretty_cluster_label")
+        plot_utils.umap_by_two_legend_styles(
+            adata,
+            key=ann_keys["pretty_cluster_key"],
+            figdir=figdir_ct,
+            stem="umap_pretty_cluster_label",
+            title=ann_keys["pretty_cluster_key"],
+        )
 
         id_key = ann_keys["pretty_cluster_key"]
         plot_utils.plot_cluster_sizes(adata, id_key, figdir_ct)
@@ -515,11 +521,12 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                         )
                         pretty_key = f"{CLUSTER_LABEL_KEY}__{new_round_id}"
                         if pretty_key in adata.obs:
-                            plot_utils.umap_by(
+                            plot_utils.umap_by_two_legend_styles(
                                 adata,
-                                keys=pretty_key,
+                                key=pretty_key,
                                 figdir=figdir_cluster,
                                 stem="umap_pretty_cluster_label",
+                                title=pretty_key,
                             )
                         plot_utils.plot_compaction_flow(
                             adata,

@@ -685,45 +685,34 @@ def generate_integration_report(
     Write: <fig_root>/integration_report.html
     Expects figures under: <fig_root>/png/...
 
-    Behavior:
-      - Standard runs: same as before (scIB + UMAPs + Other).
-      - Annotated runs: only relevant info, and a pre/post UMAP side-by-side section.
+    Standard integration report only:
+      - Integration benchmarking (scIB)
+      - UMAPs
+      - Other
     """
     fig_root = Path(fig_root).resolve()
     out_html = fig_root / "integration_report.html"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     rel_imgs = _collect_pngs(fig_root)
-    is_annotated = _infer_is_annotated_integration_report(rel_imgs, adata)
 
     # -----------------------------
-    # Collect figures
+    # Collect figures (standard)
     # -----------------------------
-    if is_annotated:
-        # For annotated runs we primarily care about UMAP comparison.
-        umaps = [p for p in rel_imgs if _classify_plot_type(p) == "umap"]
-        other = [p for p in rel_imgs if p not in umaps]
+    sections: Dict[str, List[Path]] = {
+        "Integration benchmarking": [],
+        "UMAPs": [],
+        "Other": [],
+    }
 
-        pre_umap, post_umap = _pick_pre_post_umap_pngs(rel_imgs)
-
-        sections: Dict[str, List[Path]] = {
-            "Annotated UMAP comparison": [],  # special-rendered, not a normal grid
-            "Other": other,
-        }
-    else:
-        sections = {
-            "Integration benchmarking": [],
-            "UMAPs": [],
-            "Other": [],
-        }
-        for p in rel_imgs:
-            t = _classify_plot_type(p)
-            if t == "scib":
-                sections["Integration benchmarking"].append(p)
-            elif t == "umap":
-                sections["UMAPs"].append(p)
-            else:
-                sections["Other"].append(p)
+    for p in rel_imgs:
+        t = _classify_plot_type(p)
+        if t == "scib":
+            sections["Integration benchmarking"].append(p)
+        elif t == "umap":
+            sections["UMAPs"].append(p)
+        else:
+            sections["Other"].append(p)
 
     # -----------------------------
     # Summary payload
@@ -734,29 +723,9 @@ def generate_integration_report(
         "batch_key": batch_key,
         "label_key": label_key,
         "methods_requested": methods,
+        "benchmark_n_jobs": benchmark_n_jobs,
+        "selected_embedding": selected_embedding,
     }
-
-    if is_annotated:
-        summary["mode"] = "annotated_secondary"
-        # pull last annotated run meta if present
-        try:
-            runs = getattr(adata, "uns", {}).get("integration", {}).get("runs", [])
-            if isinstance(runs, list) and runs:
-                last = runs[-1] if isinstance(runs[-1], dict) else {}
-                if isinstance(last, dict):
-                    rid = last.get("source_round_id", None)
-                    if rid is not None:
-                        summary["source_round_id"] = str(rid)
-                    summary["embedding_key_created"] = last.get("embedding_key_created", "scANVI__annotated")
-        except Exception:
-            pass
-
-        # In annotated mode you asked to NOT select a best embedding; do not show it as meaningful.
-        summary["selected_embedding"] = "N/A (annotated run does not select best embedding)"
-        summary["benchmark_n_jobs"] = "N/A (annotated run skips scIB benchmarking)"
-    else:
-        summary["benchmark_n_jobs"] = benchmark_n_jobs
-        summary["selected_embedding"] = selected_embedding
 
     rows = [f"<tr><td>{_safe(k)}</td><td>{_safe(v)}</td></tr>" for k, v in summary.items()]
     summary_table = (
@@ -773,115 +742,246 @@ def generate_integration_report(
         '<div class="meta">'
         f"Version:   {_safe(version)}\n"
         f"Timestamp: {_safe(timestamp)}\n\n"
+        f"Selected embedding:\n{_safe(selected_embedding)}\n\n"
         "Summary:\n"
         f"{summary_json}"
         "</div>"
     )
 
     # -----------------------------
-    # TOC
+    # TOC (standard)
     # -----------------------------
-    toc_sections: List[Tuple[str, str]] = [("summary", "Summary")]
-    if is_annotated:
-        toc_sections.append(("annotated-umap-comparison", "Annotated UMAP comparison"))
-        if sections["Other"]:
-            toc_sections.append(("other", "Other"))
-    else:
-        toc_sections.extend(
-            [
-                ("integration-benchmarking", "Integration benchmarking"),
-                ("umaps", "UMAPs"),
-            ]
-        )
-        if sections["Other"]:
-            toc_sections.append(("other", "Other"))
-
+    toc_sections: List[Tuple[str, str]] = [
+        ("summary", "Summary"),
+        ("integration-benchmarking", "Integration benchmarking"),
+        ("umaps", "UMAPs"),
+    ]
+    if sections["Other"]:
+        toc_sections.append(("other", "Other"))
     toc_html = _toc(toc_sections)
 
     # -----------------------------
-    # Render body
+    # Render body (standard)
     # -----------------------------
     blocks: List[str] = [header]
     blocks.append('<div id="summary"></div>')
     blocks.append(_details_block("Summary", summary_table, open_by_default=True))
 
-    if is_annotated:
-        # --- Annotated UMAP: side-by-side ---
-        blocks.append('<div id="annotated-umap-comparison"></div>')
-
+    if sections["Integration benchmarking"]:
         note = (
-            "Pre vs post annotated integration UMAP. "
-            "“Pre” is the UMAP active before the annotated run; “Post” is the new active UMAP."
+            "Benchmarking outputs (e.g., scIB tables/plots). "
+            "Use this to understand tradeoffs between batch mixing and biological conservation."
         )
-        note_html = f"<p class='note'>{_safe(note)}</p>"
+        inner = f"<p class='note'>{_safe(note)}</p>" + _grid_block(
+            [_render_image_card(p) for p in sections["Integration benchmarking"]]
+        )
+        blocks.append('<div id="integration-benchmarking"></div>')
+        title_html = (
+            f"Integration benchmarking <span class='pill'>{len(sections['Integration benchmarking'])} plots</span>"
+        )
+        blocks.append(_details_block(title_html, inner, open_by_default=False))
 
-        cards: List[str] = []
-        if pre_umap is not None:
-            cards.append(_render_image_card(pre_umap).replace(
-                '<div class="cap-title">', '<div class="cap-title">Pre: '
-            ))
-        else:
-            cards.append(
-                '<figure class="card"><div class="card-img">'
-                "<div class='note'><em>Could not find a saved “pre” UMAP PNG.</em></div>"
-                "</div></figure>"
-            )
+    if sections["UMAPs"]:
+        note = "UMAPs for each embedding / method. Expand only when needed."
+        inner = f"<p class='note'>{_safe(note)}</p>" + _grid_block(
+            [_render_image_card(p) for p in sections["UMAPs"]]
+        )
+        blocks.append('<div id="umaps"></div>')
+        title_html = f"UMAPs <span class='pill'>{len(sections['UMAPs'])} plots</span>"
+        blocks.append(_details_block(title_html, inner, open_by_default=False))
 
-        if post_umap is not None:
-            cards.append(_render_image_card(post_umap).replace(
-                '<div class="cap-title">', '<div class="cap-title">Post: '
-            ))
-        else:
-            cards.append(
-                '<figure class="card"><div class="card-img">'
-                "<div class='note'><em>Could not find a saved “post/annotated” UMAP PNG.</em></div>"
-                "</div></figure>"
-            )
-
-        inner = note_html + _grid2_block(cards)
-        title_html = "Annotated UMAP comparison <span class='pill'>2-up</span>"
-        blocks.append(_details_block(title_html, inner, open_by_default=True))
-
-        # --- Other figures (if any) ---
-        if sections["Other"]:
-            blocks.append('<div id="other"></div>')
-            inner = _grid_block([_render_image_card(p) for p in sections["Other"]])
-            title_html = f"Other <span class='pill'>{len(sections['Other'])} plots</span>"
-            blocks.append(_details_block(title_html, inner, open_by_default=False))
-
-    else:
-        # --- Standard integration report (unchanged style) ---
-        if sections["Integration benchmarking"]:
-            note = (
-                "Benchmarking outputs (e.g., scIB tables/plots). "
-                "Use this to understand tradeoffs between batch mixing and biological conservation."
-            )
-            inner = f"<p class='note'>{_safe(note)}</p>" + _grid_block(
-                [_render_image_card(p) for p in sections["Integration benchmarking"]]
-            )
-            blocks.append('<div id="integration-benchmarking"></div>')
-            title_html = f"Integration benchmarking <span class='pill'>{len(sections['Integration benchmarking'])} plots</span>"
-            blocks.append(_details_block(title_html, inner, open_by_default=False))
-
-        if sections["UMAPs"]:
-            note = "UMAPs for each embedding / method. Expand only when needed."
-            inner = f"<p class='note'>{_safe(note)}</p>" + _grid_block(
-                [_render_image_card(p) for p in sections["UMAPs"]]
-            )
-            blocks.append('<div id="umaps"></div>')
-            title_html = f"UMAPs <span class='pill'>{len(sections['UMAPs'])} plots</span>"
-            blocks.append(_details_block(title_html, inner, open_by_default=False))
-
-        if sections["Other"]:
-            inner = _grid_block([_render_image_card(p) for p in sections["Other"]])
-            blocks.append('<div id="other"></div>')
-            title_html = f"Other <span class='pill'>{len(sections['Other'])} plots</span>"
-            blocks.append(_details_block(title_html, inner, open_by_default=False))
+    if sections["Other"]:
+        inner = _grid_block([_render_image_card(p) for p in sections["Other"]])
+        blocks.append('<div id="other"></div>')
+        title_html = f"Other <span class='pill'>{len(sections['Other'])} plots</span>"
+        blocks.append(_details_block(title_html, inner, open_by_default=False))
 
     html_doc = (
         "<!DOCTYPE html><html><head>"
         '<meta charset="utf-8">'
         "<title>scOmnom Integration report</title>"
+        f"<style>{_css()}</style>"
+        "</head><body>"
+        f'<div class="wrap">{toc_html}<main class="content">{"".join(blocks)}</main></div>'
+        "</body></html>"
+    )
+    out_html.write_text(html_doc, encoding="utf-8")
+
+
+def generate_annotated_integration_report(
+    *,
+    fig_root: Path,
+    version: str,
+    adata,
+    batch_key: str,
+    final_label_key: str,
+    round_id: str,
+    # Optional overrides (paths relative to fig_root). Leave None to auto-infer.
+    pre_full_png: str | None = None,
+    post_full_png: str | None = None,
+    pre_short_png: str | None = None,
+    post_short_png: str | None = None,
+    pre_post_png: str | None = None,
+) -> None:
+    """
+    Write: <fig_root>/integration_report_annotated.html
+
+    Annotated-run report:
+      - NO scIB benchmarking
+      - Only the 5 annotated-run UMAP figures produced by plot_annotated_run_umaps()
+
+    Expected stems (written by plot_annotated_run_umaps via save_umap_multi):
+      - umap_pre__<tag>__fulllegend
+      - umap_post__<tag>__fulllegend
+      - umap_pre__<tag>__shortlegend
+      - umap_post__<tag>__shortlegend
+      - umap_pre_vs_post__<tag>__shortlegend
+    """
+    from datetime import datetime
+    from pathlib import Path
+    import json
+    import re
+    from typing import Any, List, Tuple
+
+    fig_root = Path(fig_root).resolve()
+    out_html = fig_root / "integration_report_annotated.html"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    rel_imgs = _collect_pngs(fig_root)
+
+    rid = str(round_id)
+
+    def _sanitize_tag(s: str) -> str:
+        s = str(s or "").strip()
+        s = re.sub(r"[^A-Za-z0-9]+", "-", s).strip("-")
+        return s or "NA"
+
+    tag = _sanitize_tag(rid)
+
+    def _as_relpath(x: str | Path | None) -> Path | None:
+        if not x:
+            return None
+        p = Path(x)
+        return p if not p.is_absolute() else p.relative_to(fig_root)
+
+    def _find_first_contains(substr: str) -> Path | None:
+        # rel_imgs are already relative-to-fig_root paths
+        for p in rel_imgs:
+            if substr in p.as_posix():
+                return p
+        return None
+
+    # If user passes explicit files, respect them; else auto-infer by the stems your plotter uses.
+    pre_full_path = _as_relpath(pre_full_png) or _find_first_contains(f"umap_pre__{tag}__fulllegend")
+    post_full_path = _as_relpath(post_full_png) or _find_first_contains(f"umap_post__{tag}__fulllegend")
+    pre_short_path = _as_relpath(pre_short_png) or _find_first_contains(f"umap_pre__{tag}__shortlegend")
+    post_short_path = _as_relpath(post_short_png) or _find_first_contains(f"umap_post__{tag}__shortlegend")
+    pre_post_path = _as_relpath(pre_post_png) or _find_first_contains(f"umap_pre_vs_post__{tag}__shortlegend")
+
+    # last-resort fallback (if tag mismatch) — pick “any tag”
+    if pre_full_path is None:
+        pre_full_path = _find_first_contains("umap_pre__") and _find_first_contains("__fulllegend")
+    if post_full_path is None:
+        post_full_path = _find_first_contains("umap_post__") and _find_first_contains("__fulllegend")
+    if pre_short_path is None:
+        pre_short_path = _find_first_contains("umap_pre__") and _find_first_contains("__shortlegend")
+    if post_short_path is None:
+        post_short_path = _find_first_contains("umap_post__") and _find_first_contains("__shortlegend")
+    if pre_post_path is None:
+        pre_post_path = _find_first_contains("umap_pre_vs_post__") and _find_first_contains("__shortlegend")
+
+    # Order: 2-panel first, then post/pre fulllegend, then post/pre shortlegend
+    cards_sorted: list[Path] = []
+    for p in [pre_post_path, post_full_path, pre_full_path, post_short_path, pre_short_path]:
+        if p is not None:
+            cards_sorted.append(p)
+
+    # Deduplicate while keeping order
+    seen = set()
+    cards_sorted = [p for p in cards_sorted if not (p in seen or seen.add(p))]
+
+    summary: dict[str, Any] = {
+        "mode": "annotated_secondary",
+        "version": version,
+        "timestamp": timestamp,
+        "batch_key": str(batch_key),
+        "final_label_key": str(final_label_key),
+        "round_id": rid,
+        "round_tag": tag,
+        "active_umap_key": "X_umap",
+        "stashed_pre_umap_key": "X_umap__pre_annotated_run",
+        "plots_expected": 5,
+        "plots_found": len(cards_sorted),
+        "plots": [p.as_posix() for p in cards_sorted],
+    }
+
+    summary_json = _safe(json.dumps(summary, indent=2, default=str))
+
+    rows = []
+    for k, v in summary.items():
+        vv = ", ".join(map(str, v)) if isinstance(v, (list, tuple)) else str(v)
+        rows.append(f"<tr><td>{_safe(k)}</td><td>{_safe(vv)}</td></tr>")
+
+    summary_table = (
+        '<table class="summary-table">'
+        "<thead><tr><th>Field</th><th>Value</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+    )
+
+    header = (
+        '<h1 id="top">scOmnom Annotated integration report</h1>'
+        '<div class="meta">'
+        f"Version:   {_safe(version)}\n"
+        f"Timestamp: {_safe(timestamp)}\n\n"
+        f"Round:     {_safe(rid)}\n\n"
+        "Summary:\n"
+        f"{summary_json}"
+        "</div>"
+        "<p class='note'>This report is intentionally minimal: it documents the annotated scANVI re-run and shows the pre/post UMAPs.</p>"
+    )
+
+    toc_sections: List[Tuple[str, str]] = [
+        ("summary", "Summary"),
+        ("umaps", "UMAPs (pre/post)"),
+    ]
+    toc_html = _toc(toc_sections)
+
+    blocks: List[str] = [header]
+    blocks.append('<div id="summary"></div>')
+    blocks.append(_details_block("Summary", summary_table, open_by_default=True))
+
+    blocks.append('<div id="umaps"></div>')
+    if cards_sorted:
+        note = (
+            "Figures produced by the annotated-run UMAP helper:\n"
+            "• Fulllegend plots show the full pretty labels with a right-side legend.\n"
+            "• Shortlegend plots replace legends with on-data Cnn IDs at cluster centroids.\n"
+            "• The 2-panel plot compares Pre vs Post side-by-side using short labels."
+        )
+        inner = (
+            f"<p class='note'>{_safe(note)}</p>"
+            + '<div class="grid grid2">'
+            + "".join([_render_image_card(p) for p in cards_sorted])
+            + "</div>"
+        )
+        title_html = f"UMAPs (annotated run on { _safe(rid) }) <span class='pill'>{len(cards_sorted)} plots</span>"
+        blocks.append(_details_block(title_html, inner, open_by_default=True))
+    else:
+        blocks.append(
+            _details_block(
+                f"UMAPs (annotated run on { _safe(rid) })",
+                "<p class='note'><em>No annotated-run UMAP plots were found under fig_root/png. "
+                "Expected files like <code>png/integration/umap_*__&lt;tag&gt;__fulllegend.png</code> and "
+                "<code>png/integration/umap_*__&lt;tag&gt;__shortlegend.png</code>.</em></p>",
+                open_by_default=True,
+            )
+        )
+
+    html_doc = (
+        "<!DOCTYPE html><html><head>"
+        '<meta charset="utf-8">'
+        "<title>scOmnom Annotated integration report</title>"
         f"<style>{_css()}</style>"
         "</head><body>"
         f'<div class="wrap">{toc_html}<main class="content">{"".join(blocks)}</main></div>'

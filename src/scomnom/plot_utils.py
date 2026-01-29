@@ -1667,6 +1667,105 @@ def umap_plots(
     LOGGER.info("Generated UMAP plots (batch + %s)", cluster_key)
 
 
+def umap_by_two_legend_styles(
+    adata,
+    *,
+    key: str,
+    figdir,
+    stem: str,
+    title: str | None = None,
+) -> None:
+    """
+    Emit two UMAPs for a categorical key:
+      - fulllegend: standard right-side legend with full labels
+      - shortlegend: no legend; Cnn overlaid at cluster centroids
+
+    Respects Scanpy colors in adata.uns[f"{key}_colors"] if present.
+    Uses save_umap_multi(...) like the rest of your plotting.
+    """
+    import re
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import scanpy as sc
+    from pathlib import Path
+
+    base = Path(figdir)
+
+    if "X_umap" not in adata.obsm:
+        raise KeyError("umap_by_two_legend_styles: adata.obsm['X_umap'] missing.")
+    if key not in adata.obs:
+        raise KeyError(f"umap_by_two_legend_styles: key={key!r} missing from adata.obs.")
+
+    X = np.asarray(adata.obsm["X_umap"])
+    labels = adata.obs[key].astype(str).to_numpy()
+    ttl = title if title is not None else key
+
+    def _extract_cnn(x: str) -> str:
+        s = str(x or "")
+        m = re.search(r"\b(C\d+)\b", s)
+        if m:
+            return m.group(1)
+        m2 = re.search(r"(C\d+)", s)
+        if m2:
+            return m2.group(1)
+        return s.split()[0][:8] if s.strip() else "C?"
+
+    def _unique_stable(arr: np.ndarray) -> list[str]:
+        seen = set()
+        out: list[str] = []
+        for v in arr.tolist():
+            if v not in seen:
+                seen.add(v)
+                out.append(v)
+        return out
+
+    def _annotate_cnn(ax) -> None:
+        if X.ndim != 2 or X.shape[1] != 2:
+            return
+        for lab in _unique_stable(labels):
+            m = labels == lab
+            if not np.any(m):
+                continue
+            cx = float(np.median(X[m, 0]))
+            cy = float(np.median(X[m, 1]))
+            ax.text(
+                cx,
+                cy,
+                _extract_cnn(lab),
+                ha="center",
+                va="center",
+                fontsize=9,
+                fontweight="bold",
+                color="black",
+                bbox=dict(boxstyle="round,pad=0.18", fc="white", ec="none", alpha=0.65),
+                zorder=10,
+            )
+
+    # 1) full legend
+    fig_full = sc.pl.umap(
+        adata,
+        color=key,
+        title=ttl,
+        show=False,
+        return_fig=True,
+        legend_loc="right margin",
+    )
+    save_umap_multi(f"{stem}__fulllegend", figdir=base, fig=fig_full)
+
+    # 2) short legend (no legend; Cnn on clusters)
+    fig_short = sc.pl.umap(
+        adata,
+        color=key,
+        title=ttl,
+        show=False,
+        return_fig=True,
+        legend_loc=None,
+    )
+    ax = fig_short.axes[0] if getattr(fig_short, "axes", None) else plt.gca()
+    _annotate_cnn(ax)
+    save_umap_multi(f"{stem}__shortlegend", figdir=base, fig=fig_short)
+
+
 # -------------------------------------------------------------------------
 # scIB-style results table
 # -------------------------------------------------------------------------
@@ -1960,98 +2059,25 @@ def plot_integration_umaps(
     embedding_keys,
     batch_key: str,
     color: str,
-    *,
-    # Optional: only relevant for annotated runs (keeps backwards compatibility)
-    annotated_round_id: str | None = None,
 ) -> None:
     """
     Plot UMAPs for unintegrated + integrated embeddings.
 
-    Special behavior (annotated runs):
-      If adata.obsm contains:
-        - "X_umap_pre_annotated" (stashed previous active UMAP)
-        - "X_umap" (current active UMAP, expected to be annotated)
-      then we save:
-        - integration/umap_pre_annotated__<round_id>.png
-        - integration/umap_annotated__<round_id>.png
-      and we DO NOT recompute UMAP for those.
+    Core behavior ONLY:
+      - For each embedding in embedding_keys:
+          * recompute neighbors + UMAP (or BBKNN graph)
+          * save single UMAP: integration/umap_<emb>.png
+          * save side-by-side vs Unintegrated (if available and emb != Unintegrated):
+              integration/umap_<emb>_vs_Unintegrated.png
     """
     from pathlib import Path
-    import logging
-    import re
-
     import matplotlib.pyplot as plt
     import scanpy as sc
+    import logging
 
     LOGGER = logging.getLogger(__name__)
     base = Path("integration")
 
-    def _sanitize_tag(s: str | None) -> str:
-        s = str(s or "").strip()
-        s = re.sub(r"[^A-Za-z0-9]+", "-", s).strip("-")
-        return s or "NA"
-
-    # ------------------------------------------------------------------
-    # Annotated-run: emit pre/post UMAP PNGs (no recompute)
-    # ------------------------------------------------------------------
-    has_pre = hasattr(adata, "obsm") and ("X_umap_pre_annotated" in adata.obsm)
-    has_post = hasattr(adata, "obsm") and ("X_umap" in adata.obsm)
-
-    # Try to infer round id if not provided (from integration provenance)
-    rid = annotated_round_id
-    if rid is None:
-        try:
-            runs = getattr(adata, "uns", {}).get("integration", {}).get("runs", [])
-            if isinstance(runs, list) and runs:
-                last = runs[-1] if isinstance(runs[-1], dict) else {}
-                if isinstance(last, dict) and str(last.get("mode", "")).lower() == "annotated_secondary":
-                    rid = str(last.get("source_round_id", "") or "") or None
-        except Exception:
-            rid = None
-
-    if has_pre and has_post:
-        tag = _sanitize_tag(rid)
-
-        try:
-            # --- PRE ---
-            tmp_pre = adata.copy()
-            tmp_pre.obsm["X_umap"] = tmp_pre.obsm["X_umap_pre_annotated"].copy()
-
-            fig_pre = sc.pl.umap(
-                tmp_pre,
-                color=color,
-                title="Pre integration UMAP",
-                show=False,
-                return_fig=True,
-            )
-            # Ensure filename contains "umap" and "pre"
-            save_umap_multi(f"umap_pre_annotated__{tag}", figdir=base, fig=fig_pre)
-
-            # --- POST (active, annotated) ---
-            tmp_post = adata.copy()
-            # tmp_post.obsm["X_umap"] is already active; keep it
-            title_post = f"scANVI annotated on {rid}" if rid else "scANVI annotated"
-
-            fig_post = sc.pl.umap(
-                tmp_post,
-                color=color,
-                title=title_post,
-                show=False,
-                return_fig=True,
-            )
-            # Ensure filename contains "umap" and "annotated"
-            save_umap_multi(f"umap_annotated__{tag}", figdir=base, fig=fig_post)
-
-        except Exception as e:
-            LOGGER.warning("Failed to plot annotated pre/post UMAPs: %s", e)
-
-        # Continue on to normal per-embedding plotting as well (unless you want to skip).
-        # If annotated runs should ONLY show pre/post, uncomment this early return:
-        # return
-
-    # ------------------------------------------------------------------
-    # Standard behavior: per-embedding recompute + save
-    # ------------------------------------------------------------------
     for emb in embedding_keys:
         if emb not in adata.obsm and emb != "BBKNN":
             LOGGER.warning("Embedding '%s' missing; skipping", emb)
@@ -2079,6 +2105,7 @@ def plot_integration_umaps(
                 return_fig=True,
             )
 
+            # Use the UMAP-safe saver (prevents legend clipping)
             save_umap_multi(f"umap_{emb}", figdir=base, fig=fig)
 
             # ---------------------------
@@ -2125,11 +2152,259 @@ def plot_integration_umaps(
                     f"umap_{emb}_vs_Unintegrated",
                     figdir=base,
                     fig=fig,
-                    right=0.92,
+                    right=0.92,  # side-by-side has wider right margin needs
                 )
 
         except Exception as e:
             LOGGER.warning("Failed to plot UMAP for %s: %s", emb, e)
+
+def plot_annotated_run_umaps(
+    adata,
+    *,
+    batch_key: str,
+    final_label_key: str,
+    round_id: str,
+    figdir="integration",
+) -> None:
+    """
+    Emit 5 annotated-run UMAP plots:
+
+      1) Pre  (full legend; full pretty labels)
+      2) Post (full legend; full pretty labels)
+      3) Pre  (short legend; Cnn labels on clusters; no legend)
+      4) Post (short legend; Cnn labels on clusters; no legend)
+      5) Pre vs Post (short legend; 2-panel; Cnn labels; no legend)
+
+    Requires:
+      - adata.obsm["X_umap__pre_annotated_run"] exists (pre)
+      - adata.obsm["X_umap"] exists (post/active)
+
+    Uses save_umap_multi(...) saver (as in your existing plot_utils).
+    """
+    from pathlib import Path
+    import logging
+    import re
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import scanpy as sc
+
+    LOGGER = logging.getLogger(__name__)
+    base = Path(figdir)
+
+    # ----------------------------
+    # Validate inputs
+    # ----------------------------
+    if "X_umap" not in adata.obsm:
+        raise KeyError("plot_annotated_run_umaps: adata.obsm['X_umap'] missing (post/active UMAP).")
+    if "X_umap__pre_annotated_run" not in adata.obsm:
+        raise KeyError("plot_annotated_run_umaps: adata.obsm['X_umap__pre_annotated_run'] missing (pre UMAP stash).")
+    if final_label_key not in adata.obs:
+        raise KeyError(f"plot_annotated_run_umaps: final_label_key={final_label_key!r} missing from adata.obs.")
+    if batch_key not in adata.obs:
+        raise KeyError(f"plot_annotated_run_umaps: batch_key={batch_key!r} missing from adata.obs.")
+
+    rid = str(round_id)
+
+    pre_umap = np.asarray(adata.obsm["X_umap__pre_annotated_run"])
+    post_umap = np.asarray(adata.obsm["X_umap"])
+
+    # ----------------------------
+    # Helpers
+    # ----------------------------
+    def _sanitize_tag(s: str) -> str:
+        s = str(s or "").strip()
+        s = re.sub(r"[^A-Za-z0-9]+", "-", s).strip("-")
+        return s or "NA"
+
+    tag = _sanitize_tag(rid)
+
+    def _extract_cnn(x: str) -> str:
+        """
+        Extract the Cnn token from a pretty label string.
+        Examples:
+          "C07 Astrocytes" -> "C07"
+          "Astrocytes C07" -> "C07"
+        Fallback: first token, truncated.
+        """
+        s = str(x or "")
+        m = re.search(r"\b(C\d+)\b", s)
+        if m:
+            return m.group(1)
+        # fallback: maybe it starts like "C07_..."
+        m2 = re.search(r"(C\d+)", s)
+        if m2:
+            return m2.group(1)
+        return s.split()[0][:8] if s.strip() else "C?"
+
+    def _annotate_cluster_short_ids(ax, umap_xy: np.ndarray, labels: np.ndarray) -> None:
+        """
+        Place Cnn label at per-cluster centroid in the provided UMAP coords.
+        """
+        labs = np.asarray(labels).astype(str)
+        xy = np.asarray(umap_xy)
+        if xy.ndim != 2 or xy.shape[1] != 2:
+            return
+
+        uniq = pd_unique_stable(labs)
+        for lab in uniq:
+            m = labs == lab
+            if not np.any(m):
+                continue
+            cx, cy = np.median(xy[m, 0]), np.median(xy[m, 1])
+            ax.text(
+                float(cx),
+                float(cy),
+                _extract_cnn(lab),
+                ha="center",
+                va="center",
+                fontsize=9,
+                fontweight="bold",
+                color="black",
+                bbox=dict(boxstyle="round,pad=0.18", fc="white", ec="none", alpha=0.65),
+                zorder=10,
+            )
+
+    def pd_unique_stable(arr: np.ndarray) -> list[str]:
+        # stable unique without pandas dependency
+        seen = set()
+        out = []
+        for x in arr.tolist():
+            if x not in seen:
+                seen.add(x)
+                out.append(x)
+        return out
+
+    def _tmp_with_umap(X_umap: np.ndarray):
+        tmp = adata.copy()
+        tmp.obsm["X_umap"] = np.asarray(X_umap)
+        return tmp
+
+    title_pre = f"Pre scANVI annotated integration on {rid}"
+    title_post = f"Post scANVI annotated integration on {rid}"
+
+    # ----------------------------
+    # 1) PRE (full legend; full labels)
+    # ----------------------------
+    try:
+        tmp_pre = _tmp_with_umap(pre_umap)
+        fig_pre_full = sc.pl.umap(
+            tmp_pre,
+            color=final_label_key,
+            title=title_pre,
+            show=False,
+            return_fig=True,
+            legend_loc="right margin",
+        )
+        save_umap_multi(f"umap_pre__{tag}__fulllegend", figdir=base, fig=fig_pre_full)
+    except Exception as e:
+        LOGGER.warning("Annotated UMAP (pre/fulllegend) failed: %s", e)
+
+    # ----------------------------
+    # 2) POST (full legend; full labels)
+    # ----------------------------
+    try:
+        tmp_post = _tmp_with_umap(post_umap)
+        fig_post_full = sc.pl.umap(
+            tmp_post,
+            color=final_label_key,
+            title=title_post,
+            show=False,
+            return_fig=True,
+            legend_loc="right margin",
+        )
+        save_umap_multi(f"umap_post__{tag}__fulllegend", figdir=base, fig=fig_post_full)
+    except Exception as e:
+        LOGGER.warning("Annotated UMAP (post/fulllegend) failed: %s", e)
+
+    # ----------------------------
+    # 3) PRE (short legend; Cnn labels; no legend)
+    # ----------------------------
+    try:
+        tmp_pre = _tmp_with_umap(pre_umap)
+        fig_pre_short = sc.pl.umap(
+            tmp_pre,
+            color=final_label_key,
+            title=title_pre,
+            show=False,
+            return_fig=True,
+            legend_loc=None,
+        )
+        ax = fig_pre_short.axes[0] if fig_pre_short.axes else plt.gca()
+        _annotate_cluster_short_ids(ax, pre_umap, tmp_pre.obs[final_label_key].astype(str).to_numpy())
+        save_umap_multi(f"umap_pre__{tag}__shortlegend", figdir=base, fig=fig_pre_short)
+    except Exception as e:
+        LOGGER.warning("Annotated UMAP (pre/shortlegend) failed: %s", e)
+
+    # ----------------------------
+    # 4) POST (short legend; Cnn labels; no legend)
+    # ----------------------------
+    try:
+        tmp_post = _tmp_with_umap(post_umap)
+        fig_post_short = sc.pl.umap(
+            tmp_post,
+            color=final_label_key,
+            title=title_post,
+            show=False,
+            return_fig=True,
+            legend_loc=None,
+        )
+        ax = fig_post_short.axes[0] if fig_post_short.axes else plt.gca()
+        _annotate_cluster_short_ids(ax, post_umap, tmp_post.obs[final_label_key].astype(str).to_numpy())
+        save_umap_multi(f"umap_post__{tag}__shortlegend", figdir=base, fig=fig_post_short)
+    except Exception as e:
+        LOGGER.warning("Annotated UMAP (post/shortlegend) failed: %s", e)
+
+    # ----------------------------
+    # 5) PRE vs POST (2-panel; short legend; Cnn labels; no legend)
+    # ----------------------------
+    try:
+        # Make a temp object just to reuse sc.pl.umap on specific axes
+        tmp = adata.copy()
+
+        fig, axs = plt.subplots(1, 2, figsize=(10, 4))
+
+        # Left: PRE
+        tmp.obsm["X_umap"] = pre_umap
+        sc.pl.umap(
+            tmp,
+            color=final_label_key,
+            ax=axs[0],
+            show=False,
+            title=title_pre,
+            legend_loc=None,
+        )
+        _annotate_cluster_short_ids(
+            axs[0],
+            pre_umap,
+            tmp.obs[final_label_key].astype(str).to_numpy(),
+        )
+
+        # Right: POST
+        tmp.obsm["X_umap"] = post_umap
+        sc.pl.umap(
+            tmp,
+            color=final_label_key,
+            ax=axs[1],
+            show=False,
+            title=title_post,
+            legend_loc=None,
+        )
+        _annotate_cluster_short_ids(
+            axs[1],
+            post_umap,
+            tmp.obs[final_label_key].astype(str).to_numpy(),
+        )
+
+        save_umap_multi(
+            f"umap_pre_vs_post__{tag}__shortlegend",
+            figdir=base,
+            fig=fig,
+            right=0.92,
+        )
+
+    except Exception as e:
+        LOGGER.warning("Annotated UMAP (pre-vs-post/shortlegend) failed: %s", e)
+
 
 
 # ----------------------------------------------------------------------
