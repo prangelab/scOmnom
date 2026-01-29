@@ -400,22 +400,22 @@ import pandas as pd
 
 
 def heatmap_top_genes(
-    adata,
-    *,
-    genes: Sequence[str] | None = None,
-    genes_by_cluster: Mapping[str, Sequence[str]] | None = None,
-    groupby: str,
-    use_raw: bool = False,
-    layer: Optional[str] = None,
-    cmap: str | None = None,
-    show_cluster_colorbar: bool = True,
-    scale_columns_by_size: bool = True,
-    min_col_width: float = 0.5,
-    max_col_width: float = 5.0,
-    figsize: Optional[tuple[float, float]] = None,
-    show_gene_labels: bool = True,
-    z_clip: float | None = 2.5,
-    show: bool = False,
+        adata,
+        *,
+        genes: Sequence[str] | None = None,
+        genes_by_cluster: Mapping[str, Sequence[str]] | None = None,
+        groupby: str,
+        use_raw: bool = False,
+        layer: Optional[str] = None,
+        cmap: str | None = None,
+        show_cluster_colorbar: bool = True,
+        scale_columns_by_size: bool = True,
+        min_col_width: float = 0.5,
+        max_col_width: float = 5.0,
+        figsize: Optional[tuple[float, float]] = None,
+        show_gene_labels: bool = True,
+        z_clip: float | None = 2.5,
+        show: bool = False,
 ):
     import numpy as np
     import pandas as pd
@@ -446,10 +446,10 @@ def heatmap_top_genes(
 
     genes = [str(g) for g in (genes or []) if g is not None and str(g) != ""]
     if not genes:
-        raise ValueError("No genes provided (genes empty and genes_by_cluster did not yield any).")
+        raise ValueError("No genes provided.")
 
     # -----------------------------
-    # 1) Aggregate expression per cluster, then z-score per gene
+    # 1) Aggregate expression and Z-score
     # -----------------------------
     vc = adata.obs[groupby].astype(str).value_counts()
     groups = vc.index.astype(str).tolist()
@@ -463,7 +463,7 @@ def heatmap_top_genes(
 
     mean = df_x.groupby(groupby, observed=True)[genes].mean().reindex(groups)
 
-    M = mean.to_numpy(dtype=float)  # n_clusters x n_genes
+    M = mean.to_numpy(dtype=float)
     mu = np.nanmean(M, axis=0)
     sd = np.nanstd(M, axis=0)
     sd[sd == 0] = 1.0
@@ -475,10 +475,9 @@ def heatmap_top_genes(
     plot_mat = Z.T  # genes x clusters
 
     # -----------------------------
-    # 2) Dynamic column widths (cluster sizes)
+    # 2) Column widths (Cluster sizes)
     # -----------------------------
     sizes = vc.reindex(groups).values.astype(float)
-
     if scale_columns_by_size:
         w = sizes / float(np.mean(sizes)) if np.mean(sizes) > 0 else np.ones_like(sizes)
         w = np.clip(w, float(min_col_width), float(max_col_width))
@@ -490,7 +489,7 @@ def heatmap_top_genes(
     y_edges = np.arange(plot_mat.shape[0] + 1, dtype=float)
 
     # -----------------------------
-    # 3) Cluster colors (Scanpy palette)
+    # 3) Cluster colors (Scanpy)
     # -----------------------------
     colors = None
     if show_cluster_colorbar:
@@ -505,19 +504,16 @@ def heatmap_top_genes(
             colors = None
 
     # -----------------------------
-    # 4) Colormap: SEURAT MAGENTA-BLACK-YELLOW (0 pinned to black)
+    # 4) Colormap: Magenta-Black-Yellow
     # -----------------------------
-    if cmap is None:
-        colors_list = ["#FF00FF", "#000000", "#FFFF00"]  # Magenta, Black, Yellow
-        cmap_seurat = mcolors.LinearSegmentedColormap.from_list("seurat", colors_list, N=256)
-    else:
-        cmap_seurat = plt.get_cmap(cmap) if isinstance(cmap, str) else cmap
+    colors_list = ["#FF00FF", "#000000", "#FFFF00"]
+    cmap_seurat = mcolors.LinearSegmentedColormap.from_list("seurat", colors_list, N=256)
 
     if z_clip is not None:
         norm = mcolors.TwoSlopeNorm(vmin=-float(z_clip), vcenter=0.0, vmax=float(z_clip))
     else:
         vabs = max(abs(np.nanmin(plot_mat)), abs(np.nanmax(plot_mat)))
-        norm = mcolors.TwoSlopeNorm(vmin=-float(vabs), vcenter=0.0, vmax=float(vabs))
+        norm = mcolors.TwoSlopeNorm(vmin=-vabs, vcenter=0.0, vmax=vabs)
 
     # -----------------------------
     # 5) Figure & GridSpec
@@ -528,21 +524,19 @@ def heatmap_top_genes(
         figsize = (W, H)
 
     fig = plt.figure(figsize=figsize)
-
     gs = fig.add_gridspec(
         nrows=2 if colors is not None else 1,
         ncols=2,
         height_ratios=[0.02, 1.0] if colors is not None else [1.0],
         width_ratios=[1.0, 0.01],
-        hspace=0.01,
-        wspace=0.02,
+        hspace=0.01, wspace=0.02
     )
 
     ax = fig.add_subplot(gs[-1, 0])
     cax = fig.add_subplot(gs[-1, 1])
 
     # -----------------------------
-    # 6) Heatmap draw (FIXED: No seams, Guaranteed Colors)
+    # 6) Heatmap Draw (No Seams, Fixed Color)
     # -----------------------------
     mesh = ax.pcolormesh(
         x_edges,
@@ -551,15 +545,57 @@ def heatmap_top_genes(
         shading="flat",
         cmap=cmap_seurat,
         norm=norm,
-        edgecolors="face",
-        linewidth=0.01,  # A tiny bit of overlap prevents the seam
-        antialiased=True,  # Set to True when using edgecolor='face'
-        rasterized=True  # CRITICAL: keeps the file small and colors punchy
+        edgecolors="face",  # Heals seams
+        linewidth=0.01,  # Micro-overlap
+        antialiased=True,  # Required for face bleed
+        rasterized=True
     )
+    ax.set_facecolor("#000000")  # Background matches center
 
-    # Clean up the axes to ensure no grid lines or spines interfere
-    ax.set_facecolor("black")  # Sets background to black so any micro-gaps are invisible
-    ax.grid(False)
+    # -----------------------------
+    # 7) Thinner Colorbar Style
+    # -----------------------------
+    cb = fig.colorbar(mesh, cax=cax)
+    cb.outline.set_visible(False)
+    cax.tick_params(labelsize=8, length=0)
+    cax.set_ylabel("Z-score", fontsize=8, labelpad=2)
+
+    # -----------------------------
+    # 8) Axes Cosmetics
+    # -----------------------------
+    ax.invert_yaxis()
+    ax.set_yticks(np.arange(len(genes)) + 0.5)
+    ax.set_yticklabels(genes if show_gene_labels else [], fontsize=10)
+
+    # We remove the main axis cluster labels because we'll put them on the colorbar
+    ax.set_xticks([])
+    ax.tick_params(axis="both", which="both", length=0)
+    sns.despine(ax=ax, left=True, bottom=True)
+
+    # -----------------------------
+    # 9) Top cluster color bar + Group Labels
+    # -----------------------------
+    if colors is not None:
+        ax_top = fig.add_subplot(gs[0, 0], sharex=ax)
+        for i in range(len(groups)):
+            ax_top.add_patch(
+                plt.Rectangle((float(x_edges[i]), 0.0), float(w[i]), 1.0, color=colors[i], lw=0)
+            )
+            # Add Cluster labels (C01, C02, etc.) centered above their block
+            ax_top.text(
+                x_centers[i], 1.2, groups[i],
+                ha='center', va='bottom', fontsize=11, fontweight='bold',
+                transform=ax_top.get_xaxis_transform()
+            )
+
+        ax_top.set_xlim(0, float(x_edges[-1]))
+        ax_top.set_ylim(0, 1)
+        ax_top.axis("off")
+
+    if show:
+        plt.show()
+
+    return fig
 
     # -----------------------------
     # 7) Colorbar
