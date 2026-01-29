@@ -2,16 +2,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Optional, Sequence
+from typing import Iterable, Mapping, Optional, Sequence
 
 import numpy as np
 import pandas as pd
+import scanpy as sc
 
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
-import scanpy as sc
+
 
 
 # -----------------------------------------------------------------------------
@@ -391,14 +392,6 @@ def _normalize_scanpy_groupby_colors(adata, groupby: str) -> None:
     adata.uns[k] = colors
 
 
-
-from typing import Mapping, Any, Dict  # add at top
-
-from typing import Mapping, Sequence, Optional
-import numpy as np
-import pandas as pd
-
-
 def heatmap_top_genes(
         adata,
         *,
@@ -506,12 +499,12 @@ def heatmap_top_genes(
     # 5) Figure & GridSpec
     # -----------------------------
     if figsize is None:
-        W = max(8.0, 0.3 * float(x_edges[-1]) + 4.0)  # Iets breder voor labels
+        # Increased base width for the right-hand labels
+        W = max(9.0, 0.3 * float(x_edges[-1]) + 5.0)
         H = max(5.0, 0.2 * float(plot_mat.shape[0]) + 2.5)
         figsize = (W, H)
 
     fig = plt.figure(figsize=figsize)
-    # Vergroot wspace en pas de rechter marge aan in subplots_adjust later
     gs = fig.add_gridspec(
         nrows=2 if colors is not None else 1,
         ncols=2,
@@ -524,9 +517,9 @@ def heatmap_top_genes(
     cax = fig.add_subplot(gs[-1, 1])
 
     # -----------------------------
-    # 6) Heatmap Draw (KILL GRID & SEAMS)
+    # 6) Heatmap Draw (Kill Grid & Seams)
     # -----------------------------
-    ax.grid(False)  # FORCEER GRID UIT voor plotten
+    ax.grid(False)
 
     mesh = ax.pcolormesh(
         x_edges,
@@ -556,15 +549,15 @@ def heatmap_top_genes(
     ax.set_yticks(np.arange(len(genes)) + 0.5)
     ax.set_yticklabels(genes if show_gene_labels else [], fontsize=10)
     ax.set_xticks([])
-    ax.tick_params(axis="both", which="both", length=0, zorder=10)
+    ax.tick_params(axis="both", which="both", length=0)
     sns.despine(ax=ax, left=True, bottom=True)
 
     # -----------------------------
-    # 9) Top color bar + Labels (Fixed Clip)
+    # 9) Top color bar + Labels (Increased Margin)
     # -----------------------------
     if colors is not None:
         ax_top = fig.add_subplot(gs[0, 0], sharex=ax)
-        ax_top.grid(False)  # Zorg dat hier ook geen grid staat
+        ax_top.grid(False)
         for i in range(len(groups)):
             ax_top.add_patch(
                 plt.Rectangle((float(x_edges[i]), 0.0), float(w[i]), 1.0, color=colors[i], lw=0)
@@ -575,14 +568,14 @@ def heatmap_top_genes(
                 rotation=45,
                 fontsize=11, fontweight='bold',
                 transform=ax_top.get_xaxis_transform(),
-                clip_on=False  # VOORKOMT AFSNIJDEN
+                clip_on=False
             )
         ax_top.set_xlim(0, float(x_edges[-1]))
         ax_top.set_ylim(0, 1)
         ax_top.axis("off")
 
-    # Extra ruimte aan de rechterkant voor de schuine labels
-    fig.subplots_adjust(right=0.90)
+    # Final margin adjustment to catch the right-most labels
+    fig.subplots_adjust(right=0.85, top=0.85)
 
     if show:
         plt.show()
