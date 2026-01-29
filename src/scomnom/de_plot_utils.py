@@ -400,22 +400,22 @@ import pandas as pd
 
 
 def heatmap_top_genes(
-        adata,
-        *,
-        genes: Sequence[str] | None = None,
-        genes_by_cluster: Mapping[str, Sequence[str]] | None = None,
-        groupby: str,
-        use_raw: bool = False,
-        layer: Optional[str] = None,
-        cmap: str | None = None,
-        show_cluster_colorbar: bool = True,
-        scale_columns_by_size: bool = True,
-        min_col_width: float = 0.5,
-        max_col_width: float = 5.0,
-        figsize: Optional[tuple[float, float]] = None,
-        show_gene_labels: bool = True,
-        z_clip: float | None = 2.5,
-        show: bool = False,
+    adata,
+    *,
+    genes: Sequence[str] | None = None,
+    genes_by_cluster: Mapping[str, Sequence[str]] | None = None,
+    groupby: str,
+    use_raw: bool = False,
+    layer: Optional[str] = None,
+    cmap: str | None = None,
+    show_cluster_colorbar: bool = True,
+    scale_columns_by_size: bool = True,
+    min_col_width: float = 0.5,
+    max_col_width: float = 5.0,
+    figsize: Optional[tuple[float, float]] = None,
+    show_gene_labels: bool = True,
+    z_clip: float | None = 2.5,
+    show: bool = False,
 ):
     import numpy as np
     import pandas as pd
@@ -433,9 +433,7 @@ def heatmap_top_genes(
     if genes_by_cluster is not None:
         vc0 = adata.obs[groupby].astype(str).value_counts()
         cluster_order0 = vc0.index.astype(str).tolist()
-
-        flat: list[str] = []
-        seen: set[str] = set()
+        flat, seen = [], set()
         for cl in cluster_order0:
             for g in (genes_by_cluster.get(str(cl), []) or []):
                 g = str(g) if g is not None else ""
@@ -449,7 +447,7 @@ def heatmap_top_genes(
         raise ValueError("No genes provided.")
 
     # -----------------------------
-    # 1) Aggregate expression and Z-score
+    # 1) Aggregate and Z-score
     # -----------------------------
     vc = adata.obs[groupby].astype(str).value_counts()
     groups = vc.index.astype(str).tolist()
@@ -460,22 +458,18 @@ def heatmap_top_genes(
 
     df_x = pd.DataFrame(X, columns=genes)
     df_x[groupby] = adata.obs[groupby].astype(str).values
-
     mean = df_x.groupby(groupby, observed=True)[genes].mean().reindex(groups)
 
     M = mean.to_numpy(dtype=float)
-    mu = np.nanmean(M, axis=0)
-    sd = np.nanstd(M, axis=0)
+    mu, sd = np.nanmean(M, axis=0), np.nanstd(M, axis=0)
     sd[sd == 0] = 1.0
-
     Z = (M - mu) / sd
     if z_clip is not None:
         Z = np.clip(Z, -float(z_clip), float(z_clip))
-
-    plot_mat = Z.T  # genes x clusters
+    plot_mat = Z.T
 
     # -----------------------------
-    # 2) Column widths (Cluster sizes)
+    # 2) Column widths (X-axis)
     # -----------------------------
     sizes = vc.reindex(groups).values.astype(float)
     if scale_columns_by_size:
@@ -489,7 +483,7 @@ def heatmap_top_genes(
     y_edges = np.arange(plot_mat.shape[0] + 1, dtype=float)
 
     # -----------------------------
-    # 3) Cluster colors (Scanpy)
+    # 3) Cluster colors
     # -----------------------------
     colors = None
     if show_cluster_colorbar:
@@ -508,12 +502,7 @@ def heatmap_top_genes(
     # -----------------------------
     colors_list = ["#FF00FF", "#000000", "#FFFF00"]
     cmap_seurat = mcolors.LinearSegmentedColormap.from_list("seurat", colors_list, N=256)
-
-    if z_clip is not None:
-        norm = mcolors.TwoSlopeNorm(vmin=-float(z_clip), vcenter=0.0, vmax=float(z_clip))
-    else:
-        vabs = max(abs(np.nanmin(plot_mat)), abs(np.nanmax(plot_mat)))
-        norm = mcolors.TwoSlopeNorm(vmin=-vabs, vcenter=0.0, vmax=vabs)
+    norm = mcolors.TwoSlopeNorm(vmin=-float(z_clip), vcenter=0.0, vmax=float(z_clip))
 
     # -----------------------------
     # 5) Figure & GridSpec
@@ -528,7 +517,7 @@ def heatmap_top_genes(
         nrows=2 if colors is not None else 1,
         ncols=2,
         height_ratios=[0.02, 1.0] if colors is not None else [1.0],
-        width_ratios=[1.0, 0.01],
+        width_ratios=[1.0, 0.008],
         hspace=0.01, wspace=0.02
     )
 
@@ -536,7 +525,7 @@ def heatmap_top_genes(
     cax = fig.add_subplot(gs[-1, 1])
 
     # -----------------------------
-    # 6) Heatmap Draw (No Seams, Fixed Color)
+    # 6) Heatmap Draw (No Seams Fix)
     # -----------------------------
     mesh = ax.pcolormesh(
         x_edges,
@@ -545,35 +534,32 @@ def heatmap_top_genes(
         shading="flat",
         cmap=cmap_seurat,
         norm=norm,
-        edgecolors="face",  # Heals seams
-        linewidth=0.01,  # Micro-overlap
-        antialiased=True,  # Required for face bleed
+        edgecolors="face",
+        linewidth=0.1,
+        antialiased=True,
         rasterized=True
     )
-    ax.set_facecolor("#000000")  # Background matches center
+    ax.set_facecolor("#000000")
 
     # -----------------------------
-    # 7) Thinner Colorbar Style
+    # 7) Colorbar
     # -----------------------------
     cb = fig.colorbar(mesh, cax=cax)
     cb.outline.set_visible(False)
     cax.tick_params(labelsize=8, length=0)
-    cax.set_ylabel("Z-score", fontsize=8, labelpad=2)
 
     # -----------------------------
-    # 8) Axes Cosmetics
+    # 8) Cosmetics
     # -----------------------------
     ax.invert_yaxis()
     ax.set_yticks(np.arange(len(genes)) + 0.5)
     ax.set_yticklabels(genes if show_gene_labels else [], fontsize=10)
-
-    # We remove the main axis cluster labels because we'll put them on the colorbar
     ax.set_xticks([])
     ax.tick_params(axis="both", which="both", length=0)
     sns.despine(ax=ax, left=True, bottom=True)
 
     # -----------------------------
-    # 9) Top cluster color bar + Group Labels
+    # 9) Top color bar + Angled Labels
     # -----------------------------
     if colors is not None:
         ax_top = fig.add_subplot(gs[0, 0], sharex=ax)
@@ -581,13 +567,16 @@ def heatmap_top_genes(
             ax_top.add_patch(
                 plt.Rectangle((float(x_edges[i]), 0.0), float(w[i]), 1.0, color=colors[i], lw=0)
             )
-            # Add Cluster labels (C01, C02, etc.) centered above their block
+            # FIX: Schuine labels (45 graden) om overlap te voorkomen
             ax_top.text(
                 x_centers[i], 1.2, groups[i],
-                ha='center', va='bottom', fontsize=11, fontweight='bold',
+                ha='left',           # 'left' i.c.m. rotatie zorgt voor mooie uitlijning
+                va='bottom',
+                rotation=45,         # Schuine hoek
+                fontsize=11,
+                fontweight='bold',
                 transform=ax_top.get_xaxis_transform()
             )
-
         ax_top.set_xlim(0, float(x_edges[-1]))
         ax_top.set_ylim(0, 1)
         ax_top.axis("off")
