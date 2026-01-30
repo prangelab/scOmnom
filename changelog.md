@@ -37,3 +37,6 @@ Added first working version of marker calling in the DE module. Module is still 
 
 ## 0.1.9 [29-01-2026]
 Bug-fix integrate --annotated-run was trying th epick a new best embedding instead of just plotting the annotated scANVI UMAP.
+
+## 0.1.10 [30-01-2026]
+Changed reporting behaviour. It now saves a report per round and for each format.
