@@ -942,11 +942,11 @@ def generate_annotated_integration_report(
         return None
 
     # FINAL LABEL plots (5)
-    pre_full_path = _find_first_all([f"umap_pre__{tag}", "__fulllegend"], exclude=["__batch"])
-    post_full_path = _find_first_all([f"umap_post__{tag}", "__fulllegend"], exclude=["__batch"])
-    pre_short_path = _find_first_all([f"umap_pre__{tag}", "__shortlegend"], exclude=["__batch"])
-    post_short_path = _find_first_all([f"umap_post__{tag}", "__shortlegend"], exclude=["__batch"])
-    pre_post_path = _find_first_all([f"umap_pre_vs_post__{tag}", "__shortlegend"], exclude=["__batch"])
+    pre_full_path = _find_first_all([f"umap_pre_{tag}", "_fulllegend"], exclude=["_batch"])
+    post_full_path = _find_first_all([f"umap_post_{tag}", "_fulllegend"], exclude=["_batch"])
+    pre_short_path = _find_first_all([f"umap_pre__{tag}", "_shortlegend"], exclude=["_batch"])
+    post_short_path = _find_first_all([f"umap_pos_{tag}", "_shortlegend"], exclude=["_batch"])
+    pre_post_path = _find_first_all([f"umap_pre_vs_post_{tag}", "_shortlegend"], exclude=["_batch"])
 
     # BATCH (3)
     pre_batch_full_path = _find_first_all(["umap_pre_", tag, "_batch_fulllegend"])
