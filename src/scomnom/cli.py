@@ -1131,6 +1131,7 @@ def _build_cfg(
     output_name: str,
     save_h5ad: bool,
     n_jobs: int,
+    run: RunWhich,
     make_figures: bool,
     figdir_name: str,
     figure_formats: Sequence[str],
@@ -1175,6 +1176,7 @@ def _build_cfg(
         output_dir=out_dir,
         output_name=output_name,
         save_h5ad=save_h5ad,
+        run=str(run.value),
         n_jobs=n_jobs,
         logfile=log_path,
         make_figures=make_figures,
@@ -1215,22 +1217,6 @@ def _build_cfg(
         plot_layer=plot_layer,
         plot_umap_ncols=plot_umap_ncols,
     )
-
-
-def _run_selected(cfg: MarkersAndDEConfig, run: RunWhich) -> None:
-    """Prefer orchestrator flags; fallback to setting attributes if signature not updated yet."""
-    run_cell = run in (RunWhich.both, RunWhich.cell)
-    run_pb = run in (RunWhich.both, RunWhich.pseudobulk)
-
-    try:
-        run_markers_and_de(cfg, run_cell=run_cell, run_pseudobulk=run_pb)  # type: ignore[misc]
-    except TypeError:
-        # If you haven't updated run_markers_and_de signature, this fallback only works
-        # if your orchestrator reads these attrs (or you add that small shim there).
-        setattr(cfg, "run_cell", run_cell)
-        setattr(cfg, "run_pseudobulk", run_pb)
-        run_markers_and_de(cfg)
-
 
 # ---------------------------------------------------------------------
 # Command 1: cluster-vs-rest (NO "run" subcommand)
@@ -1296,6 +1282,7 @@ def cluster_vs_rest(
         output_dir=output_dir,
         output_name=output_name,
         save_h5ad=save_h5ad,
+        run=run,
         n_jobs=n_jobs,
         make_figures=make_figures,
         figdir_name=figdir_name,
@@ -1335,8 +1322,7 @@ def cluster_vs_rest(
     cfg.contrast_key = None
     cfg.contrast_contrasts = ()
 
-    _run_selected(cfg, run)
-
+    run_markers_and_de(cfg)
 
 # ---------------------------------------------------------------------
 # Command 2: within-cluster (NO "run" subcommand)
@@ -1406,6 +1392,7 @@ def within_cluster(
         output_dir=output_dir,
         output_name=output_name,
         save_h5ad=save_h5ad,
+        run=run,
         n_jobs=n_jobs,
         make_figures=make_figures,
         figdir_name=figdir_name,

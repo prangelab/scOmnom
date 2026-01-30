@@ -587,6 +587,13 @@ class MarkersAndDEConfig(BaseModel):
     output_name: str = "adata.markers_and_de"
     logfile: Optional[Path] = None
 
+    # run toggles (driven by CLI)
+    run: Literal["cell", "pseudobulk", "both"] = "both"
+
+    # General DE settings
+    positive_only: bool = True
+    markers_layer: Optional[str] = None
+
     # figures
     figdir_name: str = "figures"
     figure_formats: Sequence[str] = Field(default_factory=lambda: ["png", "pdf"])
@@ -641,6 +648,10 @@ class MarkersAndDEConfig(BaseModel):
     min_cells_target: int = 20
     alpha: float = 0.05
     store_key: str = "scomnom_de"
+
+    min_samples_per_level: int = 2
+    shrink_lfc: bool = True
+    pb_min_total_counts: int = 10
 
     # ------------------------------------------------------------------
     # Optional condition-within-cluster DE
