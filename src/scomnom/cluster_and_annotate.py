@@ -588,12 +588,14 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
 
     if cfg.make_figures:
         try:
-            reporting.generate_cluster_and_annotate_report(
-                fig_root=Path(cfg.figdir),
-                cfg=cfg,
-                version=__version__,
-                adata=adata,
-            )
+            for fmt in cfg.figure_formats:
+                reporting.generate_cluster_and_annotate_report(
+                    fig_root=Path(cfg.figdir),
+                    fmt=fmt,
+                    cfg=cfg,
+                    version=__version__,
+                    adata=adata,
+                )
             LOGGER.info("Wrote cluster-and-annotate report.")
         except Exception as e:
             LOGGER.warning("Failed to generate cluster-and-annotate report: %s", e)

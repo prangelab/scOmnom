@@ -1637,14 +1637,16 @@ def run_integrate(cfg: IntegrateConfig) -> ad.AnnData:
 
         # Annotated-run report
         try:
-            reporting.generate_annotated_integration_report(
-                fig_root=cfg.figdir,
-                version=__version__,
-                adata=adata,
-                batch_key=batch_key,
-                final_label_key=final_label_key,
-                round_id=round_id_for_title,
-            )
+            for fmt in cfg.figure_formats:
+                reporting.generate_annotated_integration_report(
+                    fig_root=cfg.figdir,
+                    fmt=fmt,
+                    version=__version__,
+                    adata=adata,
+                    batch_key=batch_key,
+                    final_label_key=final_label_key,
+                    round_id=round_id_for_title,
+                )
 
         except Exception as e:
             LOGGER.warning("ANNOTATED RUN: failed to generate annotated integration report: %s", e)
@@ -1715,16 +1717,18 @@ def run_integrate(cfg: IntegrateConfig) -> ad.AnnData:
 
         sc.tl.umap(adata)
 
-        reporting.generate_integration_report(
-            fig_root=cfg.figdir,
-            version=__version__,
-            adata=adata,
-            batch_key=batch_key,
-            label_key=cfg.label_key,
-            methods=methods,
-            benchmark_n_jobs=cfg.benchmark_n_jobs,
-            selected_embedding=best,
-        )
+        for fmt in cfg.figure_formats:
+            reporting.generate_integration_report(
+                fig_root=cfg.figdir,
+                fmt=fmt,
+                version=__version__,
+                adata=adata,
+                batch_key=batch_key,
+                label_key=cfg.label_key,
+                methods=methods,
+                benchmark_n_jobs=cfg.benchmark_n_jobs,
+                selected_embedding=best,
+            )
 
     out_zarr = cfg.output_dir / (cfg.output_name + ".zarr")
     LOGGER.info("Saving integrated dataset as Zarr → %s", out_zarr)

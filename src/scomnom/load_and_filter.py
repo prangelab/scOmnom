@@ -1112,12 +1112,14 @@ def run_load_and_filter(
             batch_key=batch_key,
             figdir=Path("QC_plots") / "overview",
         )
-        reporting.generate_qc_report(
-            fig_root=cfg.output_dir / cfg.figdir_name,
-            cfg=cfg,
-            version=__version__,
-            adata=adata,
-        )
+        for fmt in cfg.figure_formats:
+            reporting.generate_qc_report(
+                fig_root=Path(cfg.figdir),
+                fmt=fmt,
+                cfg=cfg,
+                version=__version__,
+                adata=adata,
+            )
 
     # ---------------------------------------------------------
     # Save final filtered dataset

@@ -455,6 +455,78 @@ details.section.subsection > summary {
 # =============================================================================
 # File collection
 # =============================================================================
+# =============================================================================
+# Figure-run folder helpers (format-agnostic)
+# =============================================================================
+def _find_latest_run_dir(*, fig_root: Path, fmt: str, module_prefix: str) -> Path | None:
+    """
+    Return the newest figure-run directory for a module+format, e.g.
+      <fig_root>/<fmt>/<module_prefix>_round6
+    If no round dirs exist, return <fig_root>/<fmt>/<module_prefix> if it exists.
+    """
+    fig_root = Path(fig_root).resolve()
+    base = fig_root / fmt
+    if not base.exists():
+        return None
+
+    pat = re.compile(rf"^{re.escape(module_prefix)}_round(\d+)$")
+    best_n = None
+    best_dir = None
+
+    for d in base.iterdir():
+        if not d.is_dir():
+            continue
+        m = pat.match(d.name)
+        if not m:
+            continue
+        n = int(m.group(1))
+        if best_n is None or n > best_n:
+            best_n = n
+            best_dir = d
+
+    if best_dir is not None:
+        return best_dir
+
+    fallback = base / module_prefix
+    return fallback if fallback.exists() else None
+
+
+def _collect_images_in_dir(run_dir: Path, fmt: str, *, recursive: bool = True) -> List[Path]:
+    """
+    Collect images *relative to run_dir*.
+    If recursive=True, will include nested subfolders (needed for cluster_and_annotate).
+    """
+    run_dir = Path(run_dir).resolve()
+    if not run_dir.exists():
+        return []
+    globber = run_dir.rglob if recursive else run_dir.glob
+    ex = fmt.lower().lstrip(".")
+    imgs_abs = sorted(globber(f"*.{ex}"))
+    return [p.relative_to(run_dir) for p in imgs_abs]
+
+
+def _render_image_card_from_run_dir(rel_path_from_run_dir: Path) -> str:
+    """
+    Same as _render_image_card, but expects paths relative to the *run_dir*,
+    and the report will be written into that run_dir, so <img src="..."> works.
+    """
+    caption = _caption_from_filename(rel_path_from_run_dir.name)
+    desc = _describe_plot(rel_path_from_run_dir)
+    meta = rel_path_from_run_dir.as_posix()
+    src = rel_path_from_run_dir.as_posix()
+    return (
+        '<figure class="card">'
+        '<div class="card-img">'
+        f'<img loading="lazy" src="{_safe(src)}">'
+        "</div>"
+        '<figcaption class="card-cap">'
+        f'<div class="cap-title">{_safe(caption)}</div>'
+        f'<div class="cap-desc">{_safe(desc)}</div>'
+        f'<div class="cap-meta">{_safe(meta)}</div>'
+        "</figcaption>"
+        "</figure>"
+    )
+
 def _collect_pngs(fig_root: Path) -> List[Path]:
     """
     Returns paths *relative to fig_root* suitable for <img src="...">,
@@ -561,16 +633,23 @@ def _collect_qc_summary(adata) -> Dict[str, Any]:
     return summary
 
 
-def generate_qc_report(*, fig_root: Path, cfg, version: str, adata) -> None:
+def generate_qc_report(*, fig_root: Path, fmt: str, cfg, version: str, adata, run_dir: Path | None = None) -> None:
     """
-    Write: <fig_root>/qc_report.html
-    Expects figures under: <fig_root>/png/...
+    Write: <fig_root>/<fmt>/qc_roundN/qc_report.html
     """
     fig_root = Path(fig_root).resolve()
-    out_html = fig_root / "qc_report.html"
+    fmt = fmt.lower().lstrip(".")
+
+    run_dir = Path(run_dir).resolve() if run_dir is not None else _find_latest_run_dir(
+        fig_root=fig_root, fmt=fmt, module_prefix="qc"
+    )
+    if run_dir is None:
+        raise RuntimeError(f"Could not locate qc figure run dir under {fig_root}/{fmt}/")
+
+    out_html = run_dir / "qc_report.html"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    rel_imgs = _collect_pngs(fig_root)
+    rel_imgs = _collect_images_in_dir(run_dir, fmt, recursive=True)
 
     sections: Dict[str, List[Path]] = {
         "Overview": [],
@@ -649,7 +728,7 @@ def generate_qc_report(*, fig_root: Path, cfg, version: str, adata) -> None:
         sid = _slug(title)
         note = notes_by_title.get(title, "")
         note_html = f"<p class='note'>{_safe(note)}</p>" if note else ""
-        grid = _grid_block([_render_image_card(p) for p in imgs])
+        grid = _grid_block([_render_image_card_from_run_dir(p) for p in imgs])
         inner = note_html + grid
         title_html = f"{_safe(title)} <span class='pill'>{len(imgs)} plots</span>"
         blocks.append(f'<div id="{sid}"></div>')
@@ -673,6 +752,7 @@ def generate_qc_report(*, fig_root: Path, cfg, version: str, adata) -> None:
 def generate_integration_report(
     *,
     fig_root: Path,
+    fmt: str,
     version: str,
     adata,
     batch_key: str,
@@ -680,10 +760,10 @@ def generate_integration_report(
     methods: List[str],
     selected_embedding: str,
     benchmark_n_jobs: int,
+    run_dir: Path | None = None,  # optional override
 ) -> None:
     """
-    Write: <fig_root>/integration_report.html
-    Expects figures under: <fig_root>/png/...
+    Write: <fig_root>/<fmt>/integration_roundN/integration_report.html
 
     Standard integration report only:
       - Integration benchmarking (scIB)
@@ -691,14 +771,19 @@ def generate_integration_report(
       - Other
     """
     fig_root = Path(fig_root).resolve()
-    out_html = fig_root / "integration_report.html"
+    fmt = fmt.lower().lstrip(".")
+
+    run_dir = Path(run_dir).resolve() if run_dir is not None else _find_latest_run_dir(
+        fig_root=fig_root, fmt=fmt, module_prefix="integration"
+    )
+    if run_dir is None:
+        raise RuntimeError(f"Could not locate integration figure run dir under {fig_root}/{fmt}/")
+
+    out_html = run_dir / "integration_report.html"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    rel_imgs = _collect_pngs(fig_root)
+    rel_imgs = _collect_images_in_dir(run_dir, fmt, recursive=True)
 
-    # -----------------------------
-    # Collect figures (standard)
-    # -----------------------------
     sections: Dict[str, List[Path]] = {
         "Integration benchmarking": [],
         "UMAPs": [],
@@ -714,9 +799,6 @@ def generate_integration_report(
         else:
             sections["Other"].append(p)
 
-    # -----------------------------
-    # Summary payload
-    # -----------------------------
     summary: Dict[str, Any] = {
         "version": version,
         "timestamp": timestamp,
@@ -725,6 +807,8 @@ def generate_integration_report(
         "methods_requested": methods,
         "benchmark_n_jobs": benchmark_n_jobs,
         "selected_embedding": selected_embedding,
+        "figure_format": fmt,
+        "figure_run_dir": str(run_dir),
     }
 
     rows = [f"<tr><td>{_safe(k)}</td><td>{_safe(v)}</td></tr>" for k, v in summary.items()]
@@ -748,9 +832,6 @@ def generate_integration_report(
         "</div>"
     )
 
-    # -----------------------------
-    # TOC (standard)
-    # -----------------------------
     toc_sections: List[Tuple[str, str]] = [
         ("summary", "Summary"),
         ("integration-benchmarking", "Integration benchmarking"),
@@ -760,9 +841,6 @@ def generate_integration_report(
         toc_sections.append(("other", "Other"))
     toc_html = _toc(toc_sections)
 
-    # -----------------------------
-    # Render body (standard)
-    # -----------------------------
     blocks: List[str] = [header]
     blocks.append('<div id="summary"></div>')
     blocks.append(_details_block("Summary", summary_table, open_by_default=True))
@@ -773,25 +851,23 @@ def generate_integration_report(
             "Use this to understand tradeoffs between batch mixing and biological conservation."
         )
         inner = f"<p class='note'>{_safe(note)}</p>" + _grid_block(
-            [_render_image_card(p) for p in sections["Integration benchmarking"]]
+            [_render_image_card_from_run_dir(p) for p in sections["Integration benchmarking"]]
         )
         blocks.append('<div id="integration-benchmarking"></div>')
-        title_html = (
-            f"Integration benchmarking <span class='pill'>{len(sections['Integration benchmarking'])} plots</span>"
-        )
+        title_html = f"Integration benchmarking <span class='pill'>{len(sections['Integration benchmarking'])} plots</span>"
         blocks.append(_details_block(title_html, inner, open_by_default=False))
 
     if sections["UMAPs"]:
         note = "UMAPs for each embedding / method. Expand only when needed."
         inner = f"<p class='note'>{_safe(note)}</p>" + _grid_block(
-            [_render_image_card(p) for p in sections["UMAPs"]]
+            [_render_image_card_from_run_dir(p) for p in sections["UMAPs"]]
         )
         blocks.append('<div id="umaps"></div>')
         title_html = f"UMAPs <span class='pill'>{len(sections['UMAPs'])} plots</span>"
         blocks.append(_details_block(title_html, inner, open_by_default=False))
 
     if sections["Other"]:
-        inner = _grid_block([_render_image_card(p) for p in sections["Other"]])
+        inner = _grid_block([_render_image_card_from_run_dir(p) for p in sections["Other"]])
         blocks.append('<div id="other"></div>')
         title_html = f"Other <span class='pill'>{len(sections['Other'])} plots</span>"
         blocks.append(_details_block(title_html, inner, open_by_default=False))
@@ -811,58 +887,31 @@ def generate_integration_report(
 def generate_annotated_integration_report(
     *,
     fig_root: Path,
+    fmt: str,
     version: str,
     adata,
     batch_key: str,
     final_label_key: str,
     round_id: str,
-    # Optional overrides (paths relative to fig_root). Leave None to auto-infer.
-    pre_full_png: str | None = None,
-    post_full_png: str | None = None,
-    pre_short_png: str | None = None,
-    post_short_png: str | None = None,
-    pre_post_png: str | None = None,
-    # Optional overrides for batch plots
-    pre_batch_full_png: str | None = None,
-    post_batch_full_png: str | None = None,
-    pre_post_batch_png: str | None = None,
+    run_dir: Path | None = None,  # optional override
 ) -> None:
     """
-    Write: <fig_root>/integration_report_annotated.html
+    Write: <fig_root>/<fmt>/integration_roundN/integration_report_annotated.html
 
-    Annotated-run report:
-      - NO scIB benchmarking
-      - Only annotated-run UMAP figures emitted by plot_annotated_run_umaps()
+    Looks for annotated-run plots in the *same run folder*.
+    Filenames are expected like your current writer:
+      umap_pre_<tag>_fulllegend
+      umap_post_<tag>_fulllegend
+      umap_pre_<tag>_shortlegend
+      umap_post_<tag>_shortlegend
+      umap_pre_vs_post_<tag>_shortlegend
 
-    Directory behavior:
-      - Prefer searching under the *latest* png/integration_roundN/ subtree if present.
-      - Fall back to searching all pngs otherwise.
-
-    Expected stems (written by plot_annotated_run_umaps via save_umap_multi):
-
-      FINAL LABELS (5):
-        - umap_pre__<tag>__fulllegend
-        - umap_post__<tag>__fulllegend
-        - umap_pre__<tag>__shortlegend
-        - umap_post__<tag>__shortlegend
-        - umap_pre_vs_post__<tag>__shortlegend
-
-      BATCH (3):
-        - umap_pre__<tag>__batch__fulllegend
-        - umap_post__<tag>__batch__fulllegend
-        - umap_pre_vs_post__<tag>__batch
+      umap_pre_<tag>_batch_fulllegend
+      umap_post_<tag>_batch_fulllegend
+      umap_pre_vs_post_<tag>_batch
     """
-    from datetime import datetime
-    from pathlib import Path
-    import json
-    import re
-    from typing import Any, List, Tuple
-
     fig_root = Path(fig_root).resolve()
-    out_html = fig_root / "integration_report_annotated.html"
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    rel_imgs_all = _collect_pngs(fig_root)
+    fmt = fmt.lower().lstrip(".")
     rid = str(round_id)
 
     def _sanitize_tag(s: str) -> str:
@@ -872,126 +921,39 @@ def generate_annotated_integration_report(
 
     tag = _sanitize_tag(rid)
 
-    def _as_relpath(x: str | Path | None) -> Path | None:
-        if not x:
-            return None
-        p = Path(x)
-        return p if not p.is_absolute() else p.relative_to(fig_root)
+    run_dir = Path(run_dir).resolve() if run_dir is not None else _find_latest_run_dir(
+        fig_root=fig_root, fmt=fmt, module_prefix="integration"
+    )
+    if run_dir is None:
+        raise RuntimeError(f"Could not locate integration figure run dir under {fig_root}/{fmt}/")
 
-    # ------------------------------------------------------------------
-    # Prefer latest integration_roundN subtree (by max N), else use all PNGs
-    # ------------------------------------------------------------------
-    def _infer_latest_integration_round_prefix(imgs: list[Path]) -> str | None:
-        """
-        Return prefix like 'png/integration_round7' if present, else None.
-        Accepts paths like:
-          png/integration_round7/...
-          png/integration_round7/integration/...
-        """
-        best_n = None
-        best_prefix = None
-        for p in imgs:
-            s = p.as_posix()
-            m = re.search(r"(?:^|/)png/(integration_round(\d+))(?:/|$)", s)
-            if not m:
-                continue
-            n = int(m.group(2))
-            if (best_n is None) or (n > best_n):
-                best_n = n
-                best_prefix = f"png/{m.group(1)}"
-        return best_prefix
+    out_html = run_dir / "integration_report_annotated.html"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    latest_prefix = _infer_latest_integration_round_prefix(rel_imgs_all)
+    rel_imgs = _collect_images_in_dir(run_dir, fmt, recursive=False)  # integration_roundN is flat in your example
 
-    def _imgs_in_latest_round(imgs: list[Path], prefix: str | None) -> list[Path]:
-        if not prefix:
-            return imgs
-        return [p for p in imgs if p.as_posix().startswith(prefix + "/")]
-
-    rel_imgs_preferred = _imgs_in_latest_round(rel_imgs_all, latest_prefix) if latest_prefix else rel_imgs_all
-
-    # ------------------------------------------------------------------
-    # Matching helpers (search preferred first, then global)
-    # ------------------------------------------------------------------
-    def _find_first_all(tokens: list[str], *, scope: list[Path]) -> Path | None:
-        for p in scope:
+    def _find_first_all(tokens: list[str]) -> Path | None:
+        for p in rel_imgs:
             s = p.as_posix()
             if all(t in s for t in tokens):
                 return p
         return None
 
-    def _find_with_fallback(tokens: list[str]) -> Path | None:
-        hit = _find_first_all(tokens, scope=rel_imgs_preferred)
-        if hit is not None:
-            return hit
-        return _find_first_all(tokens, scope=rel_imgs_all)
+    # FINAL LABELS (5)
+    pre_full_path = _find_first_all(["umap_pre_", tag, "_fulllegend"])
+    post_full_path = _find_first_all(["umap_post_", tag, "_fulllegend"])
+    pre_short_path = _find_first_all(["umap_pre_", tag, "_shortlegend"])
+    post_short_path = _find_first_all(["umap_post_", tag, "_shortlegend"])
+    pre_post_path = _find_first_all(["umap_pre_vs_post_", tag, "_shortlegend"])
 
-    # ------------------------------------------------------------------
-    # Resolve FINAL LABEL plots (5)
-    # ------------------------------------------------------------------
-    pre_full_path = _as_relpath(pre_full_png) or _find_with_fallback([f"umap_pre__{tag}", "__fulllegend"])
-    post_full_path = _as_relpath(post_full_png) or _find_with_fallback([f"umap_post__{tag}", "__fulllegend"])
-    pre_short_path = _as_relpath(pre_short_png) or _find_with_fallback([f"umap_pre__{tag}", "__shortlegend"])
-    post_short_path = _as_relpath(post_short_png) or _find_with_fallback([f"umap_post__{tag}", "__shortlegend"])
-    pre_post_path = _as_relpath(pre_post_png) or _find_with_fallback([f"umap_pre_vs_post__{tag}", "__shortlegend"])
+    # BATCH (3)
+    pre_batch_full_path = _find_first_all(["umap_pre_", tag, "_batch_fulllegend"])
+    post_batch_full_path = _find_first_all(["umap_post_", tag, "_batch_fulllegend"])
+    pre_post_batch_path = _find_first_all(["umap_pre_vs_post_", tag, "_batch"])
 
-    # Tag-mismatch fallback (any tag, but correct suffix)
-    if pre_full_path is None:
-        pre_full_path = _find_with_fallback(["umap_pre__", "__fulllegend"])
-    if post_full_path is None:
-        post_full_path = _find_with_fallback(["umap_post__", "__fulllegend"])
-    if pre_short_path is None:
-        pre_short_path = _find_with_fallback(["umap_pre__", "__shortlegend"])
-    if post_short_path is None:
-        post_short_path = _find_with_fallback(["umap_post__", "__shortlegend"])
-    if pre_post_path is None:
-        pre_post_path = _find_with_fallback(["umap_pre_vs_post__", "__shortlegend"])
+    final_cards: list[Path] = [p for p in [pre_post_path, post_full_path, pre_full_path, post_short_path, pre_short_path] if p]
+    batch_cards: list[Path] = [p for p in [pre_post_batch_path, post_batch_full_path, pre_batch_full_path] if p]
 
-    # ------------------------------------------------------------------
-    # Resolve BATCH plots (3)
-    # ------------------------------------------------------------------
-    pre_batch_full_path = _as_relpath(pre_batch_full_png) or _find_with_fallback([f"umap_pre__{tag}", "__batch__fulllegend"])
-    post_batch_full_path = _as_relpath(post_batch_full_png) or _find_with_fallback([f"umap_post__{tag}", "__batch__fulllegend"])
-    pre_post_batch_path = _as_relpath(pre_post_batch_png) or _find_with_fallback([f"umap_pre_vs_post__{tag}", "__batch"])
-
-    # Tag-mismatch fallback (any tag, but correct suffix)
-    if pre_batch_full_path is None:
-        pre_batch_full_path = _find_with_fallback(["umap_pre__", "__batch__fulllegend"])
-    if post_batch_full_path is None:
-        post_batch_full_path = _find_with_fallback(["umap_post__", "__batch__fulllegend"])
-    if pre_post_batch_path is None:
-        pre_post_batch_path = _find_with_fallback(["umap_pre_vs_post__", "__batch"])
-
-    # ------------------------------------------------------------------
-    # Order + dedupe within groups
-    # ------------------------------------------------------------------
-    final_cards: list[Path] = []
-    for p in [pre_post_path, post_full_path, pre_full_path, post_short_path, pre_short_path]:
-        if p is not None:
-            final_cards.append(p)
-
-    batch_cards: list[Path] = []
-    for p in [pre_post_batch_path, post_batch_full_path, pre_batch_full_path]:
-        if p is not None:
-            batch_cards.append(p)
-
-    def _dedup_keep_order(paths: list[Path]) -> list[Path]:
-        seen: set[str] = set()
-        out: list[Path] = []
-        for p in paths:
-            k = p.as_posix()
-            if k in seen:
-                continue
-            seen.add(k)
-            out.append(p)
-        return out
-
-    final_cards = _dedup_keep_order(final_cards)
-    batch_cards = _dedup_keep_order(batch_cards)
-
-    # ------------------------------------------------------------------
-    # Summary
-    # ------------------------------------------------------------------
     summary: dict[str, Any] = {
         "mode": "annotated_secondary",
         "version": version,
@@ -1000,9 +962,8 @@ def generate_annotated_integration_report(
         "final_label_key": str(final_label_key),
         "round_id": rid,
         "round_tag": tag,
-        "preferred_search_prefix": str(latest_prefix) if latest_prefix else None,
-        "active_umap_key": "X_umap",
-        "stashed_pre_umap_key": "X_umap__pre_annotated_run",
+        "figure_format": fmt,
+        "figure_run_dir": str(run_dir),
         "plots_expected_final": 5,
         "plots_found_final": len(final_cards),
         "plots_expected_batch": 3,
@@ -1033,7 +994,7 @@ def generate_annotated_integration_report(
         "Summary:\n"
         f"{summary_json}"
         "</div>"
-        "<p class='note'>This report is intentionally minimal: it documents the annotated scANVI re-run and shows the pre/post UMAPs.</p>"
+        "<p class='note'>This report lives in the per-run folder so it reflects exactly the figures/settings for that run.</p>"
     )
 
     toc_sections: List[Tuple[str, str]] = [
@@ -1047,68 +1008,47 @@ def generate_annotated_integration_report(
     blocks.append('<div id="summary"></div>')
     blocks.append(_details_block("Summary", summary_table, open_by_default=True))
 
-    # ------------------------------------------------------------------
-    # UMAPs: FINAL labels
-    # ------------------------------------------------------------------
+    # FINAL
     blocks.append('<div id="umaps-final"></div>')
     if final_cards:
-        note = (
-            "Final-label UMAPs:\n"
-            "• Fulllegend plots show full pretty labels with a right-side legend.\n"
-            "• Shortlegend plots replace legends with on-data Cnn IDs at cluster centroids.\n"
-            "• The 2-panel plot compares Pre vs Post side-by-side using short labels."
-        )
         inner = (
-            f"<p class='note'>{_safe(note)}</p>"
+            "<p class='note'>Final-label UMAPs (fulllegend + shortlegend + pre/post 2-panel).</p>"
             + '<div class="grid grid2">'
-            + "".join([_render_image_card(p) for p in final_cards])
+            + "".join([_render_image_card_from_run_dir(p) for p in final_cards])
             + "</div>"
         )
-        title_html = f"UMAPs (final labels; annotated run on { _safe(rid) }) <span class='pill'>{len(final_cards)} plots</span>"
-        blocks.append(_details_block(title_html, inner, open_by_default=True))
+        blocks.append(_details_block(
+            f"UMAPs (final labels; annotated run on {_safe(rid)}) <span class='pill'>{len(final_cards)} plots</span>",
+            inner,
+            open_by_default=True,
+        ))
     else:
-        pref = _safe(latest_prefix) if latest_prefix else "png/"
-        blocks.append(
-            _details_block(
-                f"UMAPs (final labels; annotated run on { _safe(rid) })",
-                "<p class='note'><em>No final-label annotated-run UMAP plots were found under fig_root/png. "
-                f"Searched preferentially under <code>{pref}</code>. "
-                "Expected stems like <code>umap_pre__&lt;tag&gt;__fulllegend</code> and "
-                "<code>umap_pre_vs_post__&lt;tag&gt;__shortlegend</code>.</em></p>",
-                open_by_default=True,
-            )
-        )
+        blocks.append(_details_block(
+            f"UMAPs (final labels; annotated run on {_safe(rid)})",
+            f"<p class='note'><em>No final-label annotated-run plots found in {html.escape(str(run_dir))}.</em></p>",
+            open_by_default=True,
+        ))
 
-    # ------------------------------------------------------------------
-    # UMAPs: BATCH
-    # ------------------------------------------------------------------
+    # BATCH
     blocks.append('<div id="umaps-batch"></div>')
     if batch_cards:
-        note = (
-            f"Batch-key UMAPs (color={batch_key}):\n"
-            "• Pre/Post single panels use a right-side legend.\n"
-            "• The 2-panel plot compares Pre vs Post without a legend."
-        )
         inner = (
-            f"<p class='note'>{_safe(note)}</p>"
+            f"<p class='note'>Batch-key UMAPs (color={_safe(batch_key)}).</p>"
             + '<div class="grid grid2">'
-            + "".join([_render_image_card(p) for p in batch_cards])
+            + "".join([_render_image_card_from_run_dir(p) for p in batch_cards])
             + "</div>"
         )
-        title_html = f"UMAPs (batch; annotated run on { _safe(rid) }) <span class='pill'>{len(batch_cards)} plots</span>"
-        blocks.append(_details_block(title_html, inner, open_by_default=True))
+        blocks.append(_details_block(
+            f"UMAPs (batch; annotated run on {_safe(rid)}) <span class='pill'>{len(batch_cards)} plots</span>",
+            inner,
+            open_by_default=True,
+        ))
     else:
-        pref = _safe(latest_prefix) if latest_prefix else "png/"
-        blocks.append(
-            _details_block(
-                f"UMAPs (batch; annotated run on { _safe(rid) })",
-                "<p class='note'><em>No batch annotated-run UMAP plots were found under fig_root/png. "
-                f"Searched preferentially under <code>{pref}</code>. "
-                "Expected stems like <code>umap_pre__&lt;tag&gt;__batch__fulllegend</code> and "
-                "<code>umap_pre_vs_post__&lt;tag&gt;__batch</code>.</em></p>",
-                open_by_default=True,
-            )
-        )
+        blocks.append(_details_block(
+            f"UMAPs (batch; annotated run on {_safe(rid)})",
+            f"<p class='note'><em>No batch annotated-run plots found in {html.escape(str(run_dir))}.</em></p>",
+            open_by_default=True,
+        ))
 
     html_doc = (
         "<!DOCTYPE html><html><head>"
@@ -1120,7 +1060,6 @@ def generate_annotated_integration_report(
         "</body></html>"
     )
     out_html.write_text(html_doc, encoding="utf-8")
-
 
 
 # =============================================================================
@@ -1261,20 +1200,20 @@ def _render_round_summary_table(adata, rid: str, cfg=None) -> str:
         "</table>"
     )
 
-def generate_cluster_and_annotate_report(*, fig_root: Path, cfg, version: str, adata) -> None:
-    """
-    Write: <fig_root>/cluster_and_annotate_report.html
-    Expects figures under: <fig_root>/png/...
-    Behavior:
-      - Organize by clustering state (from adata.uns, NOT from file paths)
-      - Clustering state sections collapsed by default (active round open if known)
-      - Decoupler barplots ALWAYS collapsed by default
-    """
+def generate_cluster_and_annotate_report(*, fig_root: Path, fmt: str, cfg, version: str, adata, run_dir: Path | None = None) -> None:
     fig_root = Path(fig_root).resolve()
-    out_html = fig_root / "cluster_and_annotate_report.html"
+    fmt = fmt.lower().lstrip(".")
+
+    run_dir = Path(run_dir).resolve() if run_dir is not None else _find_latest_run_dir(
+        fig_root=fig_root, fmt=fmt, module_prefix="cluster_and_annotate"
+    )
+    if run_dir is None:
+        raise RuntimeError(f"Could not locate cluster_and_annotate figure run dir under {fig_root}/{fmt}/")
+
+    out_html = run_dir / "cluster_and_annotate_report.html"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    rel_imgs = _collect_pngs(fig_root)  # Paths relative to fig_root (as in the rest of your report)
+    rel_imgs = _collect_images_in_dir(run_dir, fmt, recursive=True)
 
     # ------------------------------------------------------------------
     # Authoritative round list from AnnData
@@ -1407,14 +1346,14 @@ def generate_cluster_and_annotate_report(*, fig_root: Path, cfg, version: str, a
 
                         if heat:
                             inner = "<p class='note'>Top features/pathways across clusters.</p>" + _grid_block(
-                                [_render_image_card(p) for p in heat]
+                                [_render_image_card_from_run_dir(p) for p in heat]
                             )
                             title_html = f"Decoupler heatmaps <span class='pill'>{len(heat)} plots</span>"
                             round_parts.append(_details_block(title_html, inner, open_by_default=False, extra_class="subsection"))
 
                         if dots:
                             inner = "<p class='note'>Compact overview of activity patterns.</p>" + _grid_block(
-                                [_render_image_card(p) for p in dots]
+                                [_render_image_card_from_run_dir(p) for p in dots]
                             )
                             title_html = f"Decoupler dotplots <span class='pill'>{len(dots)} plots</span>"
                             round_parts.append(_details_block(title_html, inner, open_by_default=False, extra_class="subsection"))
@@ -1422,13 +1361,13 @@ def generate_cluster_and_annotate_report(*, fig_root: Path, cfg, version: str, a
                         if bars:
                             inner = (
                                 "<p class='note'>Per-cluster top-N features.</p>"
-                                + _grid_block([_render_image_card(p) for p in bars])
+                                + _grid_block([_render_image_card_from_run_dir(p) for p in bars])
                             )
                             title_html = f"Decoupler barplots <span class='pill'>{len(bars)} plots</span>"
                             round_parts.append(_details_block(title_html, inner, open_by_default=False, extra_class="subsection"))
 
                         if other:
-                            inner = _grid_block([_render_image_card(p) for p in other])
+                            inner = _grid_block([_render_image_card_from_run_dir(p) for p in other])
                             title_html = f"Decoupler other <span class='pill'>{len(other)} plots</span>"
                             round_parts.append(_details_block(title_html, inner, open_by_default=False, extra_class="subsection"))
 
@@ -1444,7 +1383,7 @@ def generate_cluster_and_annotate_report(*, fig_root: Path, cfg, version: str, a
                         note = "Compaction flow and compacted-state diagnostics."
 
                     note_html = f"<p class='note'>{_safe(note)}</p>" if note else ""
-                    inner = note_html + _grid_block([_render_image_card(p) for p in sec_imgs])
+                    inner = note_html + _grid_block([_render_image_card_from_run_dir(p) for p in sec_imgs])
                     title_html = f"{_safe(title)} <span class='pill'>{len(sec_imgs)} plots</span>"
                     round_parts.append(_details_block(title_html, inner, open_by_default=False, extra_class="subsection"))
 
@@ -1457,7 +1396,7 @@ def generate_cluster_and_annotate_report(*, fig_root: Path, cfg, version: str, a
             blocks.append('<div id="state-unassigned"></div>')
             inner = (
                 "<p class='note'>These plots could not be mapped to a registered clustering state from <code>adata.uns['cluster_rounds']</code>.</p>"
-                + _grid_block([_render_image_card(p) for p in imgs])
+                + _grid_block([_render_image_card_from_run_dir(p) for p in imgs])
             )
             blocks.append(_details_block(
                 f"Unassigned <span class='pill'>{len(imgs)} plots</span>",
@@ -1477,30 +1416,15 @@ def generate_cluster_and_annotate_report(*, fig_root: Path, cfg, version: str, a
     out_html.write_text(html_doc, encoding="utf-8")
 
 
-def _extract_round_id_from_rel_png(rel_path_from_fig_root: Path) -> str | None:
+def _extract_round_id_from_rel_png(rel_path_from_run_dir: Path) -> str | None:
     """
-    rel_path_from_fig_root looks like:
-      png/cluster_and_annotate_roundN/<round_id>/...
-    or (older/alternate):
-      png/cluster_and_annotate/<round_id>/...
-    Returns the <round_id> or None if not detectable.
+    Now rel_path is relative to the *run dir*, e.g.:
+      <round_id>/clustering/...
+      <round_id>/annotation/...
+    Return <round_id> if it looks like the first folder component.
     """
-    parts = list(Path(rel_path_from_fig_root).parts)
-
-    # strip leading "png" if present
-    if parts and parts[0] == "png":
-        parts = parts[1:]
-
+    parts = list(Path(rel_path_from_run_dir).parts)
     if not parts:
         return None
 
-    # Layout A: cluster_and_annotate_roundN/<rid>/...
-    if parts[0].startswith("cluster_and_annotate_round"):
-        return parts[1] if len(parts) >= 2 else None
-
-    # Layout B: cluster_and_annotate/<rid>/...
-    try:
-        i = parts.index("cluster_and_annotate")
-        return parts[i + 1] if i + 1 < len(parts) else None
-    except ValueError:
-        return None
+    return parts[0]
