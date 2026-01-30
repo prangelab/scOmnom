@@ -4,6 +4,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Literal, Optional, Sequence, Tuple
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import os
 
 import anndata as ad
 import numpy as np
@@ -62,6 +64,53 @@ class PseudobulkDEOptions:
     positive_only: bool = True
 
 
+def _pydeseq2_cluster_worker(payload: dict) -> tuple[str, pd.DataFrame, dict]:
+    """
+    Worker: run PyDESeq2 for a single cluster.
+    Returns (cluster_id, result_df, summary_meta_updates)
+    """
+    cl = payload["cluster"]
+    counts_np = payload["counts_np"]          # 2*n_samples x n_genes
+    pb_index = payload["pb_index"]            # list[str]
+    genes = payload["genes"]                  # list[str]
+    metadata_rows = payload["metadata_rows"]  # list[dict]
+    alpha = float(payload["alpha"])
+    shrink_lfc = bool(payload["shrink_lfc"])
+    positive_only = bool(payload["positive_only"])
+    n_cpus = int(payload["n_cpus"])
+
+    # Rebuild DataFrames in worker
+    metadata = pd.DataFrame(metadata_rows, index=pd.Index(pb_index, name="pb_id"))
+    # standardize to match existing design expectation
+    # de_cluster_vs_rest_pseudobulk() passes sample_key as "sample" already
+    metadata["sample"] = metadata["sample"].astype("category")
+    metadata["binary_cluster"] = pd.Categorical(metadata["binary_cluster"], categories=["rest", "target"])
+
+    counts = pd.DataFrame(counts_np, index=metadata.index, columns=pd.Index(genes, name="gene"))
+
+    try:
+        res = _run_pydeseq2(
+            counts,
+            metadata,
+            design_factors=["sample", "binary_cluster"],
+            contrast=("binary_cluster", "target", "rest"),
+            alpha=alpha,
+            shrink_lfc=shrink_lfc,
+            n_cpus=n_cpus,
+        )
+
+        if positive_only and not res.empty and "log2FoldChange" in res.columns:
+            res = res.loc[pd.to_numeric(res["log2FoldChange"], errors="coerce") > 0].copy()
+
+        n_sig = int((pd.to_numeric(res["padj"], errors="coerce") < alpha).sum()) if not res.empty else 0
+        return cl, res, {"status": "ok", "n_sig": n_sig}
+
+    except Exception as e:
+        # Return empty but keep pipeline moving
+        empty = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
+        return cl, empty, {"status": "failed", "reason": str(e)}
+
+
 # -----------------------------------------------------------------------------
 # Round-aware label resolution
 # -----------------------------------------------------------------------------
@@ -101,7 +150,6 @@ def resolve_group_key(
                 if pretty and str(pretty) in adata.obs:
                     return str(pretty)
 
-    # legacy-ish pointers
     ca = adata.uns.get("cluster_and_annotate", {})
     if isinstance(ca, dict):
         k = ca.get("cluster_label_key", None)
@@ -270,6 +318,33 @@ def _rebuild_rank_genes_groups_from_filtered(
     adata_run.uns[key]["pvals_adj"] = pvals_adj
     adata_run.uns[key]["pts"] = pts
     adata_run.uns[key]["pts_rest"] = pts_rest
+
+
+def _compute_cluster_parallelism(
+    *,
+    n_clusters: int,
+    total_cpus: int,
+) -> tuple[int, int]:
+    """
+    Decide (n_jobs, n_cpus_per_job) for cluster-wise pseudobulk DE.
+
+    Rules:
+      - If total_cpus <= n_clusters:
+          n_jobs = total_cpus
+          n_cpus = 1
+      - Else:
+          n_jobs = n_clusters
+          n_cpus = 1 + floor((total_cpus - n_clusters) / n_clusters)
+    """
+    total_cpus = int(max(1, total_cpus))
+    n_clusters = int(max(1, n_clusters))
+
+    if total_cpus <= n_clusters:
+        return total_cpus, 1
+
+    extra = total_cpus - n_clusters
+    n_cpus = 1 + (extra // n_clusters)
+    return n_clusters, n_cpus
 
 
 # -----------------------------------------------------------------------------
@@ -470,21 +545,10 @@ def de_cluster_vs_rest_pseudobulk(
     opts: PseudobulkDEOptions = PseudobulkDEOptions(),
     store_key: Optional[str] = "scomnom_de",
     store: bool = True,
-    n_cpus: int = 1,
+    n_jobs: int = 1,
 ) -> Dict[str, pd.DataFrame]:
     """
-    Rigorous “cluster markers” via paired pseudobulk DE:
-      For each cluster C:
-        within each sample S:
-          library1 = cells in (S, C)
-          library2 = cells in (S, not C)
-        Fit: ~ sample + binary_cluster
-        Contrast: C vs Rest (ref=Rest)
-
-    OOM-safe approach:
-      1) aggregate counts once per (sample, cluster) across ALL cells
-      2) aggregate totals once per sample
-      3) for each cluster, compute rest = total - target (no re-reading X)
+    ... existing docstring ...
     """
     group_key = resolve_group_key(adata, groupby=groupby, round_id=round_id, prefer_pretty=True)
     sample_key = spec.sample_key
@@ -510,7 +574,6 @@ def de_cluster_vs_rest_pseudobulk(
         min_cells_per_sample_group=1,
     )
 
-    # Build lookup maps
     meta_sc2 = meta_sc.copy()
     meta_sc2["__sample"] = meta_sc2[sample_key].astype(str)
     meta_sc2["__group"] = meta_sc2[group_key].astype(str)
@@ -522,18 +585,35 @@ def de_cluster_vs_rest_pseudobulk(
     s_row_by_sample = pd.Series(meta_s2.index.to_numpy(), index=meta_s2["__sample"].to_numpy())
 
     clusters = pd.Index(pd.unique(meta_sc[group_key].astype(str))).sort_values()
-    results: Dict[str, pd.DataFrame] = {}
+    n_clusters = int(len(clusters))
 
+    # --- smart core distribution ---
+    n_jobs_eff, n_cpus_eff = _compute_cluster_parallelism(
+        n_clusters=n_clusters,
+        total_cpus=int(n_jobs),  # cfg.n_jobs passed through
+    )
+
+    LOGGER.info(
+        "Pseudobulk DE parallelism: n_clusters=%d, total_cpus=%d → n_jobs=%d, n_cpus_per_job=%d",
+        n_clusters,
+        int(n_jobs),
+        int(n_jobs_eff),
+        int(n_cpus_eff),
+    )
+
+    results: Dict[str, pd.DataFrame] = {}
     summary_rows = []
 
-    # prevalence gates (Seurat-like)
     min_pct = float(getattr(opts, "min_pct", 0.0))
     min_diff_pct = float(getattr(opts, "min_diff_pct", 0.0))
+    min_total = int(getattr(opts, "min_total_counts", 10))
+
+    # We build per-cluster payloads in the parent process (small) and then run PyDESeq2 in workers.
+    payloads: list[dict] = []
 
     for cl in clusters:
         m_cl = meta_sc2["__group"].to_numpy() == str(cl)
         meta_cl = meta_sc2.loc[m_cl, [sample_key, group_key, "n_cells"]].copy()
-
         meta_cl = meta_cl.loc[meta_cl["n_cells"] >= int(opts.min_cells_per_sample_group)]
         n_target_samples = int(meta_cl.shape[0])
 
@@ -552,10 +632,10 @@ def de_cluster_vs_rest_pseudobulk(
 
         samples = np.unique(meta_cl[sample_key].astype(str).to_numpy())
 
-        pb_index = []
-        metadata_rows = []
-        target_rows = []
-        total_rows = []
+        pb_index: list[str] = []
+        metadata_rows: list[dict] = []
+        target_rows: list[str] = []
+        total_rows: list[str] = []
 
         for s in samples:
             key = f"{s}||{cl}"
@@ -567,12 +647,12 @@ def de_cluster_vs_rest_pseudobulk(
                 continue
 
             pb_index.append(f"{s}|{cl}|target")
-            metadata_rows.append({sample_key: str(s), "binary_cluster": "target"})
+            metadata_rows.append({"sample": str(s), "binary_cluster": "target"})
             target_rows.append(rid_target)
             total_rows.append(rid_total)
 
             pb_index.append(f"{s}|{cl}|rest")
-            metadata_rows.append({sample_key: str(s), "binary_cluster": "rest"})
+            metadata_rows.append({"sample": str(s), "binary_cluster": "rest"})
             target_rows.append(rid_target)
             total_rows.append(rid_total)
 
@@ -588,10 +668,7 @@ def de_cluster_vs_rest_pseudobulk(
             )
             continue
 
-        metadata = pd.DataFrame(metadata_rows, index=pd.Index(pb_index, name="pb_id"))
-        metadata[sample_key] = metadata[sample_key].astype("category")
-        metadata["binary_cluster"] = pd.Categorical(metadata["binary_cluster"], categories=["rest", "target"])
-
+        # densify only the needed rows (still small)
         target_mat = counts_sc.loc[pd.Index(target_rows)].sparse.to_coo().toarray()
         total_mat = counts_s.loc[pd.Index(total_rows)].sparse.to_coo().toarray()
 
@@ -604,27 +681,29 @@ def de_cluster_vs_rest_pseudobulk(
                 v[v < 0] = 0
                 out[i, :] = v.astype(np.int64, copy=False)
 
-        counts = pd.DataFrame(out, index=metadata.index, columns=adata.var_names)
-
-        # Drop genes with extremely low total counts
-        min_total = int(getattr(opts, "min_total_counts", 10))
-        keep = (counts.sum(axis=0) >= min_total)
-        counts = counts.loc[:, keep]
-        if counts.shape[1] == 0:
+        # gene prefilter: total counts
+        keep_total = (out.sum(axis=0) >= min_total)
+        if not np.any(keep_total):
             results[str(cl)] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
             summary_rows.append({"cluster": str(cl), "status": "skipped", "reason": "no genes left after filtering"})
             continue
 
-        # Seurat-like prevalence filtering on libraries (counts > 0)
-        counts, prev_meta = _apply_min_pct_filters_pseudobulk(
-            counts,
-            labels=metadata["binary_cluster"],
+        out2 = out[:, keep_total]
+        genes2 = adata.var_names.to_numpy()[keep_total].astype(str).tolist()
+
+        # min_pct / min_diff_pct prevalence filter (library prevalence)
+        metadata_tmp = pd.DataFrame(metadata_rows, index=pd.Index(pb_index, name="pb_id"))
+        counts_tmp = pd.DataFrame(out2, index=metadata_tmp.index, columns=genes2)
+
+        counts_tmp, prev_meta = _apply_min_pct_filters_pseudobulk(
+            counts_tmp,
+            labels=metadata_tmp["binary_cluster"],
             level_A="target",
             level_B="rest",
             min_pct=min_pct,
             min_diff_pct=min_diff_pct,
         )
-        if counts.shape[1] == 0:
+        if counts_tmp.shape[1] == 0:
             results[str(cl)] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
             summary_rows.append(
                 {
@@ -636,7 +715,7 @@ def de_cluster_vs_rest_pseudobulk(
             )
             continue
 
-        vc = metadata["binary_cluster"].value_counts()
+        vc = metadata_tmp["binary_cluster"].value_counts()
         if int(vc.get("target", 0)) < int(opts.min_samples_per_level) or int(vc.get("rest", 0)) < int(opts.min_samples_per_level):
             results[str(cl)] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
             summary_rows.append(
@@ -650,39 +729,66 @@ def de_cluster_vs_rest_pseudobulk(
             )
             continue
 
-        try:
-            res = _run_pydeseq2(
-                counts,
-                metadata.rename(columns={sample_key: "sample"}),
-                design_factors=["sample", "binary_cluster"],
-                contrast=("binary_cluster", "target", "rest"),
-                alpha=opts.alpha,
-                shrink_lfc=opts.shrink_lfc,
-                n_cpus=n_cpus,
-            )
+        # payload for worker (numpy + lists)
+        payloads.append(
+            {
+                "cluster": str(cl),
+                "counts_np": counts_tmp.to_numpy(dtype=np.int64, copy=False),
+                "pb_index": counts_tmp.index.astype(str).tolist(),
+                "genes": counts_tmp.columns.astype(str).tolist(),
+                "metadata_rows": metadata_rows,
+                "alpha": float(opts.alpha),
+                "shrink_lfc": bool(opts.shrink_lfc),
+                "positive_only": bool(opts.positive_only),
+                "n_cpus": int(n_cpus_eff),
+            }
+        )
 
-            # ---- POSITIVE ONLY gate
-            if opts.positive_only and not res.empty and "log2FoldChange" in res.columns:
-                res = res.loc[res["log2FoldChange"] > 0].copy()
+        # record partial summary now; finalize after worker returns
+        summary_rows.append(
+            {
+                "cluster": str(cl),
+                "status": "queued" if int(n_jobs) > 1 else "running",
+                "n_target_samples": int(len(samples)),
+                "n_libraries": int(counts_tmp.shape[0]),
+                "min_cells_per_sample_group": int(opts.min_cells_per_sample_group),
+                **prev_meta,
+            }
+        )
 
-            results[str(cl)] = res
+    # --- execute: serial or parallel ---
+    if int(n_jobs) <= 1 or len(payloads) <= 1:
+        # Serial (existing behavior but using worker function for uniformity)
+        for p in payloads:
+            cl, res, meta_upd = _pydeseq2_cluster_worker(p)
+            results[cl] = res
+            # update summary entry
+            for row in summary_rows:
+                if row.get("cluster") == cl and row.get("status") in ("queued", "running"):
+                    row.update(meta_upd)
+                    break
+    else:
+        max_workers = int(n_jobs)
+        # NOTE: use processes because PyDESeq2/NumPy/scipy often don’t release GIL reliably.
+        with ProcessPoolExecutor(max_workers=int(n_jobs_eff)) as ex:
+            futs = {ex.submit(_pydeseq2_cluster_worker, p): p["cluster"] for p in payloads}
+            for fut in as_completed(futs):
+                cl = futs[fut]
+                try:
+                    cl2, res, meta_upd = fut.result()
+                except Exception as e:
+                    cl2 = cl
+                    res = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
+                    meta_upd = {"status": "failed", "reason": str(e)}
+                results[cl2] = res
+                for row in summary_rows:
+                    if row.get("cluster") == cl2 and row.get("status") in ("queued", "running"):
+                        row.update(meta_upd)
+                        break
 
-            n_sig = int((pd.to_numeric(res["padj"], errors="coerce") < opts.alpha).sum()) if not res.empty else 0
-            summary_rows.append(
-                {
-                    "cluster": str(cl),
-                    "status": "ok",
-                    "n_target_samples": int(len(samples)),
-                    "n_libraries": int(counts.shape[0]),
-                    "min_cells_per_sample_group": int(opts.min_cells_per_sample_group),
-                    "n_sig": n_sig,
-                    **prev_meta,
-                }
-            )
-        except Exception as e:
-            LOGGER.warning("PyDESeq2 failed for cluster %s vs rest: %s", str(cl), e)
-            results[str(cl)] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
-            summary_rows.append({"cluster": str(cl), "status": "failed", "reason": str(e)})
+    # Ensure all clusters present in results dict (even skipped)
+    for cl in clusters.astype(str).tolist():
+        results.setdefault(cl, pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]))
 
     if store and store_key:
         adata.uns.setdefault(store_key, {})
@@ -698,6 +804,8 @@ def de_cluster_vs_rest_pseudobulk(
             "min_total_counts": int(getattr(opts, "min_total_counts", 10)),
             "min_pct": float(getattr(opts, "min_pct", 0.0)),
             "min_diff_pct": float(getattr(opts, "min_diff_pct", 0.0)),
+            "n_jobs": int(n_jobs),
+            "n_cpus_per_fit": 1 if int(n_jobs) > 1 else int(n_cpus),
         }
         adata.uns[store_key]["pseudobulk_cluster_vs_rest"]["summary"] = pd.DataFrame(summary_rows)
         adata.uns[store_key]["pseudobulk_cluster_vs_rest"]["results"] = results

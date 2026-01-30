@@ -117,9 +117,6 @@ def run_markers_and_de(cfg) -> ad.AnnData:
     # ------------------------------------------------------------------
     # DE: cluster vs rest (pseudobulk) [guarded]
     # ------------------------------------------------------------------
-    # ------------------------------------------------------------------
-    # DE: cluster vs rest (pseudobulk) [guarded]
-    # ------------------------------------------------------------------
     marker_genes_all_clusters = {}
 
     # Define these regardless of whether pseudobulk runs, so provenance never NameErrors.
@@ -172,6 +169,7 @@ def run_markers_and_de(cfg) -> ad.AnnData:
             pb_opts.min_samples_per_level,
         )
 
+        # We don't use this output but store it so it doesn't become spam in the log.
         marker_genes_all_clusters = de_cluster_vs_rest_pseudobulk(
             adata,
             groupby=groupby,
@@ -180,7 +178,7 @@ def run_markers_and_de(cfg) -> ad.AnnData:
             opts=pb_opts,
             store_key=str(getattr(cfg, "store_key", "scomnom_de")),
             store=True,
-            n_cpus=int(getattr(cfg, "n_jobs", 1)),
+            n_jobs=int(getattr(cfg, "n_jobs", 1)),
         )
     else:
         pb_spec = None

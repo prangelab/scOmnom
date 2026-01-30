@@ -26,7 +26,7 @@ warnings.filterwarnings(action="ignore", message="pkg_resources is deprecated as
 warnings.filterwarnings(action="ignore", message=r".*does not have many workers.*", category=UserWarning, module="lightning.pytorch")
 warnings.filterwarnings(action="ignore", message=".*already log-transformed.*", category=UserWarning)
 warnings.filterwarnings(action="ignore", message="Argument `use_highly_variable` is deprecated", category=FutureWarning, module="scanpy")
-
+warnings.filterwarnings(action="ignore", message="PerformanceWarning: DataFrame is highly fragmented", category=UserWarning, module="pandas")
 
 # ---------------------------------------------------------------------
 # Helper functions
@@ -1262,8 +1262,8 @@ def cluster_vs_rest(
     replicate_key: Optional[str] = typer.Option(None, "--replicate-key", help="[Design] obs key defining replicates for pseudobulk (donor/patient/sample)."),
 
     # shared filters
-    min_pct: float = typer.Option(0.25, "--min-pct", help="[Markers/DE] Min fraction expressed in ≥1 group (Seurat-style)."),
-    min_diff_pct: float = typer.Option(0.25, "--min-diff-pct", help="[Markers/DE] Min |pctA - pctB| (Seurat-style)."),
+    min_pct: float = typer.Option(0.25, "--min-pct", help="[Markers/DE] Min fraction expressed in ≥1 group."),
+    min_diff_pct: float = typer.Option(0.25, "--min-diff-pct", help="[Markers/DE] Min |pctA - pctB|."),
 
     # cell
     cell_method: str = typer.Option("wilcoxon", "--cell-method", help="[Cell] scanpy method: wilcoxon, t-test, logreg."),
@@ -1372,8 +1372,8 @@ def within_cluster(
     contrasts: Optional[List[str]] = typer.Option(None, "--contrasts", help="[Within-cluster] A_vs_B. Repeat or comma-separate. If omitted: all pairwise."),
 
     # shared filters
-    min_pct: float = typer.Option(0.25, "--min-pct", help="[Markers/DE] Min fraction expressed in ≥1 group (Seurat-style)."),
-    min_diff_pct: float = typer.Option(0.25, "--min-diff-pct", help="[Markers/DE] Min |pctA - pctB| (Seurat-style)."),
+    min_pct: float = typer.Option(0.25, "--min-pct", help="[Markers/DE] Min fraction expressed in ≥1 group."),
+    min_diff_pct: float = typer.Option(0.25, "--min-diff-pct", help="[Markers/DE] Min |pctA - pctB|."),
 
     # cell
     cell_method: str = typer.Option("wilcoxon", "--cell-method", help="[Cell] scanpy method: wilcoxon, t-test, logreg."),
