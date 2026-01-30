@@ -932,19 +932,21 @@ def generate_annotated_integration_report(
 
     rel_imgs = _collect_images_in_dir(run_dir, fmt, recursive=False)  # integration_roundN is flat in your example
 
-    def _find_first_all(tokens: list[str]) -> Path | None:
+    def _find_first_all(tokens: list[str], *, exclude: list[str] | None = None) -> Path | None:
+        """Find first image whose path contains ALL tokens and NONE of exclude."""
+        exclude = exclude or []
         for p in rel_imgs:
             s = p.as_posix()
-            if all(t in s for t in tokens):
+            if all(t in s for t in tokens) and not any(x in s for x in exclude):
                 return p
         return None
 
-    # FINAL LABELS (5)
-    pre_full_path = _find_first_all(["umap_pre_", tag, "_fulllegend"])
-    post_full_path = _find_first_all(["umap_post_", tag, "_fulllegend"])
-    pre_short_path = _find_first_all(["umap_pre_", tag, "_shortlegend"])
-    post_short_path = _find_first_all(["umap_post_", tag, "_shortlegend"])
-    pre_post_path = _find_first_all(["umap_pre_vs_post_", tag, "_shortlegend"])
+    # FINAL LABEL plots (5)
+    pre_full_path = _find_first_all([f"umap_pre__{tag}", "__fulllegend"], exclude=["__batch"])
+    post_full_path = _find_first_all([f"umap_post__{tag}", "__fulllegend"], exclude=["__batch"])
+    pre_short_path = _find_first_all([f"umap_pre__{tag}", "__shortlegend"], exclude=["__batch"])
+    post_short_path = _find_first_all([f"umap_post__{tag}", "__shortlegend"], exclude=["__batch"])
+    pre_post_path = _find_first_all([f"umap_pre_vs_post__{tag}", "__shortlegend"], exclude=["__batch"])
 
     # BATCH (3)
     pre_batch_full_path = _find_first_all(["umap_pre_", tag, "_batch_fulllegend"])
