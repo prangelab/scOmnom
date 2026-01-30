@@ -1,8 +1,9 @@
 from __future__ import annotations
-from typing import Optional, List, Literal, Dict
+from typing import Optional, List, Literal, Dict, Sequence, Tuple
 import typer
 from pathlib import Path
 import warnings
+from enum import Enum
 
 from .load_and_filter import run_load_and_filter
 from .integrate import run_integrate
@@ -12,7 +13,6 @@ from .markers_and_de import run_markers_and_de
 from .config import LoadAndFilterConfig, IntegrateConfig, ClusterAnnotateConfig, MarkersAndDEConfig
 import logging
 from .logging_utils import init_logging
-
 
 
 ALLOWED_METHODS = {"scVI", "scANVI", "Harmony", "Scanorama", "BBKNN"}
@@ -1072,328 +1072,400 @@ def cluster_and_annotate(
     run_clustering(cfg)
 
 
-if __name__ == "__main__":
-    app()
-
-
 # ======================================================================
 #  markers-and-de
 # ======================================================================
-@app.command(
-    "markers-and-de",
-    help="Cell-level discovery markers + pseudobulk DE (PyDESeq2): cluster-vs-rest and optional condition-within-cluster.",
+# ---------------------------------------------------------------------
+# Enums / parsing helpers
+# ---------------------------------------------------------------------
+class RunWhich(str, Enum):
+    both = "both"
+    cell = "cell"
+    pseudobulk = "pseudobulk"
+
+
+def _parse_contrasts(items: Optional[List[str]]) -> List[str]:
+    """
+    Accepts repeated --contrasts or comma-separated entries.
+    Returns a normalized list like ["A_vs_B", "C_vs_D"].
+    """
+    if not items:
+        return []
+    out: List[str] = []
+    for s in items:
+        if s is None:
+            continue
+        parts = [x.strip() for x in str(s).split(",") if x.strip()]
+        out.extend(parts)
+    # de-dupe, preserve order
+    seen = set()
+    uniq: List[str] = []
+    for x in out:
+        if x not in seen:
+            seen.add(x)
+            uniq.append(x)
+    return uniq
+
+
+def _parse_layers(items: Optional[List[str]]) -> List[str]:
+    """
+    Accept repeated --pb-counts-layer or comma-separated.
+    """
+    if not items:
+        return []
+    out: List[str] = []
+    for s in items:
+        if s is None:
+            continue
+        out.extend([x.strip() for x in str(s).split(",") if x.strip()])
+    # de-dupe, preserve order
+    seen = set()
+    uniq: List[str] = []
+    for x in out:
+        if x not in seen:
+            seen.add(x)
+            uniq.append(x)
+    return uniq
+
+
+# ---------------------------------------------------------------------
+# Typer app structure
+# ---------------------------------------------------------------------
+markers_and_de_app = typer.Typer(
+    help="Discovery markers + pseudobulk DE (cluster-vs-rest and within-cluster contrasts)."
 )
-def markers_and_de(
-    # -------------------------------------------------------------
-    # I/O
-    # -------------------------------------------------------------
-    input_path: Path = typer.Option(
+
+app.add_typer(markers_and_de_app, name="markers-and-de")
+
+cluster_vs_rest_app = typer.Typer(help="Cluster-vs-rest: groups defined by --group-key.")
+within_cluster_app = typer.Typer(help="Within-cluster contrasts: compare condition levels within each group.")
+
+markers_and_de_app.add_typer(cluster_vs_rest_app, name="cluster-vs-rest")
+markers_and_de_app.add_typer(within_cluster_app, name="within-cluster")
+
+
+# ---------------------------------------------------------------------
+# Shared option builders (keeps help organized and consistent)
+# ---------------------------------------------------------------------
+def opt_input_path():
+    return typer.Option(
         ...,
         "--input-path",
         "-i",
         help="[I/O] Clustered/annotated dataset (.zarr or .h5ad).",
-    ),
-    output_dir: Optional[Path] = typer.Option(
+    )
+
+
+def opt_output_dir():
+    return typer.Option(
         None,
         "--output-dir",
         "-o",
         help="[I/O] Output directory (default = input parent).",
-    ),
-    output_name: str = typer.Option(
-        "adata.markers_and_de",
+    )
+
+
+def opt_output_name(default: str):
+    return typer.Option(
+        default,
         "--output-name",
         help="[I/O] Base name for output dataset.",
-    ),
-    save_h5ad: bool = typer.Option(
+    )
+
+
+def opt_save_h5ad():
+    return typer.Option(
         False,
         "--save-h5ad/--no-save-h5ad",
         help="[I/O] Also write an .h5ad copy (WARNING: loads full matrix into RAM).",
-    ),
-    n_jobs: int = typer.Option(
-        1,
+    )
+
+
+def opt_n_jobs(default: int = 1):
+    return typer.Option(
+        default,
         "--n-jobs",
         help="[I/O] Number of jobs to run in parallel.",
-    ),
+    )
 
-    # -------------------------------------------------------------
-    # Figures
-    # -------------------------------------------------------------
-    make_figures: bool = typer.Option(
+
+def opt_figs_enabled():
+    return typer.Option(
         True,
         "--make-figures/--no-make-figures",
         help="[Figures] Enable/disable figure generation.",
-    ),
-    figdir_name: str = typer.Option(
+    )
+
+
+def opt_figdir_name():
+    return typer.Option(
         "figures",
         "--figdir-name",
         help="[Figures] Name of figure directory.",
-    ),
-    figure_formats: List[str] = typer.Option(
+    )
+
+
+def opt_figure_formats():
+    return typer.Option(
         ["png", "pdf"],
         "--figure-formats",
         "-F",
         help="[Figures] Output figure formats.",
-    ),
+    )
 
-    # -------------------------------------------------------------
-    # Grouping / round selection
-    # -------------------------------------------------------------
-    groupby: Optional[str] = typer.Option(
+
+def opt_run_which():
+    return typer.Option(
+        RunWhich.both,
+        "--run",
+        help="[Run] Which implementations to run: cell, pseudobulk, or both.",
+        case_sensitive=False,
+    )
+
+
+def opt_group_key():
+    return typer.Option(
         None,
-        "--groupby",
-        help="[Grouping] obs key to use for groups (overrides round-aware resolution).",
-    ),
-    label_source: str = typer.Option(
+        "--group-key",
+        help="[Grouping] obs key defining groups (e.g. clusters / labels). If omitted, uses round-aware resolution.",
+    )
+
+
+def opt_label_source():
+    return typer.Option(
         "pretty",
         "--label-source",
         help="[Grouping] Label source for round-aware resolution (e.g. pretty).",
-    ),
-    round_id: Optional[str] = typer.Option(
+    )
+
+
+def opt_round_id():
+    return typer.Option(
         None,
         "--round-id",
         help="[Grouping] Explicit cluster round id (default: active).",
-    ),
+    )
 
-    # replicate key
-    sample_key: Optional[str] = typer.Option(
-        None,
-        "--sample-key",
-        help="[Design] Replicate key in adata.obs (donor/patient/sample).",
-    ),
-    batch_key: Optional[str] = typer.Option(
-        None,
-        "--batch-key",
-        "-b",
-        help="[Design] Fallback replicate key (used if --sample-key not set).",
-    ),
 
-    # ------------------------------------------------------------------
-    # Gene detection / prevalence filters (Seurat-like)
-    # ------------------------------------------------------------------
-    min_pct: float = typer.Option(
-        0.25,
-        "--min-pct",
-        help=(
-            "[Markers / DE] Minimum fraction of cells expressing a gene in at least "
-            "one group (Seurat-style min.pct). Applied to cell-level markers, "
-            "contrast-conditional markers, and as a gene pre-filter for pseudobulk DE."
-        ),
-    ),
-    min_diff_pct: float = typer.Option(
-        0.25,
-        "--min-diff-pct",
-        help=(
-            "[Markers / DE] Minimum absolute difference in expression fraction "
-            "between groups (|pct_A - pct_B|). Seurat-style min.diff.pct."
-        ),
-    ),
-    # -------------------------------------------------------------
-    # Cell-level discovery markers (scanpy rank_genes_groups)
-    # -------------------------------------------------------------
-    markers_key: str = typer.Option(
-        "cluster_markers_wilcoxon",
-        "--markers-key",
-        help="[Markers] adata.uns key for cell-level markers.",
-    ),
-    markers_method: str = typer.Option(
+def opt_replicate_key():
+    return typer.Option(
+        None,
+        "--replicate-key",
+        help="[Design] obs key defining biological replicates for pseudobulk (patient/donor/sample).",
+    )
+
+
+# -------------------------
+# Cell-level options
+# -------------------------
+def opt_cell_method():
+    return typer.Option(
         "wilcoxon",
-        "--markers-method",
-        help="[Markers] scanpy method: wilcoxon, t-test, logreg.",
-    ),
-    markers_n_genes: int = typer.Option(
+        "--cell-method",
+        help="[Cell markers] scanpy method: wilcoxon, t-test, logreg.",
+    )
+
+
+def opt_cell_n_genes():
+    return typer.Option(
         300,
-        "--markers-n-genes",
-        help="[Markers] Number of marker genes per group.",
-    ),
-    markers_rankby_abs: bool = typer.Option(
+        "--cell-n-genes",
+        help="[Cell markers] Number of marker genes per group.",
+    )
+
+
+def opt_cell_rankby_abs():
+    return typer.Option(
         True,
-        "--markers-rankby-abs/--no-markers-rankby-abs",
-        help="[Markers] Rank by absolute effect.",
-    ),
-    markers_use_raw: bool = typer.Option(
+        "--cell-rankby-abs/--no-cell-rankby-abs",
+        help="[Cell markers] Rank by absolute effect.",
+    )
+
+
+def opt_cell_use_raw():
+    return typer.Option(
         False,
-        "--markers-use-raw/--no-markers-use-raw",
-        help="[Markers] Use adata.raw for scanpy marker calling.",
-    ),
-    markers_downsample_threshold: int = typer.Option(
+        "--cell-use-raw/--no-cell-use-raw",
+        help="[Cell markers] Use adata.raw for scanpy marker calling.",
+    )
+
+
+def opt_cell_downsample_threshold():
+    return typer.Option(
         500_000,
-        "--markers-downsample-threshold",
-        help="[Markers] Downsample marker calling if n_cells exceeds this.",
-    ),
-    markers_downsample_max_per_group: int = typer.Option(
+        "--cell-downsample-threshold",
+        help="[Cell markers] Downsample marker calling if n_cells exceeds this.",
+    )
+
+
+def opt_cell_downsample_max_per_group():
+    return typer.Option(
         2_000,
-        "--markers-downsample-max-per-group",
-        help="[Markers] Max cells per group when downsampling.",
-    ),
-    random_state: int = typer.Option(
+        "--cell-downsample-max-per-group",
+        help="[Cell markers] Max cells per group when downsampling.",
+    )
+
+
+def opt_random_state():
+    return typer.Option(
         42,
         "--random-state",
-        help="[General] RNG seed for downsampling.",
-    ),
+        help="[General] RNG seed for downsampling/subsampling.",
+    )
 
-    # -------------------------------------------------------------
-    # Pseudobulk DE: counts source + thresholds
-    # -------------------------------------------------------------
-    counts_layers: List[str] = typer.Option(
+
+# -------------------------
+# Pseudobulk options
+# -------------------------
+def opt_pb_counts_layer():
+    return typer.Option(
         ["counts_cb", "counts_raw"],
-        "--counts-layers",
-        help="[DE] Priority list of layers to use as counts (first found wins).",
-    ),
-    allow_x_counts: bool = typer.Option(
+        "--pb-counts-layer",
+        help="[Pseudobulk] Priority list of layers to use as counts. Repeat or comma-separate.",
+    )
+
+
+def opt_pb_allow_x_counts():
+    return typer.Option(
         True,
-        "--allow-x-counts/--no-allow-x-counts",
-        help="[DE] Allow falling back to adata.X if no counts layer found.",
-    ),
-    min_cells_target: int = typer.Option(
+        "--pb-allow-x-counts/--no-pb-allow-x-counts",
+        help="[Pseudobulk] Allow falling back to adata.X if no counts layer found.",
+    )
+
+
+def opt_pb_min_cells_per_repl_group():
+    return typer.Option(
         20,
-        "--min-cells-target",
-        help="[DE] Min cells per (sample, group) for cluster-vs-rest DE.",
-    ),
-    alpha: float = typer.Option(
+        "--pb-min-cells-per-replicate-group",
+        help="[Pseudobulk] Min cells per (replicate, group) for DE.",
+    )
+
+
+def opt_pb_alpha():
+    return typer.Option(
         0.05,
-        "--alpha",
-        help="[DE] Adjusted p-value cutoff.",
-    ),
-    store_key: str = typer.Option(
+        "--pb-alpha",
+        help="[Pseudobulk] Adjusted p-value cutoff.",
+    )
+
+
+def opt_pb_store_key():
+    return typer.Option(
         "scomnom_de",
-        "--store-key",
-        help="[DE] adata.uns key where DE outputs are stored.",
-    ),
+        "--pb-store-key",
+        help="[Pseudobulk] adata.uns key where DE outputs are stored.",
+    )
 
-    # -------------------------------------------------------------
-    # Optional: condition DE within group
-    # -------------------------------------------------------------
-    condition_key: Optional[str] = typer.Option(
-        None,
-        "--condition-key",
-        help="[Condition DE] obs column (e.g. disease, sex). If set, run condition-within-cluster DE.",
-    ),
-    condition_contrasts: List[str] = typer.Option(
-        [],
-        "--condition-contrasts",
-        help="[Condition DE] Optional list of contrasts to run, e.g. --condition-contrasts A_vs_B. If empty, run all pairwise contrasts among condition_key levels within each cluster.",
-    ),
-    min_cells_condition: int = typer.Option(
-        20,
-        "--min-cells-condition",
-        help="[Condition DE] Min cells per (sample, condition) within a cluster.",
-    ),
 
-    # -------------------------------------------------------------
-    # Optional: Contrast-conditional mode
-    # -------------------------------------------------------------
-    contrast_conditional_de: bool = typer.Option(
-        False,
-        "--contrast-conditional-de",
-        help="[Contrast condition] Run conditional differential expression: pairwise A vs B within each cluster (requires exactly 2 condition levels).",
-    ),
-    contrast_key: Optional[str] = typer.Option(
-        None,
-        "--contrast-key",
-        help="[Contrast condition] obs column defining the condition to contrast (defaults to sample_key).",
-    ),
-    contrast_contrasts: List[str] = typer.Option(
-        [],
-        "--contrast-contrasts",
-        help="[Contrast condition] Optional list of contrasts to run, e.g. --contrast-contrasts A_vs_B. If empty, run all pairwise contrasts among contrast_key levels within each cluster.",
-    ),
-    contrast_methods: List[str] = typer.Option(
-        ["wilcoxon", "logreg"],
-        "--contrast-methods",
-        help="[Contrast condition] Differential expression methods to run and combine (e.g. wilcoxon, logreg).",
-    ),
-    contrast_min_cells_per_level: int = typer.Option(
-        50,
-        "--contrast-min-cells-per-level",
-        help="[Contrast condition] Minimum number of cells required per condition level within a cluster.",
-    ),
-    contrast_max_cells_per_level: int = typer.Option(
-        2000,
-        "--contrast-max-cells-per-level",
-        help="[Contrast condition] Maximum number of cells per condition level (randomly subsampled if exceeded).",
-    ),
-    contrast_min_total_counts: int = typer.Option(
-        10,
-        "--contrast-min-total-counts",
-        help="[Contrast condition] Minimum total counts required for a gene to be tested.",
-    ),
-    contrast_pseudocount: float = typer.Option(
-        1.0,
-        "--contrast-pseudocount",
-        help="[Contrast condition] Pseudocount added before log fold-change computation.",
-    ),
-    contrast_cl_alpha: float = typer.Option(
-        0.05,
-        "--contrast-cl-alpha",
-        help="[Contrast condition] Significance threshold (adjusted p-value) for cluster-level DE results.",
-    ),
-    contrast_cl_min_abs_logfc: float = typer.Option(
+# -------------------------
+# Shared gene prevalence filters (apply to both paths)
+# -------------------------
+def opt_min_pct():
+    return typer.Option(
         0.25,
-        "--contrast-cl-min-abs-logfc",
-        help="[Contrast condition] Minimum absolute log fold-change for cluster-level DE filtering.",
-    ),
-    contrast_lr_min_abs_coef: float = typer.Option(
-        0.25,
-        "--contrast-lr-min-abs-coef",
-        help="[Contrast condition] Minimum absolute logistic-regression coefficient for logreg DE filtering.",
-    ),
-    contrast_pb_min_abs_log2fc: float = typer.Option(
-        0.5,
-        "--contrast-pb-min-abs-log2fc",
-        help="[Contrast condition] Minimum absolute log2 fold-change for pseudobulk DE filtering.",
-    ),
+        "--min-pct",
+        help="[Markers/DE] Minimum fraction of cells expressing a gene in at least one group (Seurat-style).",
+    )
 
-    # -------------------------------------------------------------
-    # Plot knobs (for orchestrator wiring to de_plot_utils + save_multi)
-    # -------------------------------------------------------------
-    plot_lfc_thresh: float = typer.Option(
-        1.0,
-        "--plot-lfc-thresh",
-        help="[Plots] Volcano log2FC threshold.",
-    ),
-    plot_volcano_top_label_n: int = typer.Option(
-        15,
-        "--plot-volcano-top-label-n",
-        help="[Plots] Number of labeled genes in volcano plots.",
-    ),
-    plot_top_n_per_cluster: int = typer.Option(
-        10,
-        "--plot-top-n-per-cluster",
-        help="[Plots] Top genes per cluster for heatmap/violin/umap expression plots.",
-    ),
-    plot_dotplot_top_n_genes: int = typer.Option(
-        15,
-        "--plot-dotplot-top-n-per-cluster",
-        help="[Plots] Top genes per cluster for dotplots.",
-    ),
-    plot_max_genes_total: int = typer.Option(
-        80,
-        "--plot-max-genes-total",
-        help="[Plots] Cap total genes plotted across clusters (prevents huge dotplots).",
-    ),
-    plot_use_raw: bool = typer.Option(
-        False,
-        "--plot-use-raw/--no-plot-use-raw",
-        help="[Plots] Use adata.raw for expression plots.",
-    ),
-    plot_layer: Optional[str] = typer.Option(
-        None,
-        "--plot-layer",
-        help="[Plots] Layer for expression plots (if not using raw).",
-    ),
-    plot_umap_ncols: int = typer.Option(
-        3,
-        "--plot-umap-ncols",
-        help="[Plots] Columns for UMAP feature grid.",
-    ),
-):
-    # ---------------------------------------------------------
-    # Resolve output dir + logging
-    # ---------------------------------------------------------
+
+def opt_min_diff_pct():
+    return typer.Option(
+        0.25,
+        "--min-diff-pct",
+        help="[Markers/DE] Minimum absolute difference in expression fraction between groups (Seurat-style).",
+    )
+
+
+# -------------------------
+# Plot knobs (as before)
+# -------------------------
+def opt_plot_lfc_thresh():
+    return typer.Option(1.0, "--plot-lfc-thresh", help="[Plots] Volcano log2FC threshold.")
+
+
+def opt_plot_volcano_top_label_n():
+    return typer.Option(15, "--plot-volcano-top-label-n", help="[Plots] Number of labeled genes in volcano plots.")
+
+
+def opt_plot_top_n_per_cluster():
+    return typer.Option(10, "--plot-top-n-per-cluster", help="[Plots] Top genes per cluster for expression plots.")
+
+
+def opt_plot_dotplot_top_n_genes():
+    return typer.Option(15, "--plot-dotplot-top-n-per-cluster", help="[Plots] Top genes per cluster for dotplots.")
+
+
+def opt_plot_max_genes_total():
+    return typer.Option(80, "--plot-max-genes-total", help="[Plots] Cap total genes plotted across clusters.")
+
+
+def opt_plot_use_raw():
+    return typer.Option(False, "--plot-use-raw/--no-plot-use-raw", help="[Plots] Use adata.raw for expression plots.")
+
+
+def opt_plot_layer():
+    return typer.Option(None, "--plot-layer", help="[Plots] Layer for expression plots (if not using raw).")
+
+
+def opt_plot_umap_ncols():
+    return typer.Option(3, "--plot-umap-ncols", help="[Plots] Columns for UMAP feature grid.")
+
+
+# ---------------------------------------------------------------------
+# Internal wiring: map new CLI -> existing MarkersAndDEConfig fields
+# ---------------------------------------------------------------------
+def _build_cfg_common(
+    *,
+    input_path: Path,
+    output_dir: Optional[Path],
+    output_name: str,
+    save_h5ad: bool,
+    n_jobs: int,
+    make_figures: bool,
+    figdir_name: str,
+    figure_formats: Sequence[str],
+    group_key: Optional[str],
+    label_source: str,
+    round_id: Optional[str],
+    replicate_key: Optional[str],
+    # shared filters
+    min_pct: float,
+    min_diff_pct: float,
+    # cell opts
+    cell_method: str,
+    cell_n_genes: int,
+    cell_rankby_abs: bool,
+    cell_use_raw: bool,
+    cell_downsample_threshold: int,
+    cell_downsample_max_per_group: int,
+    random_state: int,
+    # pb opts
+    pb_counts_layer: List[str],
+    pb_allow_x_counts: bool,
+    pb_min_cells_per_repl_group: int,
+    pb_alpha: float,
+    pb_store_key: str,
+    # plots
+    plot_lfc_thresh: float,
+    plot_volcano_top_label_n: int,
+    plot_top_n_per_cluster: int,
+    plot_dotplot_top_n_genes: int,
+    plot_max_genes_total: int,
+    plot_use_raw: bool,
+    plot_layer: Optional[str],
+    plot_umap_ncols: int,
+) -> MarkersAndDEConfig:
     out_dir = output_dir or input_path.parent
     log_path = out_dir / "markers-and-de.log"
     init_logging(log_path)
 
+    # Normalize pb layers input
+    layers = _parse_layers(pb_counts_layer) or ["counts_cb", "counts_raw"]
+
+    # Map new replicate_key -> existing config knobs.
+    # Keep internals intact:
+    # - sample_key is the replicate unit used by pseudobulk design in your code.
+    # - batch_key was previously a fallback; we stop exposing it here.
     cfg = MarkersAndDEConfig(
         input_path=input_path,
         output_dir=out_dir,
@@ -1404,49 +1476,278 @@ def markers_and_de(
         make_figures=make_figures,
         figdir_name=figdir_name,
         figure_formats=figure_formats,
-        groupby=groupby,
+        # grouping
+        groupby=group_key,          # old name in config
         label_source=label_source,
         round_id=round_id,
-        sample_key=sample_key,
-        batch_key=batch_key,
+        # replicate
+        sample_key=replicate_key,   # single user-facing choice
+        batch_key=None,             # do not expose; keep internal fallback logic if you want elsewhere
+        # prevalence
         min_pct=min_pct,
         min_diff_pct=min_diff_pct,
-        markers_key=markers_key,
-        markers_method=markers_method,
-        markers_n_genes=markers_n_genes,
-        markers_rankby_abs=markers_rankby_abs,
-        markers_use_raw=markers_use_raw,
-        markers_downsample_threshold=markers_downsample_threshold,
-        markers_downsample_max_per_group=markers_downsample_max_per_group,
+        # cell markers (existing field names)
+        markers_key="cluster_markers_wilcoxon",  # keep default; optionally expose later as --cell-key
+        markers_method=str(cell_method).lower(),
+        markers_n_genes=cell_n_genes,
+        markers_rankby_abs=cell_rankby_abs,
+        markers_use_raw=cell_use_raw,
+        markers_downsample_threshold=cell_downsample_threshold,
+        markers_downsample_max_per_group=cell_downsample_max_per_group,
         random_state=random_state,
-        counts_layers=counts_layers,
-        allow_X_counts=allow_x_counts,
-        min_cells_target=min_cells_target,
-        alpha=alpha,
-        store_key=store_key,
-        condition_key=condition_key,
-        condition_contrasts=condition_contrasts,
-        min_cells_condition=min_cells_condition,
-        contrast_conditional_de=contrast_conditional_de,
-        contrast_key=contrast_key,
-        contrast_contrasts=contrast_contrasts,
-        contrast_methods=tuple([str(x).lower() for x in contrast_methods]),
-        contrast_min_cells_per_level=contrast_min_cells_per_level,
-        contrast_max_cells_per_level=contrast_max_cells_per_level,
-        contrast_min_total_counts=contrast_min_total_counts,
-        contrast_pseudocount=contrast_pseudocount,
-        contrast_cl_alpha=contrast_cl_alpha,
-        contrast_cl_min_abs_logfc=contrast_cl_min_abs_logfc,
-        contrast_lr_min_abs_coef=contrast_lr_min_abs_coef,
-        contrast_pb_min_abs_log2fc=contrast_pb_min_abs_log2fc,
+        # pseudobulk (existing field names)
+        counts_layers=tuple(layers),
+        allow_X_counts=pb_allow_x_counts,
+        min_cells_target=pb_min_cells_per_repl_group,
+        alpha=pb_alpha,
+        store_key=pb_store_key,
+        # plot knobs
         plot_lfc_thresh=plot_lfc_thresh,
         plot_volcano_top_label_n=plot_volcano_top_label_n,
-        plot_dotplot_top_n_genes=plot_dotplot_top_n_genes,
         plot_top_n_per_cluster=plot_top_n_per_cluster,
+        plot_dotplot_top_n_genes=plot_dotplot_top_n_genes,
+        plot_max_genes_total=plot_max_genes_total,
+        plot_use_raw=plot_use_raw,
+        plot_layer=plot_layer,
+        plot_umap_ncols=plot_umap_ncols,
+    )
+    return cfg
+
+
+def _run_with_selection(cfg: MarkersAndDEConfig, run: RunWhich) -> None:
+    """
+    Minimal glue for implementation selection.
+
+    If your current run_markers_and_de(cfg) always runs both code paths,
+    you should update it to accept (run_cell: bool, run_pseudobulk: bool)
+    OR to read these booleans from cfg (new fields) without renaming existing ones.
+
+    This CLI assumes you add one of:
+      - run_markers_and_de(cfg, run_cell=..., run_pseudobulk=...)
+      - or cfg._run_cell / cfg._run_pseudobulk (extra fields) that orchestrator reads.
+    """
+    run_cell = run in (RunWhich.both, RunWhich.cell)
+    run_pb = run in (RunWhich.both, RunWhich.pseudobulk)
+
+    # Option 1 (recommended): update orchestrator signature
+    try:
+        run_markers_and_de(cfg, run_cell=run_cell, run_pseudobulk=run_pb)  # type: ignore[arg-type]
+        return
+    except TypeError:
+        # Option 2: stash flags on cfg (pydantic allows extra only if configured; otherwise adjust config)
+        # If you don't want to touch MarkersAndDEConfig, then you *must* do option 1 above.
+        setattr(cfg, "run_cell", run_cell)
+        setattr(cfg, "run_pseudobulk", run_pb)
+        run_markers_and_de(cfg)
+
+
+# ---------------------------------------------------------------------
+# MODE 1: cluster-vs-rest
+# ---------------------------------------------------------------------
+@cluster_vs_rest_app.command("run", help="Run cluster-vs-rest markers/DE.")
+def cluster_vs_rest_run(
+    # I/O
+    input_path: Path = opt_input_path(),
+    output_dir: Optional[Path] = opt_output_dir(),
+    output_name: str = opt_output_name("adata.markers_and_de"),
+    save_h5ad: bool = opt_save_h5ad(),
+    n_jobs: int = opt_n_jobs(1),
+    # Figures
+    make_figures: bool = opt_figs_enabled(),
+    figdir_name: str = opt_figdir_name(),
+    figure_formats: List[str] = opt_figure_formats(),
+    # Mode selection / grouping / design
+    run: RunWhich = opt_run_which(),
+    group_key: Optional[str] = opt_group_key(),
+    label_source: str = opt_label_source(),
+    round_id: Optional[str] = opt_round_id(),
+    replicate_key: Optional[str] = opt_replicate_key(),
+    # Shared filters
+    min_pct: float = opt_min_pct(),
+    min_diff_pct: float = opt_min_diff_pct(),
+    # Cell
+    cell_method: str = opt_cell_method(),
+    cell_n_genes: int = opt_cell_n_genes(),
+    cell_rankby_abs: bool = opt_cell_rankby_abs(),
+    cell_use_raw: bool = opt_cell_use_raw(),
+    cell_downsample_threshold: int = opt_cell_downsample_threshold(),
+    cell_downsample_max_per_group: int = opt_cell_downsample_max_per_group(),
+    random_state: int = opt_random_state(),
+    # Pseudobulk
+    pb_counts_layer: List[str] = opt_pb_counts_layer(),
+    pb_allow_x_counts: bool = opt_pb_allow_x_counts(),
+    pb_min_cells_per_repl_group: int = opt_pb_min_cells_per_repl_group(),
+    pb_alpha: float = opt_pb_alpha(),
+    pb_store_key: str = opt_pb_store_key(),
+    # Plots
+    plot_lfc_thresh: float = opt_plot_lfc_thresh(),
+    plot_volcano_top_label_n: int = opt_plot_volcano_top_label_n(),
+    plot_top_n_per_cluster: int = opt_plot_top_n_per_cluster(),
+    plot_dotplot_top_n_genes: int = opt_plot_dotplot_top_n_genes(),
+    plot_max_genes_total: int = opt_plot_max_genes_total(),
+    plot_use_raw: bool = opt_plot_use_raw(),
+    plot_layer: Optional[str] = opt_plot_layer(),
+    plot_umap_ncols: int = opt_plot_umap_ncols(),
+):
+    cfg = _build_cfg_common(
+        input_path=input_path,
+        output_dir=output_dir,
+        output_name=output_name,
+        save_h5ad=save_h5ad,
+        n_jobs=n_jobs,
+        make_figures=make_figures,
+        figdir_name=figdir_name,
+        figure_formats=figure_formats,
+        group_key=group_key,
+        label_source=label_source,
+        round_id=round_id,
+        replicate_key=replicate_key,
+        min_pct=min_pct,
+        min_diff_pct=min_diff_pct,
+        cell_method=cell_method,
+        cell_n_genes=cell_n_genes,
+        cell_rankby_abs=cell_rankby_abs,
+        cell_use_raw=cell_use_raw,
+        cell_downsample_threshold=cell_downsample_threshold,
+        cell_downsample_max_per_group=cell_downsample_max_per_group,
+        random_state=random_state,
+        pb_counts_layer=pb_counts_layer,
+        pb_allow_x_counts=pb_allow_x_counts,
+        pb_min_cells_per_repl_group=pb_min_cells_per_repl_group,
+        pb_alpha=pb_alpha,
+        pb_store_key=pb_store_key,
+        plot_lfc_thresh=plot_lfc_thresh,
+        plot_volcano_top_label_n=plot_volcano_top_label_n,
+        plot_top_n_per_cluster=plot_top_n_per_cluster,
+        plot_dotplot_top_n_genes=plot_dotplot_top_n_genes,
         plot_max_genes_total=plot_max_genes_total,
         plot_use_raw=plot_use_raw,
         plot_layer=plot_layer,
         plot_umap_ncols=plot_umap_ncols,
     )
 
-    run_markers_and_de(cfg)
+    # Ensure we are in "cluster-vs-rest only" mode (existing config already defaults)
+    cfg.condition_key = None
+    cfg.condition_contrasts = ()
+    cfg.contrast_conditional_de = False
+    cfg.contrast_key = None
+    cfg.contrast_contrasts = ()
+
+    _run_with_selection(cfg, run)
+
+
+# ---------------------------------------------------------------------
+# MODE 2: within-cluster contrasts
+# ---------------------------------------------------------------------
+@within_cluster_app.command("run", help="Run within-cluster contrasts (condition levels compared within each group).")
+def within_cluster_run(
+    # I/O
+    input_path: Path = opt_input_path(),
+    output_dir: Optional[Path] = opt_output_dir(),
+    output_name: str = opt_output_name("adata.markers_and_de"),
+    save_h5ad: bool = opt_save_h5ad(),
+    n_jobs: int = opt_n_jobs(1),
+    # Figures
+    make_figures: bool = opt_figs_enabled(),
+    figdir_name: str = opt_figdir_name(),
+    figure_formats: List[str] = opt_figure_formats(),
+    # Mode selection / grouping / design
+    run: RunWhich = opt_run_which(),
+    group_key: Optional[str] = opt_group_key(),
+    label_source: str = opt_label_source(),
+    round_id: Optional[str] = opt_round_id(),
+    replicate_key: Optional[str] = opt_replicate_key(),
+    # Required for this mode
+    condition_key: str = typer.Option(
+        ...,
+        "--condition-key",
+        help="[Within-cluster] obs key whose levels are contrasted within each group (e.g. disease, sex).",
+    ),
+    contrasts: Optional[List[str]] = typer.Option(
+        None,
+        "--contrasts",
+        help="[Within-cluster] Contrasts like A_vs_B. Repeat or comma-separate. If omitted: all pairwise.",
+    ),
+    # Shared filters
+    min_pct: float = opt_min_pct(),
+    min_diff_pct: float = opt_min_diff_pct(),
+    # Cell
+    cell_method: str = opt_cell_method(),
+    cell_n_genes: int = opt_cell_n_genes(),
+    cell_rankby_abs: bool = opt_cell_rankby_abs(),
+    cell_use_raw: bool = opt_cell_use_raw(),
+    cell_downsample_threshold: int = opt_cell_downsample_threshold(),
+    cell_downsample_max_per_group: int = opt_cell_downsample_max_per_group(),
+    random_state: int = opt_random_state(),
+    # Pseudobulk
+    pb_counts_layer: List[str] = opt_pb_counts_layer(),
+    pb_allow_x_counts: bool = opt_pb_allow_x_counts(),
+    pb_min_cells_per_repl_group: int = opt_pb_min_cells_per_repl_group(),
+    pb_alpha: float = opt_pb_alpha(),
+    pb_store_key: str = opt_pb_store_key(),
+    # Plots
+    plot_lfc_thresh: float = opt_plot_lfc_thresh(),
+    plot_volcano_top_label_n: int = opt_plot_volcano_top_label_n(),
+    plot_top_n_per_cluster: int = opt_plot_top_n_per_cluster(),
+    plot_dotplot_top_n_genes: int = opt_plot_dotplot_top_n_genes(),
+    plot_max_genes_total: int = opt_plot_max_genes_total(),
+    plot_use_raw: bool = opt_plot_use_raw(),
+    plot_layer: Optional[str] = opt_plot_layer(),
+    plot_umap_ncols: int = opt_plot_umap_ncols(),
+):
+    cfg = _build_cfg_common(
+        input_path=input_path,
+        output_dir=output_dir,
+        output_name=output_name,
+        save_h5ad=save_h5ad,
+        n_jobs=n_jobs,
+        make_figures=make_figures,
+        figdir_name=figdir_name,
+        figure_formats=figure_formats,
+        group_key=group_key,
+        label_source=label_source,
+        round_id=round_id,
+        replicate_key=replicate_key,
+        min_pct=min_pct,
+        min_diff_pct=min_diff_pct,
+        cell_method=cell_method,
+        cell_n_genes=cell_n_genes,
+        cell_rankby_abs=cell_rankby_abs,
+        cell_use_raw=cell_use_raw,
+        cell_downsample_threshold=cell_downsample_threshold,
+        cell_downsample_max_per_group=cell_downsample_max_per_group,
+        random_state=random_state,
+        pb_counts_layer=pb_counts_layer,
+        pb_allow_x_counts=pb_allow_x_counts,
+        pb_min_cells_per_repl_group=pb_min_cells_per_repl_group,
+        pb_alpha=pb_alpha,
+        pb_store_key=pb_store_key,
+        plot_lfc_thresh=plot_lfc_thresh,
+        plot_volcano_top_label_n=plot_volcano_top_label_n,
+        plot_top_n_per_cluster=plot_top_n_per_cluster,
+        plot_dotplot_top_n_genes=plot_dotplot_top_n_genes,
+        plot_max_genes_total=plot_max_genes_total,
+        plot_use_raw=plot_use_raw,
+        plot_layer=plot_layer,
+        plot_umap_ncols=plot_umap_ncols,
+    )
+
+    # Within-cluster: wire to BOTH existing internal paths without renaming them:
+    # - pseudobulk path uses condition_key/condition_contrasts
+    # - cell-level conditional path uses contrast_conditional_de + contrast_key/contrast_contrasts
+    parsed_contrasts = _parse_contrasts(contrasts)
+
+    cfg.condition_key = condition_key
+    cfg.condition_contrasts = tuple(parsed_contrasts)  # pseudobulk within-group
+    # Keep the old config fields to support cell-level conditional comparisons too:
+    cfg.contrast_key = condition_key
+    cfg.contrast_contrasts = tuple(parsed_contrasts)
+
+    # Enable cell-level conditional engine only if user asked to run cell markers
+    cfg.contrast_conditional_de = run in (RunWhich.both, RunWhich.cell)
+
+    _run_with_selection(cfg, run)
+
+
+if __name__ == "__main__":
+    app()
