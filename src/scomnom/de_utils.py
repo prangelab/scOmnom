@@ -14,6 +14,14 @@ import scipy.sparse as sp
 
 LOGGER = logging.getLogger(__name__)
 
+import multiprocessing as mp
+
+try:
+    mp.set_start_method("spawn", force=True)
+except RuntimeError:
+    # start method already set
+    pass
+
 
 # -----------------------------------------------------------------------------
 # Public API (notebook-first)
@@ -817,6 +825,7 @@ def de_cluster_vs_rest_pseudobulk(
 
     # --- execute: serial or parallel ---
     import time
+    ctx = mp.get_context("spawn")
 
     t0 = time.perf_counter()
     total = int(len(payloads))
@@ -861,10 +870,7 @@ def de_cluster_vs_rest_pseudobulk(
                 meta_upd.get("n_sig", "NA"),
                 dt, elapsed, eta_s,
             )
-
-
     else:
-
         import time
         from concurrent.futures import TimeoutError
 
@@ -876,7 +882,7 @@ def de_cluster_vs_rest_pseudobulk(
         )
 
         submit_ts: dict[str, float] = {}
-        with ProcessPoolExecutor(max_workers=max_workers) as ex:
+        with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as ex:
             futs = {}
             for p in payloads:
                 cl = str(p.get("cluster", ""))
