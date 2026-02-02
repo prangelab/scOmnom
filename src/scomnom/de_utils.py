@@ -804,8 +804,8 @@ def de_cluster_vs_rest_pseudobulk(
             "min_total_counts": int(getattr(opts, "min_total_counts", 10)),
             "min_pct": float(getattr(opts, "min_pct", 0.0)),
             "min_diff_pct": float(getattr(opts, "min_diff_pct", 0.0)),
-            "n_jobs": int(n_jobs),
-            "n_cpus_per_fit": 1 if int(n_jobs) > 1 else int(n_cpus),
+            "n_jobs": int(n_jobs_eff),
+            "n_cpus_per_fit": 1 if int(n_jobs_eff) > 1 else int(n_cpus_eff),
         }
         adata.uns[store_key]["pseudobulk_cluster_vs_rest"]["summary"] = pd.DataFrame(summary_rows)
         adata.uns[store_key]["pseudobulk_cluster_vs_rest"]["results"] = results
@@ -1377,13 +1377,19 @@ def contrast_conditional_markers(
     groupby: Optional[str] = None,
     round_id: Optional[str] = None,
     spec: ContrastConditionalSpec,
-    pb_spec: PseudobulkSpec,
+    pb_spec: Optional[PseudobulkSpec] = None,
     store_key: str = "scomnom_de",
     store: bool = True,
 ) -> Dict[str, Dict[str, Dict[str, pd.DataFrame]]]:
     """
+    Pairwise (A vs B) markers within each cluster.
+
     Returns nested dict:
       out[cluster][f"{A}_vs_{B}"]["combined" | "wilcoxon" | "logreg" | "pseudobulk_effect"] = DataFrame
+
+    Notes:
+      - If pb_spec is None, pseudobulk_effect is empty and tiering ignores pseudobulk.
+      - Cell-level prevalence gates (min_pct/min_diff_pct) are applied when prevalence columns exist.
     """
     import scanpy as sc
     from scanpy.get import rank_genes_groups_df
@@ -1403,7 +1409,7 @@ def contrast_conditional_markers(
     out: Dict[str, Dict[str, Dict[str, pd.DataFrame]]] = {}
     summary_rows: list[dict[str, Any]] = []
 
-    counts_layer = pb_spec.counts_layer
+    counts_layer = pb_spec.counts_layer if pb_spec is not None else None
 
     # cell-level prevalence gates (Seurat-like)
     cl_min_pct = float(getattr(spec, "min_pct", 0.0))
@@ -1412,9 +1418,21 @@ def contrast_conditional_markers(
     # choose which pairs to run
     pairs = _select_pairs(levels.tolist(), list(spec.contrasts) if spec.contrasts else None)
 
+    def _sgn(x: Any) -> int:
+        try:
+            if x is None or not np.isfinite(x):
+                return 0
+        except Exception:
+            return 0
+        if x > 0:
+            return 1
+        if x < 0:
+            return -1
+        return 0
+
     for cl in clusters:
         cl_mask = (adata.obs[group_key].astype(str).to_numpy() == str(cl))
-        if cl_mask.sum() == 0:
+        if int(cl_mask.sum()) == 0:
             continue
 
         out[str(cl)] = {}
@@ -1436,7 +1454,7 @@ def contrast_conditional_markers(
             nA = int(idxA.size)
             nB = int(idxB.size)
 
-            if nA < spec.min_cells_per_level_in_cluster or nB < spec.min_cells_per_level_in_cluster:
+            if nA < int(spec.min_cells_per_level_in_cluster) or nB < int(spec.min_cells_per_level_in_cluster):
                 out[str(cl)][pair_key] = {
                     "wilcoxon": pd.DataFrame(),
                     "logreg": pd.DataFrame(),
@@ -1457,30 +1475,44 @@ def contrast_conditional_markers(
                 )
                 continue
 
-            maskA = np.zeros(adata.n_obs, dtype=bool); maskA[idxA] = True
-            maskB = np.zeros(adata.n_obs, dtype=bool); maskB[idxB] = True
+            maskA = np.zeros(adata.n_obs, dtype=bool)
+            maskA[idxA] = True
+            maskB = np.zeros(adata.n_obs, dtype=bool)
+            maskB[idxB] = True
 
             adata_sub, ds_meta = _downsample_two_level_subset(
-                adata, maskA, maskB,
+                adata,
+                maskA,
+                maskB,
                 max_per_level=int(spec.max_cells_per_level_in_cluster),
                 random_state=int(spec.random_state),
             )
 
+            # keep only the two levels explicitly (defensive)
             adata_sub = adata_sub[adata_sub.obs[contrast_key].astype(str).isin([A, B])].copy()
 
-            # pseudobulk effect (all cells)
-            pb_df = _pb_effect_log2fc(
-                adata,
-                cluster_mask=cl_mask,
-                contrast_key=contrast_key,
-                level_A=A,
-                level_B=B,
-                counts_layer=counts_layer,
-                min_total_counts=int(spec.min_total_counts),
-                pseudocount=float(spec.pseudocount),
-            )
+            # ----------------------------
+            # pseudobulk effect (optional)
+            # ----------------------------
+            if pb_spec is not None:
+                pb_df = _pb_effect_log2fc(
+                    adata,
+                    cluster_mask=cl_mask,
+                    contrast_key=contrast_key,
+                    level_A=A,
+                    level_B=B,
+                    counts_layer=counts_layer,
+                    min_total_counts=int(spec.min_total_counts),
+                    pseudocount=float(spec.pseudocount),
+                )
+            else:
+                pb_df = pd.DataFrame(
+                    columns=["gene", "pb_log2fc", "pb_sum_A", "pb_sum_B", "pb_cpm_A", "pb_cpm_B"]
+                )
 
-            # ---- Wilcoxon (force pts=True so we can do Seurat-like min.pct gating)
+            # ----------------------------
+            # Wilcoxon (cell-level)
+            # ----------------------------
             wilcoxon_df = pd.DataFrame()
             if "wilcoxon" in spec.methods:
                 sc.tl.rank_genes_groups(
@@ -1509,15 +1541,18 @@ def contrast_conditional_markers(
                         "pts_rest": "cl_pts_rest",
                     }
                 )
-                wilcoxon_df["gene"] = wilcoxon_df["gene"].astype(str)
+                if "gene" in wilcoxon_df.columns:
+                    wilcoxon_df["gene"] = wilcoxon_df["gene"].astype(str)
 
-                # Apply Seurat-like gates (min.pct / min.diff.pct) using cl_pts/cl_pts_rest
-                # (Implement by temporarily renaming to pts/pts_rest to reuse helper)
-                _tmp = wilcoxon_df.rename(columns={"cl_pts": "pts", "cl_pts_rest": "pts_rest"})
-                _tmp = _apply_min_pct_filters_celllevel(_tmp, min_pct=cl_min_pct, min_diff_pct=cl_min_diff_pct)
-                wilcoxon_df = _tmp.rename(columns={"pts": "cl_pts", "pts_rest": "cl_pts_rest"}).copy()
+                # Apply Seurat-like gates using prevalence columns
+                if ("cl_pts" in wilcoxon_df.columns) and ("cl_pts_rest" in wilcoxon_df.columns):
+                    _tmp = wilcoxon_df.rename(columns={"cl_pts": "pts", "cl_pts_rest": "pts_rest"})
+                    _tmp = _apply_min_pct_filters_celllevel(_tmp, min_pct=cl_min_pct, min_diff_pct=cl_min_diff_pct)
+                    wilcoxon_df = _tmp.rename(columns={"pts": "cl_pts", "pts_rest": "cl_pts_rest"}).copy()
 
-            # ---- Logreg (also force pts=True so rank_genes_groups stores pts; may or may not appear in df)
+            # ----------------------------
+            # Logreg (cell-level)
+            # ----------------------------
             logreg_df = pd.DataFrame()
             if "logreg" in spec.methods:
                 sc.tl.rank_genes_groups(
@@ -1552,7 +1587,8 @@ def contrast_conditional_markers(
 
                 cols = ["gene"] + [c for c in ["lr_coef", "lr_score", "cl_pts", "cl_pts_rest"] if c in d.columns]
                 logreg_df = d[cols].copy()
-                logreg_df["gene"] = logreg_df["gene"].astype(str)
+                if "gene" in logreg_df.columns:
+                    logreg_df["gene"] = logreg_df["gene"].astype(str)
 
                 # Apply Seurat-like gates if prevalence columns exist
                 if ("cl_pts" in logreg_df.columns) and ("cl_pts_rest" in logreg_df.columns):
@@ -1560,11 +1596,13 @@ def contrast_conditional_markers(
                     _tmp = _apply_min_pct_filters_celllevel(_tmp, min_pct=cl_min_pct, min_diff_pct=cl_min_diff_pct)
                     logreg_df = _tmp.rename(columns={"pts": "cl_pts", "pts_rest": "cl_pts_rest"}).copy()
 
-            # ---- Combined merge
-            if pb_df is None or pb_df.empty:
-                combined = pd.DataFrame({"gene": []})
-            else:
+            # ----------------------------
+            # Combined merge
+            # ----------------------------
+            if pb_df is not None and not pb_df.empty:
                 combined = pb_df.copy()
+            else:
+                combined = pd.DataFrame({"gene": []})
 
             if wilcoxon_df is not None and not wilcoxon_df.empty:
                 combined = combined.merge(wilcoxon_df, on="gene", how="outer")
@@ -1577,11 +1615,11 @@ def contrast_conditional_markers(
                     combined = combined.rename(columns={"cl_pts_lr": "cl_pts"})
                 if "cl_pts_rest_lr" in combined.columns and "cl_pts_rest" not in combined.columns:
                     combined = combined.rename(columns={"cl_pts_rest_lr": "cl_pts_rest"})
-                # drop duplicate cols if both exist
                 for c in ["cl_pts_lr", "cl_pts_rest_lr"]:
                     if c in combined.columns:
                         combined = combined.drop(columns=[c])
 
+            # Add provenance columns
             combined.insert(0, "cluster", str(cl))
             combined.insert(1, "contrast_key", contrast_key)
             combined.insert(2, "A", A)
@@ -1592,20 +1630,12 @@ def contrast_conditional_markers(
             combined.insert(7, "n_cells_A_used", int(ds_meta["n_cells_A_used"]))
             combined.insert(8, "n_cells_B_used", int(ds_meta["n_cells_B_used"]))
 
-            def _sgn(x):
-                if x is None or not np.isfinite(x):
-                    return 0
-                if x > 0:
-                    return 1
-                if x < 0:
-                    return -1
-                return 0
-
+            # numeric coercions
             for col in ["cl_logfc", "cl_padj", "lr_coef", "pb_log2fc", "cl_pts", "cl_pts_rest"]:
                 if col in combined.columns:
                     combined[col] = pd.to_numeric(combined[col], errors="coerce")
 
-            # Seurat-like gating applied at the "hit" layer too (so tiering respects it)
+            # Seurat-like gating at hit layer (so tiering respects it)
             combined["pass_minpct"] = True
             if (cl_min_pct > 0.0 or cl_min_diff_pct > 0.0) and ("cl_pts" in combined.columns) and ("cl_pts_rest" in combined.columns):
                 pass_mask = pd.Series(True, index=combined.index)
@@ -1615,12 +1645,13 @@ def contrast_conditional_markers(
                     pass_mask &= (combined["cl_pts"] - combined["cl_pts_rest"]).abs() >= cl_min_diff_pct
                 combined["pass_minpct"] = pass_mask.fillna(True)
 
+            # hits
             combined["hit_wilcoxon"] = False
             if "cl_padj" in combined.columns and "cl_logfc" in combined.columns:
                 combined["hit_wilcoxon"] = (
-                    (combined["cl_padj"] < float(spec.cl_alpha)) &
-                    (combined["cl_logfc"].abs() >= float(spec.cl_min_abs_logfc)) &
-                    (combined["pass_minpct"])
+                    (combined["cl_padj"] < float(spec.cl_alpha))
+                    & (combined["cl_logfc"].abs() >= float(spec.cl_min_abs_logfc))
+                    & (combined["pass_minpct"])
                 )
 
             combined["hit_logreg"] = False
@@ -1628,35 +1659,56 @@ def contrast_conditional_markers(
                 combined["hit_logreg"] = (combined["lr_coef"].abs() >= float(spec.lr_min_abs_coef)) & (combined["pass_minpct"])
 
             combined["hit_pseudobulk"] = False
-            if "pb_log2fc" in combined.columns:
+            if pb_spec is not None and "pb_log2fc" in combined.columns:
                 combined["hit_pseudobulk"] = combined["pb_log2fc"].abs() >= float(spec.pb_min_abs_log2fc)
 
             combined["sign_agree_pb_wilcoxon"] = False
-            if "pb_log2fc" in combined.columns and "cl_logfc" in combined.columns:
-                combined["sign_agree_pb_wilcoxon"] = (combined["pb_log2fc"].apply(_sgn) == combined["cl_logfc"].apply(_sgn))
+            if pb_spec is not None and "pb_log2fc" in combined.columns and "cl_logfc" in combined.columns:
+                combined["sign_agree_pb_wilcoxon"] = (
+                    combined["pb_log2fc"].apply(_sgn) == combined["cl_logfc"].apply(_sgn)
+                )
 
+            # tiering
             hits = combined[["hit_wilcoxon", "hit_logreg", "hit_pseudobulk"]].sum(axis=1)
-            tier = np.where(
-                (hits == 3) & (combined.get("sign_agree_pb_wilcoxon", True)),
-                "Tier1",
-                np.where(hits >= 2, "Tier2", np.where(hits >= 1, "Tier3", "None")),
-            )
-            combined["consensus_tier"] = tier
+            if pb_spec is None:
+                # only two methods in play (wilcoxon/logreg)
+                tier = np.where(hits >= 2, "Tier1", np.where(hits >= 1, "Tier2", "None"))
+                combined["consensus_tier"] = tier
+                score = hits.astype(int) + np.where(combined["consensus_tier"] == "Tier1", 1, 0)
+            else:
+                tier = np.where(
+                    (hits == 3) & (combined.get("sign_agree_pb_wilcoxon", True)),
+                    "Tier1",
+                    np.where(hits >= 2, "Tier2", np.where(hits >= 1, "Tier3", "None")),
+                )
+                combined["consensus_tier"] = tier
+                score = hits.astype(int) + np.where(combined["consensus_tier"] == "Tier1", 2, 0)
 
-            score = hits.astype(int)
-            score = score + np.where(combined["consensus_tier"] == "Tier1", 2, 0)
-
-            if "pb_log2fc" in combined.columns and "cl_logfc" in combined.columns:
-                disagree = (combined["sign_agree_pb_wilcoxon"] == False) & (combined["pb_log2fc"].abs() > 0.5) & (combined["cl_logfc"].abs() > 0.25)
-                score = score - np.where(disagree, 1, 0)
+                # penalize strong sign disagreements (optional)
+                if "pb_log2fc" in combined.columns and "cl_logfc" in combined.columns:
+                    disagree = (
+                        (combined["sign_agree_pb_wilcoxon"] == False)
+                        & (combined["pb_log2fc"].abs() > 0.5)
+                        & (combined["cl_logfc"].abs() > 0.25)
+                    )
+                    score = score - np.where(disagree, 1, 0)
 
             combined["consensus_score"] = score.astype(int)
 
-            tier_cat = pd.Categorical(
-                combined["consensus_tier"],
-                categories=["Tier1", "Tier2", "Tier3", "None"],
-                ordered=True,
-            )
+            # sort
+            if pb_spec is None:
+                tier_cat = pd.Categorical(
+                    combined["consensus_tier"],
+                    categories=["Tier1", "Tier2", "None"],
+                    ordered=True,
+                )
+            else:
+                tier_cat = pd.Categorical(
+                    combined["consensus_tier"],
+                    categories=["Tier1", "Tier2", "Tier3", "None"],
+                    ordered=True,
+                )
+
             combined["__tier_order"] = tier_cat
             sort_cols = ["__tier_order"]
             asc = [True]
@@ -1666,6 +1718,7 @@ def contrast_conditional_markers(
                 sort_cols.append("pb_log2fc"); asc.append(False)
             if "lr_coef" in combined.columns:
                 sort_cols.append("lr_coef"); asc.append(False)
+
             combined = combined.sort_values(sort_cols, ascending=asc).drop(columns=["__tier_order"])
 
             out[str(cl)][pair_key] = {
@@ -1675,10 +1728,15 @@ def contrast_conditional_markers(
                 "combined": combined,
             }
 
-            n_t1 = int((combined["consensus_tier"] == "Tier1").sum()) if "consensus_tier" in combined.columns else 0
-            n_t2 = int((combined["consensus_tier"] == "Tier2").sum()) if "consensus_tier" in combined.columns else 0
-            n_t3 = int((combined["consensus_tier"] == "Tier3").sum()) if "consensus_tier" in combined.columns else 0
-            top10 = combined.loc[combined["consensus_tier"] == "Tier1", "gene"].head(10).tolist() if "gene" in combined.columns else []
+            # summary
+            if "consensus_tier" in combined.columns:
+                n_t1 = int((combined["consensus_tier"] == "Tier1").sum())
+                n_t2 = int((combined["consensus_tier"] == ("Tier2" if pb_spec is not None else "Tier2")).sum())
+                n_t3 = int((combined["consensus_tier"] == "Tier3").sum()) if pb_spec is not None else 0
+                top10 = combined.loc[combined["consensus_tier"] == "Tier1", "gene"].head(10).tolist() if "gene" in combined.columns else []
+            else:
+                n_t1 = n_t2 = n_t3 = 0
+                top10 = []
 
             summary_rows.append(
                 dict(
@@ -1692,11 +1750,12 @@ def contrast_conditional_markers(
                     n_cells_B=nB,
                     downsampled=bool(ds_meta["downsampled"]),
                     n_genes_tested=int(combined.shape[0]),
-                    n_tier1=n_t1,
-                    n_tier2=n_t2,
-                    n_tier3=n_t3,
+                    n_tier1=int(n_t1),
+                    n_tier2=int(n_t2),
+                    n_tier3=int(n_t3),
                     min_pct=float(cl_min_pct),
                     min_diff_pct=float(cl_min_diff_pct),
+                    pseudobulk_effect_included=bool(pb_spec is not None),
                     top10_tier1_genes=",".join(map(str, top10)),
                 )
             )
@@ -1706,13 +1765,13 @@ def contrast_conditional_markers(
         adata.uns[store_key].setdefault("contrast_conditional", {})
         adata.uns[store_key]["contrast_conditional"]["group_key"] = str(group_key)
         adata.uns[store_key]["contrast_conditional"]["contrast_key"] = str(contrast_key)
-        adata.uns[store_key]["contrast_conditional"]["counts_layer"] = str(counts_layer) if counts_layer else None
+        adata.uns[store_key]["contrast_conditional"]["counts_layer"] = str(counts_layer) if (pb_spec is not None and counts_layer) else None
         adata.uns[store_key]["contrast_conditional"]["spec"] = {**spec.__dict__, "methods": list(spec.methods)}
+        adata.uns[store_key]["contrast_conditional"]["pseudobulk_effect_included"] = bool(pb_spec is not None)
         adata.uns[store_key]["contrast_conditional"]["summary"] = pd.DataFrame(summary_rows)
         adata.uns[store_key]["contrast_conditional"]["results"] = out
 
     return out
-
 
 
 def de_condition_within_group_pseudobulk_multi(
