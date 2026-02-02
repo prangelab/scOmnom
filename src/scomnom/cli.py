@@ -4,8 +4,7 @@ import typer
 from pathlib import Path
 import warnings
 from enum import Enum
-
-from narwhals.exceptions import PerformanceWarning
+from pandas.errors import PerformanceWarning
 
 from .load_and_filter import run_load_and_filter
 from .integrate import run_integrate

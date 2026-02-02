@@ -487,8 +487,7 @@ def _run_pydeseq2(
     alpha: float = 0.05,
     shrink_lfc: bool = True,
     n_cpus: int = 1,
-    # NEW: size factor policy
-    size_factors: str = "poscounts",          # "poscounts" | "ratio" | "ratio_then_poscounts"
+    size_factors: str = "poscounts",
 ) -> tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Run PyDESeq2 for one contrast.
@@ -817,34 +816,135 @@ def de_cluster_vs_rest_pseudobulk(
         )
 
     # --- execute: serial or parallel ---
-    if int(n_jobs) <= 1 or len(payloads) <= 1:
-        # Serial (existing behavior but using worker function for uniformity)
-        for p in payloads:
-            cl, res, meta_upd = _pydeseq2_cluster_worker(p)
-            results[cl] = res
+    import time
+
+    t0 = time.perf_counter()
+    total = int(len(payloads))
+    if total == 0:
+        LOGGER.info("Pseudobulk DE: no payloads queued (all clusters skipped earlier).")
+    elif int(n_jobs) <= 1 or total <= 1:
+        LOGGER.info("Pseudobulk DE: running serially (payloads=%d).", total)
+
+        for i, p in enumerate(payloads, start=1):
+            cl = str(p.get("cluster", ""))
+            t_cl0 = time.perf_counter()
+
+            # a little context up front
+            n_libs = int(len(p.get("pb_index", [])))
+            n_genes = int(len(p.get("genes", [])))
+            LOGGER.info(
+                "PB DE [%d/%d] start cluster=%s (libs=%d, genes=%d, n_cpus=%s)",
+                i, total, cl, n_libs, n_genes, p.get("n_cpus", "?"),
+            )
+
+            cl2, res, meta_upd = _pydeseq2_cluster_worker(p)
+            dt = time.perf_counter() - t_cl0
+
+            results[cl2] = res
+
             # update summary entry
             for row in summary_rows:
-                if row.get("cluster") == cl and row.get("status") in ("queued", "running"):
+                if row.get("cluster") == cl2 and row.get("status") in ("queued", "running"):
                     row.update(meta_upd)
+                    row["runtime_s"] = float(dt)
                     break
+
+            done = i
+            elapsed = time.perf_counter() - t0
+            # simple running average ETA
+            eta_s = (elapsed / max(1, done)) * (total - done)
+
+            LOGGER.info(
+                "PB DE [%d/%d] done  cluster=%s status=%s n_sig=%s time=%.1fs elapsed=%.1fs eta=%.1fs",
+                done, total, cl2,
+                meta_upd.get("status", "unknown"),
+                meta_upd.get("n_sig", "NA"),
+                dt, elapsed, eta_s,
+            )
+
+
     else:
-        max_workers = int(n_jobs)
-        # NOTE: use processes because PyDESeq2/NumPy/scipy often don’t release GIL reliably.
-        with ProcessPoolExecutor(max_workers=int(n_jobs_eff)) as ex:
-            futs = {ex.submit(_pydeseq2_cluster_worker, p): p["cluster"] for p in payloads}
-            for fut in as_completed(futs):
-                cl = futs[fut]
+
+        import time
+        from concurrent.futures import TimeoutError
+
+        max_workers = int(n_jobs_eff)  # effective workers decided earlier
+        heartbeat_s = float(getattr(opts, "heartbeat_s", 60.0)) if "opts" in locals() else 60.0  # or just 60.0
+        LOGGER.info(
+            "Pseudobulk DE: running in parallel (payloads=%d, max_workers=%d, n_cpus_per_fit=%d, heartbeat=%.0fs).",
+            total, max_workers, int(payloads[0].get("n_cpus", 1)) if payloads else 1, heartbeat_s,
+        )
+
+        submit_ts: dict[str, float] = {}
+        with ProcessPoolExecutor(max_workers=max_workers) as ex:
+            futs = {}
+            for p in payloads:
+                cl = str(p.get("cluster", ""))
+                submit_ts[cl] = time.perf_counter()
+                futs[ex.submit(_pydeseq2_cluster_worker, p)] = cl
+            done = 0
+
+            # track pending futures so we can log “oldest running”
+            pending = set(futs.keys())
+            while pending:
                 try:
-                    cl2, res, meta_upd = fut.result()
-                except Exception as e:
-                    cl2 = cl
-                    res = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
-                    meta_upd = {"status": "failed", "reason": str(e)}
-                results[cl2] = res
-                for row in summary_rows:
-                    if row.get("cluster") == cl2 and row.get("status") in ("queued", "running"):
-                        row.update(meta_upd)
-                        break
+                    # Wake up at least every heartbeat_s even if nothing finishes
+                    for fut in as_completed(pending, timeout=heartbeat_s):
+                        pending.remove(fut)
+                        cl = futs[fut]
+                        t_done = time.perf_counter()
+                        dt = t_done - float(submit_ts.get(cl, t_done))
+                        try:
+                            cl2, res, meta_upd = fut.result()
+                        except Exception as e:
+                            cl2 = cl
+                            res = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
+                            meta_upd = {"status": "failed", "reason": str(e)}
+                        results[cl2] = res
+                        for row in summary_rows:
+                            if row.get("cluster") == cl2 and row.get("status") in ("queued", "running"):
+                                row.update(meta_upd)
+                                row["runtime_s"] = float(dt)
+                                break
+                        done += 1
+                        elapsed = time.perf_counter() - t0
+                        eta_s = (elapsed / max(1, done)) * (total - done)
+                        LOGGER.info(
+                            "PB DE [%d/%d] done  cluster=%s status=%s n_sig=%s time=%.1fs elapsed=%.1fs eta=%.1fs",
+                            done, total, cl2,
+                            meta_upd.get("status", "unknown"),
+                            meta_upd.get("n_sig", "NA"),
+                            dt, elapsed, eta_s,
+                        )
+                except TimeoutError:
+                    # Heartbeat: nothing finished recently
+                    now = time.perf_counter()
+                    elapsed = now - t0
+                    # find oldest still-pending cluster
+                    oldest_cl = None
+                    oldest_dt = None
+                    if pending:
+                        # map pending futures -> cluster names
+                        pending_cls = [futs[f] for f in pending]
+
+                        # pick the one with smallest submit_ts
+                        oldest_cl = min(pending_cls, key=lambda c: submit_ts.get(c, now))
+                        oldest_dt = now - float(submit_ts.get(oldest_cl, now))
+                    # (optional) show up to 3 longest-running pending clusters
+                    longest = []
+                    if pending:
+                        pending_cls = [futs[f] for f in pending]
+                        pending_cls.sort(key=lambda c: submit_ts.get(c, now))
+                        for c in pending_cls[:3]:
+                            longest.append(f"{c}:{now - float(submit_ts.get(c, now)):.0f}s")
+
+                    LOGGER.info(
+                        "PB DE heartbeat: done=%d/%d pending=%d elapsed=%.1fs oldest=%s (%.1fs) longest=%s",
+                        done, total, int(len(pending)), elapsed,
+                        str(oldest_cl) if oldest_cl is not None else "NA",
+                        float(oldest_dt) if oldest_dt is not None else 0.0,
+                        ", ".join(longest) if longest else "NA",
+                    )
 
     # Ensure all clusters present in results dict (even skipped)
     for cl in clusters.astype(str).tolist():
