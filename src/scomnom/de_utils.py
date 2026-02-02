@@ -125,9 +125,10 @@ def _pydeseq2_cluster_worker(payload: dict) -> tuple[str, pd.DataFrame, dict]:
             "warn_low_df_dispersion": meta.get("warn_low_df_dispersion"),
         }
 
+
     except Exception as e:
         empty = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
-        return cl, empty, {"status": "failed", "reason": str(e), "sf_policy": size_factors}
+        return cl, empty, {"status": "failed", "reason": f"{type(e).__name__}: {e}"}
 
 
 # -----------------------------------------------------------------------------
@@ -915,12 +916,11 @@ def de_cluster_vs_rest_pseudobulk(
                         done += 1
                         elapsed = time.perf_counter() - t0
                         eta_s = (elapsed / max(1, done)) * (total - done)
+                        reason = meta_upd.get("reason", "")
                         LOGGER.info(
-                            "PB DE [%d/%d] done  cluster=%s status=%s n_sig=%s time=%.1fs elapsed=%.1fs eta=%.1fs",
-                            done, total, cl2,
-                            meta_upd.get("status", "unknown"),
-                            meta_upd.get("n_sig", "NA"),
-                            dt, elapsed, eta_s,
+                            "PB DE [%d/%d] done  cluster=%s status=%s n_sig=%s time=%.1fs elapsed=%.1fs eta=%.1fs%s",
+                            done, total, cl, status, n_sig, dt, elapsed, eta,
+                            (f" reason={reason}" if status != "ok" and reason else ""),
                         )
                 except TimeoutError:
                     # Heartbeat: nothing finished recently
