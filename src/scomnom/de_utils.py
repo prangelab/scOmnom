@@ -968,7 +968,7 @@ def de_condition_within_group_pseudobulk(
             n_cpus=n_cpus,
             size_factors=str(getattr(opts, "size_factors", "poscounts")),
         )
-        except Exception as e:
+    except Exception as e:
         LOGGER.warning("PyDESeq2 failed for condition DE within %s=%s: %s", group_key, group_value, e)
         res = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
         meta_df = {
