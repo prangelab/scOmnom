@@ -27,7 +27,7 @@ warnings.filterwarnings(action="ignore", message="pkg_resources is deprecated as
 warnings.filterwarnings(action="ignore", message=r".*does not have many workers.*", category=UserWarning, module="lightning.pytorch")
 warnings.filterwarnings(action="ignore", message=".*already log-transformed.*", category=UserWarning)
 warnings.filterwarnings(action="ignore", message="Argument `use_highly_variable` is deprecated", category=FutureWarning, module="scanpy")
-warnings.filterwarnings(action="ignore", message="DataFrame is highly fragmented", category=PerformanceWarning, module="pandas")
+warnings.filterwarnings(action="ignore", message="DataFrame is highly fragmented", category=PerformanceWarning, module="scanpy")
 
 # ---------------------------------------------------------------------
 # Helper functions
