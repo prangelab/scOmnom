@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Literal, Optional, Sequence, Tuple
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import os
-
+import traceback
 import anndata as ad
 import numpy as np
 import pandas as pd
@@ -125,11 +125,14 @@ def _pydeseq2_cluster_worker(payload: dict) -> tuple[str, pd.DataFrame, dict]:
             "warn_low_df_dispersion": meta.get("warn_low_df_dispersion"),
         }
 
-
     except Exception as e:
+        tb = traceback.format_exc(limit=50)
         empty = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
-        return cl, empty, {"status": "failed", "reason": f"{type(e).__name__}: {e}"}
-
+        return cl, empty, {
+            "status": "failed",
+            "reason": f"{type(e).__name__}: {e}",
+            "traceback": tb,
+        }
 
 # -----------------------------------------------------------------------------
 # Round-aware label resolution
@@ -922,6 +925,13 @@ def de_cluster_vs_rest_pseudobulk(
                             done, total, cl, status, n_sig, dt, elapsed, eta,
                             (f" reason={reason}" if status != "ok" and reason else ""),
                         )
+                        if status != "ok":
+                            fail_count += 1
+                            if fail_count <= 3:
+                                tb = meta_upd.get("traceback", "")
+                                if tb:
+                                    LOGGER.error("PB DE failure traceback (cluster=%s):\n%s", cl2, tb)
+
                 except TimeoutError:
                     # Heartbeat: nothing finished recently
                     now = time.perf_counter()
