@@ -57,6 +57,7 @@ class PseudobulkDEOptions:
     min_samples_per_level: int = 2
     alpha: float = 0.05
     lfc_threshold: float = 0.0
+    size_factors: str = "poscounts"
     shrink_lfc: bool = True
     min_total_counts: int = 10
     min_pct: float = 0.0
@@ -79,17 +80,17 @@ def _pydeseq2_cluster_worker(payload: dict) -> tuple[str, pd.DataFrame, dict]:
     positive_only = bool(payload["positive_only"])
     n_cpus = int(payload["n_cpus"])
 
-    # Rebuild DataFrames in worker
+    # NEW: size factor policy (default poscounts)
+    size_factors = str(payload.get("size_factors", "poscounts"))
+
     metadata = pd.DataFrame(metadata_rows, index=pd.Index(pb_index, name="pb_id"))
-    # standardize to match existing design expectation
-    # de_cluster_vs_rest_pseudobulk() passes sample_key as "sample" already
     metadata["sample"] = metadata["sample"].astype("category")
     metadata["binary_cluster"] = pd.Categorical(metadata["binary_cluster"], categories=["rest", "target"])
 
     counts = pd.DataFrame(counts_np, index=metadata.index, columns=pd.Index(genes, name="gene"))
 
     try:
-        res = _run_pydeseq2(
+        res, meta = _run_pydeseq2(
             counts,
             metadata,
             design_factors=["sample", "binary_cluster"],
@@ -97,18 +98,28 @@ def _pydeseq2_cluster_worker(payload: dict) -> tuple[str, pd.DataFrame, dict]:
             alpha=alpha,
             shrink_lfc=shrink_lfc,
             n_cpus=n_cpus,
+            size_factors=size_factors,
         )
 
         if positive_only and not res.empty and "log2FoldChange" in res.columns:
             res = res.loc[pd.to_numeric(res["log2FoldChange"], errors="coerce") > 0].copy()
 
         n_sig = int((pd.to_numeric(res["padj"], errors="coerce") < alpha).sum()) if not res.empty else 0
-        return cl, res, {"status": "ok", "n_sig": n_sig}
+
+        # return enriched meta for summary table
+        return cl, res, {
+            "status": "ok",
+            "n_sig": n_sig,
+            "sf_policy": meta.get("sf_policy"),
+            "sf_used": meta.get("sf_used"),
+            "sf_forced": meta.get("sf_forced"),
+            "warn_iterative_size_factors": meta.get("warn_iterative_size_factors"),
+            "warn_low_df_dispersion": meta.get("warn_low_df_dispersion"),
+        }
 
     except Exception as e:
-        # Return empty but keep pipeline moving
         empty = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
-        return cl, empty, {"status": "failed", "reason": str(e)}
+        return cl, empty, {"status": "failed", "reason": str(e), "sf_policy": size_factors}
 
 
 # -----------------------------------------------------------------------------
@@ -476,13 +487,14 @@ def _run_pydeseq2(
     alpha: float = 0.05,
     shrink_lfc: bool = True,
     n_cpus: int = 1,
-) -> pd.DataFrame:
+    # NEW: size factor policy
+    size_factors: str = "poscounts",          # "poscounts" | "ratio" | "ratio_then_poscounts"
+) -> tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Run PyDESeq2 for one contrast.
 
-    counts: samples x genes (integers)
-    metadata: samples x covariates (categorical recommended)
-    contrast: (factor_name, test_level, ref_level)
+    Returns: (results_df, meta)
+      meta includes size factor mode actually used and captured warnings.
     """
     _require_pydeseq2()
     from pydeseq2.dds import DeseqDataSet
@@ -490,7 +502,6 @@ def _run_pydeseq2(
 
     # Defensive copies, ensure alignment
     counts = counts.loc[metadata.index]
-    # PyDESeq2 expects non-negative ints
     counts_i = counts.round().astype(np.int64)
 
     dds = DeseqDataSet(
@@ -498,42 +509,93 @@ def _run_pydeseq2(
         metadata=metadata.copy(),
         design_factors=list(design_factors),
         ref_level={contrast[0]: contrast[2]},
-        n_cpus=int(n_cpus),    )
-    dds.deseq2()
-
-    stat = DeseqStats(
-        dds,
-        contrast=list(contrast),
-        alpha=float(alpha),
-        # shrinkage varies across versions; best-effort below
         n_cpus=int(n_cpus),
     )
-    stat.summary(print_result=False)
 
+    meta: Dict[str, Any] = {
+        "sf_policy": str(size_factors),
+        "sf_used": None,
+        "sf_forced": False,
+        "warn_iterative_size_factors": False,
+        "warn_low_df_dispersion": False,
+        "warnings": [],
+    }
+
+    # Capture warnings for provenance/debug
+    with warnings.catch_warnings(record=True) as wrec:
+        warnings.simplefilter("always")
+
+        # ---- Force size factor estimation if supported
+        # Prefer poscounts for sparse pseudobulk.
+        def _try_fit_size_factors(mode: str) -> bool:
+            try:
+                fit_fn = getattr(dds, "fit_size_factors", None)
+                if callable(fit_fn):
+                    fit_fn(fit_type=str(mode))
+                    meta["sf_used"] = str(mode)
+                    meta["sf_forced"] = True
+                    return True
+                return False
+            except Exception:
+                return False
+
+        sf = str(size_factors).lower().strip()
+
+        if sf == "ratio_then_poscounts":
+            ok = _try_fit_size_factors("ratio")
+            if not ok:
+                ok2 = _try_fit_size_factors("poscounts")
+                if not ok2:
+                    meta["sf_used"] = None
+            else:
+                meta["sf_used"] = "ratio"
+        elif sf in ("poscounts", "ratio"):
+            ok = _try_fit_size_factors(sf)
+            if not ok:
+                meta["sf_used"] = None
+        else:
+            # unknown policy -> do nothing, let pydeseq2 decide
+            meta["sf_used"] = None
+
+        # ---- Run DESeq2
+        dds.deseq2()
+
+        stat = DeseqStats(
+            dds,
+            contrast=list(contrast),
+            alpha=float(alpha),
+            n_cpus=int(n_cpus),
+        )
+        stat.summary(print_result=False)
+
+        # Best-effort LFC shrinkage
+        if shrink_lfc:
+            try:
+                stat.lfc_shrink()
+            except Exception:
+                pass
+
+    # Process warnings after run
+    for ww in wrec:
+        msg = str(getattr(ww, "message", ww))
+        meta["warnings"].append(msg)
+
+        # Your two notable classes of warnings:
+        if "Iterative size factor fitting did not converge" in msg:
+            meta["warn_iterative_size_factors"] = True
+        if "residual degrees of freedom is less than 3" in msg:
+            meta["warn_low_df_dispersion"] = True
+
+    # Extract results
     res = stat.results_df.copy()
-    # Standardize column names to match your older plotting expectations
-    # PyDESeq2 uses: log2FoldChange, lfcSE, stat, pvalue, padj
     if "gene" not in res.columns:
         res["gene"] = res.index.astype(str)
 
-    # Best-effort LFC shrinkage if available
-    if shrink_lfc:
-        try:
-            # Some versions support lfc_shrink(); others don't.
-            # If supported, it updates results_df.
-            stat.lfc_shrink()
-            res2 = stat.results_df.copy()
-            if "gene" not in res2.columns:
-                res2["gene"] = res2.index.astype(str)
-            res = res2
-        except Exception:
-            # keep unshrunk results
-            pass
-
-    # Sort + keep canonical columns
     cols = [c for c in ["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"] if c in res.columns]
     res = res[cols].sort_values("padj", na_position="last")
-    return res
+
+    return res, meta
+
 
 
 def de_cluster_vs_rest_pseudobulk(
@@ -547,9 +609,6 @@ def de_cluster_vs_rest_pseudobulk(
     store: bool = True,
     n_jobs: int = 1,
 ) -> Dict[str, pd.DataFrame]:
-    """
-    ... existing docstring ...
-    """
     group_key = resolve_group_key(adata, groupby=groupby, round_id=round_id, prefer_pretty=True)
     sample_key = spec.sample_key
     counts_layer = spec.counts_layer
@@ -735,6 +794,7 @@ def de_cluster_vs_rest_pseudobulk(
                 "cluster": str(cl),
                 "counts_np": counts_tmp.to_numpy(dtype=np.int64, copy=False),
                 "pb_index": counts_tmp.index.astype(str).tolist(),
+                "size_factors": "poscounts",
                 "genes": counts_tmp.columns.astype(str).tolist(),
                 "metadata_rows": metadata_rows,
                 "alpha": float(opts.alpha),
@@ -898,7 +958,7 @@ def de_condition_within_group_pseudobulk(
         return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
 
     try:
-        res = _run_pydeseq2(
+        res, meta = _run_pydeseq2(
             counts,
             metadata.rename(columns={sample_key: "sample"}),
             design_factors=["sample", condition_key],
@@ -906,35 +966,44 @@ def de_condition_within_group_pseudobulk(
             alpha=opts.alpha,
             shrink_lfc=opts.shrink_lfc,
             n_cpus=n_cpus,
+            size_factors=str(getattr(opts, "size_factors", "poscounts")),
         )
-    except Exception as e:
+        except Exception as e:
         LOGGER.warning("PyDESeq2 failed for condition DE within %s=%s: %s", group_key, group_value, e)
         res = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
+        meta_df = {
+            "sf_policy": str(getattr(opts, "size_factors", "poscounts")),
+            "sf_used": None,
+            "sf_forced": False,
+            "warn_iterative_size_factors": False,
+            "warn_low_df_dispersion": False,
+            "warnings": [str(e)],
+        }
 
     if store and store_key:
-        adata.uns.setdefault(store_key, {})
-        adata.uns[store_key].setdefault("pseudobulk_condition_within_group", {})
-        key = f"{group_key}={group_value}::{condition_key}::{test}_vs_{reference}"
-        adata.uns[store_key]["pseudobulk_condition_within_group"][key] = {
-            "group_key": str(group_key),
-            "group_value": str(group_value),
-            "sample_key": str(sample_key),
-            "condition_key": str(condition_key),
-            "reference": str(reference),
-            "test": str(test),
-            "counts_layer": str(counts_layer) if counts_layer else None,
-            "options": {
-                "min_cells_per_sample_group": int(opts.min_cells_per_sample_group),
-                "min_samples_per_level": int(opts.min_samples_per_level),
-                "alpha": float(opts.alpha),
-                "shrink_lfc": bool(opts.shrink_lfc),
-                "min_total_counts": int(getattr(opts, "min_total_counts", 10)),
-                "min_pct": float(getattr(opts, "min_pct", 0.0)),
-                "min_diff_pct": float(getattr(opts, "min_diff_pct", 0.0)),
-            },
-            "meta": meta_df,
-            "results": res,
-        }
+            adata.uns.setdefault(store_key, {})
+            adata.uns[store_key].setdefault("pseudobulk_condition_within_group", {})
+            key = f"{group_key}={group_value}::{condition_key}::{test}_vs_{reference}"
+            adata.uns[store_key]["pseudobulk_condition_within_group"][key] = {
+                "group_key": str(group_key),
+                "group_value": str(group_value),
+                "sample_key": str(sample_key),
+                "condition_key": str(condition_key),
+                "reference": str(reference),
+                "test": str(test),
+                "counts_layer": str(counts_layer) if counts_layer else None,
+                "options": {
+                    "min_cells_per_sample_group": int(opts.min_cells_per_sample_group),
+                    "min_samples_per_level": int(opts.min_samples_per_level),
+                    "alpha": float(opts.alpha),
+                    "shrink_lfc": bool(opts.shrink_lfc),
+                    "min_total_counts": int(getattr(opts, "min_total_counts", 10)),
+                    "min_pct": float(getattr(opts, "min_pct", 0.0)),
+                    "min_diff_pct": float(getattr(opts, "min_diff_pct", 0.0)),
+                },
+                "meta": meta_df,
+                "results": res,
+            }
 
     return res
 

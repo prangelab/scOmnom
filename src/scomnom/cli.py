@@ -5,6 +5,8 @@ from pathlib import Path
 import warnings
 from enum import Enum
 
+from narwhals.exceptions import PerformanceWarning
+
 from .load_and_filter import run_load_and_filter
 from .integrate import run_integrate
 from .cluster_and_annotate import run_clustering
@@ -26,7 +28,7 @@ warnings.filterwarnings(action="ignore", message="pkg_resources is deprecated as
 warnings.filterwarnings(action="ignore", message=r".*does not have many workers.*", category=UserWarning, module="lightning.pytorch")
 warnings.filterwarnings(action="ignore", message=".*already log-transformed.*", category=UserWarning)
 warnings.filterwarnings(action="ignore", message="Argument `use_highly_variable` is deprecated", category=FutureWarning, module="scanpy")
-warnings.filterwarnings(action="ignore", message="PerformanceWarning: DataFrame is highly fragmented", category=UserWarning, module="pandas")
+warnings.filterwarnings(action="ignore", message="DataFrame is highly fragmented", category=PerformanceWarning, module="pandas")
 
 # ---------------------------------------------------------------------
 # Helper functions
