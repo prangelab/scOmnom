@@ -1199,8 +1199,8 @@ def _build_cfg(
 
 
 @markers_and_de_app.command(
-    "cluster-vs-rest",
-    help="Cluster-vs-rest: markers/DE for each group vs all others.",
+    "markers",
+    help="Markers: Define marker genes for each cluster (vs all others.)",
 )
 def cluster_vs_rest(
     input_path: Path = typer.Option(..., "--input-path", "-i"),
@@ -1295,7 +1295,7 @@ def cluster_vs_rest(
 
 
 @markers_and_de_app.command(
-    "within-cluster",
+    "de",
     help="Within-cluster contrasts: compare condition levels within each group.",
 )
 def within_cluster(
