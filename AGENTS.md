@@ -11,3 +11,6 @@ These rules are persistent for all threads and apply across the whole project.
 - All plot saving must go through `save_multi()` in `src/scomnom/plot_utils.py`.
 - Do not call `plt.savefig` or `fig.savefig` directly in new or modified code.
 - When saving figures, ensure `setup_scanpy_figs(...)` has been called so `save_multi()` can route outputs correctly.
+
+## Change Reporting (mandatory)
+- Always include file paths and line numbers for any code changes you make, so I can verify quickly.

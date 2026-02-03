@@ -25,6 +25,22 @@ except RuntimeError:
     pass
 
 
+def _set_blas_threads(n: int = 1, *, force: bool = False) -> None:
+    """
+    Best-effort guard against BLAS/OpenMP oversubscription.
+    Sets thread env vars if they are not already defined by the user.
+    """
+    n_str = str(int(max(1, n)))
+    keys = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS")
+    updated = False
+    for k in keys:
+        if force or os.environ.get(k) is None:
+            os.environ[k] = n_str
+            updated = True
+    if updated:
+        LOGGER.info("Set BLAS/OpenMP thread env vars to %s for this process.", n_str)
+
+
 # -----------------------------------------------------------------------------
 # Public API (notebook-first)
 # -----------------------------------------------------------------------------
@@ -80,6 +96,7 @@ def _pydeseq2_cluster_worker(payload: dict) -> tuple[str, pd.DataFrame, dict]:
     Worker: run PyDESeq2 for a single cluster.
     Returns (cluster_id, result_df, summary_meta_updates)
     """
+    _set_blas_threads(1)
     cl = payload["cluster"]
     counts_np = payload["counts_np"]          # 2*n_samples x n_genes
     pb_index = payload["pb_index"]            # list[str]
@@ -990,6 +1007,8 @@ def de_cluster_vs_rest_pseudobulk(
         )
 
         submit_ts: dict[str, float] = {}
+        # Force BLAS/OpenMP threading to 1 before worker spawn to avoid oversubscription.
+        _set_blas_threads(1, force=True)
         with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as ex:
             futs: dict = {}
             for p in payloads:
@@ -1140,6 +1159,7 @@ def de_condition_within_group_pseudobulk(
     """
     Condition DE within a given group (e.g., cell type / cluster).
     """
+    _set_blas_threads(1)
     group_key = resolve_group_key(adata, groupby=groupby, round_id=round_id, prefer_pretty=True)
     sample_key = spec.sample_key
     counts_layer = spec.counts_layer
