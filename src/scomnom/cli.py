@@ -1136,6 +1136,7 @@ def _build_cfg(
     pb_alpha: float,
     pb_store_key: str,
     pb_max_genes: Optional[int],
+    prune_uns_de: bool,
     # plots
     plot_lfc_thresh: float,
     plot_volcano_top_label_n: int,
@@ -1189,6 +1190,7 @@ def _build_cfg(
         alpha=pb_alpha,
         store_key=pb_store_key,
         pb_max_genes=pb_max_genes,
+        prune_uns_de=prune_uns_de,
         # plots
         plot_lfc_thresh=plot_lfc_thresh,
         plot_volcano_top_label_n=plot_volcano_top_label_n,
@@ -1240,6 +1242,7 @@ def cluster_vs_rest(
     pb_alpha: float = typer.Option(0.05, "--pb-alpha"),
     pb_store_key: str = typer.Option("scomnom_de", "--pb-store-key"),
     pb_max_genes: Optional[int] = typer.Option(None, "--pb-max-genes"),
+    prune_uns_de: bool = typer.Option(False, "--prune-uns-de/--no-prune-uns-de"),
 
     plot_lfc_thresh: float = typer.Option(1.0, "--plot-lfc-thresh"),
     plot_volcano_top_label_n: int = typer.Option(15, "--plot-volcano-top-label-n"),
@@ -1279,6 +1282,7 @@ def cluster_vs_rest(
         pb_alpha=pb_alpha,
         pb_store_key=pb_store_key,
         pb_max_genes=pb_max_genes,
+        prune_uns_de=prune_uns_de,
         plot_lfc_thresh=plot_lfc_thresh,
         plot_volcano_top_label_n=plot_volcano_top_label_n,
         plot_top_n_per_cluster=plot_top_n_per_cluster,
@@ -1342,6 +1346,7 @@ def within_cluster(
     pb_alpha: float = typer.Option(0.05, "--pb-alpha"),
     pb_store_key: str = typer.Option("scomnom_de", "--pb-store-key"),
     pb_max_genes: Optional[int] = typer.Option(None, "--pb-max-genes"),
+    prune_uns_de: bool = typer.Option(False, "--prune-uns-de/--no-prune-uns-de"),
 
     plot_lfc_thresh: float = typer.Option(1.0, "--plot-lfc-thresh"),
     plot_volcano_top_label_n: int = typer.Option(15, "--plot-volcano-top-label-n"),
@@ -1384,6 +1389,7 @@ def within_cluster(
         pb_alpha=pb_alpha,
         pb_store_key=pb_store_key,
         pb_max_genes=pb_max_genes,
+        prune_uns_de=prune_uns_de,
         plot_lfc_thresh=plot_lfc_thresh,
         plot_volcano_top_label_n=plot_volcano_top_label_n,
         plot_top_n_per_cluster=plot_top_n_per_cluster,

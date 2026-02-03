@@ -653,6 +653,7 @@ class MarkersAndDEConfig(BaseModel):
     shrink_lfc: bool = True
     pb_min_total_counts: int = 10
     pb_max_genes: Optional[int] = None
+    prune_uns_de: bool = False
 
     # ------------------------------------------------------------------
     # Optional condition-within-cluster DE

@@ -2219,6 +2219,12 @@ def _coerce_pts_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     # common in newer scanpy when pts=True
     if "pts" in out.columns and "pts_rest" in out.columns:
+        # If pts columns exist but are all-NaN, fall back to pct_nz_* when available
+        if out["pts"].notna().sum() == 0 and out["pts_rest"].notna().sum() == 0:
+            if "pct_nz_group" in out.columns and "pct_nz_reference" in out.columns:
+                out["pts"] = out["pct_nz_group"]
+                out["pts_rest"] = out["pct_nz_reference"]
+                out = out.drop(columns=["pct_nz_group", "pct_nz_reference"], errors="ignore")
         return out
 
     # common alternative naming

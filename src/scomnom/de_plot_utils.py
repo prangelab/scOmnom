@@ -592,7 +592,7 @@ def violin_grid_genes(
     layer: str | None = None,
     ncols: int = 3,
     stripplot: bool = False,
-    rotation: float = 90,
+    rotation: float = 45,
     figsize: tuple[float, float] | None = None,
     show: bool = False,
 ) -> Figure:
@@ -705,7 +705,7 @@ def violin_genes(
     use_raw: bool = False,
     layer: str | None = None,
     show: bool = False,
-    rotation: int | float | None = 90,
+    rotation: int | float | None = 45,
     figsize=None,
     **kwargs,
 ):

@@ -30,6 +30,38 @@ LOGGER = logging.getLogger(__name__)
 _MIN_TOTAL_SAMPLES_FOR_PSEUDOBULK = 6
 
 
+def _prune_uns_de(adata: ad.AnnData, store_key: str) -> None:
+    """
+    Reduce memory footprint of adata.uns[store_key] by keeping summaries
+    and dropping large per-gene result tables.
+    """
+    if store_key not in adata.uns or not isinstance(adata.uns.get(store_key), dict):
+        return
+
+    block = adata.uns.get(store_key, {})
+
+    # Cluster-vs-rest pseudobulk
+    pb_cvr = block.get("pseudobulk_cluster_vs_rest", None)
+    if isinstance(pb_cvr, dict):
+        if "results" in pb_cvr:
+            pb_cvr.pop("results", None)
+
+    # Within-cluster pseudobulk multi
+    pb_within = block.get("pseudobulk_condition_within_group_multi", None)
+    if isinstance(pb_within, dict):
+        # keep metadata, drop per-contrast results tables
+        keys = list(pb_within.keys())
+        for k in keys:
+            if isinstance(pb_within.get(k), dict) and "results" in pb_within[k]:
+                pb_within[k].pop("results", None)
+
+    # Contrast-conditional (cell-level within-cluster)
+    cc = block.get("contrast_conditional", None)
+    if isinstance(cc, dict):
+        if "results" in cc:
+            cc.pop("results", None)
+
+
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
@@ -341,6 +373,9 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
     # ----------------------------
     # Save dataset
     # ----------------------------
+    if bool(getattr(cfg, "prune_uns_de", False)):
+        _prune_uns_de(adata, store_key=str(getattr(cfg, "store_key", "scomnom_de")))
+
     out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.markers_and_de")) + ".zarr")
     LOGGER.info("Saving dataset → %s", out_zarr)
     io_utils.save_dataset(adata, out_zarr, fmt="zarr")
@@ -643,6 +678,9 @@ def run_within_cluster(cfg) -> ad.AnnData:
     # ----------------------------
     # Save dataset
     # ----------------------------
+    if bool(getattr(cfg, "prune_uns_de", False)):
+        _prune_uns_de(adata, store_key=str(getattr(cfg, "store_key", "scomnom_de")))
+
     out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.markers_and_de")) + ".zarr")
     LOGGER.info("Saving dataset → %s", out_zarr)
     io_utils.save_dataset(adata, out_zarr, fmt="zarr")
