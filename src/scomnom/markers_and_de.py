@@ -202,6 +202,7 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
                 min_pct=float(getattr(cfg, "min_pct", 0.25)),
                 min_diff_pct=float(getattr(cfg, "min_diff_pct", 0.25)),
                 positive_only=bool(getattr(cfg, "positive_only", True)),
+                max_genes=getattr(cfg, "pb_max_genes", None),
             )
 
             LOGGER.info(
@@ -478,6 +479,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                 min_pct=float(getattr(cfg, "min_pct", 0.25)),
                 min_diff_pct=float(getattr(cfg, "min_diff_pct", 0.25)),
                 positive_only=bool(getattr(cfg, "positive_only", True)),
+                max_genes=getattr(cfg, "pb_max_genes", None),
             )
 
             groups = pd.Index(pd.unique(adata.obs[str(groupby)].astype(str))).sort_values()

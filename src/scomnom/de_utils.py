@@ -89,6 +89,7 @@ class PseudobulkDEOptions:
     min_pct: float = 0.0
     min_diff_pct: float = 0.0
     positive_only: bool = True
+    max_genes: Optional[int] = None
 
 
 def _pydeseq2_cluster_worker(payload: dict) -> tuple[str, pd.DataFrame, dict]:
@@ -727,6 +728,7 @@ def de_cluster_vs_rest_pseudobulk(
     min_pct = float(getattr(opts, "min_pct", 0.0))
     min_diff_pct = float(getattr(opts, "min_diff_pct", 0.0))
     min_total = int(getattr(opts, "min_total_counts", 10))
+    max_genes = getattr(opts, "max_genes", None)
 
     # ------------------------------------------------------------------
     # Build per-cluster payloads (with progress logs)
@@ -844,6 +846,11 @@ def de_cluster_vs_rest_pseudobulk(
                         min_pct=min_pct,
                         min_diff_pct=min_diff_pct,
                     )
+                    if max_genes is not None and counts_tmp.shape[1] > int(max_genes):
+                        # Keep top genes by total counts across libraries (debug / speed cap)
+                        totals = counts_tmp.sum(axis=0).sort_values(ascending=False)
+                        keep_genes = totals.index[: int(max_genes)]
+                        counts_tmp = counts_tmp.loc[:, keep_genes].copy()
                     if counts_tmp.shape[1] == 0:
                         results[cl_str] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
                         summary_rows.append(
@@ -1129,6 +1136,7 @@ def de_cluster_vs_rest_pseudobulk(
             "min_total_counts": int(getattr(opts, "min_total_counts", 10)),
             "min_pct": float(getattr(opts, "min_pct", 0.0)),
             "min_diff_pct": float(getattr(opts, "min_diff_pct", 0.0)),
+            "max_genes": (int(getattr(opts, "max_genes", 0)) if getattr(opts, "max_genes", None) else None),
             "n_jobs": int(n_jobs_eff),
             "n_cpus_per_fit": 1 if int(n_jobs_eff) > 1 else int(n_cpus_eff),
             # new logging knobs (if you used them)
@@ -1208,6 +1216,7 @@ def de_condition_within_group_pseudobulk(
     counts = pd.DataFrame(dense, index=counts_df.index, columns=counts_df.columns)
 
     min_total = int(getattr(opts, "min_total_counts", 10))
+    max_genes = getattr(opts, "max_genes", None)
     keep = (counts.sum(axis=0) >= min_total)
     counts = counts.loc[:, keep]
     if counts.shape[1] == 0:
@@ -1224,6 +1233,10 @@ def de_condition_within_group_pseudobulk(
         min_pct=min_pct,
         min_diff_pct=min_diff_pct,
     )
+    if max_genes is not None and counts.shape[1] > int(max_genes):
+        totals = counts.sum(axis=0).sort_values(ascending=False)
+        keep_genes = totals.index[: int(max_genes)]
+        counts = counts.loc[:, keep_genes].copy()
     if counts.shape[1] == 0:
         return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
 
@@ -1270,6 +1283,7 @@ def de_condition_within_group_pseudobulk(
                     "min_total_counts": int(getattr(opts, "min_total_counts", 10)),
                     "min_pct": float(getattr(opts, "min_pct", 0.0)),
                     "min_diff_pct": float(getattr(opts, "min_diff_pct", 0.0)),
+                    "max_genes": (int(getattr(opts, "max_genes", 0)) if getattr(opts, "max_genes", None) else None),
                 },
                 "meta": meta_df,
                 "results": res,
