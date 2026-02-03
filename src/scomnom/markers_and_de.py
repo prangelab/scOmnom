@@ -155,7 +155,6 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
             random_state=int(getattr(cfg, "random_state", 42)),
             min_pct=float(getattr(cfg, "min_pct", 0.25)),
             min_diff_pct=float(getattr(cfg, "min_diff_pct", 0.25)),
-            positive_only=bool(getattr(cfg, "positive_only", True)),
         )
 
         markers_key = str(getattr(cfg, "markers_key", "cluster_markers_wilcoxon"))
@@ -536,7 +535,6 @@ def run_within_cluster(cfg) -> ad.AnnData:
             random_state=int(getattr(cfg, "random_state", 42)),
             min_pct=float(getattr(cfg, "min_pct", 0.25)),
             min_diff_pct=float(getattr(cfg, "min_diff_pct", 0.25)),
-            positive_only=bool(getattr(cfg, "positive_only", True)),
         )
 
         _ = contrast_conditional_markers(
