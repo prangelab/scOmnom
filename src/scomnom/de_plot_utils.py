@@ -808,6 +808,7 @@ def umap_features_grid(
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
     size: Optional[float] = None,
+    rasterize: bool = True,
     show: bool = False,
 ) -> Figure:
 
@@ -833,6 +834,13 @@ def umap_features_grid(
         show=False,
     )
     fig = _get_fig_from_scanpy_return(ret)
+    if bool(rasterize):
+        for ax in fig.get_axes():
+            try:
+                for coll in ax.collections:
+                    coll.set_rasterized(True)
+            except Exception:
+                pass
     fig.tight_layout()
     if show:
         plt.show()

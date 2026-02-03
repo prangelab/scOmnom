@@ -10,6 +10,8 @@ import os
 import traceback
 import warnings
 import time
+import contextlib
+import io
 import anndata as ad
 import numpy as np
 import pandas as pd
@@ -552,8 +554,8 @@ def _run_pydeseq2(
         "warnings": [],
     }
 
-    # Capture warnings for provenance/debug
-    with warnings.catch_warnings(record=True) as wrec:
+    # Capture warnings for provenance/debug, suppress stdout/stderr noise
+    with warnings.catch_warnings(record=True) as wrec, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         warnings.simplefilter("always")
 
         # ---- Force size factor estimation if supported
