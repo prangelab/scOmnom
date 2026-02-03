@@ -906,7 +906,7 @@ def plot_marker_genes_pseudobulk(
             require_sig=True,
         )
         topg_dot = _select_top_genes(
-            df_v,
+            df_de,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
