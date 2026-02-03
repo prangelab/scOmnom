@@ -4,9 +4,12 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Literal, Optional, Sequence, Tuple
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed, TimeoutError
 import os
 import traceback
+import warnings
+import time
 import anndata as ad
 import numpy as np
 import pandas as pd
@@ -14,7 +17,6 @@ import scipy.sparse as sp
 
 LOGGER = logging.getLogger(__name__)
 
-import multiprocessing as mp
 
 try:
     mp.set_start_method("spawn", force=True)
@@ -620,6 +622,7 @@ def de_cluster_vs_rest_pseudobulk(
     store: bool = True,
     n_jobs: int = 1,
 ) -> Dict[str, pd.DataFrame]:
+
     group_key = resolve_group_key(adata, groupby=groupby, round_id=round_id, prefer_pretty=True)
     sample_key = spec.sample_key
     counts_layer = spec.counts_layer
@@ -627,7 +630,18 @@ def de_cluster_vs_rest_pseudobulk(
     if sample_key not in adata.obs:
         raise KeyError(f"sample_key={sample_key!r} not in adata.obs")
 
-    # 1) Aggregate per (sample, cluster)
+    # ------------------------------------------------------------------
+    # Aggregation (timed)
+    # ------------------------------------------------------------------
+    LOGGER.info(
+        "Pseudobulk DE: aggregating counts (sample_key=%r, group_key=%r, counts_layer=%r).",
+        str(sample_key),
+        str(group_key),
+        (str(counts_layer) if counts_layer else None),
+    )
+
+    t_ag0 = time.perf_counter()
+    t1 = time.perf_counter()
     counts_sc, meta_sc = pseudobulk_aggregate(
         adata,
         sample_key=sample_key,
@@ -635,7 +649,15 @@ def de_cluster_vs_rest_pseudobulk(
         counts_layer=counts_layer,
         min_cells_per_sample_group=1,
     )
-    # 2) Aggregate per sample (totals)
+    dt1 = time.perf_counter() - t1
+    LOGGER.info(
+        "Pseudobulk DE: aggregated (sample,cluster): libs=%d genes=%d time=%.1fs",
+        int(meta_sc.shape[0]),
+        int(counts_sc.shape[1]),
+        dt1,
+    )
+
+    t2 = time.perf_counter()
     counts_s, meta_s = pseudobulk_aggregate(
         adata,
         sample_key=sample_key,
@@ -643,7 +665,18 @@ def de_cluster_vs_rest_pseudobulk(
         counts_layer=counts_layer,
         min_cells_per_sample_group=1,
     )
+    dt2 = time.perf_counter() - t2
+    LOGGER.info(
+        "Pseudobulk DE: aggregated (sample totals): libs=%d genes=%d time=%.1fs (agg_total=%.1fs)",
+        int(meta_s.shape[0]),
+        int(counts_s.shape[1]),
+        dt2,
+        time.perf_counter() - t_ag0,
+    )
 
+    # ------------------------------------------------------------------
+    # Build index helpers
+    # ------------------------------------------------------------------
     meta_sc2 = meta_sc.copy()
     meta_sc2["__sample"] = meta_sc2[sample_key].astype(str)
     meta_sc2["__group"] = meta_sc2[group_key].astype(str)
@@ -660,7 +693,7 @@ def de_cluster_vs_rest_pseudobulk(
     # --- smart core distribution ---
     n_jobs_eff, n_cpus_eff = _compute_cluster_parallelism(
         n_clusters=n_clusters,
-        total_cpus=int(n_jobs),  # cfg.n_jobs passed through
+        total_cpus=int(n_jobs),
     )
 
     LOGGER.info(
@@ -672,182 +705,249 @@ def de_cluster_vs_rest_pseudobulk(
     )
 
     results: Dict[str, pd.DataFrame] = {}
-    summary_rows = []
+    summary_rows: list[dict] = []
 
     min_pct = float(getattr(opts, "min_pct", 0.0))
     min_diff_pct = float(getattr(opts, "min_diff_pct", 0.0))
     min_total = int(getattr(opts, "min_total_counts", 10))
 
-    # We build per-cluster payloads in the parent process (small) and then run PyDESeq2 in workers.
+    # ------------------------------------------------------------------
+    # Build per-cluster payloads (with progress logs)
+    # ------------------------------------------------------------------
     payloads: list[dict] = []
 
-    for cl in clusters:
-        m_cl = meta_sc2["__group"].to_numpy() == str(cl)
+    t_build0 = time.perf_counter()
+    last_build_log = t_build0
+    build_log_every_s = float(getattr(opts, "build_log_every_s", 30.0))
+    build_log_every_n = int(getattr(opts, "build_log_every_n", 5))
+
+    n_skipped = 0
+    n_queued = 0
+    libs_per_payload: list[int] = []
+    genes_per_payload: list[int] = []
+
+    LOGGER.info(
+        "Pseudobulk DE: building per-cluster payloads (clusters=%d, min_cells_per_sample_group=%d, min_samples_per_level=%d).",
+        int(n_clusters),
+        int(opts.min_cells_per_sample_group),
+        int(opts.min_samples_per_level),
+    )
+
+    for i_cl, cl in enumerate(clusters, start=1):
+        cl_str = str(cl)
+
+        m_cl = meta_sc2["__group"].to_numpy() == cl_str
         meta_cl = meta_sc2.loc[m_cl, [sample_key, group_key, "n_cells"]].copy()
         meta_cl = meta_cl.loc[meta_cl["n_cells"] >= int(opts.min_cells_per_sample_group)]
         n_target_samples = int(meta_cl.shape[0])
 
         if n_target_samples < int(opts.min_samples_per_level):
-            results[str(cl)] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
+            results[cl_str] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
             summary_rows.append(
                 {
-                    "cluster": str(cl),
+                    "cluster": cl_str,
                     "status": "skipped",
                     "reason": f"only {n_target_samples} sample(s) with >= {opts.min_cells_per_sample_group} cells in target",
                     "n_target_samples": n_target_samples,
                     "min_cells_per_sample_group": int(opts.min_cells_per_sample_group),
                 }
             )
-            continue
+            n_skipped += 1
+        else:
+            samples = np.unique(meta_cl[sample_key].astype(str).to_numpy())
 
-        samples = np.unique(meta_cl[sample_key].astype(str).to_numpy())
+            pb_index: list[str] = []
+            metadata_rows: list[dict] = []
+            target_rows: list[str] = []
+            total_rows: list[str] = []
 
-        pb_index: list[str] = []
-        metadata_rows: list[dict] = []
-        target_rows: list[str] = []
-        total_rows: list[str] = []
+            for s in samples:
+                key = f"{s}||{cl_str}"
+                if key not in sc_row_by_key.index:
+                    continue
+                rid_target = sc_row_by_key.loc[key]
+                rid_total = s_row_by_sample.loc[s] if s in s_row_by_sample.index else None
+                if rid_total is None:
+                    continue
 
-        for s in samples:
-            key = f"{s}||{cl}"
-            if key not in sc_row_by_key.index:
-                continue
-            rid_target = sc_row_by_key.loc[key]
-            rid_total = s_row_by_sample.loc[s] if s in s_row_by_sample.index else None
-            if rid_total is None:
-                continue
+                pb_index.append(f"{s}|{cl_str}|target")
+                metadata_rows.append({"sample": str(s), "binary_cluster": "target"})
+                target_rows.append(rid_target)
+                total_rows.append(rid_total)
 
-            pb_index.append(f"{s}|{cl}|target")
-            metadata_rows.append({"sample": str(s), "binary_cluster": "target"})
-            target_rows.append(rid_target)
-            total_rows.append(rid_total)
+                pb_index.append(f"{s}|{cl_str}|rest")
+                metadata_rows.append({"sample": str(s), "binary_cluster": "rest"})
+                target_rows.append(rid_target)
+                total_rows.append(rid_total)
 
-            pb_index.append(f"{s}|{cl}|rest")
-            metadata_rows.append({"sample": str(s), "binary_cluster": "rest"})
-            target_rows.append(rid_target)
-            total_rows.append(rid_total)
-
-        if len(pb_index) < 2 * int(opts.min_samples_per_level):
-            results[str(cl)] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
-            summary_rows.append(
-                {
-                    "cluster": str(cl),
-                    "status": "skipped",
-                    "reason": "paired library construction failed",
-                    "n_target_samples": n_target_samples,
-                }
-            )
-            continue
-
-        # densify only the needed rows (still small)
-        target_mat = counts_sc.loc[pd.Index(target_rows)].sparse.to_coo().toarray()
-        total_mat = counts_s.loc[pd.Index(total_rows)].sparse.to_coo().toarray()
-
-        out = np.zeros_like(total_mat, dtype=np.int64)
-        for i in range(out.shape[0]):
-            if i % 2 == 0:
-                out[i, :] = target_mat[i, :]
+            if len(pb_index) < 2 * int(opts.min_samples_per_level):
+                results[cl_str] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
+                summary_rows.append(
+                    {
+                        "cluster": cl_str,
+                        "status": "skipped",
+                        "reason": "paired library construction failed",
+                        "n_target_samples": n_target_samples,
+                    }
+                )
+                n_skipped += 1
             else:
-                v = total_mat[i, :] - target_mat[i, :]
-                v[v < 0] = 0
-                out[i, :] = v.astype(np.int64, copy=False)
+                # densify only the needed rows (still small)
+                target_mat = counts_sc.loc[pd.Index(target_rows)].sparse.to_coo().toarray()
+                total_mat = counts_s.loc[pd.Index(total_rows)].sparse.to_coo().toarray()
 
-        # gene prefilter: total counts
-        keep_total = (out.sum(axis=0) >= min_total)
-        if not np.any(keep_total):
-            results[str(cl)] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
-            summary_rows.append({"cluster": str(cl), "status": "skipped", "reason": "no genes left after filtering"})
-            continue
+                out = np.zeros_like(total_mat, dtype=np.int64)
+                for i in range(out.shape[0]):
+                    if i % 2 == 0:
+                        out[i, :] = target_mat[i, :]
+                    else:
+                        v = total_mat[i, :] - target_mat[i, :]
+                        v[v < 0] = 0
+                        out[i, :] = v.astype(np.int64, copy=False)
 
-        out2 = out[:, keep_total]
-        genes2 = adata.var_names.to_numpy()[keep_total].astype(str).tolist()
+                # gene prefilter: total counts
+                keep_total = (out.sum(axis=0) >= min_total)
+                if not np.any(keep_total):
+                    results[cl_str] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
+                    summary_rows.append({"cluster": cl_str, "status": "skipped", "reason": "no genes left after filtering"})
+                    n_skipped += 1
+                else:
+                    out2 = out[:, keep_total]
+                    genes2 = adata.var_names.to_numpy()[keep_total].astype(str).tolist()
 
-        # min_pct / min_diff_pct prevalence filter (library prevalence)
-        metadata_tmp = pd.DataFrame(metadata_rows, index=pd.Index(pb_index, name="pb_id"))
-        counts_tmp = pd.DataFrame(out2, index=metadata_tmp.index, columns=genes2)
+                    # min_pct / min_diff_pct prevalence filter (library prevalence)
+                    metadata_tmp = pd.DataFrame(metadata_rows, index=pd.Index(pb_index, name="pb_id"))
+                    counts_tmp = pd.DataFrame(out2, index=metadata_tmp.index, columns=genes2)
 
-        counts_tmp, prev_meta = _apply_min_pct_filters_pseudobulk(
-            counts_tmp,
-            labels=metadata_tmp["binary_cluster"],
-            level_A="target",
-            level_B="rest",
-            min_pct=min_pct,
-            min_diff_pct=min_diff_pct,
-        )
-        if counts_tmp.shape[1] == 0:
-            results[str(cl)] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
-            summary_rows.append(
-                {
-                    "cluster": str(cl),
-                    "status": "skipped",
-                    "reason": "no genes left after min_pct/min_diff_pct filtering",
-                    **prev_meta,
-                }
+                    counts_tmp, prev_meta = _apply_min_pct_filters_pseudobulk(
+                        counts_tmp,
+                        labels=metadata_tmp["binary_cluster"],
+                        level_A="target",
+                        level_B="rest",
+                        min_pct=min_pct,
+                        min_diff_pct=min_diff_pct,
+                    )
+                    if counts_tmp.shape[1] == 0:
+                        results[cl_str] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
+                        summary_rows.append(
+                            {
+                                "cluster": cl_str,
+                                "status": "skipped",
+                                "reason": "no genes left after min_pct/min_diff_pct filtering",
+                                **prev_meta,
+                            }
+                        )
+                        n_skipped += 1
+                    else:
+                        vc = metadata_tmp["binary_cluster"].value_counts()
+                        if int(vc.get("target", 0)) < int(opts.min_samples_per_level) or int(vc.get("rest", 0)) < int(opts.min_samples_per_level):
+                            results[cl_str] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
+                            summary_rows.append(
+                                {
+                                    "cluster": cl_str,
+                                    "status": "skipped",
+                                    "reason": "insufficient libraries per level after filtering",
+                                    "n_target_libs": int(vc.get("target", 0)),
+                                    "n_rest_libs": int(vc.get("rest", 0)),
+                                }
+                            )
+                            n_skipped += 1
+                        else:
+                            # payload for worker (numpy + lists)
+                            payloads.append(
+                                {
+                                    "cluster": cl_str,
+                                    "counts_np": counts_tmp.to_numpy(dtype=np.int64, copy=False),
+                                    "pb_index": counts_tmp.index.astype(str).tolist(),
+                                    "size_factors": "poscounts",
+                                    "genes": counts_tmp.columns.astype(str).tolist(),
+                                    "metadata_rows": metadata_rows,
+                                    "alpha": float(opts.alpha),
+                                    "shrink_lfc": bool(opts.shrink_lfc),
+                                    "positive_only": bool(opts.positive_only),
+                                    "n_cpus": int(n_cpus_eff),
+                                }
+                            )
+                            n_queued += 1
+                            libs_per_payload.append(int(counts_tmp.shape[0]))
+                            genes_per_payload.append(int(counts_tmp.shape[1]))
+
+                            # record partial summary now; finalize after worker returns
+                            summary_rows.append(
+                                {
+                                    "cluster": cl_str,
+                                    "status": "queued" if int(n_jobs_eff) > 1 else "running",
+                                    "n_target_samples": int(len(samples)),
+                                    "n_libraries": int(counts_tmp.shape[0]),
+                                    "min_cells_per_sample_group": int(opts.min_cells_per_sample_group),
+                                    **prev_meta,
+                                }
+                            )
+
+        # progress heartbeat during payload build (not spammy)
+        now = time.perf_counter()
+        if (i_cl % build_log_every_n == 0) or ((now - last_build_log) >= build_log_every_s):
+            LOGGER.info(
+                "Pseudobulk DE: payload build progress %d/%d (queued=%d skipped=%d) elapsed=%.1fs",
+                int(i_cl),
+                int(n_clusters),
+                int(n_queued),
+                int(n_skipped),
+                (now - t_build0),
             )
-            continue
+            last_build_log = now
 
-        vc = metadata_tmp["binary_cluster"].value_counts()
-        if int(vc.get("target", 0)) < int(opts.min_samples_per_level) or int(vc.get("rest", 0)) < int(opts.min_samples_per_level):
-            results[str(cl)] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
-            summary_rows.append(
-                {
-                    "cluster": str(cl),
-                    "status": "skipped",
-                    "reason": "insufficient libraries per level after filtering",
-                    "n_target_libs": int(vc.get("target", 0)),
-                    "n_rest_libs": int(vc.get("rest", 0)),
-                }
-            )
-            continue
+    # payload build summary
+    build_dt = time.perf_counter() - t_build0
+    if libs_per_payload and genes_per_payload:
+        libs_med = float(np.median(libs_per_payload))
+        genes_med = float(np.median(genes_per_payload))
+        libs_rng = (int(np.min(libs_per_payload)), int(np.max(libs_per_payload)))
+        genes_rng = (int(np.min(genes_per_payload)), int(np.max(genes_per_payload)))
+    else:
+        libs_med = genes_med = 0.0
+        libs_rng = genes_rng = (0, 0)
 
-        # payload for worker (numpy + lists)
-        payloads.append(
-            {
-                "cluster": str(cl),
-                "counts_np": counts_tmp.to_numpy(dtype=np.int64, copy=False),
-                "pb_index": counts_tmp.index.astype(str).tolist(),
-                "size_factors": "poscounts",
-                "genes": counts_tmp.columns.astype(str).tolist(),
-                "metadata_rows": metadata_rows,
-                "alpha": float(opts.alpha),
-                "shrink_lfc": bool(opts.shrink_lfc),
-                "positive_only": bool(opts.positive_only),
-                "n_cpus": int(n_cpus_eff),
-            }
-        )
+    LOGGER.info(
+        "Pseudobulk DE: payload build complete: queued=%d skipped=%d time=%.1fs "
+        "(libs median=%.0f range=%s; genes median=%.0f range=%s).",
+        int(n_queued),
+        int(n_skipped),
+        build_dt,
+        libs_med,
+        str(libs_rng),
+        genes_med,
+        str(genes_rng),
+    )
 
-        # record partial summary now; finalize after worker returns
-        summary_rows.append(
-            {
-                "cluster": str(cl),
-                "status": "queued" if int(n_jobs) > 1 else "running",
-                "n_target_samples": int(len(samples)),
-                "n_libraries": int(counts_tmp.shape[0]),
-                "min_cells_per_sample_group": int(opts.min_cells_per_sample_group),
-                **prev_meta,
-            }
-        )
-
-    # --- execute: serial or parallel ---
-    import time
+    # ------------------------------------------------------------------
+    # Execute: serial or parallel (existing behavior + your heartbeat loop)
+    # ------------------------------------------------------------------
     ctx = mp.get_context("spawn")
 
     t0 = time.perf_counter()
     total = int(len(payloads))
+
     if total == 0:
         LOGGER.info("Pseudobulk DE: no payloads queued (all clusters skipped earlier).")
-    elif int(n_jobs) <= 1 or total <= 1:
+
+    elif int(n_jobs_eff) <= 1 or total <= 1:
         LOGGER.info("Pseudobulk DE: running serially (payloads=%d).", total)
 
         for i, p in enumerate(payloads, start=1):
             cl = str(p.get("cluster", ""))
             t_cl0 = time.perf_counter()
 
-            # a little context up front
             n_libs = int(len(p.get("pb_index", [])))
             n_genes = int(len(p.get("genes", [])))
             LOGGER.info(
                 "PB DE [%d/%d] start cluster=%s (libs=%d, genes=%d, n_cpus=%s)",
-                i, total, cl, n_libs, n_genes, p.get("n_cpus", "?"),
+                i,
+                total,
+                cl,
+                n_libs,
+                n_genes,
+                p.get("n_cpus", "?"),
             )
 
             cl2, res, meta_upd = _pydeseq2_cluster_worker(p)
@@ -855,7 +955,6 @@ def de_cluster_vs_rest_pseudobulk(
 
             results[cl2] = res
 
-            # update summary entry
             for row in summary_rows:
                 if row.get("cluster") == cl2 and row.get("status") in ("queued", "running"):
                     row.update(meta_upd)
@@ -864,42 +963,46 @@ def de_cluster_vs_rest_pseudobulk(
 
             done = i
             elapsed = time.perf_counter() - t0
-            # simple running average ETA
             eta_s = (elapsed / max(1, done)) * (total - done)
 
             LOGGER.info(
                 "PB DE [%d/%d] done  cluster=%s status=%s n_sig=%s time=%.1fs elapsed=%.1fs eta=%.1fs",
-                done, total, cl2,
-                meta_upd.get("status", "unknown"),
+                done,
+                total,
+                str(cl2),
+                str(meta_upd.get("status", "unknown")),
                 meta_upd.get("n_sig", "NA"),
-                dt, elapsed, eta_s,
+                dt,
+                elapsed,
+                eta_s,
             )
-    else:
-        import time
-        from concurrent.futures import TimeoutError
 
-        max_workers = int(n_jobs_eff)  # effective workers decided earlier
-        heartbeat_s = float(getattr(opts, "heartbeat_s", 60.0)) if "opts" in locals() else 60.0  # or just 60.0
+    else:
+        max_workers = int(n_jobs_eff)
+        heartbeat_s = float(getattr(opts, "heartbeat_s", 60.0))
+
         LOGGER.info(
             "Pseudobulk DE: running in parallel (payloads=%d, max_workers=%d, n_cpus_per_fit=%d, heartbeat=%.0fs).",
-            total, max_workers, int(payloads[0].get("n_cpus", 1)) if payloads else 1, heartbeat_s,
+            total,
+            max_workers,
+            int(payloads[0].get("n_cpus", 1)) if payloads else 1,
+            heartbeat_s,
         )
 
         submit_ts: dict[str, float] = {}
         with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as ex:
-            futs = {}
+            futs: dict = {}
             for p in payloads:
                 cl = str(p.get("cluster", ""))
                 submit_ts[cl] = time.perf_counter()
                 futs[ex.submit(_pydeseq2_cluster_worker, p)] = cl
-            done = 0
 
-            # track pending futures so we can log “oldest running”
+            done = 0
             fail_count = 0
+
             pending = set(futs.keys())
             while pending:
                 try:
-                    # Wake up at least every heartbeat_s even if nothing finishes
                     for fut in as_completed(pending, timeout=heartbeat_s):
                         pending.remove(fut)
                         cl = futs[fut]
@@ -910,6 +1013,7 @@ def de_cluster_vs_rest_pseudobulk(
                             cl2, res, meta_upd = fut.result()
                         except Exception as e:
                             import traceback
+
                             cl2 = cl
                             res = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
                             meta_upd = {
@@ -930,14 +1034,20 @@ def de_cluster_vs_rest_pseudobulk(
                         elapsed = time.perf_counter() - t0
                         eta_s = (elapsed / max(1, done)) * (total - done)
 
-                        # ---- robust log fields (no NameError)
                         status = str(meta_upd.get("status", "unknown"))
                         n_sig = meta_upd.get("n_sig", "NA")
                         reason = str(meta_upd.get("reason", ""))
 
                         LOGGER.info(
                             "PB DE [%d/%d] done  cluster=%s status=%s n_sig=%s time=%.1fs elapsed=%.1fs eta=%.1fs%s",
-                            done, total, str(cl2), status, n_sig, dt, elapsed, eta_s,
+                            done,
+                            total,
+                            str(cl2),
+                            status,
+                            n_sig,
+                            dt,
+                            elapsed,
+                            eta_s,
                             (f" reason={reason}" if status != "ok" and reason else ""),
                         )
 
@@ -949,21 +1059,16 @@ def de_cluster_vs_rest_pseudobulk(
                                     LOGGER.error("PB DE failure traceback (cluster=%s):\n%s", str(cl2), tb)
 
                 except TimeoutError:
-                    # Heartbeat: nothing finished recently
                     now = time.perf_counter()
                     elapsed = now - t0
-                    # find oldest still-pending cluster
+
                     oldest_cl = None
                     oldest_dt = None
                     if pending:
-                        # map pending futures -> cluster names
                         pending_cls = [futs[f] for f in pending]
-
-                        # pick the one with smallest submit_ts
                         oldest_cl = min(pending_cls, key=lambda c: submit_ts.get(c, now))
                         oldest_dt = now - float(submit_ts.get(oldest_cl, now))
 
-                    # (optional) show up to 3 longest-running pending clusters
                     longest = []
                     if pending:
                         pending_cls = [futs[f] for f in pending]
@@ -973,16 +1078,24 @@ def de_cluster_vs_rest_pseudobulk(
 
                     LOGGER.info(
                         "PB DE heartbeat: done=%d/%d pending=%d elapsed=%.1fs oldest=%s (%.1fs) longest=%s",
-                        done, total, int(len(pending)), elapsed,
+                        done,
+                        total,
+                        int(len(pending)),
+                        elapsed,
                         str(oldest_cl) if oldest_cl is not None else "NA",
                         float(oldest_dt) if oldest_dt is not None else 0.0,
                         ", ".join(longest) if longest else "NA",
                     )
 
-    # Ensure all clusters present in results dict (even skipped)
+    # ------------------------------------------------------------------
+    # Ensure all clusters present
+    # ------------------------------------------------------------------
     for cl in clusters.astype(str).tolist():
         results.setdefault(cl, pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]))
 
+    # ------------------------------------------------------------------
+    # Store
+    # ------------------------------------------------------------------
     if store and store_key:
         adata.uns.setdefault(store_key, {})
         adata.uns[store_key].setdefault("pseudobulk_cluster_vs_rest", {})
@@ -999,6 +1112,10 @@ def de_cluster_vs_rest_pseudobulk(
             "min_diff_pct": float(getattr(opts, "min_diff_pct", 0.0)),
             "n_jobs": int(n_jobs_eff),
             "n_cpus_per_fit": 1 if int(n_jobs_eff) > 1 else int(n_cpus_eff),
+            # new logging knobs (if you used them)
+            "heartbeat_s": float(getattr(opts, "heartbeat_s", 60.0)),
+            "build_log_every_s": float(getattr(opts, "build_log_every_s", 30.0)),
+            "build_log_every_n": int(getattr(opts, "build_log_every_n", 5)),
         }
         adata.uns[store_key]["pseudobulk_cluster_vs_rest"]["summary"] = pd.DataFrame(summary_rows)
         adata.uns[store_key]["pseudobulk_cluster_vs_rest"]["results"] = results
