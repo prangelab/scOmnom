@@ -895,6 +895,7 @@ def de_cluster_vs_rest_pseudobulk(
             done = 0
 
             # track pending futures so we can log “oldest running”
+            fail_count = 0
             pending = set(futs.keys())
             while pending:
                 try:
