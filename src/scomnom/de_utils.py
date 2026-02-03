@@ -904,33 +904,48 @@ def de_cluster_vs_rest_pseudobulk(
                         cl = futs[fut]
                         t_done = time.perf_counter()
                         dt = t_done - float(submit_ts.get(cl, t_done))
+
                         try:
                             cl2, res, meta_upd = fut.result()
                         except Exception as e:
+                            import traceback
                             cl2 = cl
                             res = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
-                            meta_upd = {"status": "failed", "reason": str(e)}
+                            meta_upd = {
+                                "status": "failed",
+                                "reason": f"{type(e).__name__}: {e}",
+                                "traceback": traceback.format_exc(),
+                            }
+
                         results[cl2] = res
+
                         for row in summary_rows:
                             if row.get("cluster") == cl2 and row.get("status") in ("queued", "running"):
                                 row.update(meta_upd)
                                 row["runtime_s"] = float(dt)
                                 break
+
                         done += 1
                         elapsed = time.perf_counter() - t0
                         eta_s = (elapsed / max(1, done)) * (total - done)
-                        reason = meta_upd.get("reason", "")
+
+                        # ---- robust log fields (no NameError)
+                        status = str(meta_upd.get("status", "unknown"))
+                        n_sig = meta_upd.get("n_sig", "NA")
+                        reason = str(meta_upd.get("reason", ""))
+
                         LOGGER.info(
                             "PB DE [%d/%d] done  cluster=%s status=%s n_sig=%s time=%.1fs elapsed=%.1fs eta=%.1fs%s",
-                            done, total, cl, status, n_sig, dt, elapsed, eta,
+                            done, total, str(cl2), status, n_sig, dt, elapsed, eta_s,
                             (f" reason={reason}" if status != "ok" and reason else ""),
                         )
+
                         if status != "ok":
                             fail_count += 1
                             if fail_count <= 3:
                                 tb = meta_upd.get("traceback", "")
                                 if tb:
-                                    LOGGER.error("PB DE failure traceback (cluster=%s):\n%s", cl2, tb)
+                                    LOGGER.error("PB DE failure traceback (cluster=%s):\n%s", str(cl2), tb)
 
                 except TimeoutError:
                     # Heartbeat: nothing finished recently
@@ -946,6 +961,7 @@ def de_cluster_vs_rest_pseudobulk(
                         # pick the one with smallest submit_ts
                         oldest_cl = min(pending_cls, key=lambda c: submit_ts.get(c, now))
                         oldest_dt = now - float(submit_ts.get(oldest_cl, now))
+
                     # (optional) show up to 3 longest-running pending clusters
                     longest = []
                     if pending:
