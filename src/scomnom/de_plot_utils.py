@@ -1388,3 +1388,149 @@ def plot_condition_within_cluster_all(
         use_raw=bool(use_raw),
         layer=layer,
     )
+
+
+def plot_contrast_conditional_markers(
+    adata,
+    *,
+    groupby: str,
+    contrast_key: str,
+    store_key: str = "scomnom_de",
+    alpha: float = 0.05,
+    lfc_thresh: float = 1.0,
+    top_label_n: int = 15,
+    top_n_genes: int = 9,
+    dotplot_top_n_genes: int | None = None,
+    use_raw: bool = False,
+    layer: str | None = None,
+) -> None:
+    """
+    Cell-level within-cluster contrast plots (from contrast_conditional results).
+    Generates volcano/dotplot/violin per cluster+contrast, plus a global UMAP
+    colored by the contrast_key. Does NOT create per-cluster UMAPs.
+    """
+    from pathlib import Path
+    import matplotlib.colors as mcolors
+    import seaborn as sns
+    from . import plot_utils, io_utils
+
+    block = adata.uns.get(store_key, {}).get("contrast_conditional", {})
+    results = block.get("results", {}) if isinstance(block, dict) else {}
+    if not isinstance(results, dict) or not results:
+        return
+
+    # Global UMAP colored by contrast key (colorblind-friendly palette)
+    if contrast_key in adata.obs:
+        try:
+            cats = adata.obs[contrast_key].astype("category").cat.categories
+            n_cats = int(len(cats))
+            palette = sns.color_palette("colorblind", n_colors=n_cats)
+            adata.uns[f"{contrast_key}_colors"] = [mcolors.to_hex(c) for c in palette]
+        except Exception:
+            pass
+        plot_utils.umap_by(
+            adata,
+            keys=[contrast_key],
+            figdir=Path("marker_genes") / "contrast_conditional" / f"{contrast_key}" / "umap",
+            stem=f"umap__{contrast_key}",
+        )
+
+    dot_n = int(dotplot_top_n_genes) if dotplot_top_n_genes is not None else int(top_n_genes)
+
+    for cl, per_contrast in results.items():
+        if not isinstance(per_contrast, dict):
+            continue
+
+        cl_dir = io_utils.sanitize_identifier(f"cluster__{cl}")
+        for pair_key, tables in per_contrast.items():
+            if not isinstance(tables, dict):
+                continue
+
+            pair_dir = io_utils.sanitize_identifier(str(pair_key))
+            figroot = Path("marker_genes") / "contrast_conditional" / cl_dir / pair_dir
+            d_volcano = figroot / "volcano"
+            d_dot = figroot / "dotplot"
+            d_violin = figroot / "violin"
+
+            wilcoxon_df = tables.get("wilcoxon", pd.DataFrame())
+            combined_df = tables.get("combined", pd.DataFrame())
+
+            # Build a normalized df for volcano/top-gene selection
+            df_volc = None
+            if isinstance(wilcoxon_df, pd.DataFrame) and not wilcoxon_df.empty:
+                df_volc = pd.DataFrame(
+                    {
+                        "gene": wilcoxon_df.get("gene"),
+                        "log2FoldChange": wilcoxon_df.get("cl_logfc"),
+                        "padj": wilcoxon_df.get("cl_padj"),
+                    }
+                )
+            elif isinstance(combined_df, pd.DataFrame) and not combined_df.empty:
+                df_volc = pd.DataFrame(
+                    {
+                        "gene": combined_df.get("gene"),
+                        "log2FoldChange": combined_df.get("cl_logfc"),
+                        "padj": combined_df.get("cl_padj"),
+                    }
+                )
+
+            if df_volc is not None and not df_volc.empty:
+                fig = volcano(
+                    df_volc,
+                    padj_col="padj",
+                    lfc_col="log2FoldChange",
+                    padj_thresh=float(alpha),
+                    lfc_thresh=float(lfc_thresh),
+                    top_label_n=int(top_label_n),
+                    title=f"Within-cluster contrast: {cl} {pair_key}",
+                    show=False,
+                )
+                plot_utils.save_multi(stem=f"volcano__{cl}__{pair_key}", figdir=d_volcano, fig=fig)
+
+            topg = _select_top_genes(
+                df_volc if df_volc is not None else pd.DataFrame(),
+                gene_col="gene",
+                padj_col="padj",
+                lfc_col="log2FoldChange",
+                padj_thresh=float(alpha),
+                top_n=int(top_n_genes),
+                require_sig=True,
+            )
+            topg_dot = _select_top_genes(
+                df_volc if df_volc is not None else pd.DataFrame(),
+                gene_col="gene",
+                padj_col="padj",
+                lfc_col="log2FoldChange",
+                padj_thresh=float(alpha),
+                top_n=int(dot_n),
+                require_sig=True,
+            )
+
+            if topg_dot:
+                m = adata.obs[str(groupby)].astype(str).to_numpy() == str(cl)
+                adata_sub = adata[m].copy()
+                fig = dotplot_top_genes(
+                    adata_sub,
+                    genes=topg_dot,
+                    groupby=str(contrast_key),
+                    use_raw=bool(use_raw),
+                    layer=layer,
+                    dendrogram=True,
+                    show=False,
+                )
+                plot_utils.save_multi(stem=f"dotplot__{cl}__{pair_key}", figdir=d_dot, fig=fig)
+
+            if topg:
+                m = adata.obs[str(groupby)].astype(str).to_numpy() == str(cl)
+                adata_sub = adata[m].copy()
+                fig = violin_grid_genes(
+                    adata_sub,
+                    genes=topg,
+                    groupby=str(contrast_key),
+                    use_raw=bool(use_raw),
+                    layer=layer,
+                    ncols=3,
+                    stripplot=False,
+                    show=False,
+                )
+                plot_utils.save_multi(stem=f"violin__{cl}__{pair_key}", figdir=d_violin, fig=fig)

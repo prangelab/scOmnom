@@ -1729,6 +1729,7 @@ def export_pseudobulk_de_tables(
     store_key: str = "scomnom_de",
     groupby: Optional[str] = None,
     condition_key: Optional[str] = None,
+    tables_root: Optional[Path] = None,
 ) -> None:
     """
     Write pseudobulk DE results stored in adata.uns[store_key] to CSV files.
@@ -1744,7 +1745,7 @@ def export_pseudobulk_de_tables(
       adata.uns[store_key]["pseudobulk_condition_within_group"]      : dict[key -> payload]
     """
     output_dir = Path(output_dir)
-    base = output_dir / "de_tables"
+    base = Path(tables_root) if tables_root is not None else (output_dir / "de_tables")
     base.mkdir(parents=True, exist_ok=True)
 
     block = adata.uns.get(store_key, {})
@@ -1783,7 +1784,9 @@ def export_pseudobulk_de_tables(
     # Condition within group
     # -------------------------
     if condition_key:
-        cond = block.get("pseudobulk_condition_within_group", {})
+        cond = block.get("pseudobulk_condition_within_group_multi", {})
+        if not cond:
+            cond = block.get("pseudobulk_condition_within_group", {})
         if isinstance(cond, dict) and cond:
             out_cond = base / f"condition_within_cluster__{_safe_filename(condition_key)}"
             out_cond.mkdir(parents=True, exist_ok=True)
@@ -1833,6 +1836,7 @@ def export_rank_genes_groups_tables(
     output_dir: Path,
     groupby: Optional[str] = None,
     prefix: str = "celllevel_markers",
+    tables_root: Optional[Path] = None,
 ) -> None:
     """
     Write scanpy rank_genes_groups results (adata.uns[key_added]) to CSV.
@@ -1843,7 +1847,7 @@ def export_rank_genes_groups_tables(
     This is notebook-friendly data in a stable tabular format.
     """
     output_dir = Path(output_dir)
-    out_dir = output_dir / "marker_tables"
+    out_dir = Path(tables_root) if tables_root is not None else (output_dir / "marker_tables")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if key_added not in adata.uns:
@@ -1932,13 +1936,15 @@ def export_pseudobulk_cluster_vs_rest_excel(
     output_dir: Path,
     store_key: str = "scomnom_de",
     filename: str = "cluster_vs_rest.xlsx",
+    tables_root: Optional[Path] = None,
 ) -> None:
     """
     Write ALL cluster-vs-rest DE tables into a single Excel workbook.
     One cluster per sheet.
     """
     output_dir = Path(output_dir)
-    out_xlsx = output_dir / "de_tables" / filename
+    base = Path(tables_root) if tables_root is not None else (output_dir / "de_tables")
+    out_xlsx = base / filename
     out_xlsx.parent.mkdir(parents=True, exist_ok=True)
 
     block = adata.uns.get(store_key, {})
@@ -1970,6 +1976,7 @@ def export_pseudobulk_condition_within_cluster_excel(
     store_key: str = "scomnom_de",
     condition_key: str,
     filename: Optional[str] = None,
+    tables_root: Optional[Path] = None,
 ) -> None:
     """
     One Excel file per condition_key.
@@ -1979,14 +1986,17 @@ def export_pseudobulk_condition_within_cluster_excel(
         return
 
     output_dir = Path(output_dir)
+    base = Path(tables_root) if tables_root is not None else (output_dir / "de_tables")
     if filename is None:
         filename = f"condition_within_cluster__{_safe_filename(condition_key)}.xlsx"
 
-    out_xlsx = output_dir / "de_tables" / filename
+    out_xlsx = base / filename
     out_xlsx.parent.mkdir(parents=True, exist_ok=True)
 
     block = adata.uns.get(store_key, {})
-    cond = block.get("pseudobulk_condition_within_group", {})
+    cond = block.get("pseudobulk_condition_within_group_multi", {})
+    if not cond:
+        cond = block.get("pseudobulk_condition_within_group", {})
 
     if not isinstance(cond, dict) or not cond:
         return
@@ -2030,6 +2040,7 @@ def export_rank_genes_groups_excel(
     filename: Optional[str] = None,
     prefix: str = "celllevel_markers",
     max_genes: Optional[int] = None,
+    tables_root: Optional[Path] = None,
 ) -> None:
     """
     Write scanpy rank_genes_groups results (adata.uns[key_added]) to a single Excel workbook.
@@ -2044,7 +2055,7 @@ def export_rank_genes_groups_excel(
       - If max_genes is set, truncates each sheet to that many rows.
     """
     output_dir = Path(output_dir)
-    out_dir = output_dir / "marker_tables"
+    out_dir = Path(tables_root) if tables_root is not None else (output_dir / "marker_tables")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if key_added not in adata.uns:
@@ -2140,6 +2151,7 @@ def export_contrast_conditional_markers_tables(
     output_dir: Path,
     store_key: str = "scomnom_de",
     filename: str = "contrast_conditional_de__combined.xlsx",
+    tables_root: Optional[Path] = None,
 ) -> None:
     """
     Writes contrast-conditional (pairwise) marker results:
@@ -2148,7 +2160,8 @@ def export_contrast_conditional_markers_tables(
       - Summary CSV
     """
     output_dir = Path(output_dir)
-    out_dir = output_dir / "marker_tables" / "contrast_conditional_de"
+    base = Path(tables_root) if tables_root is not None else (output_dir / "marker_tables")
+    out_dir = base / "contrast_conditional_de"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     block = adata.uns.get(store_key, {})
@@ -2184,7 +2197,7 @@ def export_contrast_conditional_markers_tables(
                     df.to_csv(subdir / f"{stem}__{kind}.csv", index=False)
 
     # XLSX (combined only)
-    out_xlsx = output_dir / "marker_tables" / filename
+    out_xlsx = base / filename
     out_xlsx.parent.mkdir(parents=True, exist_ok=True)
 
     with pd.ExcelWriter(out_xlsx, engine="xlsxwriter") as writer:

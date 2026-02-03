@@ -284,6 +284,11 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
     # ----------------------------
     # Exports (only what ran)
     # ----------------------------
+    results_dir = output_dir / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    marker_cell_dir = results_dir / "marker_tables" / "cell_based"
+    marker_pb_dir = results_dir / "marker_tables" / "pseudobulk_based"
+
     if run_cell and markers_key:
         io_utils.export_rank_genes_groups_tables(
             adata,
@@ -291,6 +296,7 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
             output_dir=output_dir,
             groupby=str(groupby),
             prefix="celllevel_markers",
+            tables_root=marker_cell_dir,
         )
         io_utils.export_rank_genes_groups_excel(
             adata,
@@ -299,6 +305,7 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
             groupby=str(groupby),
             filename="celllevel_markers.xlsx",
             max_genes=int(getattr(cfg, "markers_n_genes", 100)),
+            tables_root=marker_cell_dir,
         )
     else:
         LOGGER.info("cluster-vs-rest: skipping cell-level exports (cell markers did not run).")
@@ -312,11 +319,13 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
             store_key=store_key,
             groupby=str(groupby),
             condition_key=None,
+            tables_root=marker_pb_dir,
         )
         io_utils.export_pseudobulk_cluster_vs_rest_excel(
             adata,
             output_dir=output_dir,
             store_key=store_key,
+            tables_root=marker_pb_dir,
         )
     else:
         LOGGER.info("cluster-vs-rest: skipping pseudobulk exports (pseudobulk disabled or not requested).")
@@ -330,7 +339,7 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
         alpha = float(getattr(cfg, "alpha", 0.05))
         lfc_thresh = float(getattr(cfg, "plot_lfc_thresh", 1.0))
         top_label_n = int(getattr(cfg, "plot_volcano_top_label_n", 15))
-        top_n_genes = int(getattr(cfg, "plot_top_n_genes", 9))
+        top_n_genes = int(getattr(cfg, "plot_top_n_per_cluster", 9))
         dotplot_top_n_genes = int(getattr(cfg, "plot_dotplot_top_n_genes", 15))
         use_raw = bool(getattr(cfg, "plot_use_raw", False))
         layer = getattr(cfg, "plot_layer", None)
@@ -418,6 +427,11 @@ def run_within_cluster(cfg) -> ad.AnnData:
     plot_utils.setup_scanpy_figs(figdir, getattr(cfg, "figure_formats", ["png", "pdf"]))
 
     adata = io_utils.load_dataset(getattr(cfg, "input_path"))
+
+    results_dir = output_dir / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    de_cell_dir = results_dir / "de_tables" / "cell_based"
+    de_pb_dir = results_dir / "de_tables" / "pseudobulk_based"
 
     # ----------------------------
     # Resolve groupby + sample_key
@@ -587,6 +601,8 @@ def run_within_cluster(cfg) -> ad.AnnData:
             adata,
             output_dir=output_dir,
             store_key=store_key,
+            tables_root=de_cell_dir,
+            filename="contrast_conditional_de.xlsx",
         )
         ran_cell_contrast = True
     else:
@@ -630,12 +646,14 @@ def run_within_cluster(cfg) -> ad.AnnData:
             store_key=store_key,
             groupby=str(groupby),
             condition_key=str(condition_key),
+            tables_root=de_pb_dir,
         )
         io_utils.export_pseudobulk_condition_within_cluster_excel(
             adata,
             output_dir=output_dir,
             store_key=store_key,
             condition_key=str(condition_key),
+            tables_root=de_pb_dir,
         )
     else:
         LOGGER.info("within-cluster: skipping pseudobulk exports (not run).")
@@ -649,6 +667,8 @@ def run_within_cluster(cfg) -> ad.AnnData:
         alpha = float(getattr(cfg, "alpha", 0.05))
         lfc_thresh = float(getattr(cfg, "plot_lfc_thresh", 1.0))
         top_label_n = int(getattr(cfg, "plot_volcano_top_label_n", 15))
+        top_n_genes = int(getattr(cfg, "plot_top_n_per_cluster", 9))
+        dotplot_top_n_genes = int(getattr(cfg, "plot_dotplot_top_n_genes", 15))
         use_raw = bool(getattr(cfg, "plot_use_raw", False))
         layer = getattr(cfg, "plot_layer", None)
 
@@ -662,18 +682,29 @@ def run_within_cluster(cfg) -> ad.AnnData:
                 alpha=alpha,
                 lfc_thresh=lfc_thresh,
                 top_label_n=top_label_n,
-                dotplot_top_n=15,
-                violin_top_n=9,
-                heatmap_top_n=25,
+                dotplot_top_n=dotplot_top_n_genes,
+                violin_top_n=top_n_genes,
+                heatmap_top_n=dotplot_top_n_genes,
                 use_raw=use_raw,
                 layer=layer,
             )
         else:
             LOGGER.info("within-cluster: skipping condition plots (pseudobulk not run).")
 
-        # (Optional) If you add dedicated plots for contrast_conditional_markers later, hook here.
         if ran_cell_contrast:
-            LOGGER.info("within-cluster: cell-level contrast-conditional markers ran (tables exported).")
+            de_plot_utils.plot_contrast_conditional_markers(
+                adata,
+                groupby=str(groupby),
+                contrast_key=str(getattr(cfg, "contrast_key", condition_key)),
+                store_key=store_key,
+                alpha=alpha,
+                lfc_thresh=lfc_thresh,
+                top_label_n=top_label_n,
+                top_n_genes=top_n_genes,
+                dotplot_top_n_genes=dotplot_top_n_genes,
+                use_raw=use_raw,
+                layer=layer,
+            )
 
     # ----------------------------
     # Save dataset
