@@ -294,7 +294,7 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
     # ----------------------------
     # Exports (only what ran)
     # ----------------------------
-    results_dir = output_dir / "results"
+    results_dir = output_dir
     results_dir.mkdir(parents=True, exist_ok=True)
     run_round = plot_utils.get_run_round_tag("marker_genes")
     marker_cell_dir = results_dir / "tables" / f"marker_tables_{run_round}" / "cell_based"
@@ -486,7 +486,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
 
     adata = io_utils.load_dataset(getattr(cfg, "input_path"))
 
-    results_dir = output_dir / "results"
+    results_dir = output_dir
     results_dir.mkdir(parents=True, exist_ok=True)
     run_round = plot_utils.get_run_round_tag("marker_genes")
     de_cell_dir = results_dir / "tables" / f"de_tables_{run_round}" / "cell_based"
