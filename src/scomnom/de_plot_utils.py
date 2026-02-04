@@ -1602,3 +1602,53 @@ def plot_contrast_conditional_markers(
                     show=False,
                 )
                 plot_utils.save_multi(stem=f"violin__{cl}__{pair_key}", figdir=d_violin, fig=fig)
+
+
+def plot_contrast_conditional_markers_multi(
+    adata,
+    *,
+    groupby: str,
+    contrast_key: str,
+    store_key: str = "scomnom_de",
+    alpha: float = 0.05,
+    lfc_thresh: float = 1.0,
+    top_label_n: int = 15,
+    top_n_genes: int = 9,
+    dotplot_top_n_genes: int | None = None,
+    use_raw: bool = False,
+    layer: str | None = None,
+) -> None:
+    """
+    Plot contrast-conditional markers for a specific contrast_key from
+    adata.uns[store_key]["contrast_conditional_multi"].
+    """
+    block = adata.uns.get(store_key, {})
+    multi = block.get("contrast_conditional_multi", None)
+    if not isinstance(multi, dict):
+        return
+
+    payload = multi.get(str(contrast_key), None)
+    if not isinstance(payload, dict):
+        return
+
+    orig = block.get("contrast_conditional", None)
+    block["contrast_conditional"] = payload
+    try:
+        plot_contrast_conditional_markers(
+            adata,
+            groupby=str(groupby),
+            contrast_key=str(contrast_key),
+            store_key=str(store_key),
+            alpha=float(alpha),
+            lfc_thresh=float(lfc_thresh),
+            top_label_n=int(top_label_n),
+            top_n_genes=int(top_n_genes),
+            dotplot_top_n_genes=dotplot_top_n_genes,
+            use_raw=bool(use_raw),
+            layer=layer,
+        )
+    finally:
+        if orig is None:
+            block.pop("contrast_conditional", None)
+        else:
+            block["contrast_conditional"] = orig

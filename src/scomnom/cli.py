@@ -1140,6 +1140,8 @@ def _build_cfg(
     pb_min_lib_pct: float,
     pb_covariates: Optional[List[str]],
     prune_uns_de: bool,
+    # within-cluster condition keys
+    condition_keys: Optional[List[str]],
     # plots
     plot_lfc_thresh: float,
     plot_volcano_top_label_n: int,
@@ -1156,6 +1158,7 @@ def _build_cfg(
 
     layers = _parse_csv_repeat(pb_counts_layer) or ["counts_cb", "counts_raw"]
     covariates = tuple(_parse_csv_repeat(pb_covariates) or ())
+    cond_keys = tuple(_parse_csv_repeat(condition_keys) or ())
 
     return MarkersAndDEConfig(
         input_path=input_path,
@@ -1198,6 +1201,7 @@ def _build_cfg(
         pb_min_lib_pct=pb_min_lib_pct,
         pb_covariates=tuple(_parse_csv_repeat(pb_covariates) or ()),
         prune_uns_de=prune_uns_de,
+        condition_keys=cond_keys,
         # plots
         plot_lfc_thresh=plot_lfc_thresh,
         plot_volcano_top_label_n=plot_volcano_top_label_n,
@@ -1296,6 +1300,7 @@ def cluster_vs_rest(
         pb_min_lib_pct=pb_min_lib_pct,
         pb_covariates=tuple(_parse_csv_repeat(pb_covariates) or ()),
         prune_uns_de=prune_uns_de,
+        condition_keys=[],
         plot_lfc_thresh=plot_lfc_thresh,
         plot_volcano_top_label_n=plot_volcano_top_label_n,
         plot_top_n_per_cluster=plot_top_n_per_cluster,
@@ -1338,7 +1343,8 @@ def within_cluster(
     round_id: Optional[str] = typer.Option(None, "--round-id"),
     replicate_key: Optional[str] = typer.Option(None, "--replicate-key"),
 
-    condition_key: str = typer.Option(..., "--condition-key"),
+    condition_key: Optional[str] = typer.Option(None, "--condition-key"),
+    condition_keys: List[str] = typer.Option([], "--condition-keys"),
     contrasts: Optional[List[str]] = typer.Option(None, "--contrasts"),
 
     min_pct: float = typer.Option(0.25, "--min-pct"),
@@ -1409,6 +1415,7 @@ def within_cluster(
         pb_min_lib_pct=pb_min_lib_pct,
         pb_covariates=pb_covariates,
         prune_uns_de=prune_uns_de,
+        condition_keys=condition_keys,
         plot_lfc_thresh=plot_lfc_thresh,
         plot_volcano_top_label_n=plot_volcano_top_label_n,
         plot_top_n_per_cluster=plot_top_n_per_cluster,
@@ -1420,12 +1427,18 @@ def within_cluster(
     )
 
     parsed = _parse_csv_repeat(contrasts)
+    cond_keys = _parse_csv_repeat(condition_keys)
+    if not cond_keys and condition_key:
+        cond_keys = [str(condition_key)]
+    if not cond_keys:
+        raise typer.BadParameter("Provide at least one --condition-key or --condition-keys.")
 
-    cfg.condition_key = str(condition_key)
+    cfg.condition_key = None
+    cfg.condition_keys = tuple(cond_keys)
     cfg.condition_contrasts = tuple(parsed)
 
     # drive cell-level within-cluster contrasts (NO pseudobulk guard in orchestrator)
-    cfg.contrast_key = str(condition_key)
+    cfg.contrast_key = None
     cfg.contrast_contrasts = tuple(parsed)
     cfg.contrast_conditional_de = run in (RunWhich.cell, RunWhich.both)
 

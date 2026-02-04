@@ -94,6 +94,36 @@ def _n_unique_samples(adata: ad.AnnData, sample_key: str) -> int:
     return int(adata.obs[str(sample_key)].astype(str).nunique(dropna=True))
 
 
+def _safe_combo_token(x: object) -> str:
+    s = str(x)
+    s = s.replace("/", "_").replace(":", "_")
+    return s
+
+
+def _resolve_condition_key(adata: ad.AnnData, key: str) -> str:
+    raw = str(key).strip()
+    if ":" not in raw:
+        return raw
+
+    parts = [p.strip() for p in raw.split(":") if p.strip()]
+    if len(parts) < 2:
+        return raw
+
+    missing = [p for p in parts if p not in adata.obs]
+    if missing:
+        raise RuntimeError(f"within-cluster: condition_key parts not in adata.obs: {missing}")
+
+    combo_key = ".".join(parts)
+    if combo_key not in adata.obs:
+        comp = adata.obs[parts[0]].astype(str).map(_safe_combo_token)
+        for p in parts[1:]:
+            comp = comp + "." + adata.obs[p].astype(str).map(_safe_combo_token)
+        adata.obs[combo_key] = comp
+        LOGGER.info("within-cluster: created composite condition_key=%r from %s", combo_key, parts)
+
+    return combo_key
+
+
 def _write_settings(out_dir: Path, name: str, lines: list[str]) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / name
@@ -513,21 +543,25 @@ def run_within_cluster(cfg) -> ad.AnnData:
         raise RuntimeError(f"within-cluster: sample_key={sample_key!r} not found in adata.obs")
 
     # ----------------------------
-    # Condition key (required)
+    # Condition keys (required)
     # ----------------------------
-    condition_key = getattr(cfg, "condition_key", None)
-    if not condition_key:
-        raise RuntimeError("within-cluster: condition_key is required.")
-    if str(condition_key) not in adata.obs:
-        raise RuntimeError(f"within-cluster: condition_key={condition_key!r} not found in adata.obs")
+    condition_keys = list(getattr(cfg, "condition_keys", ())) or []
+    if not condition_keys:
+        ck = getattr(cfg, "condition_key", None)
+        if ck:
+            condition_keys = [str(ck)]
+    if not condition_keys:
+        raise RuntimeError("within-cluster: condition_key or condition_keys is required.")
+
+    condition_keys = [_resolve_condition_key(adata, k) for k in condition_keys]
 
     # Optional explicit contrasts (e.g. ["M_vs_F"])
     condition_contrasts = list(getattr(cfg, "condition_contrasts", [])) or None
 
     LOGGER.info(
-        "within-cluster: groupby=%r, condition_key=%r, sample_key=%r, contrasts=%r",
+        "within-cluster: groupby=%r, condition_keys=%r, sample_key=%r, contrasts=%r",
         str(groupby),
-        str(condition_key),
+        condition_keys,
         str(sample_key),
         condition_contrasts,
     )
@@ -593,31 +627,36 @@ def run_within_cluster(cfg) -> ad.AnnData:
             )
 
             groups = pd.Index(pd.unique(adata.obs[str(groupby)].astype(str))).sort_values()
-            LOGGER.info(
-                "within-cluster: pseudobulk DE across %d groups (groupby=%r) for condition_key=%r",
-                len(groups),
-                str(groupby),
-                str(condition_key),
-            )
 
             from .de_utils import de_condition_within_group_pseudobulk_multi
 
-            for g in groups:
-                _ = de_condition_within_group_pseudobulk_multi(
-                    adata,
-                    group_value=str(g),
-                    groupby=str(groupby),
-                    round_id=getattr(cfg, "round_id", None),
-                    condition_key=str(condition_key),
-                    spec=pb_spec,
-                    opts=pb_opts,
-                    contrasts=condition_contrasts,
-                    store_key=store_key,
-                    store=True,
-                    n_cpus=int(getattr(cfg, "n_jobs", 1)),
+            for condition_key in condition_keys:
+                if str(condition_key) not in adata.obs:
+                    raise RuntimeError(f"within-cluster: condition_key={condition_key!r} not found in adata.obs")
+
+                LOGGER.info(
+                    "within-cluster: pseudobulk DE across %d groups (groupby=%r) for condition_key=%r",
+                    len(groups),
+                    str(groupby),
+                    str(condition_key),
                 )
 
-            ran_pseudobulk = True
+                for g in groups:
+                    _ = de_condition_within_group_pseudobulk_multi(
+                        adata,
+                        group_value=str(g),
+                        groupby=str(groupby),
+                        round_id=getattr(cfg, "round_id", None),
+                        condition_key=str(condition_key),
+                        spec=pb_spec,
+                        opts=pb_opts,
+                        contrasts=condition_contrasts,
+                        store_key=store_key,
+                        store=True,
+                        n_cpus=int(getattr(cfg, "n_jobs", 1)),
+                    )
+
+                ran_pseudobulk = True
     else:
         LOGGER.info("within-cluster: skipping pseudobulk (run=%r).", mode)
 
@@ -628,68 +667,84 @@ def run_within_cluster(cfg) -> ad.AnnData:
     if run_cell_requested:
         from .de_utils import ContrastConditionalSpec, contrast_conditional_markers
 
-        # What defines the levels to contrast at cell-level:
-        # prefer explicit cfg.contrast_key; else condition_key.
-        contrast_key = getattr(cfg, "contrast_key", None) or str(condition_key)
+        for condition_key in condition_keys:
+            if str(condition_key) not in adata.obs:
+                raise RuntimeError(f"within-cluster: condition_key={condition_key!r} not found in adata.obs")
 
-        cc_spec = ContrastConditionalSpec(
-            contrast_key=str(contrast_key),
-            methods=tuple(getattr(cfg, "contrast_methods", ("wilcoxon", "logreg"))),
-            min_cells_per_level_in_cluster=int(getattr(cfg, "contrast_min_cells_per_level", 50)),
-            max_cells_per_level_in_cluster=int(getattr(cfg, "contrast_max_cells_per_level", 2000)),
-            min_total_counts=int(getattr(cfg, "contrast_min_total_counts", 10)),
-            pseudocount=float(getattr(cfg, "contrast_pseudocount", 1.0)),
-            cl_alpha=float(getattr(cfg, "contrast_cl_alpha", 0.05)),
-            cl_min_abs_logfc=float(getattr(cfg, "contrast_cl_min_abs_logfc", 0.25)),
-            lr_min_abs_coef=float(getattr(cfg, "contrast_lr_min_abs_coef", 0.25)),
-            pb_min_abs_log2fc=float(getattr(cfg, "contrast_pb_min_abs_log2fc", 0.5)),
-            random_state=int(getattr(cfg, "random_state", 42)),
-            min_pct=float(getattr(cfg, "min_pct", 0.25)),
-            min_diff_pct=float(getattr(cfg, "min_diff_pct", 0.25)),
-        )
+            # What defines the levels to contrast at cell-level:
+            # prefer explicit cfg.contrast_key; else condition_key.
+            contrast_key = getattr(cfg, "contrast_key", None) or str(condition_key)
 
-        _ = contrast_conditional_markers(
-            adata,
-            groupby=str(groupby),
-            round_id=getattr(cfg, "round_id", None),
-            spec=cc_spec,
-            pb_spec=pb_spec,  # may be None; function should tolerate (cell-only mode)
-            store_key=store_key,
-            store=True,
-        )
+            cc_spec = ContrastConditionalSpec(
+                contrast_key=str(contrast_key),
+                methods=tuple(getattr(cfg, "contrast_methods", ("wilcoxon", "logreg"))),
+                min_cells_per_level_in_cluster=int(getattr(cfg, "contrast_min_cells_per_level", 50)),
+                max_cells_per_level_in_cluster=int(getattr(cfg, "contrast_max_cells_per_level", 2000)),
+                min_total_counts=int(getattr(cfg, "contrast_min_total_counts", 10)),
+                pseudocount=float(getattr(cfg, "contrast_pseudocount", 1.0)),
+                cl_alpha=float(getattr(cfg, "contrast_cl_alpha", 0.05)),
+                cl_min_abs_logfc=float(getattr(cfg, "contrast_cl_min_abs_logfc", 0.25)),
+                lr_min_abs_coef=float(getattr(cfg, "contrast_lr_min_abs_coef", 0.25)),
+                pb_min_abs_log2fc=float(getattr(cfg, "contrast_pb_min_abs_log2fc", 0.5)),
+                random_state=int(getattr(cfg, "random_state", 42)),
+                min_pct=float(getattr(cfg, "min_pct", 0.25)),
+                min_diff_pct=float(getattr(cfg, "min_diff_pct", 0.25)),
+            )
 
-        # tables for contrast-conditional markers
-        io_utils.export_contrast_conditional_markers_tables(
-            adata,
-            output_dir=output_dir,
-            store_key=store_key,
-            tables_root=de_cell_dir,
-            filename=None,
-            contrast_key=str(contrast_key),
-        )
-        _write_settings(
-            de_cell_dir,
-            "de_settings.txt",
-            [
-                "mode=within-cluster",
-                "engine=cell",
-                f"groupby={groupby}",
-                f"contrast_key={contrast_key}",
-                f"contrast_methods={tuple(getattr(cfg, 'contrast_methods', ())) }",
-                f"contrast_min_cells_per_level={getattr(cfg, 'contrast_min_cells_per_level', None)}",
-                f"contrast_max_cells_per_level={getattr(cfg, 'contrast_max_cells_per_level', None)}",
-                f"contrast_min_total_counts={getattr(cfg, 'contrast_min_total_counts', None)}",
-                f"contrast_pseudocount={getattr(cfg, 'contrast_pseudocount', None)}",
-                f"contrast_cl_alpha={getattr(cfg, 'contrast_cl_alpha', None)}",
-                f"contrast_cl_min_abs_logfc={getattr(cfg, 'contrast_cl_min_abs_logfc', None)}",
-                f"contrast_lr_min_abs_coef={getattr(cfg, 'contrast_lr_min_abs_coef', None)}",
-                f"contrast_pb_min_abs_log2fc={getattr(cfg, 'contrast_pb_min_abs_log2fc', None)}",
-                f"min_pct={getattr(cfg, 'min_pct', None)}",
-                f"min_diff_pct={getattr(cfg, 'min_diff_pct', None)}",
-                "design_formula=NA (cell-level)",
-            ],
-        )
-        ran_cell_contrast = True
+            _ = contrast_conditional_markers(
+                adata,
+                groupby=str(groupby),
+                round_id=getattr(cfg, "round_id", None),
+                spec=cc_spec,
+                pb_spec=pb_spec,  # may be None; function should tolerate (cell-only mode)
+                store_key=store_key,
+                store=True,
+            )
+
+            # Persist per-contrast_key results in a multi-store block
+            if store_key in adata.uns and isinstance(adata.uns.get(store_key), dict):
+                cc_block = adata.uns[store_key].get("contrast_conditional", None)
+                if isinstance(cc_block, dict):
+                    adata.uns[store_key].setdefault("contrast_conditional_multi", {})
+                    adata.uns[store_key]["contrast_conditional_multi"][str(contrast_key)] = cc_block
+
+            # tables for contrast-conditional markers
+            io_utils.export_contrast_conditional_markers_tables(
+                adata,
+                output_dir=output_dir,
+                store_key=store_key,
+                tables_root=de_cell_dir,
+                filename=None,
+                contrast_key=str(contrast_key),
+            )
+
+            settings_name = "de_settings.txt"
+            if len(condition_keys) > 1:
+                settings_name = f"de_settings__{io_utils.sanitize_identifier(condition_key, allow_spaces=False)}.txt"
+
+            _write_settings(
+                de_cell_dir,
+                settings_name,
+                [
+                    "mode=within-cluster",
+                    "engine=cell",
+                    f"groupby={groupby}",
+                    f"contrast_key={contrast_key}",
+                    f"contrast_methods={tuple(getattr(cfg, 'contrast_methods', ())) }",
+                    f"contrast_min_cells_per_level={getattr(cfg, 'contrast_min_cells_per_level', None)}",
+                    f"contrast_max_cells_per_level={getattr(cfg, 'contrast_max_cells_per_level', None)}",
+                    f"contrast_min_total_counts={getattr(cfg, 'contrast_min_total_counts', None)}",
+                    f"contrast_pseudocount={getattr(cfg, 'contrast_pseudocount', None)}",
+                    f"contrast_cl_alpha={getattr(cfg, 'contrast_cl_alpha', None)}",
+                    f"contrast_cl_min_abs_logfc={getattr(cfg, 'contrast_cl_min_abs_logfc', None)}",
+                    f"contrast_lr_min_abs_coef={getattr(cfg, 'contrast_lr_min_abs_coef', None)}",
+                    f"contrast_pb_min_abs_log2fc={getattr(cfg, 'contrast_pb_min_abs_log2fc', None)}",
+                    f"min_pct={getattr(cfg, 'min_pct', None)}",
+                    f"min_diff_pct={getattr(cfg, 'min_diff_pct', None)}",
+                    "design_formula=NA (cell-level)",
+                ],
+            )
+            ran_cell_contrast = True
     else:
         LOGGER.info("within-cluster: skipping cell-level within-cluster contrasts (run=%r).", mode)
 
@@ -703,7 +758,8 @@ def run_within_cluster(cfg) -> ad.AnnData:
             "timestamp_utc": datetime.utcnow().isoformat(),
             "mode": "within-cluster",
             "groupby": str(groupby),
-            "condition_key": str(condition_key),
+            "condition_key": str(condition_keys[-1]) if condition_keys else None,
+            "condition_keys": list(condition_keys),
             "condition_contrasts": list(condition_contrasts) if condition_contrasts else None,
             "sample_key": str(sample_key),
             "run": mode,
@@ -725,48 +781,55 @@ def run_within_cluster(cfg) -> ad.AnnData:
     # Pseudobulk exports (only if actually ran)
     # ----------------------------
     if ran_pseudobulk:
-        io_utils.export_pseudobulk_de_tables(
-            adata,
-            output_dir=output_dir,
-            store_key=store_key,
-            groupby=str(groupby),
-            condition_key=str(condition_key),
-            tables_root=de_pb_dir,
-        )
-        io_utils.export_pseudobulk_condition_within_cluster_excel(
-            adata,
-            output_dir=output_dir,
-            store_key=store_key,
-            condition_key=str(condition_key),
-            tables_root=de_pb_dir,
-        )
         covariates = tuple(getattr(cfg, "pb_covariates", ()))
-        design_terms = ["sample", *covariates, str(condition_key)]
-        _write_settings(
-            de_pb_dir,
-            "de_settings.txt",
-            [
-                "mode=within-cluster",
-                "engine=pseudobulk",
-                f"groupby={groupby}",
-                f"condition_key={condition_key}",
-                f"sample_key={sample_key}",
-                f"counts_layer={counts_layer_used}",
-                f"min_cells_per_sample_group={getattr(cfg, 'min_cells_condition', None)}",
-                f"min_samples_per_level={getattr(cfg, 'min_samples_per_level', None)}",
-                f"alpha={getattr(cfg, 'alpha', None)}",
-                f"shrink_lfc={getattr(cfg, 'shrink_lfc', None)}",
-                f"min_total_counts={getattr(cfg, 'pb_min_total_counts', None)}",
-                f"min_counts_per_lib={getattr(cfg, 'pb_min_counts_per_lib', None)}",
-                f"min_lib_pct={getattr(cfg, 'pb_min_lib_pct', None)}",
-                f"min_pct={getattr(cfg, 'min_pct', None)}",
-                "min_diff_pct=NA (unused for pseudobulk)",
-                f"positive_only={getattr(cfg, 'positive_only', None)}",
-                f"pb_max_genes={getattr(cfg, 'pb_max_genes', None)}",
-                f"pb_covariates={covariates}",
-                f"design_formula={' + '.join(design_terms)}",
-            ],
-        )
+
+        for condition_key in condition_keys:
+            io_utils.export_pseudobulk_de_tables(
+                adata,
+                output_dir=output_dir,
+                store_key=store_key,
+                groupby=str(groupby),
+                condition_key=str(condition_key),
+                tables_root=de_pb_dir,
+            )
+            io_utils.export_pseudobulk_condition_within_cluster_excel(
+                adata,
+                output_dir=output_dir,
+                store_key=store_key,
+                condition_key=str(condition_key),
+                tables_root=de_pb_dir,
+            )
+            design_terms = ["sample", *covariates, str(condition_key)]
+
+            settings_name = "de_settings.txt"
+            if len(condition_keys) > 1:
+                settings_name = f"de_settings__{io_utils.sanitize_identifier(condition_key, allow_spaces=False)}.txt"
+
+            _write_settings(
+                de_pb_dir,
+                settings_name,
+                [
+                    "mode=within-cluster",
+                    "engine=pseudobulk",
+                    f"groupby={groupby}",
+                    f"condition_key={condition_key}",
+                    f"sample_key={sample_key}",
+                    f"counts_layer={counts_layer_used}",
+                    f"min_cells_per_sample_group={getattr(cfg, 'min_cells_condition', None)}",
+                    f"min_samples_per_level={getattr(cfg, 'min_samples_per_level', None)}",
+                    f"alpha={getattr(cfg, 'alpha', None)}",
+                    f"shrink_lfc={getattr(cfg, 'shrink_lfc', None)}",
+                    f"min_total_counts={getattr(cfg, 'pb_min_total_counts', None)}",
+                    f"min_counts_per_lib={getattr(cfg, 'pb_min_counts_per_lib', None)}",
+                    f"min_lib_pct={getattr(cfg, 'pb_min_lib_pct', None)}",
+                    f"min_pct={getattr(cfg, 'min_pct', None)}",
+                    "min_diff_pct=NA (unused for pseudobulk)",
+                    f"positive_only={getattr(cfg, 'positive_only', None)}",
+                    f"pb_max_genes={getattr(cfg, 'pb_max_genes', None)}",
+                    f"pb_covariates={covariates}",
+                    f"design_formula={' + '.join(design_terms)}",
+                ],
+            )
     else:
         LOGGER.info("within-cluster: skipping pseudobulk exports (not run).")
 
@@ -786,37 +849,39 @@ def run_within_cluster(cfg) -> ad.AnnData:
 
         # Condition plots only if pseudobulk ran
         if ran_pseudobulk:
-            de_plot_utils.plot_condition_within_cluster_all(
-                adata,
-                cluster_key=str(groupby),
-                condition_key=str(condition_key),
-                store_key=store_key,
-                alpha=alpha,
-                lfc_thresh=lfc_thresh,
-                top_label_n=top_label_n,
-                dotplot_top_n=dotplot_top_n_genes,
-                violin_top_n=top_n_genes,
-                heatmap_top_n=dotplot_top_n_genes,
-                use_raw=use_raw,
-                layer=layer,
-            )
+            for condition_key in condition_keys:
+                de_plot_utils.plot_condition_within_cluster_all(
+                    adata,
+                    cluster_key=str(groupby),
+                    condition_key=str(condition_key),
+                    store_key=store_key,
+                    alpha=alpha,
+                    lfc_thresh=lfc_thresh,
+                    top_label_n=top_label_n,
+                    dotplot_top_n=dotplot_top_n_genes,
+                    violin_top_n=top_n_genes,
+                    heatmap_top_n=dotplot_top_n_genes,
+                    use_raw=use_raw,
+                    layer=layer,
+                )
         else:
             LOGGER.info("within-cluster: skipping condition plots (pseudobulk not run).")
 
         if ran_cell_contrast:
-            de_plot_utils.plot_contrast_conditional_markers(
-                adata,
-                groupby=str(groupby),
-                contrast_key=str(getattr(cfg, "contrast_key", condition_key)),
-                store_key=store_key,
-                alpha=alpha,
-                lfc_thresh=lfc_thresh,
-                top_label_n=top_label_n,
-                top_n_genes=top_n_genes,
-                dotplot_top_n_genes=dotplot_top_n_genes,
-                use_raw=use_raw,
-                layer=layer,
-            )
+            for condition_key in condition_keys:
+                de_plot_utils.plot_contrast_conditional_markers(
+                    adata,
+                    groupby=str(groupby),
+                    contrast_key=str(getattr(cfg, "contrast_key", condition_key)),
+                    store_key=store_key,
+                    alpha=alpha,
+                    lfc_thresh=lfc_thresh,
+                    top_label_n=top_label_n,
+                    top_n_genes=top_n_genes,
+                    dotplot_top_n_genes=dotplot_top_n_genes,
+                    use_raw=use_raw,
+                    layer=layer,
+                )
 
     # ----------------------------
     # Save dataset

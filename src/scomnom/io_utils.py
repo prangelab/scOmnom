@@ -2222,3 +2222,43 @@ def export_contrast_conditional_markers_tables(
                     pd.DataFrame().to_excel(writer, sheet_name=sheet, index=False)
                 else:
                     df.to_excel(writer, sheet_name=sheet, index=False)
+
+
+def export_contrast_conditional_markers_tables_multi(
+    adata: ad.AnnData,
+    *,
+    output_dir: Path,
+    store_key: str = "scomnom_de",
+    filename: Optional[str] = None,
+    tables_root: Optional[Path] = None,
+    contrast_key: Optional[str] = None,
+) -> None:
+    """
+    Export contrast-conditional markers for a specific contrast_key from
+    adata.uns[store_key]["contrast_conditional_multi"].
+    """
+    block = adata.uns.get(store_key, {})
+    multi = block.get("contrast_conditional_multi", None)
+    if not isinstance(multi, dict):
+        return
+
+    key = str(contrast_key) if contrast_key else None
+    if key is None or key not in multi:
+        return
+
+    orig = block.get("contrast_conditional", None)
+    block["contrast_conditional"] = multi.get(key)
+    try:
+        export_contrast_conditional_markers_tables(
+            adata,
+            output_dir=output_dir,
+            store_key=store_key,
+            filename=filename,
+            tables_root=tables_root,
+            contrast_key=key,
+        )
+    finally:
+        if orig is None:
+            block.pop("contrast_conditional", None)
+        else:
+            block["contrast_conditional"] = orig

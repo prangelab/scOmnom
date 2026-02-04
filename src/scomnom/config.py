@@ -662,6 +662,7 @@ class MarkersAndDEConfig(BaseModel):
     # Optional condition-within-cluster DE
     # ------------------------------------------------------------------
     condition_key: Optional[str] = None
+    condition_keys: Tuple[str, ...] = ()
     condition_contrasts: Tuple[str, ...] = ()
     min_cells_condition: int = 20
 
