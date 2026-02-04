@@ -674,11 +674,18 @@ def violin_grid_genes(
         last_r = None
         for r in range(nrows):
             ax = axes[r][c]
-            if isinstance(ax, Axes) and ax.get_visible():
-                last_r = r
+            if not isinstance(ax, Axes):
+                continue
+            if not ax.get_visible():
+                continue
+            if not getattr(ax, "axison", True):
+                continue
+            last_r = r
         for r in range(nrows):
             ax = axes[r][c]
-            if not isinstance(ax, Axes) or not ax.get_visible():
+            if not isinstance(ax, Axes):
+                continue
+            if not ax.get_visible() or not getattr(ax, "axison", True):
                 continue
             if last_r is None or r != last_r:
                 ax.tick_params(axis="x", labelbottom=False)
