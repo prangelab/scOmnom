@@ -1476,6 +1476,40 @@ def within_cluster(
     pb_covariates: List[str] = typer.Option([], "--pb-covariates"),
     prune_uns_de: bool = typer.Option(False, "--prune-uns-de/--no-prune-uns-de"),
 
+    de_decoupler_source: str = typer.Option(
+        "auto",
+        "--de-decoupler-source",
+        help="DE-decoupler input source: auto, all, pseudobulk, cell, none.",
+    ),
+    de_decoupler_stat_col: str = typer.Option("stat", "--de-decoupler-stat-col"),
+    decoupler_method: str = typer.Option("consensus", "--decoupler-method"),
+    decoupler_consensus_methods: Optional[List[str]] = typer.Option(
+        None,
+        "--decoupler-consensus-methods",
+        callback=validate_decoupler_consensus_methods,
+    ),
+    decoupler_min_n_targets: int = typer.Option(5, "--decoupler-min-n-targets"),
+    msigdb_gene_sets_cli: Optional[str] = typer.Option(
+        None,
+        "--msigdb-gene-sets",
+        help="[MSigDB] Comma-separated MSigDB keywords or paths to .gmt files.",
+        autocompletion=_gene_sets_completion,
+    ),
+    msigdb_method: str = typer.Option("consensus", "--msigdb-method"),
+    msigdb_min_n_targets: int = typer.Option(5, "--msigdb-min-n-targets"),
+
+    run_dorothea: bool = typer.Option(True, "--run-dorothea/--no-run-dorothea"),
+    dorothea_method: str = typer.Option("consensus", "--dorothea-method"),
+    dorothea_min_n_targets: int = typer.Option(5, "--dorothea-min-n-targets"),
+    dorothea_confidence: str = typer.Option("A,B,C", "--dorothea-confidence"),
+    dorothea_organism: str = typer.Option("human", "--dorothea-organism"),
+
+    run_progeny: bool = typer.Option(True, "--run-progeny/--no-run-progeny"),
+    progeny_method: str = typer.Option("consensus", "--progeny-method"),
+    progeny_min_n_targets: int = typer.Option(5, "--progeny-min-n-targets"),
+    progeny_top_n: int = typer.Option(100, "--progeny-top-n"),
+    progeny_organism: str = typer.Option("human", "--progeny-organism"),
+
     plot_lfc_thresh: float = typer.Option(1.0, "--plot-lfc-thresh"),
     plot_volcano_top_label_n: int = typer.Option(15, "--plot-volcano-top-label-n"),
     plot_top_n_per_cluster: int = typer.Option(10, "--plot-top-n-per-cluster"),
