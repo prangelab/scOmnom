@@ -1652,3 +1652,112 @@ def plot_contrast_conditional_markers_multi(
             block.pop("contrast_conditional", None)
         else:
             block["contrast_conditional"] = orig
+
+
+def plot_de_decoupler_payload(
+    payload: dict,
+    *,
+    net_name: str,
+    figdir: "Path",
+    heatmap_top_k: int = 30,
+    bar_top_n: int = 10,
+    dotplot_top_k: int = 30,
+    title_prefix: str | None = None,
+) -> None:
+    """
+    Plot decoupler activity payload produced from DE stats.
+    """
+    from . import plot_utils
+
+    if not isinstance(payload, dict):
+        return
+    activity = payload.get("activity", None)
+    if activity is None or not isinstance(activity, pd.DataFrame) or activity.empty:
+        return
+
+    if str(net_name).lower().strip() == "msigdb":
+        splits = payload.get("activity_by_gmt", None)
+        if isinstance(splits, dict) and splits:
+            splits = {str(k): v for k, v in splits.items() if isinstance(v, pd.DataFrame) and not v.empty}
+        else:
+            splits = plot_utils._split_activity_for_msigdb(activity)
+
+        if not splits:
+            return
+
+        ordered = sorted(
+            splits.keys(),
+            key=lambda x: (0 if str(x).upper() == "HALLMARK" else 1, str(x).upper()),
+        )
+
+        for pfx in ordered:
+            sub = splits[pfx]
+            if sub is None or not isinstance(sub, pd.DataFrame) or sub.empty:
+                continue
+            tprefix = f"{str(pfx).upper()}" if title_prefix is None else f"{str(pfx).upper()} [{title_prefix}]"
+            plot_utils.plot_decoupler_activity_heatmap(
+                sub,
+                net_name=str(net_name),
+                figdir=figdir,
+                top_k=int(heatmap_top_k),
+                rank_mode="var",
+                use_zscore=True,
+                wrap_labels=True,
+                stem=f"heatmap_top_{str(pfx).lower()}_",
+                title_prefix=tprefix,
+            )
+            plot_utils.plot_decoupler_cluster_topn_barplots(
+                sub,
+                net_name=str(net_name),
+                figdir=figdir,
+                n=int(bar_top_n),
+                use_abs=False,
+                stem_prefix=f"cluster_{str(pfx).lower()}",
+                title_prefix=tprefix,
+            )
+            plot_utils.plot_decoupler_dotplot(
+                sub,
+                net_name=str(net_name),
+                figdir=figdir,
+                top_k=int(dotplot_top_k),
+                rank_mode="var",
+                color_by="z",
+                size_by="abs_raw",
+                wrap_labels=True,
+                stem=f"dotplot_top_{str(pfx).lower()}_",
+                title_prefix=tprefix,
+            )
+        return
+
+    plot_utils.plot_decoupler_activity_heatmap(
+        activity,
+        net_name=str(net_name),
+        figdir=figdir,
+        top_k=int(heatmap_top_k),
+        rank_mode="var",
+        use_zscore=True,
+        wrap_labels=True,
+        stem="heatmap_top_",
+        title_prefix=title_prefix,
+    )
+    plot_utils.plot_decoupler_cluster_topn_barplots(
+        activity,
+        net_name=str(net_name),
+        figdir=figdir,
+        n=int(bar_top_n),
+        use_abs=False,
+        stem_prefix="cluster",
+        title_prefix=title_prefix,
+    )
+    plot_utils.plot_decoupler_dotplot(
+        activity,
+        net_name=str(net_name),
+        figdir=figdir,
+        top_k=int(dotplot_top_k),
+        rank_mode="var",
+        color_by="z",
+        size_by="abs_raw",
+        wrap_labels=True,
+        stem="dotplot_top_",
+        title_prefix=title_prefix,
+    )

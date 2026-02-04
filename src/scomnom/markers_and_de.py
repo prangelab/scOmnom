@@ -124,6 +124,112 @@ def _resolve_condition_key(adata: ad.AnnData, key: str) -> str:
     return combo_key
 
 
+def _select_stat_col(df: pd.DataFrame, preferred: str, fallbacks: Sequence[str]) -> Optional[str]:
+    if df is None or df.empty:
+        return None
+    if preferred in df.columns:
+        return str(preferred)
+    for c in fallbacks:
+        if c in df.columns:
+            return str(c)
+    return None
+
+
+def _build_stats_matrix_from_tables(
+    tables: dict[str, pd.DataFrame],
+    *,
+    preferred_col: str,
+    fallback_cols: Sequence[str],
+) -> pd.DataFrame:
+    series_by_cluster: dict[str, pd.Series] = {}
+    for cl, df in tables.items():
+        if df is None or getattr(df, "empty", True):
+            continue
+        col = _select_stat_col(df, preferred_col, fallback_cols)
+        if col is None:
+            continue
+        if "gene" in df.columns:
+            genes = df["gene"].astype(str)
+        else:
+            genes = df.index.astype(str)
+        vals = pd.to_numeric(df[col], errors="coerce")
+        s = pd.Series(vals.to_numpy(), index=genes.to_numpy(), name=str(cl))
+        s = s.dropna()
+        if s.empty:
+            continue
+        s = s.groupby(level=0).mean()
+        series_by_cluster[str(cl)] = s
+
+    if not series_by_cluster:
+        return pd.DataFrame()
+
+    out = pd.DataFrame(series_by_cluster).fillna(0.0)
+    return out
+
+
+def _collect_pseudobulk_de_tables(
+    adata: ad.AnnData,
+    *,
+    store_key: str,
+    condition_key: str,
+) -> dict[str, dict[str, pd.DataFrame]]:
+    block = adata.uns.get(store_key, {})
+    cond = block.get("pseudobulk_condition_within_group_multi", {})
+    if not isinstance(cond, dict) or not cond:
+        return {}
+
+    out: dict[str, dict[str, pd.DataFrame]] = {}
+    for _, payload in cond.items():
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("condition_key", "")) != str(condition_key):
+            continue
+        test = payload.get("test", None)
+        ref = payload.get("reference", None)
+        if test is None or ref is None:
+            continue
+        contrast = f"{test}_vs_{ref}"
+        cl = str(payload.get("group_value", "")) or "cluster"
+        df = payload.get("results", None)
+        if df is None:
+            continue
+        out.setdefault(str(contrast), {})[str(cl)] = df
+    return out
+
+
+def _collect_cell_contrast_tables(
+    adata: ad.AnnData,
+    *,
+    store_key: str,
+    contrast_key: str,
+) -> dict[str, dict[str, pd.DataFrame]]:
+    block = adata.uns.get(store_key, {})
+    multi = block.get("contrast_conditional_multi", {})
+    if isinstance(multi, dict) and str(contrast_key) in multi:
+        cc = multi.get(str(contrast_key), {})
+    else:
+        cc = block.get("contrast_conditional", {})
+
+    results = cc.get("results", {}) if isinstance(cc, dict) else {}
+    if not isinstance(results, dict) or not results:
+        return {}
+
+    out: dict[str, dict[str, pd.DataFrame]] = {}
+    for cl, per_contrast in results.items():
+        if not isinstance(per_contrast, dict):
+            continue
+        for pair_key, tables in per_contrast.items():
+            if not isinstance(tables, dict):
+                continue
+            df = tables.get("combined", None)
+            if df is None or getattr(df, "empty", True):
+                df = tables.get("wilcoxon", None)
+            if df is None:
+                continue
+            out.setdefault(str(pair_key), {})[str(cl)] = df
+    return out
+
+
 def _write_settings(out_dir: Path, name: str, lines: list[str]) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / name
@@ -741,12 +847,128 @@ def run_within_cluster(cfg) -> ad.AnnData:
                     f"contrast_pb_min_abs_log2fc={getattr(cfg, 'contrast_pb_min_abs_log2fc', None)}",
                     f"min_pct={getattr(cfg, 'min_pct', None)}",
                     f"min_diff_pct={getattr(cfg, 'min_diff_pct', None)}",
+                    f"de_decoupler_source={getattr(cfg, 'de_decoupler_source', None)}",
+                    f"de_decoupler_stat_col={getattr(cfg, 'de_decoupler_stat_col', None)}",
+                    f"decoupler_method={getattr(cfg, 'decoupler_method', None)}",
+                    f"decoupler_consensus_methods={getattr(cfg, 'decoupler_consensus_methods', None)}",
+                    f"decoupler_min_n_targets={getattr(cfg, 'decoupler_min_n_targets', None)}",
+                    f"msigdb_gene_sets={getattr(cfg, 'msigdb_gene_sets', None)}",
+                    f"msigdb_method={getattr(cfg, 'msigdb_method', None)}",
+                    f"msigdb_min_n_targets={getattr(cfg, 'msigdb_min_n_targets', None)}",
+                    f"run_progeny={getattr(cfg, 'run_progeny', None)}",
+                    f"progeny_method={getattr(cfg, 'progeny_method', None)}",
+                    f"progeny_min_n_targets={getattr(cfg, 'progeny_min_n_targets', None)}",
+                    f"progeny_top_n={getattr(cfg, 'progeny_top_n', None)}",
+                    f"progeny_organism={getattr(cfg, 'progeny_organism', None)}",
+                    f"run_dorothea={getattr(cfg, 'run_dorothea', None)}",
+                    f"dorothea_method={getattr(cfg, 'dorothea_method', None)}",
+                    f"dorothea_min_n_targets={getattr(cfg, 'dorothea_min_n_targets', None)}",
+                    f"dorothea_confidence={getattr(cfg, 'dorothea_confidence', None)}",
+                    f"dorothea_organism={getattr(cfg, 'dorothea_organism', None)}",
                     "design_formula=NA (cell-level)",
                 ],
             )
             ran_cell_contrast = True
     else:
         LOGGER.info("within-cluster: skipping cell-level within-cluster contrasts (run=%r).", mode)
+
+    # ----------------------------
+    # 3) DE-based decoupler (pathways/TF from DE stats)
+    # ----------------------------
+    de_decoupler_ran = False
+    de_source = str(getattr(cfg, "de_decoupler_source", "auto") or "auto").lower()
+    if de_source not in ("auto", "all", "pseudobulk", "cell", "none"):
+        raise RuntimeError(f"within-cluster: invalid de_decoupler_source={de_source!r}")
+
+    if de_source != "none":
+        from .annotation_utils import (
+            _run_msigdb_from_stats,
+            _run_progeny_from_stats,
+            _run_dorothea_from_stats,
+        )
+
+        stat_col = str(getattr(cfg, "de_decoupler_stat_col", "stat") or "stat")
+
+        for condition_key in condition_keys:
+            pb_tables = _collect_pseudobulk_de_tables(
+                adata,
+                store_key=store_key,
+                condition_key=str(condition_key),
+            )
+            cell_tables = _collect_cell_contrast_tables(
+                adata,
+                store_key=store_key,
+                contrast_key=str(condition_key),
+            )
+
+            sources: list[tuple[str, dict[str, dict[str, pd.DataFrame]]]] = []
+            if de_source == "auto":
+                if pb_tables:
+                    sources = [("pseudobulk", pb_tables)]
+                elif cell_tables:
+                    sources = [("cell", cell_tables)]
+            elif de_source == "all":
+                if pb_tables:
+                    sources.append(("pseudobulk", pb_tables))
+                if cell_tables:
+                    sources.append(("cell", cell_tables))
+            elif de_source == "pseudobulk":
+                if pb_tables:
+                    sources = [("pseudobulk", pb_tables)]
+            elif de_source == "cell":
+                if cell_tables:
+                    sources = [("cell", cell_tables)]
+
+            if not sources:
+                LOGGER.info(
+                    "DE-decoupler: no DE tables found for condition_key=%r (skipping).",
+                    str(condition_key),
+                )
+                continue
+
+            for source, tables_by_contrast in sources:
+                for contrast, tables in tables_by_contrast.items():
+                    stats = _build_stats_matrix_from_tables(
+                        tables,
+                        preferred_col=stat_col,
+                        fallback_cols=("log2FoldChange", "cl_logfc", "lr_coef"),
+                    )
+                    if stats is None or stats.empty:
+                        continue
+
+                    input_label = f"{source}:{condition_key}:{contrast}:{stat_col}"
+                    payloads = {}
+
+                    msigdb_payload = _run_msigdb_from_stats(stats, cfg, input_label=input_label)
+                    if msigdb_payload is not None:
+                        payloads["msigdb"] = msigdb_payload
+
+                    if bool(getattr(cfg, "run_progeny", True)):
+                        prog = _run_progeny_from_stats(stats, cfg, input_label=input_label)
+                        if prog is not None:
+                            payloads["progeny"] = prog
+
+                    if bool(getattr(cfg, "run_dorothea", True)):
+                        doro = _run_dorothea_from_stats(stats, cfg, input_label=input_label)
+                        if doro is not None:
+                            payloads["dorothea"] = doro
+
+                    if not payloads:
+                        continue
+
+                    adata.uns.setdefault(store_key, {})
+                    adata.uns[store_key].setdefault("de_decoupler", {})
+                    adata.uns[store_key]["de_decoupler"].setdefault(str(condition_key), {})
+                    adata.uns[store_key]["de_decoupler"][str(condition_key)].setdefault(str(contrast), {})
+                    adata.uns[store_key]["de_decoupler"][str(condition_key)][str(contrast)][str(source)] = {
+                        "source": source,
+                        "stat_col": stat_col,
+                        "nets": payloads,
+                    }
+
+                    de_decoupler_ran = True
+    else:
+        LOGGER.info("within-cluster: skipping DE-decoupler (disabled).")
 
     # ----------------------------
     # Provenance (safe)
@@ -774,6 +996,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
             "counts_layer_used": counts_layer_used,
             "alpha": float(getattr(cfg, "alpha", 0.05)),
             "positive_only_markers": bool(positive_only),
+            "de_decoupler_ran": bool(de_decoupler_ran),
         }
     )
 
@@ -825,6 +1048,24 @@ def run_within_cluster(cfg) -> ad.AnnData:
                     f"min_pct={getattr(cfg, 'min_pct', None)}",
                     "min_diff_pct=NA (unused for pseudobulk)",
                     f"positive_only={getattr(cfg, 'positive_only', None)}",
+                    f"de_decoupler_source={getattr(cfg, 'de_decoupler_source', None)}",
+                    f"de_decoupler_stat_col={getattr(cfg, 'de_decoupler_stat_col', None)}",
+                    f"decoupler_method={getattr(cfg, 'decoupler_method', None)}",
+                    f"decoupler_consensus_methods={getattr(cfg, 'decoupler_consensus_methods', None)}",
+                    f"decoupler_min_n_targets={getattr(cfg, 'decoupler_min_n_targets', None)}",
+                    f"msigdb_gene_sets={getattr(cfg, 'msigdb_gene_sets', None)}",
+                    f"msigdb_method={getattr(cfg, 'msigdb_method', None)}",
+                    f"msigdb_min_n_targets={getattr(cfg, 'msigdb_min_n_targets', None)}",
+                    f"run_progeny={getattr(cfg, 'run_progeny', None)}",
+                    f"progeny_method={getattr(cfg, 'progeny_method', None)}",
+                    f"progeny_min_n_targets={getattr(cfg, 'progeny_min_n_targets', None)}",
+                    f"progeny_top_n={getattr(cfg, 'progeny_top_n', None)}",
+                    f"progeny_organism={getattr(cfg, 'progeny_organism', None)}",
+                    f"run_dorothea={getattr(cfg, 'run_dorothea', None)}",
+                    f"dorothea_method={getattr(cfg, 'dorothea_method', None)}",
+                    f"dorothea_min_n_targets={getattr(cfg, 'dorothea_min_n_targets', None)}",
+                    f"dorothea_confidence={getattr(cfg, 'dorothea_confidence', None)}",
+                    f"dorothea_organism={getattr(cfg, 'dorothea_organism', None)}",
                     f"pb_max_genes={getattr(cfg, 'pb_max_genes', None)}",
                     f"pb_covariates={covariates}",
                     f"design_formula={' + '.join(design_terms)}",
@@ -872,7 +1113,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                 de_plot_utils.plot_contrast_conditional_markers(
                     adata,
                     groupby=str(groupby),
-                    contrast_key=str(getattr(cfg, "contrast_key", condition_key)),
+                    contrast_key=str(getattr(cfg, "contrast_key", None) or condition_key),
                     store_key=store_key,
                     alpha=alpha,
                     lfc_thresh=lfc_thresh,
@@ -882,6 +1123,40 @@ def run_within_cluster(cfg) -> ad.AnnData:
                     use_raw=use_raw,
                     layer=layer,
                 )
+
+        # DE-based decoupler plots (if available)
+        if de_source != "none":
+            de_block = adata.uns.get(store_key, {}).get("de_decoupler", {})
+            if isinstance(de_block, dict) and de_block:
+                for condition_key, per_contrast in de_block.items():
+                    if not isinstance(per_contrast, dict):
+                        continue
+                    for contrast, payload_by_source in per_contrast.items():
+                        if not isinstance(payload_by_source, dict):
+                            continue
+                        for source, payload in payload_by_source.items():
+                            if not isinstance(payload, dict):
+                                continue
+                            nets = payload.get("nets", {})
+                            if not isinstance(nets, dict) or not nets:
+                                continue
+
+                            base = Path("DE")
+                            if str(source) == "cell":
+                                base = base / "cell_level_DE" / str(condition_key) / str(contrast)
+                            else:
+                                base = base / "pseudobulk_DE" / str(condition_key) / str(contrast)
+
+                            for net_name, net_payload in nets.items():
+                                de_plot_utils.plot_de_decoupler_payload(
+                                    net_payload,
+                                    net_name=str(net_name),
+                                    figdir=base,
+                                    heatmap_top_k=int(getattr(cfg, "plot_max_genes_total", 80)),
+                                    bar_top_n=int(top_n_genes),
+                                    dotplot_top_k=int(dotplot_top_n_genes),
+                                    title_prefix=f"{condition_key} {contrast}",
+                                )
 
     # ----------------------------
     # Save dataset

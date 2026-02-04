@@ -1142,6 +1142,25 @@ def _build_cfg(
     prune_uns_de: bool,
     # within-cluster condition keys
     condition_keys: Optional[List[str]],
+    # de-decoupler
+    de_decoupler_source: str,
+    de_decoupler_stat_col: str,
+    decoupler_method: str,
+    decoupler_consensus_methods: Optional[List[str]],
+    decoupler_min_n_targets: int,
+    msigdb_gene_sets: Optional[List[str]],
+    msigdb_method: str,
+    msigdb_min_n_targets: int,
+    run_progeny: bool,
+    progeny_method: str,
+    progeny_min_n_targets: int,
+    progeny_top_n: int,
+    progeny_organism: str,
+    run_dorothea: bool,
+    dorothea_method: str,
+    dorothea_min_n_targets: int,
+    dorothea_confidence: Optional[List[str]],
+    dorothea_organism: str,
     # plots
     plot_lfc_thresh: float,
     plot_volcano_top_label_n: int,
@@ -1159,6 +1178,8 @@ def _build_cfg(
     layers = _parse_csv_repeat(pb_counts_layer) or ["counts_cb", "counts_raw"]
     covariates = tuple(_parse_csv_repeat(pb_covariates) or ())
     cond_keys = tuple(_parse_csv_repeat(condition_keys) or ())
+    msigdb_sets = list(msigdb_gene_sets) if msigdb_gene_sets else None
+    doro_conf = list(dorothea_confidence) if dorothea_confidence else None
 
     return MarkersAndDEConfig(
         input_path=input_path,
@@ -1202,6 +1223,24 @@ def _build_cfg(
         pb_covariates=tuple(_parse_csv_repeat(pb_covariates) or ()),
         prune_uns_de=prune_uns_de,
         condition_keys=cond_keys,
+        de_decoupler_source=str(de_decoupler_source),
+        de_decoupler_stat_col=str(de_decoupler_stat_col),
+        decoupler_method=str(decoupler_method),
+        decoupler_consensus_methods=decoupler_consensus_methods,
+        decoupler_min_n_targets=int(decoupler_min_n_targets),
+        msigdb_gene_sets=msigdb_sets if msigdb_sets is not None else ["HALLMARK", "REACTOME"],
+        msigdb_method=str(msigdb_method),
+        msigdb_min_n_targets=int(msigdb_min_n_targets),
+        run_progeny=bool(run_progeny),
+        progeny_method=str(progeny_method),
+        progeny_min_n_targets=int(progeny_min_n_targets),
+        progeny_top_n=int(progeny_top_n),
+        progeny_organism=str(progeny_organism),
+        run_dorothea=bool(run_dorothea),
+        dorothea_method=str(dorothea_method),
+        dorothea_min_n_targets=int(dorothea_min_n_targets),
+        dorothea_confidence=doro_conf if doro_conf is not None else ["A", "B", "C"],
+        dorothea_organism=str(dorothea_organism),
         # plots
         plot_lfc_thresh=plot_lfc_thresh,
         plot_volcano_top_label_n=plot_volcano_top_label_n,
@@ -1267,6 +1306,40 @@ def cluster_vs_rest(
     pb_covariates: List[str] = typer.Option([], "--pb-covariates"),
     prune_uns_de: bool = typer.Option(False, "--prune-uns-de/--no-prune-uns-de"),
 
+    de_decoupler_source: str = typer.Option(
+        "auto",
+        "--de-decoupler-source",
+        help="DE-decoupler input source: auto, all, pseudobulk, cell, none.",
+    ),
+    de_decoupler_stat_col: str = typer.Option("stat", "--de-decoupler-stat-col"),
+    decoupler_method: str = typer.Option("consensus", "--decoupler-method"),
+    decoupler_consensus_methods: Optional[List[str]] = typer.Option(
+        None,
+        "--decoupler-consensus-methods",
+        callback=validate_decoupler_consensus_methods,
+    ),
+    decoupler_min_n_targets: int = typer.Option(5, "--decoupler-min-n-targets"),
+    msigdb_gene_sets_cli: Optional[str] = typer.Option(
+        None,
+        "--msigdb-gene-sets",
+        help="[MSigDB] Comma-separated MSigDB keywords or paths to .gmt files.",
+        autocompletion=_gene_sets_completion,
+    ),
+    msigdb_method: str = typer.Option("consensus", "--msigdb-method"),
+    msigdb_min_n_targets: int = typer.Option(5, "--msigdb-min-n-targets"),
+
+    run_dorothea: bool = typer.Option(True, "--run-dorothea/--no-run-dorothea"),
+    dorothea_method: str = typer.Option("consensus", "--dorothea-method"),
+    dorothea_min_n_targets: int = typer.Option(5, "--dorothea-min-n-targets"),
+    dorothea_confidence: str = typer.Option("A,B,C", "--dorothea-confidence"),
+    dorothea_organism: str = typer.Option("human", "--dorothea-organism"),
+
+    run_progeny: bool = typer.Option(True, "--run-progeny/--no-run-progeny"),
+    progeny_method: str = typer.Option("consensus", "--progeny-method"),
+    progeny_min_n_targets: int = typer.Option(5, "--progeny-min-n-targets"),
+    progeny_top_n: int = typer.Option(100, "--progeny-top-n"),
+    progeny_organism: str = typer.Option("human", "--progeny-organism"),
+
     plot_lfc_thresh: float = typer.Option(1.0, "--plot-lfc-thresh"),
     plot_volcano_top_label_n: int = typer.Option(15, "--plot-volcano-top-label-n"),
     plot_top_n_per_cluster: int = typer.Option(10, "--plot-top-n-per-cluster"),
@@ -1278,6 +1351,10 @@ def cluster_vs_rest(
 ):
     if output_name is None:
         output_name = _default_output_name(input_path, "markers")
+    de_source = str(de_decoupler_source or "auto").lower()
+    if de_source not in ("auto", "all", "pseudobulk", "cell", "none"):
+        raise typer.BadParameter("Invalid --de-decoupler-source. Use: auto, all, pseudobulk, cell, none.")
+
     cfg = _build_cfg(
         input_path=input_path,
         output_dir=output_dir,
@@ -1312,6 +1389,24 @@ def cluster_vs_rest(
         pb_covariates=tuple(_parse_csv_repeat(pb_covariates) or ()),
         prune_uns_de=prune_uns_de,
         condition_keys=[],
+        de_decoupler_source="none",
+        de_decoupler_stat_col="stat",
+        decoupler_method="consensus",
+        decoupler_consensus_methods=None,
+        decoupler_min_n_targets=5,
+        msigdb_gene_sets=None,
+        msigdb_method="consensus",
+        msigdb_min_n_targets=5,
+        run_progeny=True,
+        progeny_method="consensus",
+        progeny_min_n_targets=5,
+        progeny_top_n=100,
+        progeny_organism="human",
+        run_dorothea=True,
+        dorothea_method="consensus",
+        dorothea_min_n_targets=5,
+        dorothea_confidence=["A", "B", "C"],
+        dorothea_organism="human",
         plot_lfc_thresh=plot_lfc_thresh,
         plot_volcano_top_label_n=plot_volcano_top_label_n,
         plot_top_n_per_cluster=plot_top_n_per_cluster,
@@ -1395,6 +1490,11 @@ def within_cluster(
     if output_name is None:
         output_name = _default_output_name(input_path, "de")
 
+    if msigdb_gene_sets_cli is None:
+        msigdb_gene_sets = None
+    else:
+        msigdb_gene_sets = [x.strip() for x in msigdb_gene_sets_cli.split(",") if x.strip()]
+
     cfg = _build_cfg(
         input_path=input_path,
         output_dir=output_dir,
@@ -1429,6 +1529,24 @@ def within_cluster(
         pb_covariates=pb_covariates,
         prune_uns_de=prune_uns_de,
         condition_keys=condition_keys,
+        de_decoupler_source=de_source,
+        de_decoupler_stat_col=de_decoupler_stat_col,
+        decoupler_method=decoupler_method,
+        decoupler_consensus_methods=decoupler_consensus_methods,
+        decoupler_min_n_targets=decoupler_min_n_targets,
+        msigdb_gene_sets=msigdb_gene_sets,
+        msigdb_method=msigdb_method,
+        msigdb_min_n_targets=msigdb_min_n_targets,
+        run_progeny=run_progeny,
+        progeny_method=progeny_method,
+        progeny_min_n_targets=progeny_min_n_targets,
+        progeny_top_n=progeny_top_n,
+        progeny_organism=progeny_organism,
+        run_dorothea=run_dorothea,
+        dorothea_method=dorothea_method,
+        dorothea_min_n_targets=dorothea_min_n_targets,
+        dorothea_confidence=[x.strip() for x in dorothea_confidence.split(",") if x.strip()],
+        dorothea_organism=dorothea_organism,
         plot_lfc_thresh=plot_lfc_thresh,
         plot_volcano_top_label_n=plot_volcano_top_label_n,
         plot_top_n_per_cluster=plot_top_n_per_cluster,

@@ -667,6 +667,34 @@ class MarkersAndDEConfig(BaseModel):
     min_cells_condition: int = 20
 
     # ------------------------------------------------------------------
+    # DE-based decoupler (pathway/TF activity from DE stats)
+    # ------------------------------------------------------------------
+    de_decoupler_source: str = "auto"
+    de_decoupler_stat_col: str = "stat"
+    decoupler_method: str = "consensus"
+    decoupler_consensus_methods: Optional[List[str]] = ["ulm", "mlm", "wsum"]
+    decoupler_min_n_targets: int = 5
+
+    msigdb_gene_sets: List[str] = Field(
+        default_factory=lambda: ["HALLMARK", "REACTOME"],
+        description="MSigDB collections/keywords and/or paths to .gmt files.",
+    )
+    msigdb_method: str = "consensus"
+    msigdb_min_n_targets: int = 5
+
+    run_progeny: bool = True
+    progeny_method: str = "consensus"
+    progeny_min_n_targets: int = 5
+    progeny_top_n: int = 100
+    progeny_organism: str = "human"
+
+    run_dorothea: bool = True
+    dorothea_method: str = "consensus"
+    dorothea_min_n_targets: int = 5
+    dorothea_confidence: List[str] = Field(default_factory=lambda: ["A", "B", "C"])
+    dorothea_organism: str = "human"
+
+    # ------------------------------------------------------------------
     # Optional contrast-conditional mode
     # ------------------------------------------------------------------
     contrast_conditional_de: bool = False
