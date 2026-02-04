@@ -124,21 +124,6 @@ def _resolve_condition_key(adata: ad.AnnData, key: str) -> str:
     return combo_key
 
 
-def _log_condition_levels(adata: ad.AnnData, keys: Sequence[str], tag: str) -> None:
-    for k in keys:
-        if str(k) not in adata.obs:
-            LOGGER.warning("%s: condition_key=%r not in adata.obs", tag, str(k))
-            continue
-        vals = pd.Index(pd.unique(adata.obs[str(k)].astype(str))).sort_values().tolist()
-        LOGGER.info(
-            "%s: condition_key=%r n_levels=%d levels=%s",
-            tag,
-            str(k),
-            len(vals),
-            vals,
-        )
-
-
 def _select_stat_col(df: pd.DataFrame, preferred: str, fallbacks: Sequence[str]) -> Optional[str]:
     if df is None or df.empty:
         return None
@@ -676,7 +661,6 @@ def run_within_cluster(cfg) -> ad.AnnData:
         raise RuntimeError("within-cluster: condition_key or condition_keys is required.")
 
     condition_keys = [_resolve_condition_key(adata, k) for k in condition_keys]
-    _log_condition_levels(adata, condition_keys, "within-cluster: condition levels (pre-DE)")
     for k in condition_keys:
         try:
             if k in adata.obs and not pd.api.types.is_categorical_dtype(adata.obs[k]):
@@ -756,7 +740,6 @@ def run_within_cluster(cfg) -> ad.AnnData:
             )
 
             groups = pd.Index(pd.unique(adata.obs[str(groupby)].astype(str))).sort_values()
-            _log_condition_levels(adata, condition_keys, "within-cluster: condition levels (pre-pseudobulk)")
 
             from .de_utils import de_condition_within_group_pseudobulk_multi
 
@@ -797,8 +780,6 @@ def run_within_cluster(cfg) -> ad.AnnData:
     if run_cell_requested:
         from .de_utils import ContrastConditionalSpec, contrast_conditional_markers
 
-        _log_condition_levels(adata, condition_keys, "within-cluster: condition levels (pre-cell)")
-
         for condition_key in condition_keys:
             if str(condition_key) not in adata.obs:
                 raise RuntimeError(f"within-cluster: condition_key={condition_key!r} not found in adata.obs")
@@ -832,7 +813,6 @@ def run_within_cluster(cfg) -> ad.AnnData:
                 store_key=store_key,
                 store=True,
             )
-            _log_condition_levels(adata, [str(condition_key)], "within-cluster: condition levels (post-cell)")
 
             # Persist per-contrast_key results in a multi-store block
             if store_key in adata.uns and isinstance(adata.uns.get(store_key), dict):
@@ -955,6 +935,13 @@ def run_within_cluster(cfg) -> ad.AnnData:
 
             for source, tables_by_contrast in sources:
                 for contrast, tables in tables_by_contrast.items():
+                    LOGGER.info(
+                        "DE-decoupler: running source=%r condition_key=%r contrast=%r stat_col=%r",
+                        str(source),
+                        str(condition_key),
+                        str(contrast),
+                        str(stat_col),
+                    )
                     stats = _build_stats_matrix_from_tables(
                         tables,
                         preferred_col=stat_col,
@@ -1136,9 +1123,8 @@ def run_within_cluster(cfg) -> ad.AnnData:
             LOGGER.info("within-cluster: skipping condition plots (pseudobulk not run).")
 
         if ran_cell_contrast:
-            _log_condition_levels(adata, condition_keys, "within-cluster: condition levels (pre-contrast plots)")
             for condition_key in condition_keys:
-                de_plot_utils.plot_contrast_conditional_markers(
+                de_plot_utils.plot_contrast_conditional_markers_multi(
                     adata,
                     groupby=str(groupby),
                     contrast_key=str(getattr(cfg, "contrast_key", None) or condition_key),

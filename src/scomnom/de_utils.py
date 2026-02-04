@@ -1932,6 +1932,13 @@ def contrast_conditional_markers(
 
         for (A, B) in pairs:
             pair_key = f"{A}_vs_{B}"
+            LOGGER.info(
+                "cell-level contrast: cluster=%r contrast_key=%r A=%r B=%r",
+                str(cl),
+                str(contrast_key),
+                str(A),
+                str(B),
+            )
 
             idxA = by_level_idx.get(A, np.array([], dtype=int))
             idxB = by_level_idx.get(B, np.array([], dtype=int))
@@ -2304,6 +2311,13 @@ def de_condition_within_group_pseudobulk_multi(
 
     out: Dict[str, pd.DataFrame] = {}
     for A, B in pairs:
+        LOGGER.info(
+            "pseudobulk contrast: group=%r condition_key=%r A=%r B=%r",
+            str(group_value),
+            str(condition_key),
+            str(A),
+            str(B),
+        )
         # Run A vs B by calling your existing function,
         # but it currently wants reference and assumes exactly 2 levels.
         # We can *temporarily* treat reference=B and restrict to only A/B cells:
