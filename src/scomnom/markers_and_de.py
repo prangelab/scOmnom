@@ -822,8 +822,9 @@ def run_within_cluster(cfg) -> ad.AnnData:
             if store_key in adata.uns and isinstance(adata.uns.get(store_key), dict):
                 cc_block = adata.uns[store_key].get("contrast_conditional", None)
                 if isinstance(cc_block, dict):
+                    from copy import deepcopy
                     adata.uns[store_key].setdefault("contrast_conditional_multi", {})
-                    adata.uns[store_key]["contrast_conditional_multi"][str(contrast_key)] = cc_block
+                    adata.uns[store_key]["contrast_conditional_multi"][str(contrast_key)] = deepcopy(cc_block)
                     LOGGER.info(
                         "within-cluster: stored cell-level results for contrast_key=%r (multi_keys=%s, single_key=%r)",
                         str(contrast_key),
