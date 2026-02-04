@@ -1214,6 +1214,15 @@ def _build_cfg(
     )
 
 
+def _default_output_name(input_path: Path, suffix: str) -> str:
+    name = input_path.name
+    for ext in (".zarr", ".h5ad", ".h5", ".hdf5"):
+        if name.endswith(ext):
+            name = name[: -len(ext)]
+            break
+    return f"{name}.{suffix}"
+
+
 @markers_and_de_app.command(
     "markers",
     help="Markers: Define marker genes for each cluster (vs all others.)",
@@ -1221,7 +1230,7 @@ def _build_cfg(
 def cluster_vs_rest(
     input_path: Path = typer.Option(..., "--input-path", "-i"),
     output_dir: Optional[Path] = typer.Option(None, "--output-dir", "-o"),
-    output_name: str = typer.Option("adata.markers_and_de", "--output-name"),
+    output_name: Optional[str] = typer.Option(None, "--output-name"),
     save_h5ad: bool = typer.Option(False, "--save-h5ad/--no-save-h5ad"),
     n_jobs: int = typer.Option(1, "--n-jobs"),
 
@@ -1267,10 +1276,12 @@ def cluster_vs_rest(
     plot_layer: Optional[str] = typer.Option(None, "--plot-layer"),
     plot_umap_ncols: int = typer.Option(3, "--plot-umap-ncols"),
 ):
+    if output_name is None:
+        output_name = _default_output_name(input_path, "markers")
     cfg = _build_cfg(
         input_path=input_path,
         output_dir=output_dir,
-        output_name=output_name,
+        output_name=str(output_name),
         save_h5ad=save_h5ad,
         n_jobs=n_jobs,
         run=run,
@@ -1328,7 +1339,7 @@ def cluster_vs_rest(
 def within_cluster(
     input_path: Path = typer.Option(..., "--input-path", "-i"),
     output_dir: Optional[Path] = typer.Option(None, "--output-dir", "-o"),
-    output_name: str = typer.Option("adata.markers_and_de", "--output-name"),
+    output_name: Optional[str] = typer.Option(None, "--output-name"),
     save_h5ad: bool = typer.Option(False, "--save-h5ad/--no-save-h5ad"),
     n_jobs: int = typer.Option(1, "--n-jobs"),
 
@@ -1381,11 +1392,13 @@ def within_cluster(
 ):
     # fix typo from signature (keep CLI option stable)
     group_key = None if group_key is None else str(group_key)
+    if output_name is None:
+        output_name = _default_output_name(input_path, "de")
 
     cfg = _build_cfg(
         input_path=input_path,
         output_dir=output_dir,
-        output_name=output_name,
+        output_name=str(output_name),
         save_h5ad=save_h5ad,
         n_jobs=n_jobs,
         run=run,
