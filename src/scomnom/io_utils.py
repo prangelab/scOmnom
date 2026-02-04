@@ -1058,15 +1058,7 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr") -> None:
                 total_mb,
             )
 
-        if isinstance(uns, dict):
-            for k, v in uns.items():
-                sz = _estimate_size_bytes(v) / (1024 ** 2)
-                if sz >= WARN_SINGLE_MB:
-                    LOGGER.warning(
-                        "Large object in adata.uns['%s'] (~%.1f MB).",
-                        k,
-                        sz,
-                    )
+        _ = WARN_SINGLE_MB
     except Exception as e:
         LOGGER.warning(
             "Could not estimate adata.uns size for warning purposes (continuing). (%s)",

@@ -1304,7 +1304,7 @@ def cluster_vs_rest(
     pb_min_counts_per_lib: int = typer.Option(0, "--pb-min-counts-per-lib"),
     pb_min_lib_pct: float = typer.Option(0.0, "--pb-min-lib-pct"),
     pb_covariates: List[str] = typer.Option([], "--pb-covariates"),
-    prune_uns_de: bool = typer.Option(False, "--prune-uns-de/--no-prune-uns-de"),
+    prune_uns_de: bool = typer.Option(True, "--prune-uns-de/--no-prune-uns-de"),
 
     de_decoupler_source: str = typer.Option(
         "auto",
@@ -1474,7 +1474,7 @@ def within_cluster(
     pb_min_counts_per_lib: int = typer.Option(0, "--pb-min-counts-per-lib"),
     pb_min_lib_pct: float = typer.Option(0.0, "--pb-min-lib-pct"),
     pb_covariates: List[str] = typer.Option([], "--pb-covariates"),
-    prune_uns_de: bool = typer.Option(False, "--prune-uns-de/--no-prune-uns-de"),
+    prune_uns_de: bool = typer.Option(True, "--prune-uns-de/--no-prune-uns-de"),
 
     de_decoupler_source: str = typer.Option(
         "auto",

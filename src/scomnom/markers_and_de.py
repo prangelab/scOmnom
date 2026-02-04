@@ -30,7 +30,7 @@ LOGGER = logging.getLogger(__name__)
 _MIN_TOTAL_SAMPLES_FOR_PSEUDOBULK = 6
 
 
-def _prune_uns_de(adata: ad.AnnData, store_key: str) -> None:
+def _prune_uns_de(adata: ad.AnnData, store_key: str, *, top_n: int = 50, decoupler_top_n: int = 20) -> None:
     """
     Reduce memory footprint of adata.uns[store_key] by keeping summaries
     and dropping large per-gene result tables.
@@ -39,11 +39,82 @@ def _prune_uns_de(adata: ad.AnnData, store_key: str) -> None:
         return
 
     block = adata.uns.get(store_key, {})
+    top_n = int(top_n)
+    decoupler_top_n = int(decoupler_top_n)
+
+    def _top_df(df: pd.DataFrame, n: int) -> pd.DataFrame:
+        if df is None or getattr(df, "empty", True):
+            return pd.DataFrame()
+        n = int(max(1, n))
+        d = df.copy()
+        cols = list(d.columns)
+        if "gene" in cols:
+            d["gene"] = d["gene"].astype(str)
+        if "cl_padj" in cols:
+            lfc_col = "cl_logfc" if "cl_logfc" in cols else None
+            if lfc_col:
+                d["_abs_lfc"] = d[lfc_col].abs()
+                d = d.sort_values(by=["cl_padj", "_abs_lfc"], ascending=[True, False], kind="mergesort")
+                d = d.drop(columns=["_abs_lfc"], errors="ignore")
+            else:
+                d = d.sort_values(by=["cl_padj"], ascending=[True], kind="mergesort")
+        elif "padj" in cols:
+            lfc_col = "log2FoldChange" if "log2FoldChange" in cols else ("cl_logfc" if "cl_logfc" in cols else None)
+            if lfc_col:
+                d["_abs_lfc"] = d[lfc_col].abs()
+                d = d.sort_values(by=["padj", "_abs_lfc"], ascending=[True, False], kind="mergesort")
+                d = d.drop(columns=["_abs_lfc"], errors="ignore")
+            else:
+                d = d.sort_values(by=["padj"], ascending=[True], kind="mergesort")
+        elif "pval" in cols:
+            d = d.sort_values(by=["pval"], ascending=[True], kind="mergesort")
+        elif "score" in cols:
+            d = d.sort_values(by=["score"], ascending=[False], kind="mergesort")
+        elif "cl_score" in cols:
+            d = d.sort_values(by=["cl_score"], ascending=[False], kind="mergesort")
+        d = d.head(n)
+        keep_cols = [
+            "gene",
+            "cl_logfc",
+            "cl_padj",
+            "cl_pval",
+            "cl_score",
+            "lr_coef",
+            "pb_log2fc",
+            "log2FoldChange",
+            "padj",
+            "pval",
+            "score",
+            "stat",
+        ]
+        keep = [c for c in keep_cols if c in d.columns]
+        if keep:
+            d = d.loc[:, keep]
+        return d
+
+    def _top_activity(activity: pd.DataFrame, n: int) -> pd.DataFrame:
+        if activity is None or getattr(activity, "empty", True):
+            return pd.DataFrame()
+        n = int(max(1, n))
+        try:
+            scores = activity.abs().mean(axis=0)
+            top_cols = scores.sort_values(ascending=False).head(n).index.tolist()
+        except Exception:
+            top_cols = list(activity.columns[:n])
+        return activity.loc[:, top_cols].copy()
 
     # Cluster-vs-rest pseudobulk
     pb_cvr = block.get("pseudobulk_cluster_vs_rest", None)
     if isinstance(pb_cvr, dict):
         if "results" in pb_cvr:
+            results = pb_cvr.get("results", {})
+            top = {}
+            if isinstance(results, dict):
+                for cl, df in results.items():
+                    if isinstance(df, pd.DataFrame):
+                        top[str(cl)] = _top_df(df, top_n)
+            if top:
+                pb_cvr["top_genes"] = top
             pb_cvr.pop("results", None)
 
     # Within-cluster pseudobulk multi
@@ -53,13 +124,81 @@ def _prune_uns_de(adata: ad.AnnData, store_key: str) -> None:
         keys = list(pb_within.keys())
         for k in keys:
             if isinstance(pb_within.get(k), dict) and "results" in pb_within[k]:
+                res = pb_within[k].get("results", None)
+                if isinstance(res, pd.DataFrame):
+                    pb_within[k]["top_genes"] = _top_df(res, top_n)
                 pb_within[k].pop("results", None)
 
     # Contrast-conditional (cell-level within-cluster)
     cc = block.get("contrast_conditional", None)
     if isinstance(cc, dict):
         if "results" in cc:
+            results = cc.get("results", {})
+            top = {}
+            if isinstance(results, dict):
+                for cl, per_contrast in results.items():
+                    if not isinstance(per_contrast, dict):
+                        continue
+                    for pair_key, tables in per_contrast.items():
+                        if not isinstance(tables, dict):
+                            continue
+                        df = tables.get("combined", None)
+                        if df is None or getattr(df, "empty", True):
+                            df = tables.get("wilcoxon", None)
+                        if isinstance(df, pd.DataFrame):
+                            top.setdefault(str(cl), {})[str(pair_key)] = _top_df(df, top_n)
+            if top:
+                cc["top_genes"] = top
             cc.pop("results", None)
+
+    cc_multi = block.get("contrast_conditional_multi", None)
+    if isinstance(cc_multi, dict):
+        for ck, cc_block in list(cc_multi.items()):
+            if not isinstance(cc_block, dict):
+                continue
+            if "results" in cc_block:
+                results = cc_block.get("results", {})
+                top = {}
+                if isinstance(results, dict):
+                    for cl, per_contrast in results.items():
+                        if not isinstance(per_contrast, dict):
+                            continue
+                        for pair_key, tables in per_contrast.items():
+                            if not isinstance(tables, dict):
+                                continue
+                            df = tables.get("combined", None)
+                            if df is None or getattr(df, "empty", True):
+                                df = tables.get("wilcoxon", None)
+                            if isinstance(df, pd.DataFrame):
+                                top.setdefault(str(cl), {})[str(pair_key)] = _top_df(df, top_n)
+                if top:
+                    cc_block["top_genes"] = top
+                cc_block.pop("results", None)
+
+    # DE-decoupler payloads
+    de_dec = block.get("de_decoupler", None)
+    if isinstance(de_dec, dict):
+        for ck, per_contrast in list(de_dec.items()):
+            if not isinstance(per_contrast, dict):
+                continue
+            for contrast, payload_by_source in list(per_contrast.items()):
+                if not isinstance(payload_by_source, dict):
+                    continue
+                for source, payload in list(payload_by_source.items()):
+                    if not isinstance(payload, dict):
+                        continue
+                    nets = payload.get("nets", None)
+                    if not isinstance(nets, dict):
+                        continue
+                    for net_name, net_payload in list(nets.items()):
+                        if not isinstance(net_payload, dict):
+                            continue
+                        activity = net_payload.get("activity", None)
+                        if isinstance(activity, pd.DataFrame):
+                            net_payload["activity_top"] = _top_activity(activity, decoupler_top_n)
+                        net_payload.pop("activity", None)
+                        net_payload.pop("activity_by_gmt", None)
+                        net_payload.pop("feature_meta", None)
 
 
 # -----------------------------------------------------------------------------
@@ -264,6 +403,11 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
     """
     init_logging(getattr(cfg, "logfile", None))
     LOGGER.info("Starting markers-and-de (cluster-vs-rest)...")
+    if not bool(getattr(cfg, "prune_uns_de", True)):
+        LOGGER.warning(
+            "prune_uns_de is disabled; adata.uns may become very large. "
+            "Use --prune-uns-de to keep only summaries and top genes."
+        )
 
     # ----------------------------
     # I/O + figure setup
@@ -581,7 +725,7 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
     # ----------------------------
     # Save dataset
     # ----------------------------
-    if bool(getattr(cfg, "prune_uns_de", False)):
+    if bool(getattr(cfg, "prune_uns_de", True)):
         _prune_uns_de(adata, store_key=str(getattr(cfg, "store_key", "scomnom_de")))
 
     out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.markers_and_de")) + ".zarr")
@@ -615,6 +759,11 @@ def run_within_cluster(cfg) -> ad.AnnData:
     """
     init_logging(getattr(cfg, "logfile", None))
     LOGGER.info("Starting markers-and-de (within-cluster)...")
+    if not bool(getattr(cfg, "prune_uns_de", True)):
+        LOGGER.warning(
+            "prune_uns_de is disabled; adata.uns may become very large. "
+            "Use --prune-uns-de to keep only summaries and top genes."
+        )
 
     # ----------------------------
     # I/O + figure setup
@@ -825,14 +974,6 @@ def run_within_cluster(cfg) -> ad.AnnData:
                     from copy import deepcopy
                     adata.uns[store_key].setdefault("contrast_conditional_multi", {})
                     adata.uns[store_key]["contrast_conditional_multi"][str(contrast_key)] = deepcopy(cc_block)
-                    LOGGER.info(
-                        "within-cluster: stored cell-level results for contrast_key=%r (multi_keys=%s, single_key=%r)",
-                        str(contrast_key),
-                        sorted(list(adata.uns[store_key]["contrast_conditional_multi"].keys())),
-                        str(adata.uns[store_key]["contrast_conditional"].get("contrast_key"))
-                        if isinstance(adata.uns[store_key].get("contrast_conditional"), dict)
-                        else None,
-                    )
 
             # tables for contrast-conditional markers
             io_utils.export_contrast_conditional_markers_tables(
@@ -947,19 +1088,6 @@ def run_within_cluster(cfg) -> ad.AnnData:
                 continue
 
             for source, tables_by_contrast in sources:
-                if store_key in adata.uns and isinstance(adata.uns.get(store_key), dict):
-                    multi_keys = sorted(
-                        list(adata.uns[store_key].get("contrast_conditional_multi", {}).keys())
-                    )
-                    single_key = None
-                    if isinstance(adata.uns[store_key].get("contrast_conditional"), dict):
-                        single_key = adata.uns[store_key]["contrast_conditional"].get("contrast_key")
-                    LOGGER.info(
-                        "DE-decoupler: pre-run store status for condition_key=%r (multi_keys=%s, single_key=%r)",
-                        str(condition_key),
-                        multi_keys,
-                        single_key,
-                    )
                 for contrast, tables in tables_by_contrast.items():
                     LOGGER.info(
                         "DE-decoupler: running source=%r condition_key=%r contrast=%r stat_col=%r",
@@ -1201,7 +1329,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
     # ----------------------------
     # Save dataset
     # ----------------------------
-    if bool(getattr(cfg, "prune_uns_de", False)):
+    if bool(getattr(cfg, "prune_uns_de", True)):
         _prune_uns_de(adata, store_key=str(getattr(cfg, "store_key", "scomnom_de")))
 
     out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.markers_and_de")) + ".zarr")

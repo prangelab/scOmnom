@@ -629,7 +629,7 @@ def violin_grid_genes(
     if figsize is None:
         n_groups = int(adata.obs[str(groupby)].astype(str).nunique())
         per_plot_w = max(3.2, min(0.25 * n_groups, 8.0))
-        figsize = (max(8.0, per_plot_w * min(ncols, n)), max(4.0, 2.6 * nrows))
+        figsize = (max(8.0, per_plot_w * min(ncols, n)), max(4.0, 3.2 * nrows))
 
     fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=figsize, squeeze=False)
 

@@ -656,7 +656,7 @@ class MarkersAndDEConfig(BaseModel):
     pb_min_lib_pct: float = 0.0
     pb_max_genes: Optional[int] = None
     pb_covariates: Tuple[str, ...] = ()
-    prune_uns_de: bool = False
+    prune_uns_de: bool = True
 
     # ------------------------------------------------------------------
     # Optional condition-within-cluster DE

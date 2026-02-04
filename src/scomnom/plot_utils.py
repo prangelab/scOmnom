@@ -241,7 +241,7 @@ def save_multi(stem: str, figdir: Path, fig=None, *, savefig_kwargs: dict | None
         outdir = ROOT_FIGDIR / ext / RUN_FIG_SUBDIR / rel_figdir
         outdir.mkdir(parents=True, exist_ok=True)
         outfile = outdir / f"{stem}.{ext}"
-        LOGGER.info("Saving figure: %s", outfile)
+        LOGGER.debug("Saving figure: %s", outfile)
 
         if fig is not None:
             # avoid pyplot global state
