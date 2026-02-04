@@ -627,7 +627,9 @@ def violin_grid_genes(
 
     # heuristic sizing if not given
     if figsize is None:
-        figsize = (max(8.0, 3.4 * min(ncols, n)), max(4.0, 2.6 * nrows))
+        n_groups = int(adata.obs[str(groupby)].astype(str).nunique())
+        per_plot_w = max(3.2, min(0.25 * n_groups, 8.0))
+        figsize = (max(8.0, per_plot_w * min(ncols, n)), max(4.0, 2.6 * nrows))
 
     fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=figsize, squeeze=False)
 
@@ -653,20 +655,32 @@ def violin_grid_genes(
             ax.set_title(str(g))
         except Exception:
             pass
+        if layer in (None, "", "X"):
+            ylabel = "Expression (X)" if not use_raw else "Expression (raw)"
+        else:
+            ylabel = f"Expression ({layer})"
+        try:
+            ax.set_ylabel(ylabel)
+        except Exception:
+            pass
 
     # ---- turn off unused axes
     for j in range(n, nrows * ncols):
         r, c = divmod(j, ncols)
         axes[r][c].axis("off")
 
-    # ---- Hide cluster/category labels except on bottom row
-    for r in range(nrows):
-        for c in range(ncols):
+    # ---- Hide cluster/category labels except on last visible row per column
+    for c in range(ncols):
+        last_r = None
+        for r in range(nrows):
+            ax = axes[r][c]
+            if isinstance(ax, Axes) and ax.get_visible():
+                last_r = r
+        for r in range(nrows):
             ax = axes[r][c]
             if not isinstance(ax, Axes) or not ax.get_visible():
                 continue
-
-            if r != nrows - 1:
+            if last_r is None or r != last_r:
                 ax.tick_params(axis="x", labelbottom=False)
                 ax.set_xlabel("")
             else:

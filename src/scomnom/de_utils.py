@@ -1996,6 +1996,21 @@ def contrast_conditional_markers(
                 )
 
             # ----------------------------
+            # Cell-level prevalence (always compute; do not trust scanpy)
+            # ----------------------------
+            pct_A = None
+            pct_B = None
+            if any(m in spec.methods for m in ("wilcoxon", "logreg")):
+                pct_A, pct_B = _compute_cl_prevalence(
+                    adata_sub,
+                    groupby=contrast_key,
+                    group_A=A,
+                    group_B=B,
+                    use_raw=False,
+                    layer=None,
+                )
+
+            # ----------------------------
             # Wilcoxon (cell-level)
             # ----------------------------
             wilcoxon_df = pd.DataFrame()
@@ -2029,11 +2044,11 @@ def contrast_conditional_markers(
                 if "gene" in wilcoxon_df.columns:
                     wilcoxon_df["gene"] = wilcoxon_df["gene"].astype(str)
 
-                # Apply Seurat-like gates using prevalence columns
-                if ("cl_pts" in wilcoxon_df.columns) and ("cl_pts_rest" in wilcoxon_df.columns):
-                    _tmp = wilcoxon_df.rename(columns={"cl_pts": "pts", "cl_pts_rest": "pts_rest"})
-                    _tmp = _apply_min_pct_filters_celllevel(_tmp, min_pct=cl_min_pct, min_diff_pct=cl_min_diff_pct)
-                    wilcoxon_df = _tmp.rename(columns={"pts": "cl_pts", "pts_rest": "cl_pts_rest"}).copy()
+                if pct_A is not None and "gene" in wilcoxon_df.columns:
+                    idx = adata_sub.var_names.get_indexer(wilcoxon_df["gene"].astype(str))
+                    ok = idx >= 0
+                    wilcoxon_df.loc[ok, "cl_pts"] = pct_A[idx[ok]]
+                    wilcoxon_df.loc[ok, "cl_pts_rest"] = pct_B[idx[ok]]
 
             # ----------------------------
             # Logreg (cell-level)
@@ -2075,11 +2090,11 @@ def contrast_conditional_markers(
                 if "gene" in logreg_df.columns:
                     logreg_df["gene"] = logreg_df["gene"].astype(str)
 
-                # Apply Seurat-like gates if prevalence columns exist
-                if ("cl_pts" in logreg_df.columns) and ("cl_pts_rest" in logreg_df.columns):
-                    _tmp = logreg_df.rename(columns={"cl_pts": "pts", "cl_pts_rest": "pts_rest"})
-                    _tmp = _apply_min_pct_filters_celllevel(_tmp, min_pct=cl_min_pct, min_diff_pct=cl_min_diff_pct)
-                    logreg_df = _tmp.rename(columns={"pts": "cl_pts", "pts_rest": "cl_pts_rest"}).copy()
+                if pct_A is not None and "gene" in logreg_df.columns:
+                    idx = adata_sub.var_names.get_indexer(logreg_df["gene"].astype(str))
+                    ok = idx >= 0
+                    logreg_df.loc[ok, "cl_pts"] = pct_A[idx[ok]]
+                    logreg_df.loc[ok, "cl_pts_rest"] = pct_B[idx[ok]]
 
             # ----------------------------
             # Combined merge
@@ -2123,12 +2138,13 @@ def contrast_conditional_markers(
             # Seurat-like gating at hit layer (so tiering respects it)
             combined["pass_minpct"] = True
             if (cl_min_pct > 0.0 or cl_min_diff_pct > 0.0) and ("cl_pts" in combined.columns) and ("cl_pts_rest" in combined.columns):
-                pass_mask = pd.Series(True, index=combined.index)
-                if cl_min_pct > 0.0:
-                    pass_mask &= (combined["cl_pts"] >= cl_min_pct) | (combined["cl_pts_rest"] >= cl_min_pct)
-                if cl_min_diff_pct > 0.0:
-                    pass_mask &= (combined["cl_pts"] - combined["cl_pts_rest"]).abs() >= cl_min_diff_pct
-                combined["pass_minpct"] = pass_mask.fillna(True)
+                if not (combined["cl_pts"].notna().sum() == 0 and combined["cl_pts_rest"].notna().sum() == 0):
+                    pass_mask = pd.Series(True, index=combined.index)
+                    if cl_min_pct > 0.0:
+                        pass_mask &= (combined["cl_pts"] >= cl_min_pct) | (combined["cl_pts_rest"] >= cl_min_pct)
+                    if cl_min_diff_pct > 0.0:
+                        pass_mask &= (combined["cl_pts"] - combined["cl_pts_rest"]).abs() >= cl_min_diff_pct
+                    combined["pass_minpct"] = pass_mask.fillna(True)
 
             # hits
             combined["hit_wilcoxon"] = False
@@ -2469,3 +2485,38 @@ def _apply_min_pct_filters_pseudobulk(
     out = counts.loc[:, keep].copy()
     meta["n_genes_after"] = int(out.shape[1])
     return out, meta
+
+
+def _compute_cl_prevalence(
+    adata: ad.AnnData,
+    *,
+    groupby: str,
+    group_A: str,
+    group_B: str,
+    use_raw: bool = False,
+    layer: Optional[str] = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    obs = adata.obs[str(groupby)].astype(str)
+    mask_A = obs.to_numpy() == str(group_A)
+    mask_B = obs.to_numpy() == str(group_B)
+
+    X = _get_counts_matrix(adata, counts_layer=layer)
+    if use_raw and adata.raw is not None:
+        X = adata.raw.X
+
+    if sp.issparse(X):
+        nA = int(mask_A.sum())
+        nB = int(mask_B.sum())
+        if nA == 0 or nB == 0:
+            return np.zeros(adata.n_vars), np.zeros(adata.n_vars)
+        pct_A = np.asarray(X[mask_A].getnnz(axis=0)).ravel() / float(nA)
+        pct_B = np.asarray(X[mask_B].getnnz(axis=0)).ravel() / float(nB)
+    else:
+        subA = X[mask_A]
+        subB = X[mask_B]
+        pct_A = (subA > 0).mean(axis=0) if subA.shape[0] > 0 else np.zeros(adata.n_vars)
+        pct_B = (subB > 0).mean(axis=0) if subB.shape[0] > 0 else np.zeros(adata.n_vars)
+        pct_A = np.asarray(pct_A).ravel()
+        pct_B = np.asarray(pct_B).ravel()
+
+    return pct_A, pct_B
