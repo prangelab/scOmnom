@@ -537,6 +537,7 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
         dotplot_top_n_genes = int(getattr(cfg, "plot_dotplot_top_n_genes", 15))
         use_raw = bool(getattr(cfg, "plot_use_raw", False))
         layer = getattr(cfg, "plot_layer", None)
+        de_source = str(getattr(cfg, "de_decoupler_source", "auto") or "auto").lower()
         ncols = int(getattr(cfg, "plot_umap_ncols", 3))
 
         if run_cell and markers_key:
