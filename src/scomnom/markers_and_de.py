@@ -296,7 +296,7 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
     # ----------------------------
     results_dir = output_dir
     results_dir.mkdir(parents=True, exist_ok=True)
-    run_round = plot_utils.get_run_round_tag("marker_genes")
+    run_round = plot_utils.get_run_round_tag("markers")
     marker_cell_dir = results_dir / "tables" / f"marker_tables_{run_round}" / "cell_based"
     marker_pb_dir = results_dir / "tables" / f"marker_tables_{run_round}" / "pseudobulk_based"
 
@@ -488,7 +488,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
 
     results_dir = output_dir
     results_dir.mkdir(parents=True, exist_ok=True)
-    run_round = plot_utils.get_run_round_tag("marker_genes")
+    run_round = plot_utils.get_run_round_tag("DE")
     de_cell_dir = results_dir / "tables" / f"de_tables_{run_round}" / "cell_based"
     de_pb_dir = results_dir / "tables" / f"de_tables_{run_round}" / "pseudobulk_based"
 
@@ -664,7 +664,8 @@ def run_within_cluster(cfg) -> ad.AnnData:
             output_dir=output_dir,
             store_key=store_key,
             tables_root=de_cell_dir,
-            filename="contrast_conditional_de.xlsx",
+            filename=None,
+            contrast_key=str(contrast_key),
         )
         _write_settings(
             de_cell_dir,

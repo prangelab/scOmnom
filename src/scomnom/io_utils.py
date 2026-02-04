@@ -2150,8 +2150,9 @@ def export_contrast_conditional_markers_tables(
     *,
     output_dir: Path,
     store_key: str = "scomnom_de",
-    filename: str = "contrast_conditional_de__combined.xlsx",
+    filename: Optional[str] = None,
     tables_root: Optional[Path] = None,
+    contrast_key: Optional[str] = None,
 ) -> None:
     """
     Writes contrast-conditional (pairwise) marker results:
@@ -2161,8 +2162,6 @@ def export_contrast_conditional_markers_tables(
     """
     output_dir = Path(output_dir)
     base = Path(tables_root) if tables_root is not None else (output_dir / "marker_tables")
-    out_dir = base / "contrast_conditional_de"
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     block = adata.uns.get(store_key, {})
     cc = block.get("contrast_conditional", {})
@@ -2172,19 +2171,29 @@ def export_contrast_conditional_markers_tables(
     results = cc.get("results", {})
     summary = cc.get("summary", None)
 
-    if isinstance(summary, pd.DataFrame) and not summary.empty:
-        summary.to_csv(out_dir / "__summary.csv", index=False)
-
     if not isinstance(results, dict) or not results:
         return
 
-    # CSVs
-    for cluster, pairs in results.items():
-        if not isinstance(pairs, dict):
-            continue
-        for pair_key, payload in pairs.items():
+    condition = str(contrast_key) if contrast_key else "contrast"
+    pair_keys: set[str] = set()
+    for pairs in results.values():
+        if isinstance(pairs, dict):
+            pair_keys.update(str(k) for k in pairs.keys())
+
+    for pair_key in sorted(pair_keys):
+        out_dir = base / f"{_safe_filename(condition)}_{_safe_filename(pair_key)}_DE"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        if isinstance(summary, pd.DataFrame) and not summary.empty:
+            summary.to_csv(out_dir / "__summary.csv", index=False)
+
+        for cluster, pairs in results.items():
+            if not isinstance(pairs, dict):
+                continue
+            payload = pairs.get(pair_key, None)
             if not isinstance(payload, dict):
                 continue
+
             stem = f"cluster__{_safe_filename(cluster)}__{_safe_filename(pair_key)}"
             subdir = out_dir / stem
             subdir.mkdir(parents=True, exist_ok=True)
@@ -2196,22 +2205,19 @@ def export_contrast_conditional_markers_tables(
                 else:
                     df.to_csv(subdir / f"{stem}__{kind}.csv", index=False)
 
-    # XLSX (combined only)
-    out_xlsx = base / filename
-    out_xlsx.parent.mkdir(parents=True, exist_ok=True)
-
-    with pd.ExcelWriter(out_xlsx, engine="xlsxwriter") as writer:
-        for cluster, pairs in results.items():
-            if not isinstance(pairs, dict):
-                continue
-            for pair_key, payload in pairs.items():
-                if not isinstance(payload, dict):
+        out_xlsx = out_dir / (filename or f"{_safe_filename(condition)}_{_safe_filename(pair_key)}_DE.xlsx")
+        with pd.ExcelWriter(out_xlsx, engine="xlsxwriter") as writer:
+            for cl2, pairs2 in results.items():
+                if not isinstance(pairs2, dict):
                     continue
-                df = payload.get("combined", None)
+                payload2 = pairs2.get(pair_key, None)
+                if not isinstance(payload2, dict):
+                    continue
+                df = payload2.get("combined", None)
                 if df is None:
                     continue
 
-                sheet = _safe_excel_sheet_name(f"{cluster}__{pair_key}")
+                sheet = _safe_excel_sheet_name(str(cl2))
                 if getattr(df, "empty", True):
                     pd.DataFrame().to_excel(writer, sheet_name=sheet, index=False)
                 else:

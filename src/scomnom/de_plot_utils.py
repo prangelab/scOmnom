@@ -871,7 +871,7 @@ def plot_marker_genes_pseudobulk(
     _normalize_scanpy_groupby_colors(adata, str(groupby))
     dot_n = int(dotplot_top_n_genes) if dotplot_top_n_genes is not None else int(top_n_genes)
 
-    figroot = Path("marker_genes") / "pseudobulk"
+    figroot = Path("markers") / "pseudobulk_markers"
     d_volcano = figroot / "volcano"
     d_dot = figroot / "dotplot"
     d_violin = figroot / "violin"
@@ -997,7 +997,7 @@ def plot_marker_genes_ranksum(
     _normalize_scanpy_groupby_colors(adata, str(groupby))
     dot_n = int(dotplot_top_n_genes) if dotplot_top_n_genes is not None else int(top_n_genes)
 
-    figroot = Path("marker_genes") / "ranksum"
+    figroot = Path("markers") / "cell_level_markers"
     d_volcano = figroot / "volcano"
     d_dot = figroot / "dotplot"
     d_violin = figroot / "violin"
@@ -1207,7 +1207,7 @@ def plot_condition_within_cluster(
       - heatmap (top 25 up + top 25 down), within-cluster, grouped by condition
 
     Saves under:
-      marker_genes/pseudobulk/condition_within_cluster__<condition_key>/<contrast_key>/{volcano,dotplot,violin,heatmap}/
+      DE/pseudobulk_DE/<condition_key>/<contrast_key>/{volcano,dotplot,violin,heatmap}/
     """
     from pathlib import Path
     from . import plot_utils
@@ -1216,7 +1216,7 @@ def plot_condition_within_cluster(
     if not isinstance(block, dict) or not block:
         return
 
-    base = Path("marker_genes") / "pseudobulk" / f"condition_within_cluster__{condition_key}"
+    base = Path("DE") / "pseudobulk_DE" / f"{condition_key}"
 
     for k, payload in block.items():
         if not isinstance(payload, dict):
@@ -1239,12 +1239,18 @@ def plot_condition_within_cluster(
             continue
         sub = adata[mask].copy()
 
-        # output folder per contrast key
-        safe_k = str(k)
-        out_volcano = base / safe_k / "volcano"
-        out_dot = base / safe_k / "dotplot"
-        out_violin = base / safe_k / "violin"
-        out_heat = base / safe_k / "heatmap"
+        # output folder per contrast key (no per-cluster folders)
+        test = payload.get("test", None)
+        ref = payload.get("reference", None)
+        if test and ref:
+            pair_dir = io_utils.sanitize_identifier(f"{test}_vs_{ref}")
+        else:
+            pair_dir = io_utils.sanitize_identifier(str(k))
+
+        out_volcano = base / pair_dir / "volcano"
+        out_dot = base / pair_dir / "dotplot"
+        out_violin = base / pair_dir / "violin"
+        out_heat = base / pair_dir / "heatmap"
 
         # volcano
         fig = volcano(
@@ -1255,7 +1261,7 @@ def plot_condition_within_cluster(
             title=str(k),
             show=False,
         )
-        plot_utils.save_multi(stem=f"volcano__{k}", figdir=out_volcano, fig=fig)
+        plot_utils.save_multi(stem=f"volcano__{group_value}__{pair_dir}", figdir=out_volcano, fig=fig)
 
         # top up/down for dot/violin
         up9 = _select_top_signed(
@@ -1288,7 +1294,11 @@ def plot_condition_within_cluster(
                 dendrogram=False,
                 show=False,
             )
-            plot_utils.save_multi(stem=f"dotplot__top{int(dotplot_top_n)}up_down__{k}", figdir=out_dot, fig=fig)
+            plot_utils.save_multi(
+                stem=f"dotplot__top{int(dotplot_top_n)}up_down__{group_value}__{pair_dir}",
+                figdir=out_dot,
+                fig=fig,
+            )
 
             fig = violin_grid_genes(
                 sub,
@@ -1300,7 +1310,11 @@ def plot_condition_within_cluster(
                 stripplot=False,
                 show=False,
             )
-            plot_utils.save_multi(stem=f"violin__top{int(violin_top_n)}up_down__{k}", figdir=out_violin, fig=fig)
+            plot_utils.save_multi(
+                stem=f"violin__top{int(violin_top_n)}up_down__{group_value}__{pair_dir}",
+                figdir=out_violin,
+                fig=fig,
+            )
 
         # heatmap: top 25 up + top 25 down
         up25 = _select_top_signed(
@@ -1335,7 +1349,11 @@ def plot_condition_within_cluster(
                 z_clip=3.0,
                 show=False,
             )
-            plot_utils.save_multi(stem=f"heatmap__top{int(heatmap_top_n)}up_down__{k}", figdir=out_heat, fig=fig)
+            plot_utils.save_multi(
+                stem=f"heatmap__top{int(heatmap_top_n)}up_down__{group_value}__{pair_dir}",
+                figdir=out_heat,
+                fig=fig,
+            )
 
 
 def plot_condition_within_cluster_all(
@@ -1359,7 +1377,7 @@ def plot_condition_within_cluster_all(
       2) per-cluster/per-contrast plots via plot_condition_within_cluster()
 
     Saves UMAP under:
-      marker_genes/pseudobulk/condition_within_cluster__<condition_key>/umap/
+      DE/pseudobulk_DE/<condition_key>/umap/
     """
     from pathlib import Path
     from . import plot_utils
@@ -1369,7 +1387,7 @@ def plot_condition_within_cluster_all(
         plot_utils.umap_by(
             adata,
             keys=str(condition_key),
-            figdir=Path("marker_genes") / "pseudobulk" / f"condition_within_cluster__{condition_key}" / "umap",
+            figdir=Path("DE") / "pseudobulk_DE" / f"{condition_key}" / "umap",
             stem=f"umap__{condition_key}",
         )
 
@@ -1420,6 +1438,8 @@ def plot_contrast_conditional_markers(
     if not isinstance(results, dict) or not results:
         return
 
+    figroot = Path("DE") / "cell_level_DE" / str(contrast_key)
+
     # Global UMAP colored by contrast key (colorblind-friendly palette)
     colors = None
     if contrast_key in adata.obs:
@@ -1431,52 +1451,53 @@ def plot_contrast_conditional_markers(
             adata.uns[f"{contrast_key}_colors"] = list(colors)
         except Exception:
             pass
-        plot_utils.umap_by(
-            adata,
-            keys=[contrast_key],
-            figdir=Path("marker_genes") / "contrast_conditional" / f"{contrast_key}" / "umap",
-            stem=f"umap__{contrast_key}",
-        )
-
-    if contrast_key in adata.obs and "X_umap" in adata.obsm:
-        import numpy as np
-        import anndata as ad
-
-        umap_dir = Path("marker_genes") / "contrast_conditional" / f"{contrast_key}" / "umap"
-        groups = list(results.keys())
-        for cl in groups:
-            m = adata.obs[str(groupby)].astype(str).to_numpy() == str(cl)
-            if not m.any():
-                continue
-            adata_umap = ad.AnnData(X=np.zeros((int(m.sum()), 0)))
-            adata_umap.obs = adata.obs.loc[m, [contrast_key]].copy()
-            adata_umap.obsm["X_umap"] = adata.obsm["X_umap"][m]
-            if colors is not None:
-                adata_umap.uns[f"{contrast_key}_colors"] = list(colors)
-            cl_safe = io_utils.sanitize_identifier(str(cl))
-            plot_utils.umap_by(
-                adata_umap,
-                keys=[contrast_key],
-                figdir=umap_dir,
-                stem=f"umap__{contrast_key}__{cl_safe}",
-            )
 
     dot_n = int(dotplot_top_n_genes) if dotplot_top_n_genes is not None else int(top_n_genes)
+
+    done_pairs: set[str] = set()
 
     for cl, per_contrast in results.items():
         if not isinstance(per_contrast, dict):
             continue
 
-        cl_dir = io_utils.sanitize_identifier(f"cluster__{cl}")
         for pair_key, tables in per_contrast.items():
             if not isinstance(tables, dict):
                 continue
 
             pair_dir = io_utils.sanitize_identifier(str(pair_key))
-            figroot = Path("marker_genes") / "contrast_conditional" / cl_dir / pair_dir
-            d_volcano = figroot / "volcano"
-            d_dot = figroot / "dotplot"
-            d_violin = figroot / "violin"
+            pair_root = figroot / pair_dir
+            d_volcano = pair_root / "volcano"
+            d_dot = pair_root / "dotplot"
+            d_violin = pair_root / "violin"
+            d_umap = pair_root / "umap"
+
+            # Global and per-cluster UMAPs live alongside other plots
+            if contrast_key in adata.obs and pair_dir not in done_pairs:
+                plot_utils.umap_by(
+                    adata,
+                    keys=[contrast_key],
+                    figdir=d_umap,
+                    stem=f"umap__{contrast_key}",
+                )
+                done_pairs.add(pair_dir)
+
+            if contrast_key in adata.obs and "X_umap" in adata.obsm:
+                import numpy as np
+                import anndata as ad
+
+                m = adata.obs[str(groupby)].astype(str).to_numpy() == str(cl)
+                if m.any():
+                    adata_umap = ad.AnnData(X=np.zeros((int(m.sum()), 0)))
+                    adata_umap.obs = adata.obs.loc[m, [contrast_key]].copy()
+                    adata_umap.obsm["X_umap"] = adata.obsm["X_umap"][m]
+                    if colors is not None:
+                        adata_umap.uns[f"{contrast_key}_colors"] = list(colors)
+                    plot_utils.umap_by(
+                        adata_umap,
+                        keys=[contrast_key],
+                        figdir=d_umap,
+                        stem=f"umap__{contrast_key}__{cl}",
+                    )
 
             wilcoxon_df = tables.get("wilcoxon", pd.DataFrame())
             combined_df = tables.get("combined", pd.DataFrame())
