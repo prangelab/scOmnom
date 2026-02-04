@@ -661,6 +661,12 @@ def run_within_cluster(cfg) -> ad.AnnData:
         raise RuntimeError("within-cluster: condition_key or condition_keys is required.")
 
     condition_keys = [_resolve_condition_key(adata, k) for k in condition_keys]
+    for k in condition_keys:
+        try:
+            if k in adata.obs and not pd.api.types.is_categorical_dtype(adata.obs[k]):
+                adata.obs[k] = adata.obs[k].astype("category")
+        except Exception:
+            pass
 
     # Optional explicit contrasts (e.g. ["M_vs_F"])
     condition_contrasts = list(getattr(cfg, "condition_contrasts", [])) or None
