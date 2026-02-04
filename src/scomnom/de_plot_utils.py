@@ -1407,7 +1407,8 @@ def plot_contrast_conditional_markers(
     """
     Cell-level within-cluster contrast plots (from contrast_conditional results).
     Generates volcano/dotplot/violin per cluster+contrast, plus a global UMAP
-    colored by the contrast_key. Does NOT create per-cluster UMAPs.
+    colored by the contrast_key and per-cluster UMAPs that reuse the global
+    embedding (no recompute).
     """
     from pathlib import Path
     import matplotlib.colors as mcolors
@@ -1420,12 +1421,14 @@ def plot_contrast_conditional_markers(
         return
 
     # Global UMAP colored by contrast key (colorblind-friendly palette)
+    colors = None
     if contrast_key in adata.obs:
         try:
             cats = adata.obs[contrast_key].astype("category").cat.categories
             n_cats = int(len(cats))
             palette = sns.color_palette("colorblind", n_colors=n_cats)
-            adata.uns[f"{contrast_key}_colors"] = [mcolors.to_hex(c) for c in palette]
+            colors = [mcolors.to_hex(c) for c in palette]
+            adata.uns[f"{contrast_key}_colors"] = list(colors)
         except Exception:
             pass
         plot_utils.umap_by(
@@ -1434,6 +1437,29 @@ def plot_contrast_conditional_markers(
             figdir=Path("marker_genes") / "contrast_conditional" / f"{contrast_key}" / "umap",
             stem=f"umap__{contrast_key}",
         )
+
+    if contrast_key in adata.obs and "X_umap" in adata.obsm:
+        import numpy as np
+        import anndata as ad
+
+        umap_dir = Path("marker_genes") / "contrast_conditional" / f"{contrast_key}" / "umap"
+        groups = list(results.keys())
+        for cl in groups:
+            m = adata.obs[str(groupby)].astype(str).to_numpy() == str(cl)
+            if not m.any():
+                continue
+            adata_umap = ad.AnnData(X=np.zeros((int(m.sum()), 0)))
+            adata_umap.obs = adata.obs.loc[m, [contrast_key]].copy()
+            adata_umap.obsm["X_umap"] = adata.obsm["X_umap"][m]
+            if colors is not None:
+                adata_umap.uns[f"{contrast_key}_colors"] = list(colors)
+            cl_safe = io_utils.sanitize_identifier(str(cl))
+            plot_utils.umap_by(
+                adata_umap,
+                keys=[contrast_key],
+                figdir=umap_dir,
+                stem=f"umap__{contrast_key}__{cl_safe}",
+            )
 
     dot_n = int(dotplot_top_n_genes) if dotplot_top_n_genes is not None else int(top_n_genes)
 

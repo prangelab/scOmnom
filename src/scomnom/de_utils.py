@@ -92,6 +92,53 @@ class PseudobulkDEOptions:
     min_diff_pct: float = 0.0
     positive_only: bool = True
     max_genes: Optional[int] = None
+    covariates: Tuple[str, ...] = ()
+
+
+def _collect_sample_covariates(
+    adata: ad.AnnData,
+    *,
+    sample_key: str,
+    covariates: Sequence[str],
+) -> tuple[dict[str, dict[str, object]], list[str]]:
+    covariates = [str(c) for c in covariates if c]
+    if not covariates:
+        return {}, []
+
+    missing = [c for c in covariates if c not in adata.obs]
+    if missing:
+        LOGGER.warning("Pseudobulk covariates not found in adata.obs (skipping): %s", missing)
+    covariates = [c for c in covariates if c in adata.obs]
+    if not covariates:
+        return {}, []
+
+    obs = adata.obs[[sample_key] + covariates].copy()
+    obs[sample_key] = obs[sample_key].astype(str)
+
+    sample_covs: dict[str, dict[str, object]] = {}
+    multi_counts = {c: 0 for c in covariates}
+
+    for s, sub in obs.groupby(sample_key, sort=False):
+        cov_dict: dict[str, object] = {}
+        for c in covariates:
+            vals = sub[c].dropna().unique()
+            if vals.size == 0:
+                cov_dict[c] = np.nan
+            else:
+                cov_dict[c] = vals[0]
+                if vals.size > 1:
+                    multi_counts[c] += 1
+        sample_covs[str(s)] = cov_dict
+
+    for c, n in multi_counts.items():
+        if n > 0:
+            LOGGER.warning(
+                "Pseudobulk covariate %r has multiple values in %d sample(s); using first value per sample.",
+                c,
+                int(n),
+            )
+
+    return sample_covs, covariates
 
 
 def _pydeseq2_cluster_worker(payload: dict) -> tuple[str, pd.DataFrame, dict]:
@@ -117,13 +164,18 @@ def _pydeseq2_cluster_worker(payload: dict) -> tuple[str, pd.DataFrame, dict]:
     metadata["sample"] = metadata["sample"].astype("category")
     metadata["binary_cluster"] = pd.Categorical(metadata["binary_cluster"], categories=["rest", "target"])
 
+    covariates = [str(c) for c in payload.get("covariates", []) if c]
+    for c in covariates:
+        if c in metadata.columns and metadata[c].dtype == object:
+            metadata[c] = metadata[c].astype("category")
+
     counts = pd.DataFrame(counts_np, index=metadata.index, columns=pd.Index(genes, name="gene"))
 
     try:
         res, meta = _run_pydeseq2(
             counts,
             metadata,
-            design_factors=["sample", "binary_cluster"],
+            design_factors=["sample", *covariates, "binary_cluster"],
             contrast=("binary_cluster", "target", "rest"),
             alpha=alpha,
             shrink_lfc=shrink_lfc,
@@ -422,7 +474,6 @@ def pseudobulk_aggregate(
     """
     if sample_key not in adata.obs:
         raise KeyError(f"sample_key={sample_key!r} not in adata.obs")
-
     X = _get_counts_matrix(adata, counts_layer=counts_layer)
     n_cells, n_genes = X.shape
 
@@ -650,6 +701,15 @@ def de_cluster_vs_rest_pseudobulk(
     if sample_key not in adata.obs:
         raise KeyError(f"sample_key={sample_key!r} not in adata.obs")
 
+    raw_covariates = [
+        c for c in getattr(opts, "covariates", ()) if str(c) not in {str(sample_key), "sample", "binary_cluster"}
+    ]
+    sample_covs, covariates = _collect_sample_covariates(
+        adata,
+        sample_key=str(sample_key),
+        covariates=raw_covariates,
+    )
+
     # ------------------------------------------------------------------
     # Aggregation (timed)
     # ------------------------------------------------------------------
@@ -792,12 +852,13 @@ def de_cluster_vs_rest_pseudobulk(
                     continue
 
                 pb_index.append(f"{s}|{cl_str}|target")
-                metadata_rows.append({"sample": str(s), "binary_cluster": "target"})
+                cov_vals = sample_covs.get(str(s), {})
+                metadata_rows.append({"sample": str(s), "binary_cluster": "target", **cov_vals})
                 target_rows.append(rid_target)
                 total_rows.append(rid_total)
 
                 pb_index.append(f"{s}|{cl_str}|rest")
-                metadata_rows.append({"sample": str(s), "binary_cluster": "rest"})
+                metadata_rows.append({"sample": str(s), "binary_cluster": "rest", **cov_vals})
                 target_rows.append(rid_target)
                 total_rows.append(rid_total)
 
@@ -888,6 +949,7 @@ def de_cluster_vs_rest_pseudobulk(
                                     "size_factors": "poscounts",
                                     "genes": counts_tmp.columns.astype(str).tolist(),
                                     "metadata_rows": metadata_rows,
+                                    "covariates": covariates,
                                     "alpha": float(opts.alpha),
                                     "shrink_lfc": bool(opts.shrink_lfc),
                                     "positive_only": bool(opts.positive_only),
@@ -1210,7 +1272,22 @@ def de_condition_within_group_pseudobulk(
     if int(vc.get(str(reference), 0)) < int(opts.min_samples_per_level) or int(vc.get(str(test), 0)) < int(opts.min_samples_per_level):
         return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
 
+    raw_covariates = [
+        c for c in getattr(opts, "covariates", ()) if str(c) not in {str(sample_key), str(condition_key), "sample"}
+    ]
+    sample_covs, covariates = _collect_sample_covariates(
+        adata,
+        sample_key=str(sample_key),
+        covariates=raw_covariates,
+    )
+
     metadata = meta_df[[sample_key, condition_key]].copy()
+    for c in covariates:
+        metadata[c] = metadata[sample_key].astype(str).map(
+            lambda s: sample_covs.get(str(s), {}).get(c, np.nan)
+        )
+        if metadata[c].dtype == object:
+            metadata[c] = metadata[c].astype("category")
     metadata[sample_key] = metadata[sample_key].astype("category")
     metadata[condition_key] = pd.Categorical(metadata[condition_key].astype(str), categories=[str(reference), str(test)])
 
@@ -1246,7 +1323,7 @@ def de_condition_within_group_pseudobulk(
         res, meta = _run_pydeseq2(
             counts,
             metadata.rename(columns={sample_key: "sample"}),
-            design_factors=["sample", condition_key],
+            design_factors=["sample", *covariates, condition_key],
             contrast=(condition_key, str(test), str(reference)),
             alpha=opts.alpha,
             shrink_lfc=opts.shrink_lfc,

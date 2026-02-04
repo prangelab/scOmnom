@@ -90,6 +90,56 @@ def setup_scanpy_figs(figdir: Path, formats: Sequence[str] | None = None) -> Non
     ROOT_FIGDIR.mkdir(parents=True, exist_ok=True)
 
 
+def get_run_subdir(run_key: str | None = None) -> Path:
+    """
+    Ensure and return the current run subdir used by save_multi().
+
+    If not set yet, it initializes the run folder using the provided run_key
+    (or the first inferred key if available) and pre-creates per-format dirs.
+    """
+    global ROOT_FIGDIR, RUN_FIG_SUBDIR, RUN_KEY
+
+    if ROOT_FIGDIR is None:
+        raise RuntimeError("ROOT_FIGDIR is not set. Call setup_scanpy_figs() first.")
+
+    if RUN_FIG_SUBDIR is not None:
+        if run_key is not None and RUN_KEY is not None and str(run_key) != str(RUN_KEY):
+            LOGGER.warning(
+                "get_run_subdir: run_key=%r does not match active RUN_KEY=%r; using existing run subdir.",
+                str(run_key),
+                str(RUN_KEY),
+            )
+        return RUN_FIG_SUBDIR
+
+    if run_key is not None:
+        RUN_KEY = str(run_key)
+    if RUN_KEY is None:
+        RUN_KEY = "figures"
+
+    RUN_FIG_SUBDIR = _next_round_subdir(
+        root_figdir=ROOT_FIGDIR,
+        formats=FIGURE_FORMATS,
+        run_name=RUN_KEY,
+    )
+
+    for ext in FIGURE_FORMATS:
+        (ROOT_FIGDIR / ext / RUN_FIG_SUBDIR).mkdir(parents=True, exist_ok=True)
+
+    return RUN_FIG_SUBDIR
+
+
+def get_run_round_tag(run_key: str | None = None) -> str:
+    """
+    Return the round tag (e.g., "round3") for the current figure run.
+    Ensures the run subdir is initialized.
+    """
+    run_subdir = get_run_subdir(run_key)
+    m = re.search(r"_round(\d+)$", str(run_subdir))
+    if not m:
+        return "round1"
+    return f"round{m.group(1)}"
+
+
 def save_multi(stem: str, figdir: Path, fig=None, *, savefig_kwargs: dict | None = None) -> None:
     """
     Save the current matplotlib figure (or a provided figure) to multiple formats.
@@ -4188,4 +4238,3 @@ def _make_unique_labels(labels: dict[str, str]) -> dict[str, str]:
         for raw in raws:
             out[raw] = f"{disp} [{raw}]"
     return out
-

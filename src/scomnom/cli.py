@@ -1136,6 +1136,7 @@ def _build_cfg(
     pb_alpha: float,
     pb_store_key: str,
     pb_max_genes: Optional[int],
+    pb_covariates: Optional[List[str]],
     prune_uns_de: bool,
     # plots
     plot_lfc_thresh: float,
@@ -1152,6 +1153,7 @@ def _build_cfg(
     init_logging(log_path)
 
     layers = _parse_csv_repeat(pb_counts_layer) or ["counts_cb", "counts_raw"]
+    covariates = tuple(_parse_csv_repeat(pb_covariates) or ())
 
     return MarkersAndDEConfig(
         input_path=input_path,
@@ -1190,6 +1192,7 @@ def _build_cfg(
         alpha=pb_alpha,
         store_key=pb_store_key,
         pb_max_genes=pb_max_genes,
+        pb_covariates=covariates,
         prune_uns_de=prune_uns_de,
         # plots
         plot_lfc_thresh=plot_lfc_thresh,
@@ -1242,6 +1245,7 @@ def cluster_vs_rest(
     pb_alpha: float = typer.Option(0.05, "--pb-alpha"),
     pb_store_key: str = typer.Option("scomnom_de", "--pb-store-key"),
     pb_max_genes: Optional[int] = typer.Option(None, "--pb-max-genes"),
+    pb_covariates: List[str] = typer.Option([], "--pb-covariates"),
     prune_uns_de: bool = typer.Option(False, "--prune-uns-de/--no-prune-uns-de"),
 
     plot_lfc_thresh: float = typer.Option(1.0, "--plot-lfc-thresh"),
@@ -1282,6 +1286,7 @@ def cluster_vs_rest(
         pb_alpha=pb_alpha,
         pb_store_key=pb_store_key,
         pb_max_genes=pb_max_genes,
+        pb_covariates=covariates,
         prune_uns_de=prune_uns_de,
         plot_lfc_thresh=plot_lfc_thresh,
         plot_volcano_top_label_n=plot_volcano_top_label_n,
@@ -1346,6 +1351,7 @@ def within_cluster(
     pb_alpha: float = typer.Option(0.05, "--pb-alpha"),
     pb_store_key: str = typer.Option("scomnom_de", "--pb-store-key"),
     pb_max_genes: Optional[int] = typer.Option(None, "--pb-max-genes"),
+    pb_covariates: List[str] = typer.Option([], "--pb-covariates"),
     prune_uns_de: bool = typer.Option(False, "--prune-uns-de/--no-prune-uns-de"),
 
     plot_lfc_thresh: float = typer.Option(1.0, "--plot-lfc-thresh"),
@@ -1389,6 +1395,7 @@ def within_cluster(
         pb_alpha=pb_alpha,
         pb_store_key=pb_store_key,
         pb_max_genes=pb_max_genes,
+        pb_covariates=pb_covariates,
         prune_uns_de=prune_uns_de,
         plot_lfc_thresh=plot_lfc_thresh,
         plot_volcano_top_label_n=plot_volcano_top_label_n,

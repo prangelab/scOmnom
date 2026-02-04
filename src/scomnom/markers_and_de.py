@@ -94,6 +94,13 @@ def _n_unique_samples(adata: ad.AnnData, sample_key: str) -> int:
     return int(adata.obs[str(sample_key)].astype(str).nunique(dropna=True))
 
 
+def _write_settings(out_dir: Path, name: str, lines: list[str]) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / name
+    with out_path.open("w", encoding="utf-8") as f:
+        f.write("\n".join(lines).rstrip() + "\n")
+
+
 # -----------------------------------------------------------------------------
 # Orchestrator 1: cluster-vs-rest
 # -----------------------------------------------------------------------------
@@ -234,6 +241,7 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
                 min_diff_pct=float(getattr(cfg, "min_diff_pct", 0.25)),
                 positive_only=bool(getattr(cfg, "positive_only", True)),
                 max_genes=getattr(cfg, "pb_max_genes", None),
+                covariates=tuple(getattr(cfg, "pb_covariates", ())),
             )
 
             LOGGER.info(
@@ -286,8 +294,9 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
     # ----------------------------
     results_dir = output_dir / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
-    marker_cell_dir = results_dir / "marker_tables" / "cell_based"
-    marker_pb_dir = results_dir / "marker_tables" / "pseudobulk_based"
+    run_round = plot_utils.get_run_round_tag("marker_genes")
+    marker_cell_dir = results_dir / "tables" / f"marker_tables_{run_round}" / "cell_based"
+    marker_pb_dir = results_dir / "tables" / f"marker_tables_{run_round}" / "pseudobulk_based"
 
     if run_cell and markers_key:
         io_utils.export_rank_genes_groups_tables(
@@ -306,6 +315,26 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
             filename="celllevel_markers.xlsx",
             max_genes=int(getattr(cfg, "markers_n_genes", 100)),
             tables_root=marker_cell_dir,
+        )
+        _write_settings(
+            marker_cell_dir,
+            "de_settings.txt",
+            [
+                "mode=cluster-vs-rest",
+                "engine=cell",
+                f"groupby={groupby}",
+                f"sample_key={sample_key}",
+                f"markers_method={getattr(cfg, 'markers_method', None)}",
+                f"markers_n_genes={getattr(cfg, 'markers_n_genes', None)}",
+                f"markers_rankby_abs={getattr(cfg, 'markers_rankby_abs', None)}",
+                f"markers_use_raw={getattr(cfg, 'markers_use_raw', None)}",
+                f"markers_layer={getattr(cfg, 'markers_layer', None)}",
+                f"markers_downsample_threshold={getattr(cfg, 'markers_downsample_threshold', None)}",
+                f"markers_downsample_max_per_group={getattr(cfg, 'markers_downsample_max_per_group', None)}",
+                f"min_pct={getattr(cfg, 'min_pct', None)}",
+                f"min_diff_pct={getattr(cfg, 'min_diff_pct', None)}",
+                "design_formula=NA (cell-level)",
+            ],
         )
     else:
         LOGGER.info("cluster-vs-rest: skipping cell-level exports (cell markers did not run).")
@@ -326,6 +355,31 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
             output_dir=output_dir,
             store_key=store_key,
             tables_root=marker_pb_dir,
+        )
+        covariates = tuple(getattr(cfg, "pb_covariates", ()))
+        design_terms = ["sample", *covariates, "binary_cluster"]
+        _write_settings(
+            marker_pb_dir,
+            "de_settings.txt",
+            [
+                "mode=cluster-vs-rest",
+                "engine=pseudobulk",
+                f"groupby={groupby}",
+                f"sample_key={sample_key}",
+                f"counts_layer={counts_layer_used}",
+                f"min_cells_per_sample_group={getattr(cfg, 'min_cells_target', None)}",
+                f"min_samples_per_level={getattr(cfg, 'min_samples_per_level', None)}",
+                f"alpha={getattr(cfg, 'alpha', None)}",
+                f"shrink_lfc={getattr(cfg, 'shrink_lfc', None)}",
+                f"min_total_counts={getattr(cfg, 'pb_min_total_counts', None)}",
+                f"min_pct={getattr(cfg, 'min_pct', None)}",
+                f"min_diff_pct={getattr(cfg, 'min_diff_pct', None)}",
+                f"positive_only={getattr(cfg, 'positive_only', None)}",
+                f"pb_max_genes={getattr(cfg, 'pb_max_genes', None)}",
+                f"pb_covariates={covariates}",
+                f"design_formula={' + '.join(design_terms)}",
+                "contrast=binary_cluster: target vs rest",
+            ],
         )
     else:
         LOGGER.info("cluster-vs-rest: skipping pseudobulk exports (pseudobulk disabled or not requested).")
@@ -430,8 +484,9 @@ def run_within_cluster(cfg) -> ad.AnnData:
 
     results_dir = output_dir / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
-    de_cell_dir = results_dir / "de_tables" / "cell_based"
-    de_pb_dir = results_dir / "de_tables" / "pseudobulk_based"
+    run_round = plot_utils.get_run_round_tag("marker_genes")
+    de_cell_dir = results_dir / "tables" / f"de_tables_{run_round}" / "cell_based"
+    de_pb_dir = results_dir / "tables" / f"de_tables_{run_round}" / "pseudobulk_based"
 
     # ----------------------------
     # Resolve groupby + sample_key
@@ -528,6 +583,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                 min_diff_pct=float(getattr(cfg, "min_diff_pct", 0.25)),
                 positive_only=bool(getattr(cfg, "positive_only", True)),
                 max_genes=getattr(cfg, "pb_max_genes", None),
+                covariates=tuple(getattr(cfg, "pb_covariates", ())),
             )
 
             groups = pd.Index(pd.unique(adata.obs[str(groupby)].astype(str))).sort_values()
@@ -604,6 +660,28 @@ def run_within_cluster(cfg) -> ad.AnnData:
             tables_root=de_cell_dir,
             filename="contrast_conditional_de.xlsx",
         )
+        _write_settings(
+            de_cell_dir,
+            "de_settings.txt",
+            [
+                "mode=within-cluster",
+                "engine=cell",
+                f"groupby={groupby}",
+                f"contrast_key={contrast_key}",
+                f"contrast_methods={tuple(getattr(cfg, 'contrast_methods', ())) }",
+                f"contrast_min_cells_per_level={getattr(cfg, 'contrast_min_cells_per_level', None)}",
+                f"contrast_max_cells_per_level={getattr(cfg, 'contrast_max_cells_per_level', None)}",
+                f"contrast_min_total_counts={getattr(cfg, 'contrast_min_total_counts', None)}",
+                f"contrast_pseudocount={getattr(cfg, 'contrast_pseudocount', None)}",
+                f"contrast_cl_alpha={getattr(cfg, 'contrast_cl_alpha', None)}",
+                f"contrast_cl_min_abs_logfc={getattr(cfg, 'contrast_cl_min_abs_logfc', None)}",
+                f"contrast_lr_min_abs_coef={getattr(cfg, 'contrast_lr_min_abs_coef', None)}",
+                f"contrast_pb_min_abs_log2fc={getattr(cfg, 'contrast_pb_min_abs_log2fc', None)}",
+                f"min_pct={getattr(cfg, 'min_pct', None)}",
+                f"min_diff_pct={getattr(cfg, 'min_diff_pct', None)}",
+                "design_formula=NA (cell-level)",
+            ],
+        )
         ran_cell_contrast = True
     else:
         LOGGER.info("within-cluster: skipping cell-level within-cluster contrasts (run=%r).", mode)
@@ -654,6 +732,31 @@ def run_within_cluster(cfg) -> ad.AnnData:
             store_key=store_key,
             condition_key=str(condition_key),
             tables_root=de_pb_dir,
+        )
+        covariates = tuple(getattr(cfg, "pb_covariates", ()))
+        design_terms = ["sample", *covariates, str(condition_key)]
+        _write_settings(
+            de_pb_dir,
+            "de_settings.txt",
+            [
+                "mode=within-cluster",
+                "engine=pseudobulk",
+                f"groupby={groupby}",
+                f"condition_key={condition_key}",
+                f"sample_key={sample_key}",
+                f"counts_layer={counts_layer_used}",
+                f"min_cells_per_sample_group={getattr(cfg, 'min_cells_condition', None)}",
+                f"min_samples_per_level={getattr(cfg, 'min_samples_per_level', None)}",
+                f"alpha={getattr(cfg, 'alpha', None)}",
+                f"shrink_lfc={getattr(cfg, 'shrink_lfc', None)}",
+                f"min_total_counts={getattr(cfg, 'pb_min_total_counts', None)}",
+                f"min_pct={getattr(cfg, 'min_pct', None)}",
+                f"min_diff_pct={getattr(cfg, 'min_diff_pct', None)}",
+                f"positive_only={getattr(cfg, 'positive_only', None)}",
+                f"pb_max_genes={getattr(cfg, 'pb_max_genes', None)}",
+                f"pb_covariates={covariates}",
+                f"design_formula={' + '.join(design_terms)}",
+            ],
         )
     else:
         LOGGER.info("within-cluster: skipping pseudobulk exports (not run).")
