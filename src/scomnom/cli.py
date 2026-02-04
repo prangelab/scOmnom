@@ -1294,7 +1294,7 @@ def cluster_vs_rest(
         pb_max_genes=pb_max_genes,
         pb_min_counts_per_lib=pb_min_counts_per_lib,
         pb_min_lib_pct=pb_min_lib_pct,
-        pb_covariates=covariates,
+        pb_covariates=tuple(_parse_csv_repeat(pb_covariates) or ()),
         prune_uns_de=prune_uns_de,
         plot_lfc_thresh=plot_lfc_thresh,
         plot_volcano_top_label_n=plot_volcano_top_label_n,
