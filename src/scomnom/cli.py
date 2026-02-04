@@ -1529,6 +1529,10 @@ def within_cluster(
     else:
         msigdb_gene_sets = [x.strip() for x in msigdb_gene_sets_cli.split(",") if x.strip()]
 
+    de_source = str(de_decoupler_source or "auto").lower()
+    if de_source not in ("auto", "all", "pseudobulk", "cell", "none"):
+        raise typer.BadParameter("Invalid --de-decoupler-source. Use: auto, all, pseudobulk, cell, none.")
+
     cfg = _build_cfg(
         input_path=input_path,
         output_dir=output_dir,
