@@ -652,6 +652,8 @@ class MarkersAndDEConfig(BaseModel):
     min_samples_per_level: int = 2
     shrink_lfc: bool = True
     pb_min_total_counts: int = 10
+    pb_min_counts_per_lib: int = 0
+    pb_min_lib_pct: float = 0.0
     pb_max_genes: Optional[int] = None
     pb_covariates: Tuple[str, ...] = ()
     prune_uns_de: bool = False

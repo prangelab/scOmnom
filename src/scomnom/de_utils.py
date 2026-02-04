@@ -93,6 +93,8 @@ class PseudobulkDEOptions:
     positive_only: bool = True
     max_genes: Optional[int] = None
     covariates: Tuple[str, ...] = ()
+    min_counts_per_lib: int = 0
+    min_lib_pct: float = 0.0
 
 
 def _collect_sample_covariates(
@@ -139,6 +141,31 @@ def _collect_sample_covariates(
             )
 
     return sample_covs, covariates
+
+
+def _celllevel_pct_mask(
+    adata: ad.AnnData,
+    *,
+    mask: np.ndarray,
+    counts_layer: Optional[str],
+    min_pct: float,
+) -> np.ndarray:
+    min_pct = float(min_pct)
+    n = int(np.sum(mask))
+    if n == 0 or min_pct <= 0.0:
+        return np.ones(adata.n_vars, dtype=bool)
+
+    X = _get_counts_matrix(adata, counts_layer=counts_layer)
+    X_sub = X[mask]
+
+    if sp.issparse(X_sub):
+        nnz = np.asarray(X_sub.getnnz(axis=0)).ravel()
+        pct = nnz / float(n)
+    else:
+        pct = (X_sub > 0).mean(axis=0)
+        pct = np.asarray(pct).ravel()
+
+    return pct >= min_pct
 
 
 def _pydeseq2_cluster_worker(payload: dict) -> tuple[str, pd.DataFrame, dict]:
@@ -787,10 +814,11 @@ def de_cluster_vs_rest_pseudobulk(
     results: Dict[str, pd.DataFrame] = {}
     summary_rows: list[dict] = []
 
-    min_pct = float(getattr(opts, "min_pct", 0.0))
-    min_diff_pct = float(getattr(opts, "min_diff_pct", 0.0))
     min_total = int(getattr(opts, "min_total_counts", 10))
     max_genes = getattr(opts, "max_genes", None)
+    min_pct = float(getattr(opts, "min_pct", 0.0))
+    min_counts_per_lib = int(getattr(opts, "min_counts_per_lib", 0))
+    min_lib_pct = float(getattr(opts, "min_lib_pct", 0.0))
 
     # ------------------------------------------------------------------
     # Build per-cluster payloads (with progress logs)
@@ -887,28 +915,38 @@ def de_cluster_vs_rest_pseudobulk(
                         v[v < 0] = 0
                         out[i, :] = v.astype(np.int64, copy=False)
 
-                # gene prefilter: total counts
+                # gene prefilter: total counts + cell-level prevalence (Seurat-style: either group)
                 keep_total = (out.sum(axis=0) >= min_total)
-                if not np.any(keep_total):
+                cell_mask = adata.obs[str(group_key)].astype(str).to_numpy() == cl_str
+                keep_target = _celllevel_pct_mask(
+                    adata,
+                    mask=cell_mask,
+                    counts_layer=counts_layer,
+                    min_pct=min_pct,
+                )
+                keep_rest = _celllevel_pct_mask(
+                    adata,
+                    mask=~cell_mask,
+                    counts_layer=counts_layer,
+                    min_pct=min_pct,
+                )
+                keep = keep_total & (keep_target | keep_rest)
+                if not np.any(keep):
                     results[cl_str] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
                     summary_rows.append({"cluster": cl_str, "status": "skipped", "reason": "no genes left after filtering"})
                     n_skipped += 1
                 else:
-                    out2 = out[:, keep_total]
-                    genes2 = adata.var_names.to_numpy()[keep_total].astype(str).tolist()
+                    out2 = out[:, keep]
+                    genes2 = adata.var_names.to_numpy()[keep].astype(str).tolist()
 
-                    # min_pct / min_diff_pct prevalence filter (library prevalence)
                     metadata_tmp = pd.DataFrame(metadata_rows, index=pd.Index(pb_index, name="pb_id"))
                     counts_tmp = pd.DataFrame(out2, index=metadata_tmp.index, columns=genes2)
 
-                    counts_tmp, prev_meta = _apply_min_pct_filters_pseudobulk(
-                        counts_tmp,
-                        labels=metadata_tmp["binary_cluster"],
-                        level_A="target",
-                        level_B="rest",
-                        min_pct=min_pct,
-                        min_diff_pct=min_diff_pct,
-                    )
+                    # aggregate-level library filter: >= min_counts_per_lib in >= min_lib_pct of libs
+                    if min_counts_per_lib > 0 and min_lib_pct > 0.0:
+                        lib_frac = (counts_tmp >= int(min_counts_per_lib)).sum(axis=0) / float(counts_tmp.shape[0])
+                        keep_lib = (lib_frac >= float(min_lib_pct)).to_numpy()
+                        counts_tmp = counts_tmp.loc[:, keep_lib].copy()
                     if max_genes is not None and counts_tmp.shape[1] > int(max_genes):
                         # Keep top genes by total counts across libraries (debug / speed cap)
                         totals = counts_tmp.sum(axis=0).sort_values(ascending=False)
@@ -920,8 +958,7 @@ def de_cluster_vs_rest_pseudobulk(
                             {
                                 "cluster": cl_str,
                                 "status": "skipped",
-                                "reason": "no genes left after min_pct/min_diff_pct filtering",
-                                **prev_meta,
+                                "reason": "no genes left after filtering",
                             }
                         )
                         n_skipped += 1
@@ -968,7 +1005,6 @@ def de_cluster_vs_rest_pseudobulk(
                                     "n_target_samples": int(len(samples)),
                                     "n_libraries": int(counts_tmp.shape[0]),
                                     "min_cells_per_sample_group": int(opts.min_cells_per_sample_group),
-                                    **prev_meta,
                                 }
                             )
 
@@ -1301,17 +1337,34 @@ def de_condition_within_group_pseudobulk(
     if counts.shape[1] == 0:
         return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
 
-    # Seurat-like prevalence gates (library prevalence by condition)
+    # Cell-level prevalence filter within this cluster (min_pct on either condition)
     min_pct = float(getattr(opts, "min_pct", 0.0))
-    min_diff_pct = float(getattr(opts, "min_diff_pct", 0.0))
-    counts, _prev_meta = _apply_min_pct_filters_pseudobulk(
-        counts,
-        labels=metadata[condition_key],
-        level_A=str(test),
-        level_B=str(reference),
-        min_pct=min_pct,
-        min_diff_pct=min_diff_pct,
-    )
+    if min_pct > 0.0:
+        mask_cluster = adata.obs[str(group_key)].astype(str).to_numpy() == str(group_value)
+        mask_test = mask_cluster & (adata.obs[str(condition_key)].astype(str).to_numpy() == str(test))
+        mask_ref = mask_cluster & (adata.obs[str(condition_key)].astype(str).to_numpy() == str(reference))
+        keep_test = _celllevel_pct_mask(
+            adata,
+            mask=mask_test,
+            counts_layer=counts_layer,
+            min_pct=min_pct,
+        )
+        keep_ref = _celllevel_pct_mask(
+            adata,
+            mask=mask_ref,
+            counts_layer=counts_layer,
+            min_pct=min_pct,
+        )
+        keep = keep_test | keep_ref
+        counts = counts.loc[:, keep]
+    # aggregate-level library filter: >= min_counts_per_lib in >= min_lib_pct of libs
+    min_counts_per_lib = int(getattr(opts, "min_counts_per_lib", 0))
+    min_lib_pct = float(getattr(opts, "min_lib_pct", 0.0))
+    if min_counts_per_lib > 0 and min_lib_pct > 0.0 and counts.shape[1] > 0:
+        lib_frac = (counts >= int(min_counts_per_lib)).sum(axis=0) / float(counts.shape[0])
+        keep_lib = (lib_frac >= float(min_lib_pct)).to_numpy()
+        counts = counts.loc[:, keep_lib].copy()
+
     if max_genes is not None and counts.shape[1] > int(max_genes):
         totals = counts.sum(axis=0).sort_values(ascending=False)
         keep_genes = totals.index[: int(max_genes)]

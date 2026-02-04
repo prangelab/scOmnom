@@ -241,6 +241,8 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
                 min_diff_pct=float(getattr(cfg, "min_diff_pct", 0.25)),
                 positive_only=bool(getattr(cfg, "positive_only", True)),
                 max_genes=getattr(cfg, "pb_max_genes", None),
+                min_counts_per_lib=int(getattr(cfg, "pb_min_counts_per_lib", 0)),
+                min_lib_pct=float(getattr(cfg, "pb_min_lib_pct", 0.0)),
                 covariates=tuple(getattr(cfg, "pb_covariates", ())),
             )
 
@@ -372,8 +374,10 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
                 f"alpha={getattr(cfg, 'alpha', None)}",
                 f"shrink_lfc={getattr(cfg, 'shrink_lfc', None)}",
                 f"min_total_counts={getattr(cfg, 'pb_min_total_counts', None)}",
+                f"min_counts_per_lib={getattr(cfg, 'pb_min_counts_per_lib', None)}",
+                f"min_lib_pct={getattr(cfg, 'pb_min_lib_pct', None)}",
                 f"min_pct={getattr(cfg, 'min_pct', None)}",
-                f"min_diff_pct={getattr(cfg, 'min_diff_pct', None)}",
+                "min_diff_pct=NA (unused for pseudobulk)",
                 f"positive_only={getattr(cfg, 'positive_only', None)}",
                 f"pb_max_genes={getattr(cfg, 'pb_max_genes', None)}",
                 f"pb_covariates={covariates}",
@@ -583,6 +587,8 @@ def run_within_cluster(cfg) -> ad.AnnData:
                 min_diff_pct=float(getattr(cfg, "min_diff_pct", 0.25)),
                 positive_only=bool(getattr(cfg, "positive_only", True)),
                 max_genes=getattr(cfg, "pb_max_genes", None),
+                min_counts_per_lib=int(getattr(cfg, "pb_min_counts_per_lib", 0)),
+                min_lib_pct=float(getattr(cfg, "pb_min_lib_pct", 0.0)),
                 covariates=tuple(getattr(cfg, "pb_covariates", ())),
             )
 
@@ -750,8 +756,10 @@ def run_within_cluster(cfg) -> ad.AnnData:
                 f"alpha={getattr(cfg, 'alpha', None)}",
                 f"shrink_lfc={getattr(cfg, 'shrink_lfc', None)}",
                 f"min_total_counts={getattr(cfg, 'pb_min_total_counts', None)}",
+                f"min_counts_per_lib={getattr(cfg, 'pb_min_counts_per_lib', None)}",
+                f"min_lib_pct={getattr(cfg, 'pb_min_lib_pct', None)}",
                 f"min_pct={getattr(cfg, 'min_pct', None)}",
-                f"min_diff_pct={getattr(cfg, 'min_diff_pct', None)}",
+                "min_diff_pct=NA (unused for pseudobulk)",
                 f"positive_only={getattr(cfg, 'positive_only', None)}",
                 f"pb_max_genes={getattr(cfg, 'pb_max_genes', None)}",
                 f"pb_covariates={covariates}",
