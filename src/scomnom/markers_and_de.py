@@ -209,6 +209,10 @@ def _collect_cell_contrast_tables(
         cc = multi.get(str(contrast_key), {})
     else:
         cc = block.get("contrast_conditional", {})
+        if isinstance(cc, dict):
+            cc_key = cc.get("contrast_key", None)
+            if cc_key is not None and str(cc_key) != str(contrast_key):
+                return {}
 
     results = cc.get("results", {}) if isinstance(cc, dict) else {}
     if not isinstance(results, dict) or not results:
@@ -820,6 +824,14 @@ def run_within_cluster(cfg) -> ad.AnnData:
                 if isinstance(cc_block, dict):
                     adata.uns[store_key].setdefault("contrast_conditional_multi", {})
                     adata.uns[store_key]["contrast_conditional_multi"][str(contrast_key)] = cc_block
+                    LOGGER.info(
+                        "within-cluster: stored cell-level results for contrast_key=%r (multi_keys=%s, single_key=%r)",
+                        str(contrast_key),
+                        sorted(list(adata.uns[store_key]["contrast_conditional_multi"].keys())),
+                        str(adata.uns[store_key]["contrast_conditional"].get("contrast_key"))
+                        if isinstance(adata.uns[store_key].get("contrast_conditional"), dict)
+                        else None,
+                    )
 
             # tables for contrast-conditional markers
             io_utils.export_contrast_conditional_markers_tables(
@@ -934,6 +946,19 @@ def run_within_cluster(cfg) -> ad.AnnData:
                 continue
 
             for source, tables_by_contrast in sources:
+                if store_key in adata.uns and isinstance(adata.uns.get(store_key), dict):
+                    multi_keys = sorted(
+                        list(adata.uns[store_key].get("contrast_conditional_multi", {}).keys())
+                    )
+                    single_key = None
+                    if isinstance(adata.uns[store_key].get("contrast_conditional"), dict):
+                        single_key = adata.uns[store_key]["contrast_conditional"].get("contrast_key")
+                    LOGGER.info(
+                        "DE-decoupler: pre-run store status for condition_key=%r (multi_keys=%s, single_key=%r)",
+                        str(condition_key),
+                        multi_keys,
+                        single_key,
+                    )
                 for contrast, tables in tables_by_contrast.items():
                     LOGGER.info(
                         "DE-decoupler: running source=%r condition_key=%r contrast=%r stat_col=%r",
