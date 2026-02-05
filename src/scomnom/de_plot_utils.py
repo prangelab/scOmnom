@@ -967,7 +967,7 @@ def plot_marker_genes_pseudobulk(
                 groupby=str(groupby),
                 use_raw=bool(use_raw),
                 layer=layer,
-                dendrogram=False,
+                dendrogram=True,
                 show=False,
             )
             plot_utils.save_multi(stem=f"dotplot__{cl}", figdir=d_dot, fig=fig)
@@ -1184,7 +1184,7 @@ def plot_marker_genes_ranksum(
                 groupby=str(groupby),
                 use_raw=bool(use_raw),
                 layer=layer,
-                dendrogram=False,
+                dendrogram=True,
                 show=False,
             )
             plot_utils.save_multi(stem=f"dotplot__{cl}", figdir=d_dot, fig=fig)
