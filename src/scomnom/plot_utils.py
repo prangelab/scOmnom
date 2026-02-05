@@ -532,6 +532,8 @@ def _finalize_categorical_x(
 
 def _clean_axes(ax):
     ax.grid(False)
+    ax.xaxis.grid(False)
+    ax.yaxis.grid(False)
     for spine in ["left", "bottom"]:
         ax.spines[spine].set_visible(True)
         ax.spines[spine].set_alpha(0.5)
@@ -3353,6 +3355,9 @@ def plot_cluster_qc_summary(
         df[m].plot(kind="bar", ax=ax, color="steelblue", edgecolor="black")
         ax.set_title(m.replace("_", " "))
         ax.set_xlabel("")  # only bottom axis will get label
+        ax.grid(False)
+        ax.xaxis.grid(False)
+        ax.yaxis.grid(False)
 
     axs[-1].set_xlabel("Cluster")
 
@@ -3367,6 +3372,8 @@ def plot_cluster_qc_summary(
     fig.subplots_adjust(hspace=0.25)
 
     fig.tight_layout()
+    _finalize_categorical_x(fig, axs[-1], rotate=45, ha="right", bottom=0.40)
+    fig.subplots_adjust(bottom=max(fig.subplotpars.bottom, 0.34))
     save_multi(stem, figdir, fig)
     plt.close(fig)
 
@@ -3402,11 +3409,16 @@ def plot_cluster_silhouette_by_cluster(
     ax.set_title("Silhouette distribution per cluster")
     ax.set_xlabel("Cluster")
     ax.set_ylabel("Silhouette")
+    ax.grid(False)
+    ax.xaxis.grid(False)
+    ax.yaxis.grid(False)
 
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
 
     fig.tight_layout()
     _finalize_categorical_x(fig, ax, rotate=45, ha="right", bottom=0.45)
+    _reserve_bottom_for_xticklabels(fig, ax, rotation=45, fontsize=9, ha="right")
+    fig.subplots_adjust(bottom=max(fig.subplotpars.bottom, 0.34))
     save_multi(stem, figdir)
     plt.close(fig)
 
@@ -3436,12 +3448,8 @@ def plot_cluster_batch_composition(
     )
     frac = df.div(df.sum(axis=1), axis=0)
 
-    fig, ax = plt.subplots(figsize=(max(8, 0.40 * len(df)), 4))
+    fig, ax = plt.subplots(figsize=(max(8, 0.40 * len(df)), 4.5))
     _clean_axes(ax)
-
-    # Reserve bottom for rotated x tick labels
-    _reserve_bottom_for_xticklabels(fig, ax, rotation=45, fontsize=9, ha="right")
-    fig.subplots_adjust(bottom=max(fig.subplotpars.bottom, 0.36))
 
     # Plot WITHOUT pandas legend (we'll add a clean one outside)
     frac.plot(
@@ -3454,6 +3462,7 @@ def plot_cluster_batch_composition(
         legend=False,
     )
 
+    ax.grid(False)
     ax.set_ylabel("Fraction")
     ax.set_title("Batch composition per cluster")
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
@@ -3476,8 +3485,16 @@ def plot_cluster_batch_composition(
             title_fontsize=10,
         )
 
+    _reserve_bottom_for_xticklabels(fig, ax, rotation=45, fontsize=9, ha="right")
+
     # Keep your existing final x-axis layout helper
-    _finalize_categorical_x(fig, ax, rotate=45, ha="right", bottom=0.42)
+    _finalize_categorical_x(
+        fig,
+        ax,
+        rotate=45,
+        ha="right",
+        bottom=max(fig.subplotpars.bottom, 0.42),
+    )
 
     save_multi(stem, figdir, fig)
     plt.close(fig)

@@ -379,7 +379,7 @@ class ClusterAnnotateConfig(BaseModel):
         description="Decoupler method (default: consensus).",
     )
     decoupler_consensus_methods: Optional[List[str]] = ["ulm", "mlm", "wsum"]
-    decoupler_bar_split_signed: bool = True
+    decoupler_bar_split_signed: bool = False
     decoupler_bar_top_n_up: Optional[int] = None
     decoupler_bar_top_n_down: Optional[int] = None
 

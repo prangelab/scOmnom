@@ -834,7 +834,7 @@ def cluster_and_annotate(
         help="[Decoupler] Minimum targets per source.",
     ),
     decoupler_bar_split_signed: bool = typer.Option(
-        True,
+        False,
         "--decoupler-bar-split-signed/--no-decoupler-bar-split-signed",
         help="[Decoupler] Split barplots into top up/down activities (DoRothEA/MSigDB).",
     ),
