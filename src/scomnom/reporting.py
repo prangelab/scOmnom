@@ -641,7 +641,7 @@ def generate_qc_report(*, fig_root: Path, fmt: str, cfg, version: str, adata, ru
     fmt = fmt.lower().lstrip(".")
 
     run_dir = Path(run_dir).resolve() if run_dir is not None else _find_latest_run_dir(
-        fig_root=fig_root, fmt=fmt, module_prefix="qc"
+        fig_root=fig_root, fmt=fmt, module_prefix="QC_plots"
     )
     if run_dir is None:
         raise RuntimeError(f"Could not locate qc figure run dir under {fig_root}/{fmt}/")
