@@ -833,6 +833,21 @@ def cluster_and_annotate(
         "--decoupler-min-n-targets",
         help="[Decoupler] Minimum targets per source.",
     ),
+    decoupler_bar_split_signed: bool = typer.Option(
+        True,
+        "--decoupler-bar-split-signed/--no-decoupler-bar-split-signed",
+        help="[Decoupler] Split barplots into top up/down activities (DoRothEA/MSigDB).",
+    ),
+    decoupler_bar_top_n_up: Optional[int] = typer.Option(
+        None,
+        "--decoupler-bar-top-n-up",
+        help="[Decoupler] Top N positive activities for split barplots.",
+    ),
+    decoupler_bar_top_n_down: Optional[int] = typer.Option(
+        None,
+        "--decoupler-bar-top-n-down",
+        help="[Decoupler] Top N negative activities for split barplots.",
+    ),
 
     # MSigDB
     msigdb_gene_sets_cli: Optional[str] = typer.Option(
@@ -1504,6 +1519,12 @@ def within_cluster(
         callback=validate_decoupler_consensus_methods,
     ),
     decoupler_min_n_targets: int = typer.Option(5, "--decoupler-min-n-targets"),
+    decoupler_bar_split_signed: bool = typer.Option(
+        True,
+        "--decoupler-bar-split-signed/--no-decoupler-bar-split-signed",
+    ),
+    decoupler_bar_top_n_up: Optional[int] = typer.Option(None, "--decoupler-bar-top-n-up"),
+    decoupler_bar_top_n_down: Optional[int] = typer.Option(None, "--decoupler-bar-top-n-down"),
     msigdb_gene_sets_cli: Optional[str] = typer.Option(
         None,
         "--msigdb-gene-sets",
