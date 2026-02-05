@@ -1334,12 +1334,6 @@ def cluster_vs_rest(
     ),
     decoupler_bar_top_n_up: Optional[int] = typer.Option(None, "--decoupler-bar-top-n-up"),
     decoupler_bar_top_n_down: Optional[int] = typer.Option(None, "--decoupler-bar-top-n-down"),
-    decoupler_bar_split_signed: bool = typer.Option(
-        True,
-        "--decoupler-bar-split-signed/--no-decoupler-bar-split-signed",
-    ),
-    decoupler_bar_top_n_up: Optional[int] = typer.Option(None, "--decoupler-bar-top-n-up"),
-    decoupler_bar_top_n_down: Optional[int] = typer.Option(None, "--decoupler-bar-top-n-down"),
     msigdb_gene_sets_cli: Optional[str] = typer.Option(
         None,
         "--msigdb-gene-sets",
