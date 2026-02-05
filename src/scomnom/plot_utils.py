@@ -6,6 +6,7 @@ from typing import Dict, Sequence, Mapping, Iterable, List, Any
 import logging
 from sklearn.metrics import silhouette_samples
 
+import math
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
@@ -18,6 +19,65 @@ import textwrap
 import seaborn as sns
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _extract_cnn_token(label: str) -> str:
+    s = str(label or "")
+    m = re.search(r"\b(C\d+)\b", s)
+    if m:
+        return m.group(1)
+    m2 = re.search(r"(C\d+)", s)
+    if m2:
+        return m2.group(1)
+    return s.split()[0][:8] if s.strip() else "C?"
+
+
+def _cluster_color_map(adata, label_key: str) -> dict[str, str]:
+    palette = adata.uns.get(f"{label_key}_colors", None)
+    if not palette:
+        return {}
+    try:
+        cats = list(adata.obs[label_key].cat.categories)
+    except Exception:
+        cats = list(pd.Series(adata.obs[label_key].astype(str)).unique())
+    return {str(cat): palette[i % len(palette)] for i, cat in enumerate(cats)}
+
+
+def _add_outside_legend(
+    ax,
+    labels: list[str],
+    colors: list[str],
+    title: str,
+    *,
+    max_rows: int = 12,
+    face: str = "full",
+) -> None:
+    if not labels:
+        return
+    ncol = max(1, math.ceil(len(labels) / max_rows))
+    fig = ax.figure
+    fig.subplots_adjust(right=0.80)
+    if face == "none":
+        handles = [
+            mpl.patches.Patch(facecolor="none", edgecolor=c, linewidth=1.2, label=l)
+            for l, c in zip(labels, colors)
+        ]
+    else:
+        handles = [
+            mpl.patches.Patch(facecolor=c, edgecolor="black", linewidth=0.4, label=l)
+            for l, c in zip(labels, colors)
+        ]
+    ax.legend(
+        handles=handles,
+        title=title,
+        loc="upper left",
+        bbox_to_anchor=(1.01, 1.0),
+        borderaxespad=0.0,
+        frameon=True,
+        fontsize=9,
+        title_fontsize=10,
+        ncol=ncol,
+    )
 
 # -------------------------------------------------------------------------
 # Global styling
@@ -2782,7 +2842,7 @@ def plot_cluster_tree(
     ax.grid(False)
     plt.tight_layout()
 
-    save_multi(stem, figdir, fig)
+    save_multi(stem, figdir, fig, savefig_kwargs={"bbox_inches": "tight"})
 
 
 def plot_compaction_flow(
@@ -3006,7 +3066,7 @@ def plot_compaction_flow(
     ax.grid(False)
     plt.tight_layout()
 
-    save_multi(stem, figdir, fig)
+    save_multi(stem, figdir, fig, savefig_kwargs={"bbox_inches": "tight"})
 
 
 
@@ -3281,17 +3341,21 @@ def plot_cluster_sizes(
 
     counts = adata.obs[label_key].value_counts().sort_index()
     clusters = counts.index.tolist()
+    short_labels = [_extract_cnn_token(c) for c in clusters]
     sizes = counts.values.astype(int)
     total = sizes.sum()
 
     # colors from Scanpy palette
-    palette = adata.uns.get(f"{label_key}_colors", None)
-    if palette is None:
+    color_map = _cluster_color_map(adata, label_key)
+    if color_map:
+        colors = [color_map.get(c) for c in clusters]
+        if any(c is None for c in colors):
+            cmap = plt.get_cmap("tab20")
+            colors = [c if c is not None else cmap(i % cmap.N) for i, c in enumerate(colors)]
+    else:
         LOGGER.warning("No cluster palette found for '%s'; using default.", label_key)
         cmap = plt.get_cmap("tab20")
         colors = [cmap(i % cmap.N) for i in range(len(clusters))]
-    else:
-        colors = palette[:len(clusters)]
 
     fig, ax = plt.subplots(figsize=(max(8, 0.35 * len(clusters)), 4))
     _clean_axes(ax)
@@ -3313,15 +3377,16 @@ def plot_cluster_sizes(
             )
 
     ax.set_xticks(x)
-    ax.set_xticklabels(clusters)
+    ax.set_xticklabels(short_labels)
     ax.set_ylabel("Cells")
     ax.set_title("Cluster sizes")
+    _add_outside_legend(ax, clusters, colors, title="Cluster")
 
     fig.tight_layout()
     _finalize_categorical_x(fig, ax, rotate=45, ha="right", bottom=0.40)
     _reserve_bottom_for_xticklabels(fig, ax, rotation=45, fontsize=9, ha="right")
     fig.subplots_adjust(bottom=max(fig.subplotpars.bottom, 0.34))
-    save_multi(stem, figdir)
+    save_multi(stem, figdir, fig, savefig_kwargs={"bbox_inches": "tight"})
     plt.close(fig)
 
 
@@ -3342,6 +3407,17 @@ def plot_cluster_qc_summary(
         return
 
     df = adata.obs[[label_key] + metrics].groupby(label_key).mean()
+    clusters = df.index.astype(str).tolist()
+    short_labels = [_extract_cnn_token(c) for c in clusters]
+    color_map = _cluster_color_map(adata, label_key)
+    if color_map:
+        colors = [color_map.get(c) for c in clusters]
+        if any(c is None for c in colors):
+            cmap = plt.get_cmap("tab20")
+            colors = [c if c is not None else cmap(i % cmap.N) for i, c in enumerate(colors)]
+    else:
+        cmap = plt.get_cmap("tab20")
+        colors = [cmap(i % cmap.N) for i in range(len(clusters))]
 
     n = df.shape[0]
     fig_w = max(10, 0.35 * n)
@@ -3350,9 +3426,10 @@ def plot_cluster_qc_summary(
     fig, axs = plt.subplots(3, 1, figsize=(fig_w, 7.5), sharex=True)
     fig.set_constrained_layout(False)
 
+    x = np.arange(len(clusters))
     for ax, m in zip(axs, metrics):
         _clean_axes(ax)
-        df[m].plot(kind="bar", ax=ax, color="steelblue", edgecolor="black")
+        ax.bar(x, df[m].values, color=colors, edgecolor="black")
         ax.set_title(m.replace("_", " "))
         ax.set_xlabel("")  # only bottom axis will get label
         ax.grid(False)
@@ -3360,6 +3437,8 @@ def plot_cluster_qc_summary(
         ax.yaxis.grid(False)
 
     axs[-1].set_xlabel("Cluster")
+    axs[-1].set_xticks(x)
+    axs[-1].set_xticklabels(short_labels)
 
     # Hide x tick labels on upper panels
     for ax in axs[:-1]:
@@ -3371,10 +3450,11 @@ def plot_cluster_qc_summary(
     # Reduce vertical spacing a bit
     fig.subplots_adjust(hspace=0.25)
 
+    _add_outside_legend(axs[-1], clusters, colors, title="Cluster")
     fig.tight_layout()
     _finalize_categorical_x(fig, axs[-1], rotate=45, ha="right", bottom=0.40)
     fig.subplots_adjust(bottom=max(fig.subplotpars.bottom, 0.34))
-    save_multi(stem, figdir, fig)
+    save_multi(stem, figdir, fig, savefig_kwargs={"bbox_inches": "tight"})
     plt.close(fig)
 
 
@@ -3400,11 +3480,40 @@ def plot_cluster_silhouette_by_cluster(
     silvals = silhouette_samples(X, labels, metric="euclidean")
 
     df = pd.DataFrame({"cluster": labels, "silhouette": silvals})
+    try:
+        clusters = list(adata.obs[label_key].cat.categories)
+    except Exception:
+        clusters = sorted(df["cluster"].astype(str).unique().tolist())
+    clusters = [str(c) for c in clusters]
+    short_labels = [_extract_cnn_token(c) for c in clusters]
+    color_map = _cluster_color_map(adata, label_key)
+    if color_map:
+        colors = [color_map.get(c) for c in clusters]
+        if any(c is None for c in colors):
+            cmap = plt.get_cmap("tab20")
+            colors = [c if c is not None else cmap(i % cmap.N) for i, c in enumerate(colors)]
+    else:
+        cmap = plt.get_cmap("tab20")
+        colors = [cmap(i % cmap.N) for i in range(len(clusters))]
 
     fig, ax = plt.subplots(figsize=(max(10, 0.35 * df["cluster"].nunique()), 4.5))
     _clean_axes(ax)
 
-    df.boxplot(column="silhouette", by="cluster", ax=ax)
+    data = [df.loc[df["cluster"].astype(str) == c, "silhouette"].values for c in clusters]
+    bp = ax.boxplot(data, labels=short_labels, patch_artist=True)
+    for i, box in enumerate(bp.get("boxes", [])):
+        box.set(facecolor="none", edgecolor=colors[i], linewidth=1.2)
+    for i, med in enumerate(bp.get("medians", [])):
+        med.set(color=colors[i], linewidth=1.2)
+    whiskers = bp.get("whiskers", [])
+    caps = bp.get("caps", [])
+    for i in range(len(colors)):
+        for w in whiskers[2 * i: 2 * i + 2]:
+            w.set(color=colors[i], linewidth=1.0)
+        for c in caps[2 * i: 2 * i + 2]:
+            c.set(color=colors[i], linewidth=1.0)
+    for i, flier in enumerate(bp.get("fliers", [])):
+        flier.set(markeredgecolor=colors[i % len(colors)], markerfacecolor="none")
     plt.suptitle("")  # remove pandas default
     ax.set_title("Silhouette distribution per cluster")
     ax.set_xlabel("Cluster")
@@ -3414,12 +3523,13 @@ def plot_cluster_silhouette_by_cluster(
     ax.yaxis.grid(False)
 
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+    _add_outside_legend(ax, clusters, colors, title="Cluster", face="none")
 
     fig.tight_layout()
     _finalize_categorical_x(fig, ax, rotate=45, ha="right", bottom=0.45)
     _reserve_bottom_for_xticklabels(fig, ax, rotation=45, fontsize=9, ha="right")
     fig.subplots_adjust(bottom=max(fig.subplotpars.bottom, 0.34))
-    save_multi(stem, figdir)
+    save_multi(stem, figdir, fig, savefig_kwargs={"bbox_inches": "tight"})
     plt.close(fig)
 
 
@@ -3434,8 +3544,6 @@ def plot_cluster_batch_composition(
     Stacked barplot showing fraction of each batch within each cluster.
     Legend is placed to the right (outside axes) to avoid overlaying bars.
     """
-    import matplotlib.pyplot as plt
-
     if label_key not in adata.obs or batch_key not in adata.obs:
         LOGGER.warning("plot_cluster_batch_composition: required columns missing.")
         return
@@ -3447,6 +3555,8 @@ def plot_cluster_batch_composition(
         .unstack(fill_value=0)
     )
     frac = df.div(df.sum(axis=1), axis=0)
+    clusters = frac.index.astype(str).tolist()
+    short_labels = [_extract_cnn_token(c) for c in clusters]
 
     fig, ax = plt.subplots(figsize=(max(8, 0.40 * len(df)), 4.5))
     _clean_axes(ax)
@@ -3465,11 +3575,14 @@ def plot_cluster_batch_composition(
     ax.grid(False)
     ax.set_ylabel("Fraction")
     ax.set_title("Batch composition per cluster")
+    ax.set_xticklabels(short_labels)
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
 
     # --- Legend to the right, outside the plotting area ---
     handles, labels = ax.get_legend_handles_labels()
     if handles:
+        max_rows = 12
+        ncol = max(1, math.ceil(len(labels) / max_rows))
         # make room on the right for legend
         fig.subplots_adjust(right=0.80)
 
@@ -3483,6 +3596,7 @@ def plot_cluster_batch_composition(
             frameon=True,
             fontsize=9,
             title_fontsize=10,
+            ncol=ncol,
         )
 
     _reserve_bottom_for_xticklabels(fig, ax, rotation=45, fontsize=9, ha="right")
@@ -3496,7 +3610,7 @@ def plot_cluster_batch_composition(
         bottom=max(fig.subplotpars.bottom, 0.42),
     )
 
-    save_multi(stem, figdir, fig)
+    save_multi(stem, figdir, fig, savefig_kwargs={"bbox_inches": "tight"})
     plt.close(fig)
 
 # -------------------------------------------------------------------------
