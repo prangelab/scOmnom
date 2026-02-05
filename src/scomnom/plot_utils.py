@@ -3706,7 +3706,14 @@ def plot_decoupler_cluster_topn_barplots(
             ax.spines["right"].set_visible(False)
 
             main_title = f"{title_prefix} • {cl}" if title_prefix else cl
-            ax.text(0.5, 1.08, main_title, transform=ax.transAxes, ha="center", weight="bold", fontsize=22)
+            title_fontsize = 22
+            if len(main_title) > 70:
+                import textwrap
+                main_title = textwrap.fill(main_title, width=70)
+                title_fontsize = 18
+            elif len(main_title) > 50:
+                title_fontsize = 20
+            ax.text(0.5, 1.08, main_title, transform=ax.transAxes, ha="center", weight="bold", fontsize=title_fontsize)
             ax.text(0.5, 1.02, str(net_name).upper(), transform=ax.transAxes, ha="center", color="#666666", fontsize=14)
 
             stem = f"{stem_prefix}_{cl}__top{int(n_pos_eff)}_up_down_bar"
@@ -3749,7 +3756,14 @@ def plot_decoupler_cluster_topn_barplots(
         ax.spines["right"].set_visible(False)
 
         main_title = f"{title_prefix} • {cl}" if title_prefix else cl
-        ax.text(0.5, 1.08, main_title, transform=ax.transAxes, ha="center", weight="bold", fontsize=22)
+        title_fontsize = 22
+        if len(main_title) > 70:
+            import textwrap
+            main_title = textwrap.fill(main_title, width=70)
+            title_fontsize = 18
+        elif len(main_title) > 50:
+            title_fontsize = 20
+        ax.text(0.5, 1.08, main_title, transform=ax.transAxes, ha="center", weight="bold", fontsize=title_fontsize)
         ax.text(0.5, 1.02, str(net_name).upper(), transform=ax.transAxes, ha="center", color="#666666", fontsize=14)
 
         stem = f"{stem_prefix}_{cl}__top{int(n)}_bar"

@@ -222,6 +222,17 @@ def volcano(
     y = -np.log10(padj_np)
     x = tmp_plot[lfc_col].to_numpy(dtype=float)
 
+    x_abs = np.abs(x)
+    if x_abs.size:
+        x_cap = float(np.quantile(x_abs[np.isfinite(x_abs)], 0.995))
+    else:
+        x_cap = 0.0
+    if not np.isfinite(x_cap) or x_cap <= 0.0:
+        x_cap = float(np.nanmax(x_abs)) if x_abs.size else 0.0
+    if x_cap < float(lfc_thresh):
+        x_cap = float(lfc_thresh) * 1.1
+    x_plot = np.clip(x, -x_cap, x_cap)
+
     sig = (tmp_plot[padj_col].to_numpy(dtype=float) < float(padj_thresh)) & (
         np.abs(x) > float(lfc_thresh)
     )
@@ -230,7 +241,7 @@ def volcano(
 
     # plot non-sig then sig on top
     ax.scatter(
-        x[~sig],
+        x_plot[~sig],
         y[~sig],
         c="#9aa0a6",  # soft gray
         s=s,
@@ -239,7 +250,7 @@ def volcano(
         rasterized=True,
     )
     ax.scatter(
-        x[sig],
+        x_plot[sig],
         y[sig],
         c="#d93025",  # red
         s=s,
@@ -252,6 +263,7 @@ def volcano(
     ax.axhline(-np.log10(max(float(padj_thresh), 1e-300)), color="black", linestyle="--", lw=1)
     ax.axvline(float(lfc_thresh), color="black", linestyle="--", lw=1)
     ax.axvline(-float(lfc_thresh), color="black", linestyle="--", lw=1)
+    ax.set_xlim(-x_cap, x_cap)
 
     ax.set_xlabel("log2 fold change")
     ax.set_ylabel("-log10 adjusted p-value")
