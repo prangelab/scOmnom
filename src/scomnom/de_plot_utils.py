@@ -210,9 +210,10 @@ def volcano(
         tmp[padj_col].to_numpy(dtype=float)
     )
     tmp_plot = tmp.loc[plot_mask].copy()
+    tmp_plot = tmp_plot[tmp_plot[padj_col] <= float(padj_thresh)].copy()
     if tmp_plot.empty:
         fig, ax = plt.subplots(figsize=figsize)
-        ax.text(0.5, 0.5, "No valid rows (all padj <= 0)", ha="center", va="center")
+        ax.text(0.5, 0.5, "No significant rows (padj > threshold)", ha="center", va="center")
         ax.set_axis_off()
         if show:
             plt.show()
