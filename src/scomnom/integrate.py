@@ -1429,8 +1429,10 @@ def _select_best_embedding(
     tag = str(run_tag).strip() if run_tag else ""
     tag_part = f"_{tag}" if tag else ""
 
-    raw_path = Path(output_dir) / f"integration_metrics_raw{tag_part}.tsv"
-    scaled_path = Path(output_dir) / f"integration_metrics_scaled{tag_part}.tsv"
+    metrics_dir = Path(output_dir) / "integration_metrics"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = metrics_dir / f"integration_metrics_raw{tag_part}.tsv"
+    scaled_path = metrics_dir / f"integration_metrics_scaled{tag_part}.tsv"
 
     raw.to_csv(raw_path, sep="\t")
     scaled.to_csv(scaled_path, sep="\t")

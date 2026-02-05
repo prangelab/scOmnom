@@ -291,7 +291,9 @@ def load_and_filter(
              "(e.g. '_cellbender_out_cell_barcodes.csv').",
     ),
 ):
-    logfile = output_dir / "load-and-filter.log"
+    log_dir = output_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    logfile = log_dir / "load-and-filter.log"
     init_logging(logfile)
     logging.getLogger(__name__).info("Logging initialized")
     logging.getLogger("scomnom.load_and_filter").info("load_and_filter logger active")
@@ -550,7 +552,9 @@ def integrate(
 
 ):
     outdir = output_dir or input_path.parent
-    logfile = outdir / "integrate.log"
+    log_dir = outdir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    logfile = log_dir / "integrate.log"
     init_logging(logfile)
 
     # Guardrail: annotated run is explicit, and only computes scANVI__annotated.
@@ -955,7 +959,9 @@ def cluster_and_annotate(
     # Resolve output dir + logging
     # ---------------------------------------------------------
     out_dir = output_dir or input_path.parent
-    log_path = out_dir / "cluster-and-annotate.log"
+    log_dir = out_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "cluster-and-annotate.log"
     init_logging(log_path)
 
     # ---------------------------------------------------------
@@ -1193,7 +1199,9 @@ def _build_cfg(
     plot_umap_ncols: int,
 ) -> MarkersAndDEConfig:
     out_dir = output_dir or input_path.parent
-    log_path = out_dir / "markers-and-de.log"
+    log_dir = out_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "markers-and-de.log"
     init_logging(log_path)
 
     layers = _parse_csv_repeat(pb_counts_layer) or ["counts_cb", "counts_raw"]
