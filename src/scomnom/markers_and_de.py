@@ -11,7 +11,7 @@ import anndata as ad
 import pandas as pd
 
 from scomnom import __version__
-from . import io_utils, plot_utils
+from . import io_utils, plot_utils, reporting
 from .logging_utils import init_logging
 from .de_utils import (
     PseudobulkSpec,
@@ -722,6 +722,19 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
         else:
             LOGGER.info("cluster-vs-rest: skipping pseudobulk plots (pseudobulk disabled or not requested).")
 
+        try:
+            for fmt in getattr(cfg, "figure_formats", ["png", "pdf"]):
+                reporting.generate_markers_report(
+                    fig_root=figdir,
+                    fmt=fmt,
+                    cfg=cfg,
+                    version=__version__,
+                    adata=adata,
+                )
+            LOGGER.info("Wrote markers report.")
+        except Exception as e:
+            LOGGER.warning("Failed to generate markers report: %s", e)
+
     # ----------------------------
     # Save dataset
     # ----------------------------
@@ -1328,6 +1341,19 @@ def run_within_cluster(cfg) -> ad.AnnData:
                                     dotplot_top_k=int(dotplot_top_n_genes),
                                     title_prefix=f"{condition_key} {contrast}",
                                 )
+
+        try:
+            for fmt in getattr(cfg, "figure_formats", ["png", "pdf"]):
+                reporting.generate_de_report(
+                    fig_root=figdir,
+                    fmt=fmt,
+                    cfg=cfg,
+                    version=__version__,
+                    adata=adata,
+                )
+            LOGGER.info("Wrote DE report.")
+        except Exception as e:
+            LOGGER.warning("Failed to generate DE report: %s", e)
 
     # ----------------------------
     # Save dataset
