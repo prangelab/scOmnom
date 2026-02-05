@@ -1058,15 +1058,7 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr") -> None:
                 total_mb,
             )
 
-        if isinstance(uns, dict):
-            for k, v in uns.items():
-                sz = _estimate_size_bytes(v) / (1024 ** 2)
-                if sz >= WARN_SINGLE_MB:
-                    LOGGER.warning(
-                        "Large object in adata.uns['%s'] (~%.1f MB).",
-                        k,
-                        sz,
-                    )
+        _ = WARN_SINGLE_MB
     except Exception as e:
         LOGGER.warning(
             "Could not estimate adata.uns size for warning purposes (continuing). (%s)",
@@ -1729,6 +1721,7 @@ def export_pseudobulk_de_tables(
     store_key: str = "scomnom_de",
     groupby: Optional[str] = None,
     condition_key: Optional[str] = None,
+    tables_root: Optional[Path] = None,
 ) -> None:
     """
     Write pseudobulk DE results stored in adata.uns[store_key] to CSV files.
@@ -1744,7 +1737,7 @@ def export_pseudobulk_de_tables(
       adata.uns[store_key]["pseudobulk_condition_within_group"]      : dict[key -> payload]
     """
     output_dir = Path(output_dir)
-    base = output_dir / "de_tables"
+    base = Path(tables_root) if tables_root is not None else (output_dir / "de_tables")
     base.mkdir(parents=True, exist_ok=True)
 
     block = adata.uns.get(store_key, {})
@@ -1783,7 +1776,9 @@ def export_pseudobulk_de_tables(
     # Condition within group
     # -------------------------
     if condition_key:
-        cond = block.get("pseudobulk_condition_within_group", {})
+        cond = block.get("pseudobulk_condition_within_group_multi", {})
+        if not cond:
+            cond = block.get("pseudobulk_condition_within_group", {})
         if isinstance(cond, dict) and cond:
             out_cond = base / f"condition_within_cluster__{_safe_filename(condition_key)}"
             out_cond.mkdir(parents=True, exist_ok=True)
@@ -1833,6 +1828,7 @@ def export_rank_genes_groups_tables(
     output_dir: Path,
     groupby: Optional[str] = None,
     prefix: str = "celllevel_markers",
+    tables_root: Optional[Path] = None,
 ) -> None:
     """
     Write scanpy rank_genes_groups results (adata.uns[key_added]) to CSV.
@@ -1843,7 +1839,7 @@ def export_rank_genes_groups_tables(
     This is notebook-friendly data in a stable tabular format.
     """
     output_dir = Path(output_dir)
-    out_dir = output_dir / "marker_tables"
+    out_dir = Path(tables_root) if tables_root is not None else (output_dir / "marker_tables")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if key_added not in adata.uns:
@@ -1932,13 +1928,15 @@ def export_pseudobulk_cluster_vs_rest_excel(
     output_dir: Path,
     store_key: str = "scomnom_de",
     filename: str = "cluster_vs_rest.xlsx",
+    tables_root: Optional[Path] = None,
 ) -> None:
     """
     Write ALL cluster-vs-rest DE tables into a single Excel workbook.
     One cluster per sheet.
     """
     output_dir = Path(output_dir)
-    out_xlsx = output_dir / "de_tables" / filename
+    base = Path(tables_root) if tables_root is not None else (output_dir / "de_tables")
+    out_xlsx = base / filename
     out_xlsx.parent.mkdir(parents=True, exist_ok=True)
 
     block = adata.uns.get(store_key, {})
@@ -1970,6 +1968,7 @@ def export_pseudobulk_condition_within_cluster_excel(
     store_key: str = "scomnom_de",
     condition_key: str,
     filename: Optional[str] = None,
+    tables_root: Optional[Path] = None,
 ) -> None:
     """
     One Excel file per condition_key.
@@ -1979,14 +1978,17 @@ def export_pseudobulk_condition_within_cluster_excel(
         return
 
     output_dir = Path(output_dir)
+    base = Path(tables_root) if tables_root is not None else (output_dir / "de_tables")
     if filename is None:
         filename = f"condition_within_cluster__{_safe_filename(condition_key)}.xlsx"
 
-    out_xlsx = output_dir / "de_tables" / filename
+    out_xlsx = base / filename
     out_xlsx.parent.mkdir(parents=True, exist_ok=True)
 
     block = adata.uns.get(store_key, {})
-    cond = block.get("pseudobulk_condition_within_group", {})
+    cond = block.get("pseudobulk_condition_within_group_multi", {})
+    if not cond:
+        cond = block.get("pseudobulk_condition_within_group", {})
 
     if not isinstance(cond, dict) or not cond:
         return
@@ -2030,6 +2032,7 @@ def export_rank_genes_groups_excel(
     filename: Optional[str] = None,
     prefix: str = "celllevel_markers",
     max_genes: Optional[int] = None,
+    tables_root: Optional[Path] = None,
 ) -> None:
     """
     Write scanpy rank_genes_groups results (adata.uns[key_added]) to a single Excel workbook.
@@ -2044,7 +2047,7 @@ def export_rank_genes_groups_excel(
       - If max_genes is set, truncates each sheet to that many rows.
     """
     output_dir = Path(output_dir)
-    out_dir = output_dir / "marker_tables"
+    out_dir = Path(tables_root) if tables_root is not None else (output_dir / "marker_tables")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if key_added not in adata.uns:
@@ -2139,7 +2142,9 @@ def export_contrast_conditional_markers_tables(
     *,
     output_dir: Path,
     store_key: str = "scomnom_de",
-    filename: str = "contrast_conditional_de__combined.xlsx",
+    filename: Optional[str] = None,
+    tables_root: Optional[Path] = None,
+    contrast_key: Optional[str] = None,
 ) -> None:
     """
     Writes contrast-conditional (pairwise) marker results:
@@ -2148,8 +2153,7 @@ def export_contrast_conditional_markers_tables(
       - Summary CSV
     """
     output_dir = Path(output_dir)
-    out_dir = output_dir / "marker_tables" / "contrast_conditional_de"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    base = Path(tables_root) if tables_root is not None else (output_dir / "marker_tables")
 
     block = adata.uns.get(store_key, {})
     cc = block.get("contrast_conditional", {})
@@ -2159,19 +2163,29 @@ def export_contrast_conditional_markers_tables(
     results = cc.get("results", {})
     summary = cc.get("summary", None)
 
-    if isinstance(summary, pd.DataFrame) and not summary.empty:
-        summary.to_csv(out_dir / "__summary.csv", index=False)
-
     if not isinstance(results, dict) or not results:
         return
 
-    # CSVs
-    for cluster, pairs in results.items():
-        if not isinstance(pairs, dict):
-            continue
-        for pair_key, payload in pairs.items():
+    condition = str(contrast_key) if contrast_key else "contrast"
+    pair_keys: set[str] = set()
+    for pairs in results.values():
+        if isinstance(pairs, dict):
+            pair_keys.update(str(k) for k in pairs.keys())
+
+    for pair_key in sorted(pair_keys):
+        out_dir = base / f"{_safe_filename(condition)}_{_safe_filename(pair_key)}_DE"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        if isinstance(summary, pd.DataFrame) and not summary.empty:
+            summary.to_csv(out_dir / "__summary.csv", index=False)
+
+        for cluster, pairs in results.items():
+            if not isinstance(pairs, dict):
+                continue
+            payload = pairs.get(pair_key, None)
             if not isinstance(payload, dict):
                 continue
+
             stem = f"cluster__{_safe_filename(cluster)}__{_safe_filename(pair_key)}"
             subdir = out_dir / stem
             subdir.mkdir(parents=True, exist_ok=True)
@@ -2183,23 +2197,60 @@ def export_contrast_conditional_markers_tables(
                 else:
                     df.to_csv(subdir / f"{stem}__{kind}.csv", index=False)
 
-    # XLSX (combined only)
-    out_xlsx = output_dir / "marker_tables" / filename
-    out_xlsx.parent.mkdir(parents=True, exist_ok=True)
-
-    with pd.ExcelWriter(out_xlsx, engine="xlsxwriter") as writer:
-        for cluster, pairs in results.items():
-            if not isinstance(pairs, dict):
-                continue
-            for pair_key, payload in pairs.items():
-                if not isinstance(payload, dict):
+        out_xlsx = out_dir / (filename or f"{_safe_filename(condition)}_{_safe_filename(pair_key)}_DE.xlsx")
+        with pd.ExcelWriter(out_xlsx, engine="xlsxwriter") as writer:
+            for cl2, pairs2 in results.items():
+                if not isinstance(pairs2, dict):
                     continue
-                df = payload.get("combined", None)
+                payload2 = pairs2.get(pair_key, None)
+                if not isinstance(payload2, dict):
+                    continue
+                df = payload2.get("combined", None)
                 if df is None:
                     continue
 
-                sheet = _safe_excel_sheet_name(f"{cluster}__{pair_key}")
+                sheet = _safe_excel_sheet_name(str(cl2))
                 if getattr(df, "empty", True):
                     pd.DataFrame().to_excel(writer, sheet_name=sheet, index=False)
                 else:
                     df.to_excel(writer, sheet_name=sheet, index=False)
+
+
+def export_contrast_conditional_markers_tables_multi(
+    adata: ad.AnnData,
+    *,
+    output_dir: Path,
+    store_key: str = "scomnom_de",
+    filename: Optional[str] = None,
+    tables_root: Optional[Path] = None,
+    contrast_key: Optional[str] = None,
+) -> None:
+    """
+    Export contrast-conditional markers for a specific contrast_key from
+    adata.uns[store_key]["contrast_conditional_multi"].
+    """
+    block = adata.uns.get(store_key, {})
+    multi = block.get("contrast_conditional_multi", None)
+    if not isinstance(multi, dict):
+        return
+
+    key = str(contrast_key) if contrast_key else None
+    if key is None or key not in multi:
+        return
+
+    orig = block.get("contrast_conditional", None)
+    block["contrast_conditional"] = multi.get(key)
+    try:
+        export_contrast_conditional_markers_tables(
+            adata,
+            output_dir=output_dir,
+            store_key=store_key,
+            filename=filename,
+            tables_root=tables_root,
+            contrast_key=key,
+        )
+    finally:
+        if orig is None:
+            block.pop("contrast_conditional", None)
+        else:
+            block["contrast_conditional"] = orig

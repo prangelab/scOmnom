@@ -90,6 +90,56 @@ def setup_scanpy_figs(figdir: Path, formats: Sequence[str] | None = None) -> Non
     ROOT_FIGDIR.mkdir(parents=True, exist_ok=True)
 
 
+def get_run_subdir(run_key: str | None = None) -> Path:
+    """
+    Ensure and return the current run subdir used by save_multi().
+
+    If not set yet, it initializes the run folder using the provided run_key
+    (or the first inferred key if available) and pre-creates per-format dirs.
+    """
+    global ROOT_FIGDIR, RUN_FIG_SUBDIR, RUN_KEY
+
+    if ROOT_FIGDIR is None:
+        raise RuntimeError("ROOT_FIGDIR is not set. Call setup_scanpy_figs() first.")
+
+    if RUN_FIG_SUBDIR is not None:
+        if run_key is not None and RUN_KEY is not None and str(run_key) != str(RUN_KEY):
+            LOGGER.warning(
+                "get_run_subdir: run_key=%r does not match active RUN_KEY=%r; using existing run subdir.",
+                str(run_key),
+                str(RUN_KEY),
+            )
+        return RUN_FIG_SUBDIR
+
+    if run_key is not None:
+        RUN_KEY = str(run_key)
+    if RUN_KEY is None:
+        RUN_KEY = "figures"
+
+    RUN_FIG_SUBDIR = _next_round_subdir(
+        root_figdir=ROOT_FIGDIR,
+        formats=FIGURE_FORMATS,
+        run_name=RUN_KEY,
+    )
+
+    for ext in FIGURE_FORMATS:
+        (ROOT_FIGDIR / ext / RUN_FIG_SUBDIR).mkdir(parents=True, exist_ok=True)
+
+    return RUN_FIG_SUBDIR
+
+
+def get_run_round_tag(run_key: str | None = None) -> str:
+    """
+    Return the round tag (e.g., "round3") for the current figure run.
+    Ensures the run subdir is initialized.
+    """
+    run_subdir = get_run_subdir(run_key)
+    m = re.search(r"_round(\d+)$", str(run_subdir))
+    if not m:
+        return "round1"
+    return f"round{m.group(1)}"
+
+
 def save_multi(stem: str, figdir: Path, fig=None, *, savefig_kwargs: dict | None = None) -> None:
     """
     Save the current matplotlib figure (or a provided figure) to multiple formats.
@@ -191,7 +241,7 @@ def save_multi(stem: str, figdir: Path, fig=None, *, savefig_kwargs: dict | None
         outdir = ROOT_FIGDIR / ext / RUN_FIG_SUBDIR / rel_figdir
         outdir.mkdir(parents=True, exist_ok=True)
         outfile = outdir / f"{stem}.{ext}"
-        LOGGER.info("Saving figure: %s", outfile)
+        LOGGER.debug("Saving figure: %s", outfile)
 
         if fig is not None:
             # avoid pyplot global state
@@ -482,6 +532,8 @@ def _finalize_categorical_x(
 
 def _clean_axes(ax):
     ax.grid(False)
+    ax.xaxis.grid(False)
+    ax.yaxis.grid(False)
     for spine in ["left", "bottom"]:
         ax.spines[spine].set_visible(True)
         ax.spines[spine].set_alpha(0.5)
@@ -3303,6 +3355,9 @@ def plot_cluster_qc_summary(
         df[m].plot(kind="bar", ax=ax, color="steelblue", edgecolor="black")
         ax.set_title(m.replace("_", " "))
         ax.set_xlabel("")  # only bottom axis will get label
+        ax.grid(False)
+        ax.xaxis.grid(False)
+        ax.yaxis.grid(False)
 
     axs[-1].set_xlabel("Cluster")
 
@@ -3317,6 +3372,8 @@ def plot_cluster_qc_summary(
     fig.subplots_adjust(hspace=0.25)
 
     fig.tight_layout()
+    _finalize_categorical_x(fig, axs[-1], rotate=45, ha="right", bottom=0.40)
+    fig.subplots_adjust(bottom=max(fig.subplotpars.bottom, 0.34))
     save_multi(stem, figdir, fig)
     plt.close(fig)
 
@@ -3352,11 +3409,16 @@ def plot_cluster_silhouette_by_cluster(
     ax.set_title("Silhouette distribution per cluster")
     ax.set_xlabel("Cluster")
     ax.set_ylabel("Silhouette")
+    ax.grid(False)
+    ax.xaxis.grid(False)
+    ax.yaxis.grid(False)
 
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
 
     fig.tight_layout()
     _finalize_categorical_x(fig, ax, rotate=45, ha="right", bottom=0.45)
+    _reserve_bottom_for_xticklabels(fig, ax, rotation=45, fontsize=9, ha="right")
+    fig.subplots_adjust(bottom=max(fig.subplotpars.bottom, 0.34))
     save_multi(stem, figdir)
     plt.close(fig)
 
@@ -3386,12 +3448,8 @@ def plot_cluster_batch_composition(
     )
     frac = df.div(df.sum(axis=1), axis=0)
 
-    fig, ax = plt.subplots(figsize=(max(8, 0.40 * len(df)), 4))
+    fig, ax = plt.subplots(figsize=(max(8, 0.40 * len(df)), 4.5))
     _clean_axes(ax)
-
-    # Reserve bottom for rotated x tick labels
-    _reserve_bottom_for_xticklabels(fig, ax, rotation=45, fontsize=9, ha="right")
-    fig.subplots_adjust(bottom=max(fig.subplotpars.bottom, 0.36))
 
     # Plot WITHOUT pandas legend (we'll add a clean one outside)
     frac.plot(
@@ -3404,6 +3462,7 @@ def plot_cluster_batch_composition(
         legend=False,
     )
 
+    ax.grid(False)
     ax.set_ylabel("Fraction")
     ax.set_title("Batch composition per cluster")
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
@@ -3426,8 +3485,16 @@ def plot_cluster_batch_composition(
             title_fontsize=10,
         )
 
+    _reserve_bottom_for_xticklabels(fig, ax, rotation=45, fontsize=9, ha="right")
+
     # Keep your existing final x-axis layout helper
-    _finalize_categorical_x(fig, ax, rotate=45, ha="right", bottom=0.42)
+    _finalize_categorical_x(
+        fig,
+        ax,
+        rotate=45,
+        ha="right",
+        bottom=max(fig.subplotpars.bottom, 0.42),
+    )
 
     save_multi(stem, figdir, fig)
     plt.close(fig)
@@ -3584,6 +3651,9 @@ def plot_decoupler_cluster_topn_barplots(
         figdir: Path | None,
         n: int = 10,
         use_abs: bool = False,
+        split_signed: bool = False,
+        n_pos: int | None = None,
+        n_neg: int | None = None,
         stem_prefix: str = "cluster",
         title_prefix: Optional[str] = None,
 ) -> None:
@@ -3596,6 +3666,61 @@ def plot_decoupler_cluster_topn_barplots(
 
     for cl in A.index.astype(str):
         s = A.loc[cl].copy()
+
+        if split_signed and not use_abs:
+            n_pos_eff = int(n_pos) if n_pos is not None else int(n)
+            n_neg_eff = int(n_neg) if n_neg is not None else int(n)
+            pos = s[s > 0].sort_values(ascending=False).head(n_pos_eff)
+            neg = s[s < 0].sort_values(ascending=True).head(n_neg_eff)
+            if pos.empty and neg.empty:
+                continue
+
+            vals = pd.concat([pos, neg], axis=0)
+            labels = [_clean_feature_label(l, net_name) for l in vals.index]
+            colors = ["#3a7f3b"] * int(pos.shape[0]) + ["#b04a4a"] * int(neg.shape[0])
+            vals_plot = vals
+
+            left = _dynamic_left_margin_from_labels(labels, base=0.25)
+            fig_w = _dynamic_fig_width_for_barplot(labels, min_w=12.0, max_w=28.0)
+            fig_h = max(4.0, 0.45 * len(vals_plot) + 1.5)
+
+            fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+            top_margin = 1.0 - (0.8 / fig_h)
+            fig.subplots_adjust(left=left, right=0.96, top=top_margin, bottom=0.15)
+
+            y = np.arange(len(vals_plot))
+            ax.barh(y=y, width=vals_plot.values, color=colors, edgecolor="#1f2d3a", linewidth=0.8, zorder=3)
+            ax.invert_yaxis()
+
+            ax.set_yticks(y)
+            ax.set_yticklabels(labels, fontsize=12)
+            ax.set_xlabel("Activity Score", fontsize=12, labelpad=10)
+
+            max_abs = float(np.max(np.abs(vals_plot.values))) if len(vals_plot) else 0.0
+            if max_abs > 0:
+                ax.set_xlim(-1.05 * max_abs, 1.05 * max_abs)
+            ax.axvline(0.0, color="#222222", linewidth=1.0)
+
+            ax.grid(False)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+
+            main_title = f"{title_prefix} • {cl}" if title_prefix else cl
+            title_fontsize = 22
+            if len(main_title) > 70:
+                import textwrap
+                main_title = textwrap.fill(main_title, width=70)
+                title_fontsize = 18
+            elif len(main_title) > 50:
+                title_fontsize = 20
+            ax.text(0.5, 1.08, main_title, transform=ax.transAxes, ha="center", weight="bold", fontsize=title_fontsize)
+            ax.text(0.5, 1.02, str(net_name).upper(), transform=ax.transAxes, ha="center", color="#666666", fontsize=14)
+
+            stem = f"{stem_prefix}_{cl}__top{int(n_pos_eff)}_up_down_bar"
+            save_multi(stem, outdir, fig)
+            plt.close(fig)
+            continue
+
         s_rank = s.abs() if use_abs else s
         top = s_rank.sort_values(ascending=False).head(int(n))
 
@@ -3606,20 +3731,16 @@ def plot_decoupler_cluster_topn_barplots(
         vals_plot = vals.sort_values(ascending=True)
         clean_labels = [_clean_feature_label(l, net_name) for l in vals_plot.index]
 
-        # Dynamic layout adjustments
         left = _dynamic_left_margin_from_labels(clean_labels, base=0.25)
         fig_w = _dynamic_fig_width_for_barplot(clean_labels, min_w=12.0, max_w=28.0)
-
-        # Height logic: reduce the multiplier slightly for high N to prevent extreme heights
         fig_h = max(4.0, 0.45 * len(vals_plot) + 1.5)
 
         fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-
-        top_margin = 1.0 - (0.8 / fig_h)  # Reserves ~0.8 inches for titles
+        top_margin = 1.0 - (0.8 / fig_h)
         fig.subplots_adjust(left=left, right=0.96, top=top_margin, bottom=0.15)
 
         if net_name.lower() == "progeny":
-            bar_colors = ["#d62728" if v < 0 else "#2ca02c" for v in vals_plot.values]
+            bar_colors = ["#b04a4a" if v < 0 else "#3a7f3b" for v in vals_plot.values]
         else:
             bar_colors = "#3b84a8"
 
@@ -3635,7 +3756,14 @@ def plot_decoupler_cluster_topn_barplots(
         ax.spines["right"].set_visible(False)
 
         main_title = f"{title_prefix} • {cl}" if title_prefix else cl
-        ax.text(0.5, 1.08, main_title, transform=ax.transAxes, ha="center", weight="bold", fontsize=22)
+        title_fontsize = 22
+        if len(main_title) > 70:
+            import textwrap
+            main_title = textwrap.fill(main_title, width=70)
+            title_fontsize = 18
+        elif len(main_title) > 50:
+            title_fontsize = 20
+        ax.text(0.5, 1.08, main_title, transform=ax.transAxes, ha="center", weight="bold", fontsize=title_fontsize)
         ax.text(0.5, 1.02, str(net_name).upper(), transform=ax.transAxes, ha="center", color="#666666", fontsize=14)
 
         stem = f"{stem_prefix}_{cl}__top{int(n)}_bar"
@@ -3659,12 +3787,10 @@ def plot_decoupler_activity_heatmap(
         return
 
     outdir = _decoupler_figdir(figdir, net_name)
-    sub = activity.copy().apply(pd.to_numeric, errors="coerce").fillna(0.0)
-    feats = _top_features_global(sub, k=top_k, mode=rank_mode, signed=True)
-    sub = sub.loc[:, feats]
-
-    if use_zscore:
-        sub = _zscore_cols(sub)
+    sub_raw, sub_z = _decoupler_balanced_clustered(activity, top_k=top_k, use_zscore=use_zscore)
+    if sub_raw is None or sub_z is None:
+        return
+    sub = sub_z if use_zscore else sub_raw
 
     # --- NO WRAP: keep single-line labels ---
     sub.columns = [_clean_feature_label(c, net_name) for c in sub.columns]
@@ -3701,6 +3827,48 @@ def plot_decoupler_activity_heatmap(
     plt.close(fig)
 
 
+def _decoupler_balanced_clustered(
+    activity: pd.DataFrame,
+    *,
+    top_k: int,
+    use_zscore: bool = True,
+) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+    if activity is None or activity.empty:
+        return None, None
+
+    sub_raw = activity.copy().apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    scores = sub_raw.mean(axis=0)
+    n_pos = int(max(1, int(top_k) // 2))
+    n_neg = int(max(1, int(top_k) - n_pos))
+    pos = scores[scores > 0].sort_values(ascending=False).head(n_pos)
+    neg = scores[scores < 0].sort_values(ascending=True).head(n_neg)
+    feats = list(pos.index) + list(neg.index)
+    if not feats:
+        return None, None
+
+    sub_raw = sub_raw.loc[:, feats].copy()
+    sub_z = _zscore_cols(sub_raw) if use_zscore else sub_raw.copy()
+    sub_raw = sub_raw.copy()
+    sub_z = sub_z.copy()
+    try:
+        from scipy.cluster.hierarchy import linkage, leaves_list
+        from scipy.spatial.distance import pdist
+        row_link = linkage(pdist(sub_z.values), method="average") if sub_z.shape[0] > 1 else None
+        col_link = linkage(pdist(sub_z.values.T), method="average") if sub_z.shape[1] > 1 else None
+        if row_link is not None:
+            row_order = leaves_list(row_link)
+            sub_raw = sub_raw.iloc[row_order, :]
+            sub_z = sub_z.iloc[row_order, :]
+        if col_link is not None:
+            col_order = leaves_list(col_link)
+            sub_raw = sub_raw.iloc[:, col_order]
+            sub_z = sub_z.iloc[:, col_order]
+    except Exception:
+        pass
+
+    return sub_raw, sub_z
+
+
 def plot_decoupler_dotplot(
     activity: pd.DataFrame,
     *,
@@ -3725,13 +3893,9 @@ def plot_decoupler_dotplot(
 
     outdir = _decoupler_figdir(figdir, net_name)
 
-    A = activity.copy().apply(pd.to_numeric, errors="coerce").fillna(0.0)
-    feats = _top_features_global(A, k=top_k, mode=rank_mode, signed=True)
-    if not feats:
+    sub_raw, sub_z = _decoupler_balanced_clustered(activity, top_k=top_k, use_zscore=True)
+    if sub_raw is None or sub_z is None:
         return
-
-    sub_raw = A.loc[:, feats].copy()
-    sub_z = _zscore_cols(sub_raw)
 
     color_mat = sub_raw if color_by == "raw" else sub_z
     cbar_label = "activity" if color_by == "raw" else "z-score"
@@ -3803,6 +3967,9 @@ def plot_decoupler_dotplot(
     # Optional label wrapping
     if wrap_labels and wrap_at and wrap_at > 5:
         import textwrap
+        from matplotlib.ticker import FixedLocator
+        yticks = ax.get_yticks()
+        ax.yaxis.set_major_locator(FixedLocator(yticks))
         ax.set_yticklabels(
             [textwrap.fill(str(t.get_text()), width=wrap_at) for t in ax.get_yticklabels()]
         )
@@ -3857,6 +4024,9 @@ def plot_decoupler_all_styles(
     figdir: Path | None = None,
     heatmap_top_k: int = 30,
     bar_top_n: int = 10,
+    bar_top_n_up: int | None = None,
+    bar_top_n_down: int | None = None,
+    bar_split_signed: bool = True,
     dotplot_top_k: int = 30,
 ) -> None:
     """
@@ -4060,6 +4230,9 @@ def plot_decoupler_all_styles(
                 figdir=figdir,
                 n=bar_top_n,
                 use_abs=False,
+                split_signed=bool(bar_split_signed) and str(net_name).lower() in ("dorothea", "msigdb"),
+                n_pos=int(bar_top_n_up) if bar_top_n_up is not None else int(bar_top_n),
+                n_neg=int(bar_top_n_down) if bar_top_n_down is not None else int(bar_top_n),
                 stem_prefix=f"{stem_prefix}cluster_{str(pfx).lower()}",
                 title_prefix=title_prefix,
             )
@@ -4104,6 +4277,9 @@ def plot_decoupler_all_styles(
         figdir=figdir,
         n=bar_top_n,
         use_abs=False,
+        split_signed=bool(bar_split_signed) and str(net_name).lower() in ("dorothea", "msigdb"),
+        n_pos=int(bar_top_n_up) if bar_top_n_up is not None else int(bar_top_n),
+        n_neg=int(bar_top_n_down) if bar_top_n_down is not None else int(bar_top_n),
         stem_prefix=f"{stem_prefix}cluster",
         title_prefix=title_prefix,
     )
@@ -4188,4 +4364,3 @@ def _make_unique_labels(labels: dict[str, str]) -> dict[str, str]:
         for raw in raws:
             out[raw] = f"{disp} [{raw}]"
     return out
-

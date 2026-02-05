@@ -379,6 +379,9 @@ class ClusterAnnotateConfig(BaseModel):
         description="Decoupler method (default: consensus).",
     )
     decoupler_consensus_methods: Optional[List[str]] = ["ulm", "mlm", "wsum"]
+    decoupler_bar_split_signed: bool = False
+    decoupler_bar_top_n_up: Optional[int] = None
+    decoupler_bar_top_n_down: Optional[int] = None
 
     # MSigDB (GMT-driven pathway nets)
     msigdb_gene_sets: List[str] = Field(
@@ -587,6 +590,13 @@ class MarkersAndDEConfig(BaseModel):
     output_name: str = "adata.markers_and_de"
     logfile: Optional[Path] = None
 
+    # run toggles (driven by CLI)
+    run: Literal["cell", "pseudobulk", "both"] = "both"
+
+    # General DE settings
+    positive_only: bool = True
+    markers_layer: Optional[str] = None
+
     # figures
     figdir_name: str = "figures"
     figure_formats: Sequence[str] = Field(default_factory=lambda: ["png", "pdf"])
@@ -642,12 +652,53 @@ class MarkersAndDEConfig(BaseModel):
     alpha: float = 0.05
     store_key: str = "scomnom_de"
 
+    min_samples_per_level: int = 2
+    shrink_lfc: bool = True
+    pb_min_total_counts: int = 10
+    pb_min_counts_per_lib: int = 0
+    pb_min_lib_pct: float = 0.0
+    pb_max_genes: Optional[int] = None
+    pb_covariates: Tuple[str, ...] = ()
+    prune_uns_de: bool = True
+
     # ------------------------------------------------------------------
     # Optional condition-within-cluster DE
     # ------------------------------------------------------------------
     condition_key: Optional[str] = None
+    condition_keys: Tuple[str, ...] = ()
     condition_contrasts: Tuple[str, ...] = ()
     min_cells_condition: int = 20
+
+    # ------------------------------------------------------------------
+    # DE-based decoupler (pathway/TF activity from DE stats)
+    # ------------------------------------------------------------------
+    de_decoupler_source: str = "auto"
+    de_decoupler_stat_col: str = "stat"
+    decoupler_method: str = "consensus"
+    decoupler_consensus_methods: Optional[List[str]] = ["ulm", "mlm", "wsum"]
+    decoupler_min_n_targets: int = 5
+    decoupler_bar_split_signed: bool = True
+    decoupler_bar_top_n_up: Optional[int] = None
+    decoupler_bar_top_n_down: Optional[int] = None
+
+    msigdb_gene_sets: List[str] = Field(
+        default_factory=lambda: ["HALLMARK", "REACTOME"],
+        description="MSigDB collections/keywords and/or paths to .gmt files.",
+    )
+    msigdb_method: str = "consensus"
+    msigdb_min_n_targets: int = 5
+
+    run_progeny: bool = True
+    progeny_method: str = "consensus"
+    progeny_min_n_targets: int = 5
+    progeny_top_n: int = 100
+    progeny_organism: str = "human"
+
+    run_dorothea: bool = True
+    dorothea_method: str = "consensus"
+    dorothea_min_n_targets: int = 5
+    dorothea_confidence: List[str] = Field(default_factory=lambda: ["A", "B", "C"])
+    dorothea_organism: str = "human"
 
     # ------------------------------------------------------------------
     # Optional contrast-conditional mode

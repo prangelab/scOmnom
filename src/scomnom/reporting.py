@@ -1418,6 +1418,260 @@ def generate_cluster_and_annotate_report(*, fig_root: Path, fmt: str, cfg, versi
     out_html.write_text(html_doc, encoding="utf-8")
 
 
+def generate_markers_report(*, fig_root: Path, fmt: str, cfg, version: str, adata, run_dir: Path | None = None) -> None:
+    fig_root = Path(fig_root).resolve()
+    fmt = fmt.lower().lstrip(".")
+
+    run_dir = Path(run_dir).resolve() if run_dir is not None else _find_latest_run_dir(
+        fig_root=fig_root, fmt=fmt, module_prefix="markers"
+    )
+    if run_dir is None:
+        raise RuntimeError(f"Could not locate markers figure run dir under {fig_root}/{fmt}/")
+
+    out_html = run_dir / "markers_report.html"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    rel_imgs = _collect_images_in_dir(run_dir, fmt, recursive=True)
+
+    by_source: Dict[str, List[Path]] = {
+        "cell_level_markers": [],
+        "pseudobulk_markers": [],
+        "other": [],
+    }
+    for p in rel_imgs:
+        parts = list(p.parts)
+        if parts and parts[0] in by_source:
+            by_source[parts[0]].append(p)
+        else:
+            by_source["other"].append(p)
+
+    cfg_dict = getattr(cfg, "__dict__", {})
+    cfg_json = _safe(json.dumps(cfg_dict, indent=2, default=str))
+
+    header = (
+        '<h1 id="top">scOmnom markers report</h1>'
+        '<div class="meta">'
+        f"Version:   {_safe(version)}\n"
+        f"Timestamp: {_safe(timestamp)}\n\n"
+        "Parameters:\n"
+        f"{cfg_json}"
+        "</div>"
+        "<p class='note'>This report is organized by cell-level vs pseudobulk markers. "
+        "Plot groups are collapsed by default to keep the page readable.</p>"
+    )
+
+    toc_sections: List[Tuple[str, str]] = [("summary", "Summary")]
+    if by_source["cell_level_markers"]:
+        toc_sections.append(("cell-level", "Cell-level markers"))
+    if by_source["pseudobulk_markers"]:
+        toc_sections.append(("pseudobulk", "Pseudobulk markers"))
+    if by_source["other"]:
+        toc_sections.append(("markers-other", "Other"))
+    toc_html = _toc(toc_sections)
+
+    blocks: List[str] = [header]
+
+    summary_inner = (
+        "<p class='note'>Summary of marker plots discovered in this run folder.</p>"
+        '<table class="summary-table"><thead><tr><th>Field</th><th>Value</th></tr></thead><tbody>'
+        f"<tr><td>n_plots_total</td><td>{len(rel_imgs)}</td></tr>"
+        f"<tr><td>cell_level</td><td>{len(by_source['cell_level_markers'])}</td></tr>"
+        f"<tr><td>pseudobulk</td><td>{len(by_source['pseudobulk_markers'])}</td></tr>"
+        "</tbody></table>"
+    )
+    blocks.append('<div id="summary"></div>')
+    blocks.append(_details_block("Summary", summary_inner, open_by_default=True))
+
+    def _render_source_block(source_key: str, title: str) -> str:
+        imgs = by_source.get(source_key, [])
+        if not imgs:
+            return ""
+        by_kind: Dict[str, List[Path]] = {}
+        for p in imgs:
+            parts = list(p.parts)
+            kind = parts[1] if len(parts) > 1 else "other"
+            by_kind.setdefault(kind, []).append(p)
+
+        inner_parts: List[str] = []
+        for kind, items in sorted(by_kind.items()):
+            cards = [_render_image_card_from_run_dir(p) for p in items]
+            inner = _grid_block(cards)
+            inner_parts.append(
+                _details_block(
+                    f"{_safe(kind)} <span class='pill'>{len(items)} plots</span>",
+                    inner,
+                    open_by_default=False,
+                )
+            )
+        return _details_block(title, "".join(inner_parts), open_by_default=False)
+
+    if by_source["cell_level_markers"]:
+        blocks.append('<div id="cell-level"></div>')
+        blocks.append(_render_source_block("cell_level_markers", "Cell-level markers"))
+
+    if by_source["pseudobulk_markers"]:
+        blocks.append('<div id="pseudobulk"></div>')
+        blocks.append(_render_source_block("pseudobulk_markers", "Pseudobulk markers"))
+
+    if by_source["other"]:
+        blocks.append('<div id="markers-other"></div>')
+        inner = _grid_block([_render_image_card_from_run_dir(p) for p in by_source["other"]])
+        blocks.append(_details_block(f"Other <span class='pill'>{len(by_source['other'])} plots</span>", inner))
+
+    html_doc = (
+        "<!DOCTYPE html><html><head>"
+        '<meta charset="utf-8">'
+        "<title>scOmnom markers report</title>"
+        f"<style>{_css()}</style>"
+        "</head><body>"
+        f'<div class="wrap">{toc_html}<main class="content">{"".join(blocks)}</main></div>'
+        "</body></html>"
+    )
+    out_html.write_text(html_doc, encoding="utf-8")
+
+
+def generate_de_report(*, fig_root: Path, fmt: str, cfg, version: str, adata, run_dir: Path | None = None) -> None:
+    fig_root = Path(fig_root).resolve()
+    fmt = fmt.lower().lstrip(".")
+
+    run_dir = Path(run_dir).resolve() if run_dir is not None else _find_latest_run_dir(
+        fig_root=fig_root, fmt=fmt, module_prefix="DE"
+    )
+    if run_dir is None:
+        raise RuntimeError(f"Could not locate DE figure run dir under {fig_root}/{fmt}/")
+
+    out_html = run_dir / "de_report.html"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    rel_imgs = _collect_images_in_dir(run_dir, fmt, recursive=True)
+
+    cfg_dict = getattr(cfg, "__dict__", {})
+    cfg_json = _safe(json.dumps(cfg_dict, indent=2, default=str))
+
+    header = (
+        '<h1 id="top">scOmnom DE report</h1>'
+        '<div class="meta">'
+        f"Version:   {_safe(version)}\n"
+        f"Timestamp: {_safe(timestamp)}\n\n"
+        "Parameters:\n"
+        f"{cfg_json}"
+        "</div>"
+        "<p class='note'>This report is organized by analysis source, condition, and contrast. "
+        "Sections are collapsed by default to avoid very long pages.</p>"
+    )
+
+    toc_sections: List[Tuple[str, str]] = [("summary", "Summary")]
+    toc_sections.append(("cell-level-de", "Cell-level DE"))
+    toc_sections.append(("pseudobulk-de", "Pseudobulk DE"))
+    toc_html = _toc(toc_sections)
+
+    blocks: List[str] = [header]
+
+    summary_inner = (
+        "<p class='note'>Summary of DE plots discovered in this run folder.</p>"
+        '<table class="summary-table"><thead><tr><th>Field</th><th>Value</th></tr></thead><tbody>'
+        f"<tr><td>n_plots_total</td><td>{len(rel_imgs)}</td></tr>"
+        "</tbody></table>"
+    )
+    blocks.append('<div id="summary"></div>')
+    blocks.append(_details_block("Summary", summary_inner, open_by_default=True))
+
+    def _group_de(rel_paths: List[Path]) -> Dict[str, Dict[str, Dict[str, Dict[str, List[Path]]]]]:
+        out: Dict[str, Dict[str, Dict[str, Dict[str, List[Path]]]]] = {
+            "cell_level_DE": {},
+            "pseudobulk_DE": {},
+        }
+        for p in rel_paths:
+            parts = list(p.parts)
+            if len(parts) < 2:
+                continue
+            source = parts[0]
+            if source not in out:
+                continue
+            condition = parts[1]
+            if source == "pseudobulk_DE" and len(parts) >= 3 and parts[2] == "umap":
+                out[source].setdefault(condition, {}).setdefault("__condition_umap__", {}).setdefault("umap", []).append(p)
+                continue
+            if len(parts) < 4:
+                continue
+            contrast = parts[2]
+            group = parts[3]
+            if group == "decoupler" and len(parts) >= 5:
+                net = parts[4]
+                group = f"decoupler/{net}"
+            out[source].setdefault(condition, {}).setdefault(contrast, {}).setdefault(group, []).append(p)
+        return out
+
+    grouped = _group_de(rel_imgs)
+
+    def _render_contrast_groups(groups: Dict[str, List[Path]]) -> str:
+        items: List[str] = []
+        for gname, imgs in sorted(groups.items()):
+            cards = [_render_image_card_from_run_dir(p) for p in imgs]
+            inner = _grid_block(cards)
+            items.append(
+                _details_block(
+                    f"{_safe(gname)} <span class='pill'>{len(imgs)} plots</span>",
+                    inner,
+                    open_by_default=False,
+                )
+            )
+        return "".join(items)
+
+    def _render_source(source_key: str, title: str, anchor: str) -> None:
+        blocks.append(f'<div id="{anchor}"></div>')
+        src = grouped.get(source_key, {})
+        if not src:
+            blocks.append(_details_block(title, "<p class='note'><em>No plots found.</em></p>", open_by_default=False))
+            return
+
+        cond_parts: List[str] = []
+        for condition, contrasts in sorted(src.items()):
+            cond_body: List[str] = []
+            for contrast, groups in sorted(contrasts.items()):
+                if contrast == "__condition_umap__":
+                    inner = _render_contrast_groups(groups)
+                    cond_body.append(
+                        _details_block(
+                            f"Condition UMAPs <span class='pill'>{sum(len(v) for v in groups.values())} plots</span>",
+                            inner,
+                            open_by_default=False,
+                        )
+                    )
+                    continue
+                inner = _render_contrast_groups(groups)
+                cond_body.append(
+                    _details_block(
+                        f"{_safe(contrast)} <span class='pill'>{sum(len(v) for v in groups.values())} plots</span>",
+                        inner,
+                        open_by_default=False,
+                    )
+                )
+            cond_parts.append(
+                _details_block(
+                    f"{_safe(condition)} <span class='pill'>{sum(len(v) for c in contrasts.values() for v in c.values())} plots</span>",
+                    "".join(cond_body),
+                    open_by_default=False,
+                )
+            )
+
+        blocks.append(_details_block(title, "".join(cond_parts), open_by_default=False))
+
+    _render_source("cell_level_DE", "Cell-level DE", "cell-level-de")
+    _render_source("pseudobulk_DE", "Pseudobulk DE", "pseudobulk-de")
+
+    html_doc = (
+        "<!DOCTYPE html><html><head>"
+        '<meta charset="utf-8">'
+        "<title>scOmnom DE report</title>"
+        f"<style>{_css()}</style>"
+        "</head><body>"
+        f'<div class="wrap">{toc_html}<main class="content">{"".join(blocks)}</main></div>'
+        "</body></html>"
+    )
+    out_html.write_text(html_doc, encoding="utf-8")
+
+
 def _extract_round_id_from_rel_png(rel_path_from_run_dir: Path) -> str | None:
     """
     Now rel_path is relative to the *run dir*, e.g.:

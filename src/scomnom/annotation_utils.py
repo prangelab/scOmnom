@@ -692,6 +692,51 @@ def _round_cluster_display_map(
 # -------------------------------------------------------------------------
 # Resource-specific runners
 # -------------------------------------------------------------------------
+def _dc_activity_from_stats(
+    stats: pd.DataFrame,
+    *,
+    method: str,
+    net: pd.DataFrame,
+    min_n: int,
+    consensus_methods: Optional[Sequence[str]] = None,
+    source: str = "source",
+    target: str = "target",
+    weight: str | None = "weight",
+) -> pd.DataFrame:
+    """
+    Run decoupler on a gene-statistics matrix (genes x samples) and return
+    activity as samples x sources.
+    """
+    est = _dc_run_method(
+        method=method,
+        mat=stats,
+        net=net,
+        source=source,
+        target=target,
+        weight=weight,
+        min_n=min_n,
+        verbose=False,
+        consensus_methods=consensus_methods,
+    )
+    activity = est.T
+    return activity
+
+
+def _msigdb_activity_by_gmt_payload(activity: pd.DataFrame) -> tuple[pd.DataFrame | None, dict]:
+    try:
+        feature_meta = pd.DataFrame(
+            {"term": activity.columns.astype(str), "gmt": [_infer_msigdb_gmt(c) for c in activity.columns.astype(str)]}
+        ).set_index("term", drop=False)
+        activity_by_gmt = msigdb_activity_by_gmt_from_activity_and_meta(
+            activity,
+            feature_meta=feature_meta,
+            gmt_col="gmt",
+        )
+        return feature_meta, activity_by_gmt
+    except Exception as e:
+        LOGGER.warning("MSigDB: failed to build activity_by_gmt; leaving empty. (%s)", e)
+        return None, {}
+
 def _run_msigdb(
     adata: ad.AnnData,
     cfg,
@@ -994,6 +1039,220 @@ def _run_dorothea(
         ",".join(conf),
         int(min_n),
     )
+
+
+def _run_msigdb_from_stats(
+    stats: pd.DataFrame,
+    cfg,
+    *,
+    input_label: str,
+) -> Optional[dict]:
+    if stats is None or stats.empty:
+        return None
+
+    gene_sets = getattr(cfg, "msigdb_gene_sets", None) or ["HALLMARK", "REACTOME"]
+    try:
+        gmt_files, used_keywords, msigdb_release = resolve_msigdb_gene_sets(gene_sets)
+    except Exception as e:
+        LOGGER.warning("MSigDB: failed to resolve gene sets: %s", e)
+        return None
+    if not gmt_files:
+        LOGGER.warning("MSigDB: no gene set files resolved; skipping.")
+        return None
+
+    method = (
+        getattr(cfg, "msigdb_method", None)
+        or getattr(cfg, "decoupler_method", None)
+        or "consensus"
+    )
+    min_n = int(getattr(cfg, "msigdb_min_n_targets", getattr(cfg, "decoupler_min_n_targets", 5)) or 5)
+
+    nets = []
+    for gmt in gmt_files:
+        try:
+            net_i = io_utils.gmt_to_decoupler_net(gmt)
+            nets.append(net_i)
+        except Exception as e:
+            LOGGER.warning("MSigDB: failed to parse GMT '%s': %s", str(gmt), e)
+
+    if not nets:
+        LOGGER.warning("MSigDB: no GMTs could be parsed into a decoupler net; skipping.")
+        return None
+
+    net = pd.concat(nets, axis=0, ignore_index=True)
+    for col in ("source", "target"):
+        if col not in net.columns:
+            LOGGER.warning("MSigDB: net missing required column '%s'; skipping.", col)
+            return None
+    if "weight" not in net.columns:
+        net["weight"] = 1.0
+
+    try:
+        activity = _dc_activity_from_stats(
+            stats,
+            method=str(method),
+            net=net,
+            min_n=min_n,
+            consensus_methods=getattr(cfg, "decoupler_consensus_methods", None),
+        )
+        activity.index.name = "cluster"
+        activity.columns.name = "pathway"
+    except Exception as e:
+        LOGGER.warning("MSigDB: decoupler run failed (method=%s): %s", str(method), e)
+        return None
+
+    feature_meta, activity_by_gmt = _msigdb_activity_by_gmt_payload(activity)
+
+    payload = {
+        "activity": activity,
+        "config": {
+            "method": str(method),
+            "min_n_targets": int(min_n),
+            "msigdb_release": msigdb_release,
+            "gene_sets": [str(g) for g in gmt_files],
+            "used_keywords": used_keywords,
+            "input": str(input_label),
+            "resource": "msigdb_gmt",
+        },
+        "activity_by_gmt": activity_by_gmt,
+        "feature_meta": feature_meta,
+    }
+    return payload
+
+
+def _run_progeny_from_stats(
+    stats: pd.DataFrame,
+    cfg,
+    *,
+    input_label: str,
+) -> Optional[dict]:
+    import decoupler as dc
+
+    if stats is None or stats.empty:
+        return None
+
+    method = (
+        getattr(cfg, "progeny_method", None)
+        or getattr(cfg, "decoupler_method", None)
+        or "consensus"
+    )
+    min_n = int(getattr(cfg, "progeny_min_n_targets", getattr(cfg, "decoupler_min_n_targets", 5)) or 5)
+    top_n = int(getattr(cfg, "progeny_top_n", 100) or 100)
+    organism = getattr(cfg, "progeny_organism", "human") or "human"
+
+    try:
+        net = dc.op.progeny(organism=str(organism), top=top_n)
+    except Exception as e:
+        LOGGER.warning("PROGENy: failed to load resource via dc.op.progeny: %s", e)
+        return None
+    if net is None or len(net) == 0:
+        LOGGER.warning("PROGENy: resource empty; skipping.")
+        return None
+
+    wcol = "weight" if "weight" in net.columns else ("mor" if "mor" in net.columns else None)
+    if wcol is None:
+        LOGGER.warning("PROGENy: no usable weight column found; skipping.")
+        return None
+
+    try:
+        activity = _dc_activity_from_stats(
+            stats,
+            method=str(method),
+            net=net,
+            min_n=min_n,
+            consensus_methods=getattr(cfg, "decoupler_consensus_methods", None),
+            weight=wcol,
+        )
+        activity.index.name = "cluster"
+        activity.columns.name = "pathway"
+    except Exception as e:
+        LOGGER.warning("PROGENy: decoupler run failed (method=%s): %s", str(method), e)
+        return None
+
+    payload = {
+        "activity": activity,
+        "config": {
+            "method": str(method),
+            "min_n_targets": int(min_n),
+            "top_n": int(top_n),
+            "input": str(input_label),
+            "resource": "progeny",
+            "organism": str(organism),
+        },
+        "feature_meta": None,
+    }
+    return payload
+
+
+def _run_dorothea_from_stats(
+    stats: pd.DataFrame,
+    cfg,
+    *,
+    input_label: str,
+) -> Optional[dict]:
+    import decoupler as dc
+
+    if stats is None or stats.empty:
+        return None
+
+    method = (
+        getattr(cfg, "dorothea_method", None)
+        or getattr(cfg, "decoupler_method", None)
+        or "consensus"
+    )
+    min_n = int(getattr(cfg, "dorothea_min_n_targets", getattr(cfg, "decoupler_min_n_targets", 5)) or 5)
+
+    conf = getattr(cfg, "dorothea_confidence", None)
+    if conf is None:
+        conf = ["A", "B", "C"]
+    if isinstance(conf, str):
+        conf = [x.strip().upper() for x in conf.split(",") if x.strip()]
+    conf = [str(x).upper() for x in conf]
+
+    organism = getattr(cfg, "dorothea_organism", "human") or "human"
+
+    try:
+        net = dc.op.dorothea(organism=str(organism), levels=conf)
+    except Exception as e:
+        LOGGER.warning("DoRothEA: failed to load resource via dc.op.dorothea: %s", e)
+        return None
+    if net is None or net.empty:
+        LOGGER.warning("DoRothEA: resource empty after confidence filtering (%s); skipping.", conf)
+        return None
+
+    wcol = "weight" if "weight" in net.columns else ("mor" if "mor" in net.columns else None)
+    if wcol is None:
+        LOGGER.warning("DoRothEA: no usable weight column found; skipping.")
+        return None
+
+    try:
+        activity = _dc_activity_from_stats(
+            stats,
+            method=str(method),
+            net=net,
+            min_n=min_n,
+            consensus_methods=getattr(cfg, "decoupler_consensus_methods", None),
+            weight=wcol,
+        )
+        activity.index.name = "cluster"
+        activity.columns.name = "TF"
+    except Exception as e:
+        LOGGER.warning("DoRothEA: decoupler run failed (method=%s): %s", str(method), e)
+        return None
+
+    payload = {
+        "activity": activity,
+        "config": {
+            "method": str(method),
+            "organism": str(organism),
+            "min_n_targets": int(min_n),
+            "confidence": list(conf),
+            "input": str(input_label),
+            "resource": "dorothea",
+        },
+        "feature_meta": None,
+    }
+    return payload
 
 
 # -------------------------------------------------------------------------

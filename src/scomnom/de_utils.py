@@ -4,13 +4,43 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Literal, Optional, Sequence, Tuple
-
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed, TimeoutError
+import os
+import traceback
+import warnings
+import time
+import contextlib
+import io
 import anndata as ad
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 
 LOGGER = logging.getLogger(__name__)
+
+
+try:
+    mp.set_start_method("spawn", force=True)
+except RuntimeError:
+    # start method already set
+    pass
+
+
+def _set_blas_threads(n: int = 1, *, force: bool = False) -> None:
+    """
+    Best-effort guard against BLAS/OpenMP oversubscription.
+    Sets thread env vars if they are not already defined by the user.
+    """
+    n_str = str(int(max(1, n)))
+    keys = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS")
+    updated = False
+    for k in keys:
+        if force or os.environ.get(k) is None:
+            os.environ[k] = n_str
+            updated = True
+    if updated:
+        LOGGER.info("Set BLAS/OpenMP thread env vars to %s for this process.", n_str)
 
 
 # -----------------------------------------------------------------------------
@@ -55,12 +85,155 @@ class PseudobulkDEOptions:
     min_samples_per_level: int = 2
     alpha: float = 0.05
     lfc_threshold: float = 0.0
+    size_factors: str = "poscounts"
     shrink_lfc: bool = True
     min_total_counts: int = 10
     min_pct: float = 0.0
     min_diff_pct: float = 0.0
     positive_only: bool = True
+    max_genes: Optional[int] = None
+    covariates: Tuple[str, ...] = ()
+    min_counts_per_lib: int = 0
+    min_lib_pct: float = 0.0
 
+
+def _collect_sample_covariates(
+    adata: ad.AnnData,
+    *,
+    sample_key: str,
+    covariates: Sequence[str],
+) -> tuple[dict[str, dict[str, object]], list[str]]:
+    covariates = [str(c) for c in covariates if c]
+    if not covariates:
+        return {}, []
+
+    missing = [c for c in covariates if c not in adata.obs]
+    if missing:
+        LOGGER.warning("Pseudobulk covariates not found in adata.obs (skipping): %s", missing)
+    covariates = [c for c in covariates if c in adata.obs]
+    if not covariates:
+        return {}, []
+
+    obs = adata.obs[[sample_key] + covariates].copy()
+    obs[sample_key] = obs[sample_key].astype(str)
+
+    sample_covs: dict[str, dict[str, object]] = {}
+    multi_counts = {c: 0 for c in covariates}
+
+    for s, sub in obs.groupby(sample_key, sort=False):
+        cov_dict: dict[str, object] = {}
+        for c in covariates:
+            vals = sub[c].dropna().unique()
+            if vals.size == 0:
+                cov_dict[c] = np.nan
+            else:
+                cov_dict[c] = vals[0]
+                if vals.size > 1:
+                    multi_counts[c] += 1
+        sample_covs[str(s)] = cov_dict
+
+    for c, n in multi_counts.items():
+        if n > 0:
+            LOGGER.warning(
+                "Pseudobulk covariate %r has multiple values in %d sample(s); using first value per sample.",
+                c,
+                int(n),
+            )
+
+    return sample_covs, covariates
+
+
+def _celllevel_pct_mask(
+    adata: ad.AnnData,
+    *,
+    mask: np.ndarray,
+    counts_layer: Optional[str],
+    min_pct: float,
+) -> np.ndarray:
+    min_pct = float(min_pct)
+    n = int(np.sum(mask))
+    if n == 0 or min_pct <= 0.0:
+        return np.ones(adata.n_vars, dtype=bool)
+
+    X = _get_counts_matrix(adata, counts_layer=counts_layer)
+    X_sub = X[mask]
+
+    if sp.issparse(X_sub):
+        nnz = np.asarray(X_sub.getnnz(axis=0)).ravel()
+        pct = nnz / float(n)
+    else:
+        pct = (X_sub > 0).mean(axis=0)
+        pct = np.asarray(pct).ravel()
+
+    return pct >= min_pct
+
+
+def _pydeseq2_cluster_worker(payload: dict) -> tuple[str, pd.DataFrame, dict]:
+    """
+    Worker: run PyDESeq2 for a single cluster.
+    Returns (cluster_id, result_df, summary_meta_updates)
+    """
+    _set_blas_threads(1)
+    cl = payload["cluster"]
+    counts_np = payload["counts_np"]          # 2*n_samples x n_genes
+    pb_index = payload["pb_index"]            # list[str]
+    genes = payload["genes"]                  # list[str]
+    metadata_rows = payload["metadata_rows"]  # list[dict]
+    alpha = float(payload["alpha"])
+    shrink_lfc = bool(payload["shrink_lfc"])
+    positive_only = bool(payload["positive_only"])
+    n_cpus = int(payload["n_cpus"])
+
+    # NEW: size factor policy (default poscounts)
+    size_factors = str(payload.get("size_factors", "poscounts"))
+
+    metadata = pd.DataFrame(metadata_rows, index=pd.Index(pb_index, name="pb_id"))
+    metadata["sample"] = metadata["sample"].astype("category")
+    metadata["binary_cluster"] = pd.Categorical(metadata["binary_cluster"], categories=["rest", "target"])
+
+    covariates = [str(c) for c in payload.get("covariates", []) if c]
+    for c in covariates:
+        if c in metadata.columns and metadata[c].dtype == object:
+            metadata[c] = metadata[c].astype("category")
+
+    counts = pd.DataFrame(counts_np, index=metadata.index, columns=pd.Index(genes, name="gene"))
+
+    try:
+        res, meta = _run_pydeseq2(
+            counts,
+            metadata,
+            design_factors=["sample", *covariates, "binary_cluster"],
+            contrast=("binary_cluster", "target", "rest"),
+            alpha=alpha,
+            shrink_lfc=shrink_lfc,
+            n_cpus=n_cpus,
+            size_factors=size_factors,
+        )
+
+        if positive_only and not res.empty and "log2FoldChange" in res.columns:
+            res = res.loc[pd.to_numeric(res["log2FoldChange"], errors="coerce") > 0].copy()
+
+        n_sig = int((pd.to_numeric(res["padj"], errors="coerce") < alpha).sum()) if not res.empty else 0
+
+        # return enriched meta for summary table
+        return cl, res, {
+            "status": "ok",
+            "n_sig": n_sig,
+            "sf_policy": meta.get("sf_policy"),
+            "sf_used": meta.get("sf_used"),
+            "sf_forced": meta.get("sf_forced"),
+            "warn_iterative_size_factors": meta.get("warn_iterative_size_factors"),
+            "warn_low_df_dispersion": meta.get("warn_low_df_dispersion"),
+        }
+
+    except Exception as e:
+        tb = traceback.format_exc(limit=50)
+        empty = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
+        return cl, empty, {
+            "status": "failed",
+            "reason": f"{type(e).__name__}: {e}",
+            "traceback": tb,
+        }
 
 # -----------------------------------------------------------------------------
 # Round-aware label resolution
@@ -101,7 +274,6 @@ def resolve_group_key(
                 if pretty and str(pretty) in adata.obs:
                     return str(pretty)
 
-    # legacy-ish pointers
     ca = adata.uns.get("cluster_and_annotate", {})
     if isinstance(ca, dict):
         k = ca.get("cluster_label_key", None)
@@ -272,6 +444,33 @@ def _rebuild_rank_genes_groups_from_filtered(
     adata_run.uns[key]["pts_rest"] = pts_rest
 
 
+def _compute_cluster_parallelism(
+    *,
+    n_clusters: int,
+    total_cpus: int,
+) -> tuple[int, int]:
+    """
+    Decide (n_jobs, n_cpus_per_job) for cluster-wise pseudobulk DE.
+
+    Rules:
+      - If total_cpus <= n_clusters:
+          n_jobs = total_cpus
+          n_cpus = 1
+      - Else:
+          n_jobs = n_clusters
+          n_cpus = 1 + floor((total_cpus - n_clusters) / n_clusters)
+    """
+    total_cpus = int(max(1, total_cpus))
+    n_clusters = int(max(1, n_clusters))
+
+    if total_cpus <= n_clusters:
+        return total_cpus, 1
+
+    extra = total_cpus - n_clusters
+    n_cpus = 1 + (extra // n_clusters)
+    return n_clusters, n_cpus
+
+
 # -----------------------------------------------------------------------------
 # OOM-safe pseudobulk aggregation (core engine)
 # -----------------------------------------------------------------------------
@@ -302,7 +501,6 @@ def pseudobulk_aggregate(
     """
     if sample_key not in adata.obs:
         raise KeyError(f"sample_key={sample_key!r} not in adata.obs")
-
     X = _get_counts_matrix(adata, counts_layer=counts_layer)
     n_cells, n_genes = X.shape
 
@@ -401,13 +599,13 @@ def _run_pydeseq2(
     alpha: float = 0.05,
     shrink_lfc: bool = True,
     n_cpus: int = 1,
-) -> pd.DataFrame:
+    size_factors: str = "poscounts",
+) -> tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Run PyDESeq2 for one contrast.
 
-    counts: samples x genes (integers)
-    metadata: samples x covariates (categorical recommended)
-    contrast: (factor_name, test_level, ref_level)
+    Returns: (results_df, meta)
+      meta includes size factor mode actually used and captured warnings.
     """
     _require_pydeseq2()
     from pydeseq2.dds import DeseqDataSet
@@ -415,7 +613,6 @@ def _run_pydeseq2(
 
     # Defensive copies, ensure alignment
     counts = counts.loc[metadata.index]
-    # PyDESeq2 expects non-negative ints
     counts_i = counts.round().astype(np.int64)
 
     dds = DeseqDataSet(
@@ -423,42 +620,93 @@ def _run_pydeseq2(
         metadata=metadata.copy(),
         design_factors=list(design_factors),
         ref_level={contrast[0]: contrast[2]},
-        n_cpus=int(n_cpus),    )
-    dds.deseq2()
-
-    stat = DeseqStats(
-        dds,
-        contrast=list(contrast),
-        alpha=float(alpha),
-        # shrinkage varies across versions; best-effort below
         n_cpus=int(n_cpus),
     )
-    stat.summary(print_result=False)
 
+    meta: Dict[str, Any] = {
+        "sf_policy": str(size_factors),
+        "sf_used": None,
+        "sf_forced": False,
+        "warn_iterative_size_factors": False,
+        "warn_low_df_dispersion": False,
+        "warnings": [],
+    }
+
+    # Capture warnings for provenance/debug, suppress stdout/stderr noise
+    with warnings.catch_warnings(record=True) as wrec, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        warnings.simplefilter("always")
+
+        # ---- Force size factor estimation if supported
+        # Prefer poscounts for sparse pseudobulk.
+        def _try_fit_size_factors(mode: str) -> bool:
+            try:
+                fit_fn = getattr(dds, "fit_size_factors", None)
+                if callable(fit_fn):
+                    fit_fn(fit_type=str(mode))
+                    meta["sf_used"] = str(mode)
+                    meta["sf_forced"] = True
+                    return True
+                return False
+            except Exception:
+                return False
+
+        sf = str(size_factors).lower().strip()
+
+        if sf == "ratio_then_poscounts":
+            ok = _try_fit_size_factors("ratio")
+            if not ok:
+                ok2 = _try_fit_size_factors("poscounts")
+                if not ok2:
+                    meta["sf_used"] = None
+            else:
+                meta["sf_used"] = "ratio"
+        elif sf in ("poscounts", "ratio"):
+            ok = _try_fit_size_factors(sf)
+            if not ok:
+                meta["sf_used"] = None
+        else:
+            # unknown policy -> do nothing, let pydeseq2 decide
+            meta["sf_used"] = None
+
+        # ---- Run DESeq2
+        dds.deseq2()
+
+        stat = DeseqStats(
+            dds,
+            contrast=list(contrast),
+            alpha=float(alpha),
+            n_cpus=int(n_cpus),
+        )
+        stat.summary(print_result=False)
+
+        # Best-effort LFC shrinkage
+        if shrink_lfc:
+            try:
+                stat.lfc_shrink()
+            except Exception:
+                pass
+
+    # Process warnings after run
+    for ww in wrec:
+        msg = str(getattr(ww, "message", ww))
+        meta["warnings"].append(msg)
+
+        # Your two notable classes of warnings:
+        if "Iterative size factor fitting did not converge" in msg:
+            meta["warn_iterative_size_factors"] = True
+        if "residual degrees of freedom is less than 3" in msg:
+            meta["warn_low_df_dispersion"] = True
+
+    # Extract results
     res = stat.results_df.copy()
-    # Standardize column names to match your older plotting expectations
-    # PyDESeq2 uses: log2FoldChange, lfcSE, stat, pvalue, padj
     if "gene" not in res.columns:
         res["gene"] = res.index.astype(str)
 
-    # Best-effort LFC shrinkage if available
-    if shrink_lfc:
-        try:
-            # Some versions support lfc_shrink(); others don't.
-            # If supported, it updates results_df.
-            stat.lfc_shrink()
-            res2 = stat.results_df.copy()
-            if "gene" not in res2.columns:
-                res2["gene"] = res2.index.astype(str)
-            res = res2
-        except Exception:
-            # keep unshrunk results
-            pass
-
-    # Sort + keep canonical columns
     cols = [c for c in ["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"] if c in res.columns]
     res = res[cols].sort_values("padj", na_position="last")
-    return res
+
+    return res, meta
+
 
 
 def de_cluster_vs_rest_pseudobulk(
@@ -470,22 +718,9 @@ def de_cluster_vs_rest_pseudobulk(
     opts: PseudobulkDEOptions = PseudobulkDEOptions(),
     store_key: Optional[str] = "scomnom_de",
     store: bool = True,
-    n_cpus: int = 1,
+    n_jobs: int = 1,
 ) -> Dict[str, pd.DataFrame]:
-    """
-    Rigorous “cluster markers” via paired pseudobulk DE:
-      For each cluster C:
-        within each sample S:
-          library1 = cells in (S, C)
-          library2 = cells in (S, not C)
-        Fit: ~ sample + binary_cluster
-        Contrast: C vs Rest (ref=Rest)
 
-    OOM-safe approach:
-      1) aggregate counts once per (sample, cluster) across ALL cells
-      2) aggregate totals once per sample
-      3) for each cluster, compute rest = total - target (no re-reading X)
-    """
     group_key = resolve_group_key(adata, groupby=groupby, round_id=round_id, prefer_pretty=True)
     sample_key = spec.sample_key
     counts_layer = spec.counts_layer
@@ -493,7 +728,27 @@ def de_cluster_vs_rest_pseudobulk(
     if sample_key not in adata.obs:
         raise KeyError(f"sample_key={sample_key!r} not in adata.obs")
 
-    # 1) Aggregate per (sample, cluster)
+    raw_covariates = [
+        c for c in getattr(opts, "covariates", ()) if str(c) not in {str(sample_key), "sample", "binary_cluster"}
+    ]
+    sample_covs, covariates = _collect_sample_covariates(
+        adata,
+        sample_key=str(sample_key),
+        covariates=raw_covariates,
+    )
+
+    # ------------------------------------------------------------------
+    # Aggregation (timed)
+    # ------------------------------------------------------------------
+    LOGGER.info(
+        "Pseudobulk DE: aggregating counts (sample_key=%r, group_key=%r, counts_layer=%r).",
+        str(sample_key),
+        str(group_key),
+        (str(counts_layer) if counts_layer else None),
+    )
+
+    t_ag0 = time.perf_counter()
+    t1 = time.perf_counter()
     counts_sc, meta_sc = pseudobulk_aggregate(
         adata,
         sample_key=sample_key,
@@ -501,7 +756,15 @@ def de_cluster_vs_rest_pseudobulk(
         counts_layer=counts_layer,
         min_cells_per_sample_group=1,
     )
-    # 2) Aggregate per sample (totals)
+    dt1 = time.perf_counter() - t1
+    LOGGER.info(
+        "Pseudobulk DE: aggregated (sample,cluster): libs=%d genes=%d time=%.1fs",
+        int(meta_sc.shape[0]),
+        int(counts_sc.shape[1]),
+        dt1,
+    )
+
+    t2 = time.perf_counter()
     counts_s, meta_s = pseudobulk_aggregate(
         adata,
         sample_key=sample_key,
@@ -509,8 +772,18 @@ def de_cluster_vs_rest_pseudobulk(
         counts_layer=counts_layer,
         min_cells_per_sample_group=1,
     )
+    dt2 = time.perf_counter() - t2
+    LOGGER.info(
+        "Pseudobulk DE: aggregated (sample totals): libs=%d genes=%d time=%.1fs (agg_total=%.1fs)",
+        int(meta_s.shape[0]),
+        int(counts_s.shape[1]),
+        dt2,
+        time.perf_counter() - t_ag0,
+    )
 
-    # Build lookup maps
+    # ------------------------------------------------------------------
+    # Build index helpers
+    # ------------------------------------------------------------------
     meta_sc2 = meta_sc.copy()
     meta_sc2["__sample"] = meta_sc2[sample_key].astype(str)
     meta_sc2["__group"] = meta_sc2[group_key].astype(str)
@@ -522,168 +795,433 @@ def de_cluster_vs_rest_pseudobulk(
     s_row_by_sample = pd.Series(meta_s2.index.to_numpy(), index=meta_s2["__sample"].to_numpy())
 
     clusters = pd.Index(pd.unique(meta_sc[group_key].astype(str))).sort_values()
+    n_clusters = int(len(clusters))
+
+    # --- smart core distribution ---
+    n_jobs_eff, n_cpus_eff = _compute_cluster_parallelism(
+        n_clusters=n_clusters,
+        total_cpus=int(n_jobs),
+    )
+
+    LOGGER.info(
+        "Pseudobulk DE parallelism: n_clusters=%d, total_cpus=%d → n_jobs=%d, n_cpus_per_job=%d",
+        n_clusters,
+        int(n_jobs),
+        int(n_jobs_eff),
+        int(n_cpus_eff),
+    )
+
     results: Dict[str, pd.DataFrame] = {}
+    summary_rows: list[dict] = []
 
-    summary_rows = []
-
-    # prevalence gates (Seurat-like)
+    min_total = int(getattr(opts, "min_total_counts", 10))
+    max_genes = getattr(opts, "max_genes", None)
     min_pct = float(getattr(opts, "min_pct", 0.0))
-    min_diff_pct = float(getattr(opts, "min_diff_pct", 0.0))
+    min_counts_per_lib = int(getattr(opts, "min_counts_per_lib", 0))
+    min_lib_pct = float(getattr(opts, "min_lib_pct", 0.0))
 
-    for cl in clusters:
-        m_cl = meta_sc2["__group"].to_numpy() == str(cl)
+    # ------------------------------------------------------------------
+    # Build per-cluster payloads (with progress logs)
+    # ------------------------------------------------------------------
+    payloads: list[dict] = []
+
+    t_build0 = time.perf_counter()
+    last_build_log = t_build0
+    build_log_every_s = float(getattr(opts, "build_log_every_s", 30.0))
+    build_log_every_n = int(getattr(opts, "build_log_every_n", 5))
+
+    n_skipped = 0
+    n_queued = 0
+    libs_per_payload: list[int] = []
+    genes_per_payload: list[int] = []
+
+    LOGGER.info(
+        "Pseudobulk DE: building per-cluster payloads (clusters=%d, min_cells_per_sample_group=%d, min_samples_per_level=%d).",
+        int(n_clusters),
+        int(opts.min_cells_per_sample_group),
+        int(opts.min_samples_per_level),
+    )
+
+    for i_cl, cl in enumerate(clusters, start=1):
+        cl_str = str(cl)
+
+        m_cl = meta_sc2["__group"].to_numpy() == cl_str
         meta_cl = meta_sc2.loc[m_cl, [sample_key, group_key, "n_cells"]].copy()
-
         meta_cl = meta_cl.loc[meta_cl["n_cells"] >= int(opts.min_cells_per_sample_group)]
         n_target_samples = int(meta_cl.shape[0])
 
         if n_target_samples < int(opts.min_samples_per_level):
-            results[str(cl)] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
+            results[cl_str] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
             summary_rows.append(
                 {
-                    "cluster": str(cl),
+                    "cluster": cl_str,
                     "status": "skipped",
                     "reason": f"only {n_target_samples} sample(s) with >= {opts.min_cells_per_sample_group} cells in target",
                     "n_target_samples": n_target_samples,
                     "min_cells_per_sample_group": int(opts.min_cells_per_sample_group),
                 }
             )
-            continue
+            n_skipped += 1
+        else:
+            samples = np.unique(meta_cl[sample_key].astype(str).to_numpy())
 
-        samples = np.unique(meta_cl[sample_key].astype(str).to_numpy())
+            pb_index: list[str] = []
+            metadata_rows: list[dict] = []
+            target_rows: list[str] = []
+            total_rows: list[str] = []
 
-        pb_index = []
-        metadata_rows = []
-        target_rows = []
-        total_rows = []
+            for s in samples:
+                key = f"{s}||{cl_str}"
+                if key not in sc_row_by_key.index:
+                    continue
+                rid_target = sc_row_by_key.loc[key]
+                rid_total = s_row_by_sample.loc[s] if s in s_row_by_sample.index else None
+                if rid_total is None:
+                    continue
 
-        for s in samples:
-            key = f"{s}||{cl}"
-            if key not in sc_row_by_key.index:
-                continue
-            rid_target = sc_row_by_key.loc[key]
-            rid_total = s_row_by_sample.loc[s] if s in s_row_by_sample.index else None
-            if rid_total is None:
-                continue
+                pb_index.append(f"{s}|{cl_str}|target")
+                cov_vals = sample_covs.get(str(s), {})
+                metadata_rows.append({"sample": str(s), "binary_cluster": "target", **cov_vals})
+                target_rows.append(rid_target)
+                total_rows.append(rid_total)
 
-            pb_index.append(f"{s}|{cl}|target")
-            metadata_rows.append({sample_key: str(s), "binary_cluster": "target"})
-            target_rows.append(rid_target)
-            total_rows.append(rid_total)
+                pb_index.append(f"{s}|{cl_str}|rest")
+                metadata_rows.append({"sample": str(s), "binary_cluster": "rest", **cov_vals})
+                target_rows.append(rid_target)
+                total_rows.append(rid_total)
 
-            pb_index.append(f"{s}|{cl}|rest")
-            metadata_rows.append({sample_key: str(s), "binary_cluster": "rest"})
-            target_rows.append(rid_target)
-            total_rows.append(rid_total)
-
-        if len(pb_index) < 2 * int(opts.min_samples_per_level):
-            results[str(cl)] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
-            summary_rows.append(
-                {
-                    "cluster": str(cl),
-                    "status": "skipped",
-                    "reason": "paired library construction failed",
-                    "n_target_samples": n_target_samples,
-                }
-            )
-            continue
-
-        metadata = pd.DataFrame(metadata_rows, index=pd.Index(pb_index, name="pb_id"))
-        metadata[sample_key] = metadata[sample_key].astype("category")
-        metadata["binary_cluster"] = pd.Categorical(metadata["binary_cluster"], categories=["rest", "target"])
-
-        target_mat = counts_sc.loc[pd.Index(target_rows)].sparse.to_coo().toarray()
-        total_mat = counts_s.loc[pd.Index(total_rows)].sparse.to_coo().toarray()
-
-        out = np.zeros_like(total_mat, dtype=np.int64)
-        for i in range(out.shape[0]):
-            if i % 2 == 0:
-                out[i, :] = target_mat[i, :]
+            if len(pb_index) < 2 * int(opts.min_samples_per_level):
+                results[cl_str] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
+                summary_rows.append(
+                    {
+                        "cluster": cl_str,
+                        "status": "skipped",
+                        "reason": "paired library construction failed",
+                        "n_target_samples": n_target_samples,
+                    }
+                )
+                n_skipped += 1
             else:
-                v = total_mat[i, :] - target_mat[i, :]
-                v[v < 0] = 0
-                out[i, :] = v.astype(np.int64, copy=False)
+                # densify only the needed rows (still small)
+                target_mat = counts_sc.loc[pd.Index(target_rows)].sparse.to_coo().toarray()
+                total_mat = counts_s.loc[pd.Index(total_rows)].sparse.to_coo().toarray()
 
-        counts = pd.DataFrame(out, index=metadata.index, columns=adata.var_names)
+                out = np.zeros_like(total_mat, dtype=np.int64)
+                for i in range(out.shape[0]):
+                    if i % 2 == 0:
+                        out[i, :] = target_mat[i, :]
+                    else:
+                        v = total_mat[i, :] - target_mat[i, :]
+                        v[v < 0] = 0
+                        out[i, :] = v.astype(np.int64, copy=False)
 
-        # Drop genes with extremely low total counts
-        min_total = int(getattr(opts, "min_total_counts", 10))
-        keep = (counts.sum(axis=0) >= min_total)
-        counts = counts.loc[:, keep]
-        if counts.shape[1] == 0:
-            results[str(cl)] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
-            summary_rows.append({"cluster": str(cl), "status": "skipped", "reason": "no genes left after filtering"})
-            continue
+                # gene prefilter: total counts + cell-level prevalence (Seurat-style: either group)
+                keep_total = (out.sum(axis=0) >= min_total)
+                cell_mask = adata.obs[str(group_key)].astype(str).to_numpy() == cl_str
+                keep_target = _celllevel_pct_mask(
+                    adata,
+                    mask=cell_mask,
+                    counts_layer=counts_layer,
+                    min_pct=min_pct,
+                )
+                keep_rest = _celllevel_pct_mask(
+                    adata,
+                    mask=~cell_mask,
+                    counts_layer=counts_layer,
+                    min_pct=min_pct,
+                )
+                keep = keep_total & (keep_target | keep_rest)
+                if not np.any(keep):
+                    results[cl_str] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
+                    summary_rows.append({"cluster": cl_str, "status": "skipped", "reason": "no genes left after filtering"})
+                    n_skipped += 1
+                else:
+                    out2 = out[:, keep]
+                    genes2 = adata.var_names.to_numpy()[keep].astype(str).tolist()
 
-        # Seurat-like prevalence filtering on libraries (counts > 0)
-        counts, prev_meta = _apply_min_pct_filters_pseudobulk(
-            counts,
-            labels=metadata["binary_cluster"],
-            level_A="target",
-            level_B="rest",
-            min_pct=min_pct,
-            min_diff_pct=min_diff_pct,
+                    metadata_tmp = pd.DataFrame(metadata_rows, index=pd.Index(pb_index, name="pb_id"))
+                    counts_tmp = pd.DataFrame(out2, index=metadata_tmp.index, columns=genes2)
+
+                    # aggregate-level library filter: >= min_counts_per_lib in >= min_lib_pct of libs
+                    if min_counts_per_lib > 0 and min_lib_pct > 0.0:
+                        lib_frac = (counts_tmp >= int(min_counts_per_lib)).sum(axis=0) / float(counts_tmp.shape[0])
+                        keep_lib = (lib_frac >= float(min_lib_pct)).to_numpy()
+                        counts_tmp = counts_tmp.loc[:, keep_lib].copy()
+                    if max_genes is not None and counts_tmp.shape[1] > int(max_genes):
+                        # Keep top genes by total counts across libraries (debug / speed cap)
+                        totals = counts_tmp.sum(axis=0).sort_values(ascending=False)
+                        keep_genes = totals.index[: int(max_genes)]
+                        counts_tmp = counts_tmp.loc[:, keep_genes].copy()
+                    if counts_tmp.shape[1] == 0:
+                        results[cl_str] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
+                        summary_rows.append(
+                            {
+                                "cluster": cl_str,
+                                "status": "skipped",
+                                "reason": "no genes left after filtering",
+                            }
+                        )
+                        n_skipped += 1
+                    else:
+                        vc = metadata_tmp["binary_cluster"].value_counts()
+                        if int(vc.get("target", 0)) < int(opts.min_samples_per_level) or int(vc.get("rest", 0)) < int(opts.min_samples_per_level):
+                            results[cl_str] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
+                            summary_rows.append(
+                                {
+                                    "cluster": cl_str,
+                                    "status": "skipped",
+                                    "reason": "insufficient libraries per level after filtering",
+                                    "n_target_libs": int(vc.get("target", 0)),
+                                    "n_rest_libs": int(vc.get("rest", 0)),
+                                }
+                            )
+                            n_skipped += 1
+                        else:
+                            # payload for worker (numpy + lists)
+                            payloads.append(
+                                {
+                                    "cluster": cl_str,
+                                    "counts_np": counts_tmp.to_numpy(dtype=np.int64, copy=False),
+                                    "pb_index": counts_tmp.index.astype(str).tolist(),
+                                    "size_factors": "poscounts",
+                                    "genes": counts_tmp.columns.astype(str).tolist(),
+                                    "metadata_rows": metadata_rows,
+                                    "covariates": covariates,
+                                    "alpha": float(opts.alpha),
+                                    "shrink_lfc": bool(opts.shrink_lfc),
+                                    "positive_only": bool(opts.positive_only),
+                                    "n_cpus": int(n_cpus_eff),
+                                }
+                            )
+                            n_queued += 1
+                            libs_per_payload.append(int(counts_tmp.shape[0]))
+                            genes_per_payload.append(int(counts_tmp.shape[1]))
+
+                            # record partial summary now; finalize after worker returns
+                            summary_rows.append(
+                                {
+                                    "cluster": cl_str,
+                                    "status": "queued" if int(n_jobs_eff) > 1 else "running",
+                                    "n_target_samples": int(len(samples)),
+                                    "n_libraries": int(counts_tmp.shape[0]),
+                                    "min_cells_per_sample_group": int(opts.min_cells_per_sample_group),
+                                }
+                            )
+
+        # progress heartbeat during payload build (not spammy)
+        now = time.perf_counter()
+        if (i_cl % build_log_every_n == 0) or ((now - last_build_log) >= build_log_every_s):
+            LOGGER.info(
+                "Pseudobulk DE: payload build progress %d/%d (queued=%d skipped=%d) elapsed=%.1fs",
+                int(i_cl),
+                int(n_clusters),
+                int(n_queued),
+                int(n_skipped),
+                (now - t_build0),
+            )
+            last_build_log = now
+
+    # payload build summary
+    build_dt = time.perf_counter() - t_build0
+    if libs_per_payload and genes_per_payload:
+        libs_med = float(np.median(libs_per_payload))
+        genes_med = float(np.median(genes_per_payload))
+        libs_rng = (int(np.min(libs_per_payload)), int(np.max(libs_per_payload)))
+        genes_rng = (int(np.min(genes_per_payload)), int(np.max(genes_per_payload)))
+    else:
+        libs_med = genes_med = 0.0
+        libs_rng = genes_rng = (0, 0)
+
+    LOGGER.info(
+        "Pseudobulk DE: payload build complete: queued=%d skipped=%d time=%.1fs "
+        "(libs median=%.0f range=%s; genes median=%.0f range=%s).",
+        int(n_queued),
+        int(n_skipped),
+        build_dt,
+        libs_med,
+        str(libs_rng),
+        genes_med,
+        str(genes_rng),
+    )
+
+    # ------------------------------------------------------------------
+    # Execute: serial or parallel (existing behavior + your heartbeat loop)
+    # ------------------------------------------------------------------
+    ctx = mp.get_context("spawn")
+
+    t0 = time.perf_counter()
+    total = int(len(payloads))
+
+    if total == 0:
+        LOGGER.info("Pseudobulk DE: no payloads queued (all clusters skipped earlier).")
+
+    elif int(n_jobs_eff) <= 1 or total <= 1:
+        LOGGER.info("Pseudobulk DE: running serially (payloads=%d).", total)
+
+        for i, p in enumerate(payloads, start=1):
+            cl = str(p.get("cluster", ""))
+            t_cl0 = time.perf_counter()
+
+            n_libs = int(len(p.get("pb_index", [])))
+            n_genes = int(len(p.get("genes", [])))
+            LOGGER.info(
+                "PB DE [%d/%d] start cluster=%s (libs=%d, genes=%d, n_cpus=%s)",
+                i,
+                total,
+                cl,
+                n_libs,
+                n_genes,
+                p.get("n_cpus", "?"),
+            )
+
+            cl2, res, meta_upd = _pydeseq2_cluster_worker(p)
+            dt = time.perf_counter() - t_cl0
+
+            results[cl2] = res
+
+            for row in summary_rows:
+                if row.get("cluster") == cl2 and row.get("status") in ("queued", "running"):
+                    row.update(meta_upd)
+                    row["runtime_s"] = float(dt)
+                    break
+
+            done = i
+            elapsed = time.perf_counter() - t0
+            eta_s = (elapsed / max(1, done)) * (total - done)
+
+            LOGGER.info(
+                "PB DE [%d/%d] done  cluster=%s status=%s n_sig=%s time=%.1fs elapsed=%.1fs eta=%.1fs",
+                done,
+                total,
+                str(cl2),
+                str(meta_upd.get("status", "unknown")),
+                meta_upd.get("n_sig", "NA"),
+                dt,
+                elapsed,
+                eta_s,
+            )
+
+    else:
+        max_workers = int(n_jobs_eff)
+        heartbeat_s = float(getattr(opts, "heartbeat_s", 60.0))
+
+        LOGGER.info(
+            "Pseudobulk DE: running in parallel (payloads=%d, max_workers=%d, n_cpus_per_fit=%d, heartbeat=%.0fs).",
+            total,
+            max_workers,
+            int(payloads[0].get("n_cpus", 1)) if payloads else 1,
+            heartbeat_s,
         )
-        if counts.shape[1] == 0:
-            results[str(cl)] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
-            summary_rows.append(
-                {
-                    "cluster": str(cl),
-                    "status": "skipped",
-                    "reason": "no genes left after min_pct/min_diff_pct filtering",
-                    **prev_meta,
-                }
-            )
-            continue
 
-        vc = metadata["binary_cluster"].value_counts()
-        if int(vc.get("target", 0)) < int(opts.min_samples_per_level) or int(vc.get("rest", 0)) < int(opts.min_samples_per_level):
-            results[str(cl)] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
-            summary_rows.append(
-                {
-                    "cluster": str(cl),
-                    "status": "skipped",
-                    "reason": "insufficient libraries per level after filtering",
-                    "n_target_libs": int(vc.get("target", 0)),
-                    "n_rest_libs": int(vc.get("rest", 0)),
-                }
-            )
-            continue
+        submit_ts: dict[str, float] = {}
+        # Force BLAS/OpenMP threading to 1 before worker spawn to avoid oversubscription.
+        _set_blas_threads(1, force=True)
+        with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as ex:
+            futs: dict = {}
+            for p in payloads:
+                cl = str(p.get("cluster", ""))
+                submit_ts[cl] = time.perf_counter()
+                futs[ex.submit(_pydeseq2_cluster_worker, p)] = cl
 
-        try:
-            res = _run_pydeseq2(
-                counts,
-                metadata.rename(columns={sample_key: "sample"}),
-                design_factors=["sample", "binary_cluster"],
-                contrast=("binary_cluster", "target", "rest"),
-                alpha=opts.alpha,
-                shrink_lfc=opts.shrink_lfc,
-                n_cpus=n_cpus,
-            )
+            done = 0
+            fail_count = 0
 
-            # ---- POSITIVE ONLY gate
-            if opts.positive_only and not res.empty and "log2FoldChange" in res.columns:
-                res = res.loc[res["log2FoldChange"] > 0].copy()
+            pending = set(futs.keys())
+            while pending:
+                try:
+                    for fut in as_completed(pending, timeout=heartbeat_s):
+                        pending.remove(fut)
+                        cl = futs[fut]
+                        t_done = time.perf_counter()
+                        dt = t_done - float(submit_ts.get(cl, t_done))
 
-            results[str(cl)] = res
+                        try:
+                            cl2, res, meta_upd = fut.result()
+                        except Exception as e:
+                            import traceback
 
-            n_sig = int((pd.to_numeric(res["padj"], errors="coerce") < opts.alpha).sum()) if not res.empty else 0
-            summary_rows.append(
-                {
-                    "cluster": str(cl),
-                    "status": "ok",
-                    "n_target_samples": int(len(samples)),
-                    "n_libraries": int(counts.shape[0]),
-                    "min_cells_per_sample_group": int(opts.min_cells_per_sample_group),
-                    "n_sig": n_sig,
-                    **prev_meta,
-                }
-            )
-        except Exception as e:
-            LOGGER.warning("PyDESeq2 failed for cluster %s vs rest: %s", str(cl), e)
-            results[str(cl)] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
-            summary_rows.append({"cluster": str(cl), "status": "failed", "reason": str(e)})
+                            cl2 = cl
+                            res = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
+                            meta_upd = {
+                                "status": "failed",
+                                "reason": f"{type(e).__name__}: {e}",
+                                "traceback": traceback.format_exc(),
+                            }
 
+                        results[cl2] = res
+
+                        for row in summary_rows:
+                            if row.get("cluster") == cl2 and row.get("status") in ("queued", "running"):
+                                row.update(meta_upd)
+                                row["runtime_s"] = float(dt)
+                                break
+
+                        done += 1
+                        elapsed = time.perf_counter() - t0
+                        eta_s = (elapsed / max(1, done)) * (total - done)
+
+                        status = str(meta_upd.get("status", "unknown"))
+                        n_sig = meta_upd.get("n_sig", "NA")
+                        reason = str(meta_upd.get("reason", ""))
+
+                        LOGGER.info(
+                            "PB DE [%d/%d] done  cluster=%s status=%s n_sig=%s time=%.1fs elapsed=%.1fs eta=%.1fs%s",
+                            done,
+                            total,
+                            str(cl2),
+                            status,
+                            n_sig,
+                            dt,
+                            elapsed,
+                            eta_s,
+                            (f" reason={reason}" if status != "ok" and reason else ""),
+                        )
+
+                        if status != "ok":
+                            fail_count += 1
+                            if fail_count <= 3:
+                                tb = meta_upd.get("traceback", "")
+                                if tb:
+                                    LOGGER.error("PB DE failure traceback (cluster=%s):\n%s", str(cl2), tb)
+
+                except TimeoutError:
+                    now = time.perf_counter()
+                    elapsed = now - t0
+
+                    oldest_cl = None
+                    oldest_dt = None
+                    if pending:
+                        pending_cls = [futs[f] for f in pending]
+                        oldest_cl = min(pending_cls, key=lambda c: submit_ts.get(c, now))
+                        oldest_dt = now - float(submit_ts.get(oldest_cl, now))
+
+                    longest = []
+                    if pending:
+                        pending_cls = [futs[f] for f in pending]
+                        pending_cls.sort(key=lambda c: submit_ts.get(c, now))
+                        for c in pending_cls[:3]:
+                            longest.append(f"{c}:{now - float(submit_ts.get(c, now)):.0f}s")
+
+                    LOGGER.info(
+                        "PB DE heartbeat: done=%d/%d pending=%d elapsed=%.1fs oldest=%s (%.1fs) longest=%s",
+                        done,
+                        total,
+                        int(len(pending)),
+                        elapsed,
+                        str(oldest_cl) if oldest_cl is not None else "NA",
+                        float(oldest_dt) if oldest_dt is not None else 0.0,
+                        ", ".join(longest) if longest else "NA",
+                    )
+
+    # ------------------------------------------------------------------
+    # Ensure all clusters present
+    # ------------------------------------------------------------------
+    for cl in clusters.astype(str).tolist():
+        results.setdefault(cl, pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]))
+
+    # ------------------------------------------------------------------
+    # Store
+    # ------------------------------------------------------------------
     if store and store_key:
         adata.uns.setdefault(store_key, {})
         adata.uns[store_key].setdefault("pseudobulk_cluster_vs_rest", {})
@@ -698,6 +1236,13 @@ def de_cluster_vs_rest_pseudobulk(
             "min_total_counts": int(getattr(opts, "min_total_counts", 10)),
             "min_pct": float(getattr(opts, "min_pct", 0.0)),
             "min_diff_pct": float(getattr(opts, "min_diff_pct", 0.0)),
+            "max_genes": (int(getattr(opts, "max_genes", 0)) if getattr(opts, "max_genes", None) else None),
+            "n_jobs": int(n_jobs_eff),
+            "n_cpus_per_fit": 1 if int(n_jobs_eff) > 1 else int(n_cpus_eff),
+            # new logging knobs (if you used them)
+            "heartbeat_s": float(getattr(opts, "heartbeat_s", 60.0)),
+            "build_log_every_s": float(getattr(opts, "build_log_every_s", 30.0)),
+            "build_log_every_n": int(getattr(opts, "build_log_every_n", 5)),
         }
         adata.uns[store_key]["pseudobulk_cluster_vs_rest"]["summary"] = pd.DataFrame(summary_rows)
         adata.uns[store_key]["pseudobulk_cluster_vs_rest"]["results"] = results
@@ -722,6 +1267,7 @@ def de_condition_within_group_pseudobulk(
     """
     Condition DE within a given group (e.g., cell type / cluster).
     """
+    _set_blas_threads(1)
     group_key = resolve_group_key(adata, groupby=groupby, round_id=round_id, prefer_pretty=True)
     sample_key = spec.sample_key
     counts_layer = spec.counts_layer
@@ -762,7 +1308,22 @@ def de_condition_within_group_pseudobulk(
     if int(vc.get(str(reference), 0)) < int(opts.min_samples_per_level) or int(vc.get(str(test), 0)) < int(opts.min_samples_per_level):
         return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
 
+    raw_covariates = [
+        c for c in getattr(opts, "covariates", ()) if str(c) not in {str(sample_key), str(condition_key), "sample"}
+    ]
+    sample_covs, covariates = _collect_sample_covariates(
+        adata,
+        sample_key=str(sample_key),
+        covariates=raw_covariates,
+    )
+
     metadata = meta_df[[sample_key, condition_key]].copy()
+    for c in covariates:
+        metadata[c] = metadata[sample_key].astype(str).map(
+            lambda s: sample_covs.get(str(s), {}).get(c, np.nan)
+        )
+        if metadata[c].dtype == object:
+            metadata[c] = metadata[c].astype("category")
     metadata[sample_key] = metadata[sample_key].astype("category")
     metadata[condition_key] = pd.Categorical(metadata[condition_key].astype(str), categories=[str(reference), str(test)])
 
@@ -770,63 +1331,97 @@ def de_condition_within_group_pseudobulk(
     counts = pd.DataFrame(dense, index=counts_df.index, columns=counts_df.columns)
 
     min_total = int(getattr(opts, "min_total_counts", 10))
+    max_genes = getattr(opts, "max_genes", None)
     keep = (counts.sum(axis=0) >= min_total)
     counts = counts.loc[:, keep]
     if counts.shape[1] == 0:
         return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
 
-    # Seurat-like prevalence gates (library prevalence by condition)
+    # Cell-level prevalence filter within this cluster (min_pct on either condition)
     min_pct = float(getattr(opts, "min_pct", 0.0))
-    min_diff_pct = float(getattr(opts, "min_diff_pct", 0.0))
-    counts, _prev_meta = _apply_min_pct_filters_pseudobulk(
-        counts,
-        labels=metadata[condition_key],
-        level_A=str(test),
-        level_B=str(reference),
-        min_pct=min_pct,
-        min_diff_pct=min_diff_pct,
-    )
+    if min_pct > 0.0:
+        mask_cluster = adata.obs[str(group_key)].astype(str).to_numpy() == str(group_value)
+        mask_test = mask_cluster & (adata.obs[str(condition_key)].astype(str).to_numpy() == str(test))
+        mask_ref = mask_cluster & (adata.obs[str(condition_key)].astype(str).to_numpy() == str(reference))
+        keep_test = _celllevel_pct_mask(
+            adata,
+            mask=mask_test,
+            counts_layer=counts_layer,
+            min_pct=min_pct,
+        )
+        keep_ref = _celllevel_pct_mask(
+            adata,
+            mask=mask_ref,
+            counts_layer=counts_layer,
+            min_pct=min_pct,
+        )
+        keep = keep_test | keep_ref
+        keep_series = pd.Series(keep, index=adata.var_names.astype(str))
+        keep = keep_series.reindex(counts.columns.astype(str)).fillna(False).to_numpy()
+        counts = counts.loc[:, keep]
+    # aggregate-level library filter: >= min_counts_per_lib in >= min_lib_pct of libs
+    min_counts_per_lib = int(getattr(opts, "min_counts_per_lib", 0))
+    min_lib_pct = float(getattr(opts, "min_lib_pct", 0.0))
+    if min_counts_per_lib > 0 and min_lib_pct > 0.0 and counts.shape[1] > 0:
+        lib_frac = (counts >= int(min_counts_per_lib)).sum(axis=0) / float(counts.shape[0])
+        keep_lib = (lib_frac >= float(min_lib_pct)).to_numpy()
+        counts = counts.loc[:, keep_lib].copy()
+
+    if max_genes is not None and counts.shape[1] > int(max_genes):
+        totals = counts.sum(axis=0).sort_values(ascending=False)
+        keep_genes = totals.index[: int(max_genes)]
+        counts = counts.loc[:, keep_genes].copy()
     if counts.shape[1] == 0:
         return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
 
     try:
-        res = _run_pydeseq2(
+        res, meta = _run_pydeseq2(
             counts,
             metadata.rename(columns={sample_key: "sample"}),
-            design_factors=["sample", condition_key],
+            design_factors=["sample", *covariates, condition_key],
             contrast=(condition_key, str(test), str(reference)),
             alpha=opts.alpha,
             shrink_lfc=opts.shrink_lfc,
             n_cpus=n_cpus,
+            size_factors=str(getattr(opts, "size_factors", "poscounts")),
         )
     except Exception as e:
         LOGGER.warning("PyDESeq2 failed for condition DE within %s=%s: %s", group_key, group_value, e)
         res = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
+        meta_df = {
+            "sf_policy": str(getattr(opts, "size_factors", "poscounts")),
+            "sf_used": None,
+            "sf_forced": False,
+            "warn_iterative_size_factors": False,
+            "warn_low_df_dispersion": False,
+            "warnings": [str(e)],
+        }
 
     if store and store_key:
-        adata.uns.setdefault(store_key, {})
-        adata.uns[store_key].setdefault("pseudobulk_condition_within_group", {})
-        key = f"{group_key}={group_value}::{condition_key}::{test}_vs_{reference}"
-        adata.uns[store_key]["pseudobulk_condition_within_group"][key] = {
-            "group_key": str(group_key),
-            "group_value": str(group_value),
-            "sample_key": str(sample_key),
-            "condition_key": str(condition_key),
-            "reference": str(reference),
-            "test": str(test),
-            "counts_layer": str(counts_layer) if counts_layer else None,
-            "options": {
-                "min_cells_per_sample_group": int(opts.min_cells_per_sample_group),
-                "min_samples_per_level": int(opts.min_samples_per_level),
-                "alpha": float(opts.alpha),
-                "shrink_lfc": bool(opts.shrink_lfc),
-                "min_total_counts": int(getattr(opts, "min_total_counts", 10)),
-                "min_pct": float(getattr(opts, "min_pct", 0.0)),
-                "min_diff_pct": float(getattr(opts, "min_diff_pct", 0.0)),
-            },
-            "meta": meta_df,
-            "results": res,
-        }
+            adata.uns.setdefault(store_key, {})
+            adata.uns[store_key].setdefault("pseudobulk_condition_within_group", {})
+            key = f"{group_key}={group_value}::{condition_key}::{test}_vs_{reference}"
+            adata.uns[store_key]["pseudobulk_condition_within_group"][key] = {
+                "group_key": str(group_key),
+                "group_value": str(group_value),
+                "sample_key": str(sample_key),
+                "condition_key": str(condition_key),
+                "reference": str(reference),
+                "test": str(test),
+                "counts_layer": str(counts_layer) if counts_layer else None,
+                "options": {
+                    "min_cells_per_sample_group": int(opts.min_cells_per_sample_group),
+                    "min_samples_per_level": int(opts.min_samples_per_level),
+                    "alpha": float(opts.alpha),
+                    "shrink_lfc": bool(opts.shrink_lfc),
+                    "min_total_counts": int(getattr(opts, "min_total_counts", 10)),
+                    "min_pct": float(getattr(opts, "min_pct", 0.0)),
+                    "min_diff_pct": float(getattr(opts, "min_diff_pct", 0.0)),
+                    "max_genes": (int(getattr(opts, "max_genes", 0)) if getattr(opts, "max_genes", None) else None),
+                },
+                "meta": meta_df,
+                "results": res,
+            }
 
     return res
 
@@ -1269,13 +1864,19 @@ def contrast_conditional_markers(
     groupby: Optional[str] = None,
     round_id: Optional[str] = None,
     spec: ContrastConditionalSpec,
-    pb_spec: PseudobulkSpec,
+    pb_spec: Optional[PseudobulkSpec] = None,
     store_key: str = "scomnom_de",
     store: bool = True,
 ) -> Dict[str, Dict[str, Dict[str, pd.DataFrame]]]:
     """
+    Pairwise (A vs B) markers within each cluster.
+
     Returns nested dict:
       out[cluster][f"{A}_vs_{B}"]["combined" | "wilcoxon" | "logreg" | "pseudobulk_effect"] = DataFrame
+
+    Notes:
+      - If pb_spec is None, pseudobulk_effect is empty and tiering ignores pseudobulk.
+      - Cell-level prevalence gates (min_pct/min_diff_pct) are applied when prevalence columns exist.
     """
     import scanpy as sc
     from scanpy.get import rank_genes_groups_df
@@ -1295,7 +1896,7 @@ def contrast_conditional_markers(
     out: Dict[str, Dict[str, Dict[str, pd.DataFrame]]] = {}
     summary_rows: list[dict[str, Any]] = []
 
-    counts_layer = pb_spec.counts_layer
+    counts_layer = pb_spec.counts_layer if pb_spec is not None else None
 
     # cell-level prevalence gates (Seurat-like)
     cl_min_pct = float(getattr(spec, "min_pct", 0.0))
@@ -1304,9 +1905,21 @@ def contrast_conditional_markers(
     # choose which pairs to run
     pairs = _select_pairs(levels.tolist(), list(spec.contrasts) if spec.contrasts else None)
 
+    def _sgn(x: Any) -> int:
+        try:
+            if x is None or not np.isfinite(x):
+                return 0
+        except Exception:
+            return 0
+        if x > 0:
+            return 1
+        if x < 0:
+            return -1
+        return 0
+
     for cl in clusters:
         cl_mask = (adata.obs[group_key].astype(str).to_numpy() == str(cl))
-        if cl_mask.sum() == 0:
+        if int(cl_mask.sum()) == 0:
             continue
 
         out[str(cl)] = {}
@@ -1321,6 +1934,13 @@ def contrast_conditional_markers(
 
         for (A, B) in pairs:
             pair_key = f"{A}_vs_{B}"
+            LOGGER.info(
+                "cell-level contrast: cluster=%r contrast_key=%r A=%r B=%r",
+                str(cl),
+                str(contrast_key),
+                str(A),
+                str(B),
+            )
 
             idxA = by_level_idx.get(A, np.array([], dtype=int))
             idxB = by_level_idx.get(B, np.array([], dtype=int))
@@ -1328,7 +1948,7 @@ def contrast_conditional_markers(
             nA = int(idxA.size)
             nB = int(idxB.size)
 
-            if nA < spec.min_cells_per_level_in_cluster or nB < spec.min_cells_per_level_in_cluster:
+            if nA < int(spec.min_cells_per_level_in_cluster) or nB < int(spec.min_cells_per_level_in_cluster):
                 out[str(cl)][pair_key] = {
                     "wilcoxon": pd.DataFrame(),
                     "logreg": pd.DataFrame(),
@@ -1349,30 +1969,59 @@ def contrast_conditional_markers(
                 )
                 continue
 
-            maskA = np.zeros(adata.n_obs, dtype=bool); maskA[idxA] = True
-            maskB = np.zeros(adata.n_obs, dtype=bool); maskB[idxB] = True
+            maskA = np.zeros(adata.n_obs, dtype=bool)
+            maskA[idxA] = True
+            maskB = np.zeros(adata.n_obs, dtype=bool)
+            maskB[idxB] = True
 
             adata_sub, ds_meta = _downsample_two_level_subset(
-                adata, maskA, maskB,
+                adata,
+                maskA,
+                maskB,
                 max_per_level=int(spec.max_cells_per_level_in_cluster),
                 random_state=int(spec.random_state),
             )
 
+            # keep only the two levels explicitly (defensive)
             adata_sub = adata_sub[adata_sub.obs[contrast_key].astype(str).isin([A, B])].copy()
 
-            # pseudobulk effect (all cells)
-            pb_df = _pb_effect_log2fc(
-                adata,
-                cluster_mask=cl_mask,
-                contrast_key=contrast_key,
-                level_A=A,
-                level_B=B,
-                counts_layer=counts_layer,
-                min_total_counts=int(spec.min_total_counts),
-                pseudocount=float(spec.pseudocount),
-            )
+            # ----------------------------
+            # pseudobulk effect (optional)
+            # ----------------------------
+            if pb_spec is not None:
+                pb_df = _pb_effect_log2fc(
+                    adata,
+                    cluster_mask=cl_mask,
+                    contrast_key=contrast_key,
+                    level_A=A,
+                    level_B=B,
+                    counts_layer=counts_layer,
+                    min_total_counts=int(spec.min_total_counts),
+                    pseudocount=float(spec.pseudocount),
+                )
+            else:
+                pb_df = pd.DataFrame(
+                    columns=["gene", "pb_log2fc", "pb_sum_A", "pb_sum_B", "pb_cpm_A", "pb_cpm_B"]
+                )
 
-            # ---- Wilcoxon (force pts=True so we can do Seurat-like min.pct gating)
+            # ----------------------------
+            # Cell-level prevalence (always compute; do not trust scanpy)
+            # ----------------------------
+            pct_A = None
+            pct_B = None
+            if any(m in spec.methods for m in ("wilcoxon", "logreg")):
+                pct_A, pct_B = _compute_cl_prevalence(
+                    adata_sub,
+                    groupby=contrast_key,
+                    group_A=A,
+                    group_B=B,
+                    use_raw=False,
+                    layer=None,
+                )
+
+            # ----------------------------
+            # Wilcoxon (cell-level)
+            # ----------------------------
             wilcoxon_df = pd.DataFrame()
             if "wilcoxon" in spec.methods:
                 sc.tl.rank_genes_groups(
@@ -1401,15 +2050,18 @@ def contrast_conditional_markers(
                         "pts_rest": "cl_pts_rest",
                     }
                 )
-                wilcoxon_df["gene"] = wilcoxon_df["gene"].astype(str)
+                if "gene" in wilcoxon_df.columns:
+                    wilcoxon_df["gene"] = wilcoxon_df["gene"].astype(str)
 
-                # Apply Seurat-like gates (min.pct / min.diff.pct) using cl_pts/cl_pts_rest
-                # (Implement by temporarily renaming to pts/pts_rest to reuse helper)
-                _tmp = wilcoxon_df.rename(columns={"cl_pts": "pts", "cl_pts_rest": "pts_rest"})
-                _tmp = _apply_min_pct_filters_celllevel(_tmp, min_pct=cl_min_pct, min_diff_pct=cl_min_diff_pct)
-                wilcoxon_df = _tmp.rename(columns={"pts": "cl_pts", "pts_rest": "cl_pts_rest"}).copy()
+                if pct_A is not None and "gene" in wilcoxon_df.columns:
+                    idx = adata_sub.var_names.get_indexer(wilcoxon_df["gene"].astype(str))
+                    ok = idx >= 0
+                    wilcoxon_df.loc[ok, "cl_pts"] = pct_A[idx[ok]]
+                    wilcoxon_df.loc[ok, "cl_pts_rest"] = pct_B[idx[ok]]
 
-            # ---- Logreg (also force pts=True so rank_genes_groups stores pts; may or may not appear in df)
+            # ----------------------------
+            # Logreg (cell-level)
+            # ----------------------------
             logreg_df = pd.DataFrame()
             if "logreg" in spec.methods:
                 sc.tl.rank_genes_groups(
@@ -1444,19 +2096,22 @@ def contrast_conditional_markers(
 
                 cols = ["gene"] + [c for c in ["lr_coef", "lr_score", "cl_pts", "cl_pts_rest"] if c in d.columns]
                 logreg_df = d[cols].copy()
-                logreg_df["gene"] = logreg_df["gene"].astype(str)
+                if "gene" in logreg_df.columns:
+                    logreg_df["gene"] = logreg_df["gene"].astype(str)
 
-                # Apply Seurat-like gates if prevalence columns exist
-                if ("cl_pts" in logreg_df.columns) and ("cl_pts_rest" in logreg_df.columns):
-                    _tmp = logreg_df.rename(columns={"cl_pts": "pts", "cl_pts_rest": "pts_rest"})
-                    _tmp = _apply_min_pct_filters_celllevel(_tmp, min_pct=cl_min_pct, min_diff_pct=cl_min_diff_pct)
-                    logreg_df = _tmp.rename(columns={"pts": "cl_pts", "pts_rest": "cl_pts_rest"}).copy()
+                if pct_A is not None and "gene" in logreg_df.columns:
+                    idx = adata_sub.var_names.get_indexer(logreg_df["gene"].astype(str))
+                    ok = idx >= 0
+                    logreg_df.loc[ok, "cl_pts"] = pct_A[idx[ok]]
+                    logreg_df.loc[ok, "cl_pts_rest"] = pct_B[idx[ok]]
 
-            # ---- Combined merge
-            if pb_df is None or pb_df.empty:
-                combined = pd.DataFrame({"gene": []})
-            else:
+            # ----------------------------
+            # Combined merge
+            # ----------------------------
+            if pb_df is not None and not pb_df.empty:
                 combined = pb_df.copy()
+            else:
+                combined = pd.DataFrame({"gene": []})
 
             if wilcoxon_df is not None and not wilcoxon_df.empty:
                 combined = combined.merge(wilcoxon_df, on="gene", how="outer")
@@ -1469,11 +2124,11 @@ def contrast_conditional_markers(
                     combined = combined.rename(columns={"cl_pts_lr": "cl_pts"})
                 if "cl_pts_rest_lr" in combined.columns and "cl_pts_rest" not in combined.columns:
                     combined = combined.rename(columns={"cl_pts_rest_lr": "cl_pts_rest"})
-                # drop duplicate cols if both exist
                 for c in ["cl_pts_lr", "cl_pts_rest_lr"]:
                     if c in combined.columns:
                         combined = combined.drop(columns=[c])
 
+            # Add provenance columns
             combined.insert(0, "cluster", str(cl))
             combined.insert(1, "contrast_key", contrast_key)
             combined.insert(2, "A", A)
@@ -1484,35 +2139,29 @@ def contrast_conditional_markers(
             combined.insert(7, "n_cells_A_used", int(ds_meta["n_cells_A_used"]))
             combined.insert(8, "n_cells_B_used", int(ds_meta["n_cells_B_used"]))
 
-            def _sgn(x):
-                if x is None or not np.isfinite(x):
-                    return 0
-                if x > 0:
-                    return 1
-                if x < 0:
-                    return -1
-                return 0
-
+            # numeric coercions
             for col in ["cl_logfc", "cl_padj", "lr_coef", "pb_log2fc", "cl_pts", "cl_pts_rest"]:
                 if col in combined.columns:
                     combined[col] = pd.to_numeric(combined[col], errors="coerce")
 
-            # Seurat-like gating applied at the "hit" layer too (so tiering respects it)
+            # Seurat-like gating at hit layer (so tiering respects it)
             combined["pass_minpct"] = True
             if (cl_min_pct > 0.0 or cl_min_diff_pct > 0.0) and ("cl_pts" in combined.columns) and ("cl_pts_rest" in combined.columns):
-                pass_mask = pd.Series(True, index=combined.index)
-                if cl_min_pct > 0.0:
-                    pass_mask &= (combined["cl_pts"] >= cl_min_pct) | (combined["cl_pts_rest"] >= cl_min_pct)
-                if cl_min_diff_pct > 0.0:
-                    pass_mask &= (combined["cl_pts"] - combined["cl_pts_rest"]).abs() >= cl_min_diff_pct
-                combined["pass_minpct"] = pass_mask.fillna(True)
+                if not (combined["cl_pts"].notna().sum() == 0 and combined["cl_pts_rest"].notna().sum() == 0):
+                    pass_mask = pd.Series(True, index=combined.index)
+                    if cl_min_pct > 0.0:
+                        pass_mask &= (combined["cl_pts"] >= cl_min_pct) | (combined["cl_pts_rest"] >= cl_min_pct)
+                    if cl_min_diff_pct > 0.0:
+                        pass_mask &= (combined["cl_pts"] - combined["cl_pts_rest"]).abs() >= cl_min_diff_pct
+                    combined["pass_minpct"] = pass_mask.fillna(True)
 
+            # hits
             combined["hit_wilcoxon"] = False
             if "cl_padj" in combined.columns and "cl_logfc" in combined.columns:
                 combined["hit_wilcoxon"] = (
-                    (combined["cl_padj"] < float(spec.cl_alpha)) &
-                    (combined["cl_logfc"].abs() >= float(spec.cl_min_abs_logfc)) &
-                    (combined["pass_minpct"])
+                    (combined["cl_padj"] < float(spec.cl_alpha))
+                    & (combined["cl_logfc"].abs() >= float(spec.cl_min_abs_logfc))
+                    & (combined["pass_minpct"])
                 )
 
             combined["hit_logreg"] = False
@@ -1520,35 +2169,56 @@ def contrast_conditional_markers(
                 combined["hit_logreg"] = (combined["lr_coef"].abs() >= float(spec.lr_min_abs_coef)) & (combined["pass_minpct"])
 
             combined["hit_pseudobulk"] = False
-            if "pb_log2fc" in combined.columns:
+            if pb_spec is not None and "pb_log2fc" in combined.columns:
                 combined["hit_pseudobulk"] = combined["pb_log2fc"].abs() >= float(spec.pb_min_abs_log2fc)
 
             combined["sign_agree_pb_wilcoxon"] = False
-            if "pb_log2fc" in combined.columns and "cl_logfc" in combined.columns:
-                combined["sign_agree_pb_wilcoxon"] = (combined["pb_log2fc"].apply(_sgn) == combined["cl_logfc"].apply(_sgn))
+            if pb_spec is not None and "pb_log2fc" in combined.columns and "cl_logfc" in combined.columns:
+                combined["sign_agree_pb_wilcoxon"] = (
+                    combined["pb_log2fc"].apply(_sgn) == combined["cl_logfc"].apply(_sgn)
+                )
 
+            # tiering
             hits = combined[["hit_wilcoxon", "hit_logreg", "hit_pseudobulk"]].sum(axis=1)
-            tier = np.where(
-                (hits == 3) & (combined.get("sign_agree_pb_wilcoxon", True)),
-                "Tier1",
-                np.where(hits >= 2, "Tier2", np.where(hits >= 1, "Tier3", "None")),
-            )
-            combined["consensus_tier"] = tier
+            if pb_spec is None:
+                # only two methods in play (wilcoxon/logreg)
+                tier = np.where(hits >= 2, "Tier1", np.where(hits >= 1, "Tier2", "None"))
+                combined["consensus_tier"] = tier
+                score = hits.astype(int) + np.where(combined["consensus_tier"] == "Tier1", 1, 0)
+            else:
+                tier = np.where(
+                    (hits == 3) & (combined.get("sign_agree_pb_wilcoxon", True)),
+                    "Tier1",
+                    np.where(hits >= 2, "Tier2", np.where(hits >= 1, "Tier3", "None")),
+                )
+                combined["consensus_tier"] = tier
+                score = hits.astype(int) + np.where(combined["consensus_tier"] == "Tier1", 2, 0)
 
-            score = hits.astype(int)
-            score = score + np.where(combined["consensus_tier"] == "Tier1", 2, 0)
-
-            if "pb_log2fc" in combined.columns and "cl_logfc" in combined.columns:
-                disagree = (combined["sign_agree_pb_wilcoxon"] == False) & (combined["pb_log2fc"].abs() > 0.5) & (combined["cl_logfc"].abs() > 0.25)
-                score = score - np.where(disagree, 1, 0)
+                # penalize strong sign disagreements (optional)
+                if "pb_log2fc" in combined.columns and "cl_logfc" in combined.columns:
+                    disagree = (
+                        (combined["sign_agree_pb_wilcoxon"] == False)
+                        & (combined["pb_log2fc"].abs() > 0.5)
+                        & (combined["cl_logfc"].abs() > 0.25)
+                    )
+                    score = score - np.where(disagree, 1, 0)
 
             combined["consensus_score"] = score.astype(int)
 
-            tier_cat = pd.Categorical(
-                combined["consensus_tier"],
-                categories=["Tier1", "Tier2", "Tier3", "None"],
-                ordered=True,
-            )
+            # sort
+            if pb_spec is None:
+                tier_cat = pd.Categorical(
+                    combined["consensus_tier"],
+                    categories=["Tier1", "Tier2", "None"],
+                    ordered=True,
+                )
+            else:
+                tier_cat = pd.Categorical(
+                    combined["consensus_tier"],
+                    categories=["Tier1", "Tier2", "Tier3", "None"],
+                    ordered=True,
+                )
+
             combined["__tier_order"] = tier_cat
             sort_cols = ["__tier_order"]
             asc = [True]
@@ -1558,6 +2228,7 @@ def contrast_conditional_markers(
                 sort_cols.append("pb_log2fc"); asc.append(False)
             if "lr_coef" in combined.columns:
                 sort_cols.append("lr_coef"); asc.append(False)
+
             combined = combined.sort_values(sort_cols, ascending=asc).drop(columns=["__tier_order"])
 
             out[str(cl)][pair_key] = {
@@ -1567,10 +2238,15 @@ def contrast_conditional_markers(
                 "combined": combined,
             }
 
-            n_t1 = int((combined["consensus_tier"] == "Tier1").sum()) if "consensus_tier" in combined.columns else 0
-            n_t2 = int((combined["consensus_tier"] == "Tier2").sum()) if "consensus_tier" in combined.columns else 0
-            n_t3 = int((combined["consensus_tier"] == "Tier3").sum()) if "consensus_tier" in combined.columns else 0
-            top10 = combined.loc[combined["consensus_tier"] == "Tier1", "gene"].head(10).tolist() if "gene" in combined.columns else []
+            # summary
+            if "consensus_tier" in combined.columns:
+                n_t1 = int((combined["consensus_tier"] == "Tier1").sum())
+                n_t2 = int((combined["consensus_tier"] == ("Tier2" if pb_spec is not None else "Tier2")).sum())
+                n_t3 = int((combined["consensus_tier"] == "Tier3").sum()) if pb_spec is not None else 0
+                top10 = combined.loc[combined["consensus_tier"] == "Tier1", "gene"].head(10).tolist() if "gene" in combined.columns else []
+            else:
+                n_t1 = n_t2 = n_t3 = 0
+                top10 = []
 
             summary_rows.append(
                 dict(
@@ -1584,11 +2260,12 @@ def contrast_conditional_markers(
                     n_cells_B=nB,
                     downsampled=bool(ds_meta["downsampled"]),
                     n_genes_tested=int(combined.shape[0]),
-                    n_tier1=n_t1,
-                    n_tier2=n_t2,
-                    n_tier3=n_t3,
+                    n_tier1=int(n_t1),
+                    n_tier2=int(n_t2),
+                    n_tier3=int(n_t3),
                     min_pct=float(cl_min_pct),
                     min_diff_pct=float(cl_min_diff_pct),
+                    pseudobulk_effect_included=bool(pb_spec is not None),
                     top10_tier1_genes=",".join(map(str, top10)),
                 )
             )
@@ -1598,13 +2275,13 @@ def contrast_conditional_markers(
         adata.uns[store_key].setdefault("contrast_conditional", {})
         adata.uns[store_key]["contrast_conditional"]["group_key"] = str(group_key)
         adata.uns[store_key]["contrast_conditional"]["contrast_key"] = str(contrast_key)
-        adata.uns[store_key]["contrast_conditional"]["counts_layer"] = str(counts_layer) if counts_layer else None
+        adata.uns[store_key]["contrast_conditional"]["counts_layer"] = str(counts_layer) if (pb_spec is not None and counts_layer) else None
         adata.uns[store_key]["contrast_conditional"]["spec"] = {**spec.__dict__, "methods": list(spec.methods)}
+        adata.uns[store_key]["contrast_conditional"]["pseudobulk_effect_included"] = bool(pb_spec is not None)
         adata.uns[store_key]["contrast_conditional"]["summary"] = pd.DataFrame(summary_rows)
         adata.uns[store_key]["contrast_conditional"]["results"] = out
 
     return out
-
 
 
 def de_condition_within_group_pseudobulk_multi(
@@ -1636,6 +2313,13 @@ def de_condition_within_group_pseudobulk_multi(
 
     out: Dict[str, pd.DataFrame] = {}
     for A, B in pairs:
+        LOGGER.info(
+            "pseudobulk contrast: group=%r condition_key=%r A=%r B=%r",
+            str(group_value),
+            str(condition_key),
+            str(A),
+            str(B),
+        )
         # Run A vs B by calling your existing function,
         # but it currently wants reference and assumes exactly 2 levels.
         # We can *temporarily* treat reference=B and restrict to only A/B cells:
@@ -1697,6 +2381,12 @@ def _coerce_pts_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     # common in newer scanpy when pts=True
     if "pts" in out.columns and "pts_rest" in out.columns:
+        # If pts columns exist but are all-NaN, fall back to pct_nz_* when available
+        if out["pts"].notna().sum() == 0 and out["pts_rest"].notna().sum() == 0:
+            if "pct_nz_group" in out.columns and "pct_nz_reference" in out.columns:
+                out["pts"] = out["pct_nz_group"]
+                out["pts_rest"] = out["pct_nz_reference"]
+                out = out.drop(columns=["pct_nz_group", "pct_nz_reference"], errors="ignore")
         return out
 
     # common alternative naming
@@ -1811,3 +2501,38 @@ def _apply_min_pct_filters_pseudobulk(
     out = counts.loc[:, keep].copy()
     meta["n_genes_after"] = int(out.shape[1])
     return out, meta
+
+
+def _compute_cl_prevalence(
+    adata: ad.AnnData,
+    *,
+    groupby: str,
+    group_A: str,
+    group_B: str,
+    use_raw: bool = False,
+    layer: Optional[str] = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    obs = adata.obs[str(groupby)].astype(str)
+    mask_A = obs.to_numpy() == str(group_A)
+    mask_B = obs.to_numpy() == str(group_B)
+
+    X = _get_counts_matrix(adata, counts_layer=layer)
+    if use_raw and adata.raw is not None:
+        X = adata.raw.X
+
+    if sp.issparse(X):
+        nA = int(mask_A.sum())
+        nB = int(mask_B.sum())
+        if nA == 0 or nB == 0:
+            return np.zeros(adata.n_vars), np.zeros(adata.n_vars)
+        pct_A = np.asarray(X[mask_A].getnnz(axis=0)).ravel() / float(nA)
+        pct_B = np.asarray(X[mask_B].getnnz(axis=0)).ravel() / float(nB)
+    else:
+        subA = X[mask_A]
+        subB = X[mask_B]
+        pct_A = (subA > 0).mean(axis=0) if subA.shape[0] > 0 else np.zeros(adata.n_vars)
+        pct_B = (subB > 0).mean(axis=0) if subB.shape[0] > 0 else np.zeros(adata.n_vars)
+        pct_A = np.asarray(pct_A).ravel()
+        pct_B = np.asarray(pct_B).ravel()
+
+    return pct_A, pct_B
