@@ -206,12 +206,23 @@ def volcano(
         if show:
             plt.show()
         return fig
+    plot_mask = (tmp[padj_col].to_numpy(dtype=float) > 0) & np.isfinite(
+        tmp[padj_col].to_numpy(dtype=float)
+    )
+    tmp_plot = tmp.loc[plot_mask].copy()
+    if tmp_plot.empty:
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.text(0.5, 0.5, "No valid rows (all padj <= 0)", ha="center", va="center")
+        ax.set_axis_off()
+        if show:
+            plt.show()
+        return fig
 
-    padj_np = _clip_padj(tmp[padj_col].to_numpy(dtype=float))
+    padj_np = _clip_padj(tmp_plot[padj_col].to_numpy(dtype=float))
     y = -np.log10(padj_np)
-    x = tmp[lfc_col].to_numpy(dtype=float)
+    x = tmp_plot[lfc_col].to_numpy(dtype=float)
 
-    sig = (tmp[padj_col].to_numpy(dtype=float) < float(padj_thresh)) & (
+    sig = (tmp_plot[padj_col].to_numpy(dtype=float) < float(padj_thresh)) & (
         np.abs(x) > float(lfc_thresh)
     )
 
@@ -261,7 +272,7 @@ def volcano(
         )
         if label_genes:
             # annotate those rows (pick first occurrence per gene)
-            tmp_idx = tmp.reset_index(drop=True)
+            tmp_idx = tmp_plot.reset_index(drop=True)
             for gg in label_genes:
                 hits = np.where(tmp_idx[gene_col].to_numpy(dtype=str) == gg)[0]
                 if hits.size == 0:
@@ -944,7 +955,7 @@ def plot_marker_genes_pseudobulk(
                 groupby=str(groupby),
                 use_raw=bool(use_raw),
                 layer=layer,
-                dendrogram=True,
+                dendrogram=False,
                 show=False,
             )
             plot_utils.save_multi(stem=f"dotplot__{cl}", figdir=d_dot, fig=fig)
@@ -1161,7 +1172,7 @@ def plot_marker_genes_ranksum(
                 groupby=str(groupby),
                 use_raw=bool(use_raw),
                 layer=layer,
-                dendrogram=True,
+                dendrogram=False,
                 show=False,
             )
             plot_utils.save_multi(stem=f"dotplot__{cl}", figdir=d_dot, fig=fig)
@@ -1583,7 +1594,7 @@ def plot_contrast_conditional_markers(
                     groupby=str(contrast_key),
                     use_raw=bool(use_raw),
                     layer=layer,
-                    dendrogram=True,
+                    dendrogram=False,
                     show=False,
                 )
                 plot_utils.save_multi(stem=f"dotplot__{cl}__{pair_key}", figdir=d_dot, fig=fig)
@@ -1661,6 +1672,9 @@ def plot_de_decoupler_payload(
     figdir: "Path",
     heatmap_top_k: int = 30,
     bar_top_n: int = 10,
+    bar_top_n_up: int | None = None,
+    bar_top_n_down: int | None = None,
+    bar_split_signed: bool = True,
     dotplot_top_k: int = 30,
     title_prefix: str | None = None,
 ) -> None:
@@ -1712,6 +1726,9 @@ def plot_de_decoupler_payload(
                 figdir=figdir,
                 n=int(bar_top_n),
                 use_abs=False,
+                split_signed=bool(bar_split_signed),
+                n_pos=int(bar_top_n_up) if bar_top_n_up is not None else int(bar_top_n),
+                n_neg=int(bar_top_n_down) if bar_top_n_down is not None else int(bar_top_n),
                 stem_prefix=f"cluster_{str(pfx).lower()}",
                 title_prefix=tprefix,
             )
@@ -1746,6 +1763,9 @@ def plot_de_decoupler_payload(
         figdir=figdir,
         n=int(bar_top_n),
         use_abs=False,
+        split_signed=bool(bar_split_signed) and str(net_name).lower() in ("dorothea", "msigdb"),
+        n_pos=int(bar_top_n_up) if bar_top_n_up is not None else int(bar_top_n),
+        n_neg=int(bar_top_n_down) if bar_top_n_down is not None else int(bar_top_n),
         stem_prefix="cluster",
         title_prefix=title_prefix,
     )

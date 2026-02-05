@@ -1356,6 +1356,8 @@ def de_condition_within_group_pseudobulk(
             min_pct=min_pct,
         )
         keep = keep_test | keep_ref
+        keep_series = pd.Series(keep, index=adata.var_names.astype(str))
+        keep = keep_series.reindex(counts.columns.astype(str)).fillna(False).to_numpy()
         counts = counts.loc[:, keep]
     # aggregate-level library filter: >= min_counts_per_lib in >= min_lib_pct of libs
     min_counts_per_lib = int(getattr(opts, "min_counts_per_lib", 0))

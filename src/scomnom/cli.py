@@ -833,6 +833,12 @@ def cluster_and_annotate(
         "--decoupler-min-n-targets",
         help="[Decoupler] Minimum targets per source.",
     ),
+    decoupler_bar_split_signed: bool = typer.Option(
+        True,
+        "--decoupler-bar-split-signed/--no-decoupler-bar-split-signed",
+    ),
+    decoupler_bar_top_n_up: Optional[int] = typer.Option(None, "--decoupler-bar-top-n-up"),
+    decoupler_bar_top_n_down: Optional[int] = typer.Option(None, "--decoupler-bar-top-n-down"),
 
     # MSigDB
     msigdb_gene_sets_cli: Optional[str] = typer.Option(
@@ -1030,6 +1036,9 @@ def cluster_and_annotate(
         decoupler_use_raw=decoupler_use_raw,
         decoupler_method=decoupler_method,
         decoupler_min_n_targets=decoupler_min_n_targets,
+        decoupler_bar_split_signed=decoupler_bar_split_signed,
+        decoupler_bar_top_n_up=decoupler_bar_top_n_up,
+        decoupler_bar_top_n_down=decoupler_bar_top_n_down,
         msigdb_method=msigdb_method,
         msigdb_min_n_targets=msigdb_min_n_targets,
 
@@ -1148,6 +1157,9 @@ def _build_cfg(
     decoupler_method: str,
     decoupler_consensus_methods: Optional[List[str]],
     decoupler_min_n_targets: int,
+    decoupler_bar_split_signed: bool,
+    decoupler_bar_top_n_up: Optional[int],
+    decoupler_bar_top_n_down: Optional[int],
     msigdb_gene_sets: Optional[List[str]],
     msigdb_method: str,
     msigdb_min_n_targets: int,
@@ -1228,6 +1240,9 @@ def _build_cfg(
         decoupler_method=str(decoupler_method),
         decoupler_consensus_methods=decoupler_consensus_methods,
         decoupler_min_n_targets=int(decoupler_min_n_targets),
+        decoupler_bar_split_signed=bool(decoupler_bar_split_signed),
+        decoupler_bar_top_n_up=decoupler_bar_top_n_up,
+        decoupler_bar_top_n_down=decoupler_bar_top_n_down,
         msigdb_gene_sets=msigdb_sets if msigdb_sets is not None else ["HALLMARK", "REACTOME"],
         msigdb_method=str(msigdb_method),
         msigdb_min_n_targets=int(msigdb_min_n_targets),
@@ -1319,6 +1334,18 @@ def cluster_vs_rest(
         callback=validate_decoupler_consensus_methods,
     ),
     decoupler_min_n_targets: int = typer.Option(5, "--decoupler-min-n-targets"),
+    decoupler_bar_split_signed: bool = typer.Option(
+        True,
+        "--decoupler-bar-split-signed/--no-decoupler-bar-split-signed",
+    ),
+    decoupler_bar_top_n_up: Optional[int] = typer.Option(None, "--decoupler-bar-top-n-up"),
+    decoupler_bar_top_n_down: Optional[int] = typer.Option(None, "--decoupler-bar-top-n-down"),
+    decoupler_bar_split_signed: bool = typer.Option(
+        True,
+        "--decoupler-bar-split-signed/--no-decoupler-bar-split-signed",
+    ),
+    decoupler_bar_top_n_up: Optional[int] = typer.Option(None, "--decoupler-bar-top-n-up"),
+    decoupler_bar_top_n_down: Optional[int] = typer.Option(None, "--decoupler-bar-top-n-down"),
     msigdb_gene_sets_cli: Optional[str] = typer.Option(
         None,
         "--msigdb-gene-sets",
@@ -1572,6 +1599,9 @@ def within_cluster(
         decoupler_method=decoupler_method,
         decoupler_consensus_methods=decoupler_consensus_methods,
         decoupler_min_n_targets=decoupler_min_n_targets,
+        decoupler_bar_split_signed=decoupler_bar_split_signed,
+        decoupler_bar_top_n_up=decoupler_bar_top_n_up,
+        decoupler_bar_top_n_down=decoupler_bar_top_n_down,
         msigdb_gene_sets=msigdb_gene_sets,
         msigdb_method=msigdb_method,
         msigdb_min_n_targets=msigdb_min_n_targets,

@@ -379,6 +379,9 @@ class ClusterAnnotateConfig(BaseModel):
         description="Decoupler method (default: consensus).",
     )
     decoupler_consensus_methods: Optional[List[str]] = ["ulm", "mlm", "wsum"]
+    decoupler_bar_split_signed: bool = True
+    decoupler_bar_top_n_up: Optional[int] = None
+    decoupler_bar_top_n_down: Optional[int] = None
 
     # MSigDB (GMT-driven pathway nets)
     msigdb_gene_sets: List[str] = Field(
@@ -674,6 +677,9 @@ class MarkersAndDEConfig(BaseModel):
     decoupler_method: str = "consensus"
     decoupler_consensus_methods: Optional[List[str]] = ["ulm", "mlm", "wsum"]
     decoupler_min_n_targets: int = 5
+    decoupler_bar_split_signed: bool = True
+    decoupler_bar_top_n_up: Optional[int] = None
+    decoupler_bar_top_n_down: Optional[int] = None
 
     msigdb_gene_sets: List[str] = Field(
         default_factory=lambda: ["HALLMARK", "REACTOME"],

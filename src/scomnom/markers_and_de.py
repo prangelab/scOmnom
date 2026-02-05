@@ -1322,6 +1322,9 @@ def run_within_cluster(cfg) -> ad.AnnData:
                                     figdir=base,
                                     heatmap_top_k=int(getattr(cfg, "plot_max_genes_total", 80)),
                                     bar_top_n=int(top_n_genes),
+                                    bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
+                                    bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
+                                    bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
                                     dotplot_top_k=int(dotplot_top_n_genes),
                                     title_prefix=f"{condition_key} {contrast}",
                                 )

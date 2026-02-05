@@ -388,6 +388,9 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                     figdir=figdir_round,
                     heatmap_top_k=30,
                     bar_top_n=15,
+                    bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
+                    bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
+                    bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
                     dotplot_top_k=25,
                 )
             if "progeny" in adata.uns:
@@ -398,6 +401,9 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                     figdir=figdir_round,
                     heatmap_top_k=30,
                     bar_top_n=15,
+                    bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
+                    bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
+                    bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
                     dotplot_top_k=25,
                 )
             if "dorothea" in adata.uns:
@@ -408,6 +414,9 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                     figdir=figdir_round,
                     heatmap_top_k=30,
                     bar_top_n=15,
+                    bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
+                    bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
+                    bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
                     dotplot_top_k=25,
                 )
 
@@ -551,6 +560,9 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                                     figdir=figdir_round,
                                     heatmap_top_k=30,
                                     bar_top_n=15,
+                                    bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
+                                    bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
+                                    bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
                                     dotplot_top_k=25,
                                 )
 
@@ -562,6 +574,9 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                                     figdir=figdir_round,
                                     heatmap_top_k=30,
                                     bar_top_n=15,
+                                    bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
+                                    bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
+                                    bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
                                     dotplot_top_k=25,
                                 )
 
@@ -573,6 +588,9 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                                     figdir=figdir_round,
                                     heatmap_top_k=30,
                                     bar_top_n=15,
+                                    bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
+                                    bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
+                                    bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
                                     dotplot_top_k=25,
                                 )
 

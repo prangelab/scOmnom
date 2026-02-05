@@ -3634,6 +3634,9 @@ def plot_decoupler_cluster_topn_barplots(
         figdir: Path | None,
         n: int = 10,
         use_abs: bool = False,
+        split_signed: bool = False,
+        n_pos: int | None = None,
+        n_neg: int | None = None,
         stem_prefix: str = "cluster",
         title_prefix: Optional[str] = None,
 ) -> None:
@@ -3646,6 +3649,54 @@ def plot_decoupler_cluster_topn_barplots(
 
     for cl in A.index.astype(str):
         s = A.loc[cl].copy()
+
+        if split_signed and not use_abs:
+            n_pos_eff = int(n_pos) if n_pos is not None else int(n)
+            n_neg_eff = int(n_neg) if n_neg is not None else int(n)
+            pos = s[s > 0].sort_values(ascending=False).head(n_pos_eff)
+            neg = s[s < 0].sort_values(ascending=True).head(n_neg_eff)
+            if pos.empty and neg.empty:
+                continue
+
+            vals = pd.concat([pos, neg], axis=0)
+            labels = [_clean_feature_label(l, net_name) for l in vals.index]
+            colors = ["#3a7f3b"] * int(pos.shape[0]) + ["#b04a4a"] * int(neg.shape[0])
+            vals_plot = vals
+
+            left = _dynamic_left_margin_from_labels(labels, base=0.25)
+            fig_w = _dynamic_fig_width_for_barplot(labels, min_w=12.0, max_w=28.0)
+            fig_h = max(4.0, 0.45 * len(vals_plot) + 1.5)
+
+            fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+            top_margin = 1.0 - (0.8 / fig_h)
+            fig.subplots_adjust(left=left, right=0.96, top=top_margin, bottom=0.15)
+
+            y = np.arange(len(vals_plot))
+            ax.barh(y=y, width=vals_plot.values, color=colors, edgecolor="#1f2d3a", linewidth=0.8, zorder=3)
+            ax.invert_yaxis()
+
+            ax.set_yticks(y)
+            ax.set_yticklabels(labels, fontsize=12)
+            ax.set_xlabel("Activity Score", fontsize=12, labelpad=10)
+
+            max_abs = float(np.max(np.abs(vals_plot.values))) if len(vals_plot) else 0.0
+            if max_abs > 0:
+                ax.set_xlim(-1.05 * max_abs, 1.05 * max_abs)
+            ax.axvline(0.0, color="#222222", linewidth=1.0)
+
+            ax.grid(False)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+
+            main_title = f"{title_prefix} • {cl}" if title_prefix else cl
+            ax.text(0.5, 1.08, main_title, transform=ax.transAxes, ha="center", weight="bold", fontsize=22)
+            ax.text(0.5, 1.02, str(net_name).upper(), transform=ax.transAxes, ha="center", color="#666666", fontsize=14)
+
+            stem = f"{stem_prefix}_{cl}__top{int(n_pos_eff)}_up_down_bar"
+            save_multi(stem, outdir, fig)
+            plt.close(fig)
+            continue
+
         s_rank = s.abs() if use_abs else s
         top = s_rank.sort_values(ascending=False).head(int(n))
 
@@ -3656,20 +3707,16 @@ def plot_decoupler_cluster_topn_barplots(
         vals_plot = vals.sort_values(ascending=True)
         clean_labels = [_clean_feature_label(l, net_name) for l in vals_plot.index]
 
-        # Dynamic layout adjustments
         left = _dynamic_left_margin_from_labels(clean_labels, base=0.25)
         fig_w = _dynamic_fig_width_for_barplot(clean_labels, min_w=12.0, max_w=28.0)
-
-        # Height logic: reduce the multiplier slightly for high N to prevent extreme heights
         fig_h = max(4.0, 0.45 * len(vals_plot) + 1.5)
 
         fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-
-        top_margin = 1.0 - (0.8 / fig_h)  # Reserves ~0.8 inches for titles
+        top_margin = 1.0 - (0.8 / fig_h)
         fig.subplots_adjust(left=left, right=0.96, top=top_margin, bottom=0.15)
 
         if net_name.lower() == "progeny":
-            bar_colors = ["#d62728" if v < 0 else "#2ca02c" for v in vals_plot.values]
+            bar_colors = ["#b04a4a" if v < 0 else "#3a7f3b" for v in vals_plot.values]
         else:
             bar_colors = "#3b84a8"
 
@@ -3709,12 +3756,10 @@ def plot_decoupler_activity_heatmap(
         return
 
     outdir = _decoupler_figdir(figdir, net_name)
-    sub = activity.copy().apply(pd.to_numeric, errors="coerce").fillna(0.0)
-    feats = _top_features_global(sub, k=top_k, mode=rank_mode, signed=True)
-    sub = sub.loc[:, feats]
-
-    if use_zscore:
-        sub = _zscore_cols(sub)
+    sub_raw, sub_z = _decoupler_balanced_clustered(activity, top_k=top_k, use_zscore=use_zscore)
+    if sub_raw is None or sub_z is None:
+        return
+    sub = sub_z if use_zscore else sub_raw
 
     # --- NO WRAP: keep single-line labels ---
     sub.columns = [_clean_feature_label(c, net_name) for c in sub.columns]
@@ -3751,6 +3796,48 @@ def plot_decoupler_activity_heatmap(
     plt.close(fig)
 
 
+def _decoupler_balanced_clustered(
+    activity: pd.DataFrame,
+    *,
+    top_k: int,
+    use_zscore: bool = True,
+) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+    if activity is None or activity.empty:
+        return None, None
+
+    sub_raw = activity.copy().apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    scores = sub_raw.mean(axis=0)
+    n_pos = int(max(1, int(top_k) // 2))
+    n_neg = int(max(1, int(top_k) - n_pos))
+    pos = scores[scores > 0].sort_values(ascending=False).head(n_pos)
+    neg = scores[scores < 0].sort_values(ascending=True).head(n_neg)
+    feats = list(pos.index) + list(neg.index)
+    if not feats:
+        return None, None
+
+    sub_raw = sub_raw.loc[:, feats].copy()
+    sub_z = _zscore_cols(sub_raw) if use_zscore else sub_raw.copy()
+    sub_raw = sub_raw.copy()
+    sub_z = sub_z.copy()
+    try:
+        from scipy.cluster.hierarchy import linkage, leaves_list
+        from scipy.spatial.distance import pdist
+        row_link = linkage(pdist(sub_z.values), method="average") if sub_z.shape[0] > 1 else None
+        col_link = linkage(pdist(sub_z.values.T), method="average") if sub_z.shape[1] > 1 else None
+        if row_link is not None:
+            row_order = leaves_list(row_link)
+            sub_raw = sub_raw.iloc[row_order, :]
+            sub_z = sub_z.iloc[row_order, :]
+        if col_link is not None:
+            col_order = leaves_list(col_link)
+            sub_raw = sub_raw.iloc[:, col_order]
+            sub_z = sub_z.iloc[:, col_order]
+    except Exception:
+        pass
+
+    return sub_raw, sub_z
+
+
 def plot_decoupler_dotplot(
     activity: pd.DataFrame,
     *,
@@ -3775,13 +3862,9 @@ def plot_decoupler_dotplot(
 
     outdir = _decoupler_figdir(figdir, net_name)
 
-    A = activity.copy().apply(pd.to_numeric, errors="coerce").fillna(0.0)
-    feats = _top_features_global(A, k=top_k, mode=rank_mode, signed=True)
-    if not feats:
+    sub_raw, sub_z = _decoupler_balanced_clustered(activity, top_k=top_k, use_zscore=True)
+    if sub_raw is None or sub_z is None:
         return
-
-    sub_raw = A.loc[:, feats].copy()
-    sub_z = _zscore_cols(sub_raw)
 
     color_mat = sub_raw if color_by == "raw" else sub_z
     cbar_label = "activity" if color_by == "raw" else "z-score"
@@ -3853,6 +3936,9 @@ def plot_decoupler_dotplot(
     # Optional label wrapping
     if wrap_labels and wrap_at and wrap_at > 5:
         import textwrap
+        from matplotlib.ticker import FixedLocator
+        yticks = ax.get_yticks()
+        ax.yaxis.set_major_locator(FixedLocator(yticks))
         ax.set_yticklabels(
             [textwrap.fill(str(t.get_text()), width=wrap_at) for t in ax.get_yticklabels()]
         )
@@ -3907,6 +3993,9 @@ def plot_decoupler_all_styles(
     figdir: Path | None = None,
     heatmap_top_k: int = 30,
     bar_top_n: int = 10,
+    bar_top_n_up: int | None = None,
+    bar_top_n_down: int | None = None,
+    bar_split_signed: bool = True,
     dotplot_top_k: int = 30,
 ) -> None:
     """
@@ -4110,6 +4199,9 @@ def plot_decoupler_all_styles(
                 figdir=figdir,
                 n=bar_top_n,
                 use_abs=False,
+                split_signed=bool(bar_split_signed) and str(net_name).lower() in ("dorothea", "msigdb"),
+                n_pos=int(bar_top_n_up) if bar_top_n_up is not None else int(bar_top_n),
+                n_neg=int(bar_top_n_down) if bar_top_n_down is not None else int(bar_top_n),
                 stem_prefix=f"{stem_prefix}cluster_{str(pfx).lower()}",
                 title_prefix=title_prefix,
             )
@@ -4154,6 +4246,9 @@ def plot_decoupler_all_styles(
         figdir=figdir,
         n=bar_top_n,
         use_abs=False,
+        split_signed=bool(bar_split_signed) and str(net_name).lower() in ("dorothea", "msigdb"),
+        n_pos=int(bar_top_n_up) if bar_top_n_up is not None else int(bar_top_n),
+        n_neg=int(bar_top_n_down) if bar_top_n_down is not None else int(bar_top_n),
         stem_prefix=f"{stem_prefix}cluster",
         title_prefix=title_prefix,
     )
