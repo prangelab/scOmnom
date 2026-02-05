@@ -36,7 +36,10 @@ Fixed bug were cluster-and-annotate was using raw counts instead of cellbender c
 Added first working version of marker calling in the DE module. Module is still under construction, do not use yet.
 
 ## 0.1.9 [29-01-2026]
-Bug-fix integrate --annotated-run was trying th epick a new best embedding instead of just plotting the annotated scANVI UMAP.
+Bug-fix integrate --annotated-run was trying to pick a new best embedding instead of just plotting the annotated scANVI UMAP.
 
 ## 0.1.10 [30-01-2026]
 Changed reporting behaviour. It now saves a report per round and for each format.
+
+## 0.1.11 [05-02-2026]
+Fixed some cluster-and-annotate plots. DE module is now feature complete, but still in testing phase.
