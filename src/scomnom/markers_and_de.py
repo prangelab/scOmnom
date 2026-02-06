@@ -1543,20 +1543,109 @@ def run_within_cluster(cfg) -> ad.AnnData:
                     str(condition_key),
                 )
 
-                for g in groups:
-                    _ = de_condition_within_group_pseudobulk_multi(
-                        adata,
-                        group_value=str(g),
-                        groupby=str(groupby),
-                        round_id=getattr(cfg, "round_id", None),
-                        condition_key=str(condition_key),
-                        spec=pb_spec,
-                        opts=pb_opts,
-                        contrasts=condition_contrasts,
-                        store_key=store_key,
-                        store=True,
-                        n_cpus=int(getattr(cfg, "n_jobs", 1)),
+                total_cpus = int(getattr(cfg, "n_jobs", 1))
+                if total_cpus > 1:
+                    from concurrent.futures import ThreadPoolExecutor, as_completed
+                    from .de_utils import _normalize_pair, _select_pairs
+
+                    cond_norm = adata.obs[str(condition_key)].astype(str).str.strip().str.replace(r"\s+", " ", regex=True)
+                    tasks: list[tuple[str, str, str]] = []
+                    for g in groups:
+                        g_mask = adata.obs[str(groupby)].astype(str).to_numpy() == str(g)
+                        levels = pd.Index(pd.unique(cond_norm.loc[g_mask])).sort_values().tolist()
+                        if len(levels) < 2:
+                            continue
+                        pairs = _select_pairs(levels, condition_contrasts if condition_contrasts else None)
+                        for A, B in pairs:
+                            tasks.append((str(g), str(A), str(B)))
+
+                    max_workers = min(int(total_cpus), max(1, int(len(tasks))))
+                    LOGGER.info(
+                        "within-cluster: pseudobulk parallel run (groups=%d, tasks=%d, workers=%d, total_cpus=%d).",
+                        int(len(groups)),
+                        int(len(tasks)),
+                        int(max_workers),
+                        int(total_cpus),
                     )
+                    LOGGER.info(
+                        "within-cluster: pseudobulk task build summary (condition_key=%r, groups_skipped=%d, total_pairs=%d).",
+                        str(condition_key),
+                        int(len(groups) - len({g for g, _, _ in tasks})),
+                        int(len(tasks)),
+                    )
+
+                    def _run_task(gval: str, A: str, B: str):
+                        res = de_condition_within_group_pseudobulk_multi(
+                            adata,
+                            group_value=str(gval),
+                            groupby=str(groupby),
+                            round_id=getattr(cfg, "round_id", None),
+                            condition_key=str(condition_key),
+                            spec=pb_spec,
+                            opts=pb_opts,
+                            contrasts=[f"{A}_vs_{B}"],
+                            store_key=None,
+                            store=False,
+                            n_cpus=1,
+                        )
+                        return str(gval), str(A), str(B), res
+
+                    total = int(len(tasks))
+                    done = 0
+                    t0 = time.perf_counter()
+                    if tasks:
+                        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                            futs = {
+                                ex.submit(_run_task, gval, A, B): (gval, A, B)
+                                for (gval, A, B) in tasks
+                            }
+                            for fut in as_completed(futs):
+                                gval, A, B, res = fut.result()
+                                if store_key:
+                                    adata.uns.setdefault(store_key, {})
+                                    adata.uns[store_key].setdefault("pseudobulk_condition_within_group_multi", {})
+                                    for contrast_key, df in res.items():
+                                        A2, B2 = _normalize_pair(contrast_key)
+                                        key = f"{groupby}={gval}::{condition_key}::{A2}_vs_{B2}"
+                                        adata.uns[store_key]["pseudobulk_condition_within_group_multi"][key] = {
+                                            "group_key": str(groupby),
+                                            "group_value": str(gval),
+                                            "condition_key": str(condition_key),
+                                            "test": str(A2),
+                                            "reference": str(B2),
+                                            "results": df,
+                                            "options": {
+                                                "min_cells_per_sample_group": int(pb_opts.min_cells_per_sample_group),
+                                                "min_samples_per_level": int(pb_opts.min_samples_per_level),
+                                                "alpha": float(pb_opts.alpha),
+                                                "shrink_lfc": bool(pb_opts.shrink_lfc),
+                                            },
+                                        }
+                                done += 1
+                                elapsed = time.perf_counter() - t0
+                                eta_s = (elapsed / max(1, done)) * (total - done)
+                                LOGGER.info(
+                                    "within-cluster: pseudobulk progress %d/%d (elapsed=%.1fs, eta=%.1fs).",
+                                    int(done),
+                                    int(total),
+                                    elapsed,
+                                    eta_s,
+                                )
+                else:
+                    for g in groups:
+                        _ = de_condition_within_group_pseudobulk_multi(
+                            adata,
+                            group_value=str(g),
+                            groupby=str(groupby),
+                            round_id=getattr(cfg, "round_id", None),
+                            condition_key=str(condition_key),
+                            spec=pb_spec,
+                            opts=pb_opts,
+                            contrasts=condition_contrasts,
+                            store_key=store_key,
+                            store=True,
+                            n_cpus=1,
+                        )
 
                 ran_pseudobulk = True
     else:
@@ -1601,6 +1690,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                 pb_spec=pb_spec,  # may be None; function should tolerate (cell-only mode)
                 store_key=store_key,
                 store=True,
+                n_jobs=int(getattr(cfg, "n_jobs", 1)),
             )
 
             # Persist per-contrast_key results in a multi-store block

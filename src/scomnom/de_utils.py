@@ -1912,6 +1912,7 @@ def contrast_conditional_markers(
     pb_spec: Optional[PseudobulkSpec] = None,
     store_key: str = "scomnom_de",
     store: bool = True,
+    n_jobs: int = 1,
 ) -> Dict[str, Dict[str, Dict[str, pd.DataFrame]]]:
     """
     Pairwise (A vs B) markers within each cluster.
@@ -1932,7 +1933,8 @@ def contrast_conditional_markers(
     if contrast_key not in adata.obs:
         raise KeyError(f"contrast_key={contrast_key!r} not in adata.obs")
 
-    levels = pd.Index(pd.unique(adata.obs[contrast_key].astype(str))).sort_values()
+    contrast_norm = adata.obs[contrast_key].astype(str).str.strip().str.replace(r"\s+", " ", regex=True)
+    levels = pd.Index(pd.unique(contrast_norm)).sort_values()
     if len(levels) < 2:
         raise ValueError(f"contrast_key={contrast_key!r} needs >=2 levels, got {list(levels)}")
 
@@ -1962,358 +1964,386 @@ def contrast_conditional_markers(
             return -1
         return 0
 
+    cluster_cache: dict[str, tuple[np.ndarray, dict[str, np.ndarray]]] = {}
     for cl in clusters:
         cl_mask = (adata.obs[group_key].astype(str).to_numpy() == str(cl))
-        if int(cl_mask.sum()) == 0:
-            continue
-
-        out[str(cl)] = {}
-
-        cl_contrast = adata.obs.loc[cl_mask, contrast_key].astype(str)
         global_idx = np.where(cl_mask)[0]
-
+        if global_idx.size == 0:
+            continue
+        cl_contrast = contrast_norm.iloc[global_idx]
         by_level_idx: dict[str, np.ndarray] = {}
         for lv in levels:
             m = (cl_contrast.to_numpy() == str(lv))
             by_level_idx[str(lv)] = global_idx[np.where(m)[0]]
+        cluster_cache[str(cl)] = (global_idx, by_level_idx)
 
-        for (A, B) in pairs:
-            pair_key = f"{A}_vs_{B}"
-            LOGGER.info(
-                "cell-level contrast: cluster=%r contrast_key=%r A=%r B=%r",
-                str(cl),
-                str(contrast_key),
-                str(A),
-                str(B),
+    def _process_pair(cl_val: str, A: str, B: str):
+        if cl_val not in cluster_cache:
+            return str(cl_val), f"{A}_vs_{B}", {}, None
+        global_idx, by_level_idx = cluster_cache[cl_val]
+        pair_key = f"{A}_vs_{B}"
+        LOGGER.info(
+            "cell-level contrast: cluster=%r contrast_key=%r A=%r B=%r",
+            str(cl_val),
+            str(contrast_key),
+            str(A),
+            str(B),
+        )
+
+        idxA = by_level_idx.get(A, np.array([], dtype=int))
+        idxB = by_level_idx.get(B, np.array([], dtype=int))
+
+        nA = int(idxA.size)
+        nB = int(idxB.size)
+
+        if nA < int(spec.min_cells_per_level_in_cluster) or nB < int(spec.min_cells_per_level_in_cluster):
+            row = dict(
+                cluster=str(cl_val),
+                contrast_key=contrast_key,
+                A=A,
+                B=B,
+                status="skipped",
+                reason="min_cells_per_level_in_cluster",
+                n_cells_A=nA,
+                n_cells_B=nB,
             )
+            return str(cl_val), pair_key, {
+                "wilcoxon": pd.DataFrame(),
+                "logreg": pd.DataFrame(),
+                "pseudobulk_effect": pd.DataFrame(),
+                "combined": pd.DataFrame(),
+            }, row
 
-            idxA = by_level_idx.get(A, np.array([], dtype=int))
-            idxB = by_level_idx.get(B, np.array([], dtype=int))
+        maskA = np.zeros(adata.n_obs, dtype=bool)
+        maskA[idxA] = True
+        maskB = np.zeros(adata.n_obs, dtype=bool)
+        maskB[idxB] = True
 
-            nA = int(idxA.size)
-            nB = int(idxB.size)
+        adata_sub, ds_meta = _downsample_two_level_subset(
+            adata,
+            maskA,
+            maskB,
+            max_per_level=int(spec.max_cells_per_level_in_cluster),
+            random_state=int(spec.random_state),
+        )
 
-            if nA < int(spec.min_cells_per_level_in_cluster) or nB < int(spec.min_cells_per_level_in_cluster):
-                out[str(cl)][pair_key] = {
-                    "wilcoxon": pd.DataFrame(),
-                    "logreg": pd.DataFrame(),
-                    "pseudobulk_effect": pd.DataFrame(),
-                    "combined": pd.DataFrame(),
-                }
-                summary_rows.append(
-                    dict(
-                        cluster=str(cl),
-                        contrast_key=contrast_key,
-                        A=A,
-                        B=B,
-                        status="skipped",
-                        reason="min_cells_per_level_in_cluster",
-                        n_cells_A=nA,
-                        n_cells_B=nB,
-                    )
-                )
-                continue
+        adata_sub = adata_sub[
+            adata_sub.obs[contrast_key]
+            .astype(str)
+            .str.strip()
+            .str.replace(r"\s+", " ", regex=True)
+            .isin([A, B])
+        ].copy()
 
-            maskA = np.zeros(adata.n_obs, dtype=bool)
-            maskA[idxA] = True
-            maskB = np.zeros(adata.n_obs, dtype=bool)
-            maskB[idxB] = True
+        cl_mask = np.zeros(adata.n_obs, dtype=bool)
+        cl_mask[global_idx] = True
 
-            adata_sub, ds_meta = _downsample_two_level_subset(
+        if pb_spec is not None:
+            pb_df = _pb_effect_log2fc(
                 adata,
-                maskA,
-                maskB,
-                max_per_level=int(spec.max_cells_per_level_in_cluster),
-                random_state=int(spec.random_state),
+                cluster_mask=cl_mask,
+                contrast_key=contrast_key,
+                level_A=A,
+                level_B=B,
+                counts_layer=counts_layer,
+                min_total_counts=int(spec.min_total_counts),
+                pseudocount=float(spec.pseudocount),
+            )
+        else:
+            pb_df = pd.DataFrame(
+                columns=["gene", "pb_log2fc", "pb_sum_A", "pb_sum_B", "pb_cpm_A", "pb_cpm_B"]
             )
 
-            # keep only the two levels explicitly (defensive)
-            adata_sub = adata_sub[adata_sub.obs[contrast_key].astype(str).isin([A, B])].copy()
-
-            # ----------------------------
-            # pseudobulk effect (optional)
-            # ----------------------------
-            if pb_spec is not None:
-                pb_df = _pb_effect_log2fc(
-                    adata,
-                    cluster_mask=cl_mask,
-                    contrast_key=contrast_key,
-                    level_A=A,
-                    level_B=B,
-                    counts_layer=counts_layer,
-                    min_total_counts=int(spec.min_total_counts),
-                    pseudocount=float(spec.pseudocount),
-                )
-            else:
-                pb_df = pd.DataFrame(
-                    columns=["gene", "pb_log2fc", "pb_sum_A", "pb_sum_B", "pb_cpm_A", "pb_cpm_B"]
-                )
-
-            # ----------------------------
-            # Cell-level prevalence (always compute; do not trust scanpy)
-            # ----------------------------
-            pct_A = None
-            pct_B = None
-            if any(m in spec.methods for m in ("wilcoxon", "logreg")):
-                pct_A, pct_B = _compute_cl_prevalence(
-                    adata_sub,
-                    groupby=contrast_key,
-                    group_A=A,
-                    group_B=B,
-                    use_raw=False,
-                    layer=None,
-                )
-
-            # ----------------------------
-            # Wilcoxon (cell-level)
-            # ----------------------------
-            wilcoxon_df = pd.DataFrame()
-            if "wilcoxon" in spec.methods:
-                sc.tl.rank_genes_groups(
-                    adata_sub,
-                    groupby=contrast_key,
-                    groups=[A],
-                    reference=B,
-                    method="wilcoxon",
-                    use_raw=False,
-                    key_added="__tmp_wilcoxon",
-                    n_genes=adata_sub.n_vars,
-                    rankby_abs=False,
-                    pts=True,
-                )
-                d = rank_genes_groups_df(adata_sub, group=A, key="__tmp_wilcoxon")
-                d = _coerce_pts_columns(d)
-
-                wilcoxon_df = d.rename(
-                    columns={
-                        "names": "gene",
-                        "logfoldchanges": "cl_logfc",
-                        "scores": "cl_score",
-                        "pvals": "cl_pval",
-                        "pvals_adj": "cl_padj",
-                        "pts": "cl_pts",
-                        "pts_rest": "cl_pts_rest",
-                    }
-                )
-                if "gene" in wilcoxon_df.columns:
-                    wilcoxon_df["gene"] = wilcoxon_df["gene"].astype(str)
-
-                if pct_A is not None and "gene" in wilcoxon_df.columns:
-                    idx = adata_sub.var_names.get_indexer(wilcoxon_df["gene"].astype(str))
-                    ok = idx >= 0
-                    wilcoxon_df.loc[ok, "cl_pts"] = pct_A[idx[ok]]
-                    wilcoxon_df.loc[ok, "cl_pts_rest"] = pct_B[idx[ok]]
-
-            # ----------------------------
-            # Logreg (cell-level)
-            # ----------------------------
-            logreg_df = pd.DataFrame()
-            if "logreg" in spec.methods:
-                sc.tl.rank_genes_groups(
-                    adata_sub,
-                    groupby=contrast_key,
-                    groups=[A],
-                    reference=B,
-                    method="logreg",
-                    use_raw=False,
-                    key_added="__tmp_logreg",
-                    n_genes=adata_sub.n_vars,
-                    rankby_abs=False,
-                    pts=True,
-                )
-                d = rank_genes_groups_df(adata_sub, group=A, key="__tmp_logreg")
-                d = _coerce_pts_columns(d)
-
-                d = d.rename(columns={"names": "gene"})
-                if "logfoldchanges" in d.columns:
-                    d = d.rename(columns={"logfoldchanges": "lr_coef"})
-                if "scores" in d.columns:
-                    d = d.rename(columns={"scores": "lr_score"})
-
-                # carry prevalence if present
-                rename_prev = {}
-                if "pts" in d.columns:
-                    rename_prev["pts"] = "cl_pts"
-                if "pts_rest" in d.columns:
-                    rename_prev["pts_rest"] = "cl_pts_rest"
-                if rename_prev:
-                    d = d.rename(columns=rename_prev)
-
-                cols = ["gene"] + [c for c in ["lr_coef", "lr_score", "cl_pts", "cl_pts_rest"] if c in d.columns]
-                logreg_df = d[cols].copy()
-                if "gene" in logreg_df.columns:
-                    logreg_df["gene"] = logreg_df["gene"].astype(str)
-
-                if pct_A is not None and "gene" in logreg_df.columns:
-                    idx = adata_sub.var_names.get_indexer(logreg_df["gene"].astype(str))
-                    ok = idx >= 0
-                    logreg_df.loc[ok, "cl_pts"] = pct_A[idx[ok]]
-                    logreg_df.loc[ok, "cl_pts_rest"] = pct_B[idx[ok]]
-
-            # ----------------------------
-            # Combined merge
-            # ----------------------------
-            if pb_df is not None and not pb_df.empty:
-                combined = pb_df.copy()
-            else:
-                combined = pd.DataFrame({"gene": []})
-
-            if wilcoxon_df is not None and not wilcoxon_df.empty:
-                combined = combined.merge(wilcoxon_df, on="gene", how="outer")
-
-            if logreg_df is not None and not logreg_df.empty:
-                combined = combined.merge(logreg_df, on="gene", how="outer", suffixes=("", "_lr"))
-
-                # if logreg carried cl_pts/cl_pts_rest with suffixes, prefer wilcoxon’s if present
-                if "cl_pts_lr" in combined.columns and "cl_pts" not in combined.columns:
-                    combined = combined.rename(columns={"cl_pts_lr": "cl_pts"})
-                if "cl_pts_rest_lr" in combined.columns and "cl_pts_rest" not in combined.columns:
-                    combined = combined.rename(columns={"cl_pts_rest_lr": "cl_pts_rest"})
-                for c in ["cl_pts_lr", "cl_pts_rest_lr"]:
-                    if c in combined.columns:
-                        combined = combined.drop(columns=[c])
-
-            # Add provenance columns
-            combined.insert(0, "cluster", str(cl))
-            combined.insert(1, "contrast_key", contrast_key)
-            combined.insert(2, "A", A)
-            combined.insert(3, "B", B)
-            combined.insert(4, "n_cells_A", int(ds_meta["n_cells_A"]))
-            combined.insert(5, "n_cells_B", int(ds_meta["n_cells_B"]))
-            combined.insert(6, "downsampled", bool(ds_meta["downsampled"]))
-            combined.insert(7, "n_cells_A_used", int(ds_meta["n_cells_A_used"]))
-            combined.insert(8, "n_cells_B_used", int(ds_meta["n_cells_B_used"]))
-
-            # numeric coercions
-            for col in ["cl_logfc", "cl_padj", "lr_coef", "pb_log2fc", "cl_pts", "cl_pts_rest"]:
-                if col in combined.columns:
-                    combined[col] = pd.to_numeric(combined[col], errors="coerce")
-
-            # Seurat-like gating at hit layer (so tiering respects it)
-            combined["pass_minpct"] = True
-            if (cl_min_pct > 0.0 or cl_min_diff_pct > 0.0) and ("cl_pts" in combined.columns) and ("cl_pts_rest" in combined.columns):
-                if not (combined["cl_pts"].notna().sum() == 0 and combined["cl_pts_rest"].notna().sum() == 0):
-                    pass_mask = pd.Series(True, index=combined.index)
-                    if cl_min_pct > 0.0:
-                        pass_mask &= (combined["cl_pts"] >= cl_min_pct) | (combined["cl_pts_rest"] >= cl_min_pct)
-                    if cl_min_diff_pct > 0.0:
-                        pass_mask &= (combined["cl_pts"] - combined["cl_pts_rest"]).abs() >= cl_min_diff_pct
-                    combined["pass_minpct"] = pass_mask.fillna(True)
-
-            # hits
-            combined["hit_wilcoxon"] = False
-            if "cl_padj" in combined.columns and "cl_logfc" in combined.columns:
-                combined["hit_wilcoxon"] = (
-                    (combined["cl_padj"] < float(spec.cl_alpha))
-                    & (combined["cl_logfc"].abs() >= float(spec.cl_min_abs_logfc))
-                    & (combined["pass_minpct"])
-                )
-
-            combined["hit_logreg"] = False
-            if "lr_coef" in combined.columns:
-                combined["hit_logreg"] = (combined["lr_coef"].abs() >= float(spec.lr_min_abs_coef)) & (combined["pass_minpct"])
-
-            combined["hit_pseudobulk"] = False
-            if pb_spec is not None and "pb_log2fc" in combined.columns:
-                combined["hit_pseudobulk"] = combined["pb_log2fc"].abs() >= float(spec.pb_min_abs_log2fc)
-
-            combined["sign_agree_pb_wilcoxon"] = False
-            if pb_spec is not None and "pb_log2fc" in combined.columns and "cl_logfc" in combined.columns:
-                combined["sign_agree_pb_wilcoxon"] = (
-                    combined["pb_log2fc"].apply(_sgn) == combined["cl_logfc"].apply(_sgn)
-                )
-
-            # tiering
-            hits = combined[["hit_wilcoxon", "hit_logreg", "hit_pseudobulk"]].sum(axis=1)
-            if pb_spec is None:
-                # only two methods in play (wilcoxon/logreg)
-                tier = np.where(hits >= 2, "Tier1", np.where(hits >= 1, "Tier2", "None"))
-                combined["consensus_tier"] = tier
-                score = hits.astype(int) + np.where(combined["consensus_tier"] == "Tier1", 1, 0)
-            else:
-                tier = np.where(
-                    (hits == 3) & (combined.get("sign_agree_pb_wilcoxon", True)),
-                    "Tier1",
-                    np.where(hits >= 2, "Tier2", np.where(hits >= 1, "Tier3", "None")),
-                )
-                combined["consensus_tier"] = tier
-                score = hits.astype(int) + np.where(combined["consensus_tier"] == "Tier1", 2, 0)
-
-                # penalize strong sign disagreements (optional)
-                if "pb_log2fc" in combined.columns and "cl_logfc" in combined.columns:
-                    disagree = (
-                        (combined["sign_agree_pb_wilcoxon"] == False)
-                        & (combined["pb_log2fc"].abs() > 0.5)
-                        & (combined["cl_logfc"].abs() > 0.25)
-                    )
-                    score = score - np.where(disagree, 1, 0)
-
-            combined["consensus_score"] = score.astype(int)
-
-            # sort
-            if pb_spec is None:
-                tier_cat = pd.Categorical(
-                    combined["consensus_tier"],
-                    categories=["Tier1", "Tier2", "None"],
-                    ordered=True,
-                )
-            else:
-                tier_cat = pd.Categorical(
-                    combined["consensus_tier"],
-                    categories=["Tier1", "Tier2", "Tier3", "None"],
-                    ordered=True,
-                )
-
-            combined["__tier_order"] = tier_cat
-            sort_cols = ["__tier_order"]
-            asc = [True]
-            if "cl_padj" in combined.columns:
-                sort_cols.append("cl_padj"); asc.append(True)
-            if "pb_log2fc" in combined.columns:
-                sort_cols.append("pb_log2fc"); asc.append(False)
-            if "lr_coef" in combined.columns:
-                sort_cols.append("lr_coef"); asc.append(False)
-
-            combined = combined.sort_values(sort_cols, ascending=asc).drop(columns=["__tier_order"])
-
-            out[str(cl)][pair_key] = {
-                "wilcoxon": wilcoxon_df,
-                "logreg": logreg_df,
-                "pseudobulk_effect": pb_df,
-                "combined": combined,
-            }
-
-            # summary
-            if "consensus_tier" in combined.columns:
-                n_t1 = int((combined["consensus_tier"] == "Tier1").sum())
-                n_t2 = int((combined["consensus_tier"] == ("Tier2" if pb_spec is not None else "Tier2")).sum())
-                n_t3 = int((combined["consensus_tier"] == "Tier3").sum()) if pb_spec is not None else 0
-                top10 = combined.loc[combined["consensus_tier"] == "Tier1", "gene"].head(10).tolist() if "gene" in combined.columns else []
-            else:
-                n_t1 = n_t2 = n_t3 = 0
-                top10 = []
-
-            summary_rows.append(
-                dict(
-                    cluster=str(cl),
-                    contrast_key=contrast_key,
-                    A=A,
-                    B=B,
-                    status="ok",
-                    reason="",
-                    n_cells_A=nA,
-                    n_cells_B=nB,
-                    downsampled=bool(ds_meta["downsampled"]),
-                    n_genes_tested=int(combined.shape[0]),
-                    n_tier1=int(n_t1),
-                    n_tier2=int(n_t2),
-                    n_tier3=int(n_t3),
-                    min_pct=float(cl_min_pct),
-                    min_diff_pct=float(cl_min_diff_pct),
-                    pseudobulk_effect_included=bool(pb_spec is not None),
-                    top10_tier1_genes=",".join(map(str, top10)),
-                )
+        pct_A = None
+        pct_B = None
+        if any(m in spec.methods for m in ("wilcoxon", "logreg")):
+            pct_A, pct_B = _compute_cl_prevalence(
+                adata_sub,
+                groupby=contrast_key,
+                group_A=A,
+                group_B=B,
+                use_raw=False,
+                layer=None,
             )
+
+        wilcoxon_df = pd.DataFrame()
+        if "wilcoxon" in spec.methods:
+            sc.tl.rank_genes_groups(
+                adata_sub,
+                groupby=contrast_key,
+                groups=[A],
+                reference=B,
+                method="wilcoxon",
+                use_raw=False,
+                key_added="__tmp_wilcoxon",
+                n_genes=adata_sub.n_vars,
+                rankby_abs=False,
+                pts=True,
+            )
+            d = rank_genes_groups_df(adata_sub, group=A, key="__tmp_wilcoxon")
+            d = _coerce_pts_columns(d)
+
+            wilcoxon_df = d.rename(
+                columns={
+                    "names": "gene",
+                    "logfoldchanges": "cl_logfc",
+                    "scores": "cl_score",
+                    "pvals": "cl_pval",
+                    "pvals_adj": "cl_padj",
+                    "pts": "cl_pts",
+                    "pts_rest": "cl_pts_rest",
+                }
+            )
+            if "gene" in wilcoxon_df.columns:
+                wilcoxon_df["gene"] = wilcoxon_df["gene"].astype(str)
+
+            if pct_A is not None and "gene" in wilcoxon_df.columns:
+                idx = adata_sub.var_names.get_indexer(wilcoxon_df["gene"].astype(str))
+                ok = idx >= 0
+                wilcoxon_df.loc[ok, "cl_pts"] = pct_A[idx[ok]]
+                wilcoxon_df.loc[ok, "cl_pts_rest"] = pct_B[idx[ok]]
+
+        logreg_df = pd.DataFrame()
+        if "logreg" in spec.methods:
+            sc.tl.rank_genes_groups(
+                adata_sub,
+                groupby=contrast_key,
+                groups=[A],
+                reference=B,
+                method="logreg",
+                use_raw=False,
+                key_added="__tmp_logreg",
+                n_genes=adata_sub.n_vars,
+                rankby_abs=False,
+                pts=True,
+            )
+            d = rank_genes_groups_df(adata_sub, group=A, key="__tmp_logreg")
+            d = _coerce_pts_columns(d)
+
+            d = d.rename(columns={"names": "gene"})
+            if "logfoldchanges" in d.columns:
+                d = d.rename(columns={"logfoldchanges": "lr_coef"})
+            if "scores" in d.columns:
+                d = d.rename(columns={"scores": "lr_score"})
+
+            rename_prev = {}
+            if "pts" in d.columns:
+                rename_prev["pts"] = "cl_pts"
+            if "pts_rest" in d.columns:
+                rename_prev["pts_rest"] = "cl_pts_rest"
+            if rename_prev:
+                d = d.rename(columns=rename_prev)
+
+            cols = ["gene"] + [c for c in ["lr_coef", "lr_score", "cl_pts", "cl_pts_rest"] if c in d.columns]
+            logreg_df = d[cols].copy()
+            if "gene" in logreg_df.columns:
+                logreg_df["gene"] = logreg_df["gene"].astype(str)
+
+            if pct_A is not None and "gene" in logreg_df.columns:
+                idx = adata_sub.var_names.get_indexer(logreg_df["gene"].astype(str))
+                ok = idx >= 0
+                logreg_df.loc[ok, "cl_pts"] = pct_A[idx[ok]]
+                logreg_df.loc[ok, "cl_pts_rest"] = pct_B[idx[ok]]
+
+        if pb_df is not None and not pb_df.empty:
+            combined = pb_df.copy()
+        else:
+            combined = pd.DataFrame({"gene": []})
+
+        if wilcoxon_df is not None and not wilcoxon_df.empty:
+            combined = combined.merge(wilcoxon_df, on="gene", how="outer")
+
+        if logreg_df is not None and not logreg_df.empty:
+            combined = combined.merge(logreg_df, on="gene", how="outer", suffixes=("", "_lr"))
+
+            if "cl_pts_lr" in combined.columns and "cl_pts" not in combined.columns:
+                combined = combined.rename(columns={"cl_pts_lr": "cl_pts"})
+            if "cl_pts_rest_lr" in combined.columns and "cl_pts_rest" not in combined.columns:
+                combined = combined.rename(columns={"cl_pts_rest_lr": "cl_pts_rest"})
+            for c in ["cl_pts_lr", "cl_pts_rest_lr"]:
+                if c in combined.columns:
+                    combined = combined.drop(columns=[c])
+
+        combined.insert(0, "cluster", str(cl_val))
+        combined.insert(1, "contrast_key", contrast_key)
+        combined.insert(2, "A", A)
+        combined.insert(3, "B", B)
+        combined.insert(4, "n_cells_A", int(ds_meta["n_cells_A"]))
+        combined.insert(5, "n_cells_B", int(ds_meta["n_cells_B"]))
+        combined.insert(6, "downsampled", bool(ds_meta["downsampled"]))
+        combined.insert(7, "n_cells_A_used", int(ds_meta["n_cells_A_used"]))
+        combined.insert(8, "n_cells_B_used", int(ds_meta["n_cells_B_used"]))
+
+        for col in ["cl_logfc", "cl_padj", "lr_coef", "pb_log2fc", "cl_pts", "cl_pts_rest"]:
+            if col in combined.columns:
+                combined[col] = pd.to_numeric(combined[col], errors="coerce")
+
+        combined["pass_minpct"] = True
+        if (cl_min_pct > 0.0 or cl_min_diff_pct > 0.0) and ("cl_pts" in combined.columns) and ("cl_pts_rest" in combined.columns):
+            if not (combined["cl_pts"].notna().sum() == 0 and combined["cl_pts_rest"].notna().sum() == 0):
+                pass_mask = pd.Series(True, index=combined.index)
+                if cl_min_pct > 0.0:
+                    pass_mask &= (combined["cl_pts"] >= cl_min_pct) | (combined["cl_pts_rest"] >= cl_min_pct)
+                if cl_min_diff_pct > 0.0:
+                    pass_mask &= (combined["cl_pts"] - combined["cl_pts_rest"]).abs() >= cl_min_diff_pct
+                combined["pass_minpct"] = pass_mask.fillna(True)
+
+        combined["hit_wilcoxon"] = False
+        if "cl_padj" in combined.columns and "cl_logfc" in combined.columns:
+            combined["hit_wilcoxon"] = (
+                (combined["cl_padj"] < float(spec.cl_alpha))
+                & (combined["cl_logfc"].abs() >= float(spec.cl_min_abs_logfc))
+                & (combined["pass_minpct"])
+            )
+
+        combined["hit_logreg"] = False
+        if "lr_coef" in combined.columns:
+            combined["hit_logreg"] = (combined["lr_coef"].abs() >= float(spec.lr_min_abs_coef)) & (combined["pass_minpct"])
+
+        combined["hit_pseudobulk"] = False
+        if pb_spec is not None and "pb_log2fc" in combined.columns:
+            combined["hit_pseudobulk"] = combined["pb_log2fc"].abs() >= float(spec.pb_min_abs_log2fc)
+
+        combined["sign_agree_pb_wilcoxon"] = False
+        if pb_spec is not None and "pb_log2fc" in combined.columns and "cl_logfc" in combined.columns:
+            combined["sign_agree_pb_wilcoxon"] = (
+                combined["pb_log2fc"].apply(_sgn) == combined["cl_logfc"].apply(_sgn)
+            )
+
+        hits = combined[["hit_wilcoxon", "hit_logreg", "hit_pseudobulk"]].sum(axis=1)
+        if pb_spec is None:
+            tier = np.where(hits >= 2, "Tier1", np.where(hits >= 1, "Tier2", "None"))
+            combined["consensus_tier"] = tier
+            score = hits.astype(int) + np.where(combined["consensus_tier"] == "Tier1", 1, 0)
+        else:
+            tier = np.where(
+                (hits == 3) & (combined.get("sign_agree_pb_wilcoxon", True)),
+                "Tier1",
+                np.where(hits >= 2, "Tier2", np.where(hits >= 1, "Tier3", "None")),
+            )
+            combined["consensus_tier"] = tier
+            score = hits.astype(int) + np.where(combined["consensus_tier"] == "Tier1", 2, 0)
+
+            if "pb_log2fc" in combined.columns and "cl_logfc" in combined.columns:
+                disagree = (
+                    (combined["sign_agree_pb_wilcoxon"] == False)
+                    & (combined["pb_log2fc"].abs() > 0.5)
+                    & (combined["cl_logfc"].abs() > 0.25)
+                )
+                score = score - np.where(disagree, 1, 0)
+
+        combined["consensus_score"] = score.astype(int)
+
+        if pb_spec is None:
+            tier_cat = pd.Categorical(
+                combined["consensus_tier"],
+                categories=["Tier1", "Tier2", "None"],
+                ordered=True,
+            )
+        else:
+            tier_cat = pd.Categorical(
+                combined["consensus_tier"],
+                categories=["Tier1", "Tier2", "Tier3", "None"],
+                ordered=True,
+            )
+
+        combined["__tier_order"] = tier_cat
+        sort_cols = ["__tier_order"]
+        asc = [True]
+        if "cl_padj" in combined.columns:
+            sort_cols.append("cl_padj"); asc.append(True)
+        if "pb_log2fc" in combined.columns:
+            sort_cols.append("pb_log2fc"); asc.append(False)
+        if "lr_coef" in combined.columns:
+            sort_cols.append("lr_coef"); asc.append(False)
+
+        combined = combined.sort_values(sort_cols, ascending=asc).drop(columns=["__tier_order"])
+
+        result = {
+            "wilcoxon": wilcoxon_df,
+            "logreg": logreg_df,
+            "pseudobulk_effect": pb_df,
+            "combined": combined,
+        }
+
+        if "consensus_tier" in combined.columns:
+            n_t1 = int((combined["consensus_tier"] == "Tier1").sum())
+            n_t2 = int((combined["consensus_tier"] == ("Tier2" if pb_spec is not None else "Tier2")).sum())
+            n_t3 = int((combined["consensus_tier"] == "Tier3").sum()) if pb_spec is not None else 0
+            top10 = combined.loc[combined["consensus_tier"] == "Tier1", "gene"].head(10).tolist() if "gene" in combined.columns else []
+        else:
+            n_t1 = n_t2 = n_t3 = 0
+            top10 = []
+
+        row = dict(
+            cluster=str(cl_val),
+            contrast_key=contrast_key,
+            A=A,
+            B=B,
+            status="ok",
+            reason="",
+            n_cells_A=nA,
+            n_cells_B=nB,
+            downsampled=bool(ds_meta["downsampled"]),
+            n_genes_tested=int(combined.shape[0]),
+            n_tier1=int(n_t1),
+            n_tier2=int(n_t2),
+            n_tier3=int(n_t3),
+            min_pct=float(cl_min_pct),
+            min_diff_pct=float(cl_min_diff_pct),
+            pseudobulk_effect_included=bool(pb_spec is not None),
+            top10_tier1_genes=",".join(map(str, top10)),
+        )
+        return str(cl_val), pair_key, result, row
+
+    tasks: list[tuple[str, str, str]] = []
+    for cl in cluster_cache:
+        for A, B in pairs:
+            tasks.append((str(cl), str(A), str(B)))
+    LOGGER.info(
+        "cell-level contrasts: task build summary (clusters=%d, tasks=%d).",
+        int(len(cluster_cache)),
+        int(len(tasks)),
+    )
+
+    total = int(len(tasks))
+    if int(n_jobs) > 1 and total > 1:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        max_workers = min(int(n_jobs), total)
+        LOGGER.info(
+            "cell-level contrasts: running in parallel (tasks=%d, workers=%d).",
+            int(total),
+            int(max_workers),
+        )
+        done = 0
+        t0 = time.perf_counter()
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futs = {ex.submit(_process_pair, cl, A, B): (cl, A, B) for (cl, A, B) in tasks}
+            for fut in as_completed(futs):
+                cl_val, pair_key, result, row = fut.result()
+                out.setdefault(str(cl_val), {})
+                if result:
+                    out[str(cl_val)][pair_key] = result
+                if row is not None:
+                    summary_rows.append(row)
+                done += 1
+                elapsed = time.perf_counter() - t0
+                eta_s = (elapsed / max(1, done)) * (total - done)
+                LOGGER.info(
+                    "cell-level contrasts progress %d/%d (elapsed=%.1fs, eta=%.1fs).",
+                    int(done),
+                    int(total),
+                    elapsed,
+                    eta_s,
+                )
+    else:
+        for cl, A, B in tasks:
+            cl_val, pair_key, result, row = _process_pair(cl, A, B)
+            out.setdefault(str(cl_val), {})
+            if result:
+                out[str(cl_val)][pair_key] = result
+            if row is not None:
+                summary_rows.append(row)
 
     if store:
         adata.uns.setdefault(store_key, {})
