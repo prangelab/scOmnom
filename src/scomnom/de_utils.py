@@ -1298,6 +1298,8 @@ def de_condition_within_group_pseudobulk(
 
     levels = list(vc.index.astype(str))
     other_levels = [x for x in levels if x != str(reference)]
+    if len(other_levels) == 0:
+        return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
     if len(other_levels) != 1:
         raise ValueError(
             f"{condition_key!r} within group {group_value!r} has levels={levels}; "
