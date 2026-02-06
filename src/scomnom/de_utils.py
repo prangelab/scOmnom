@@ -1337,6 +1337,13 @@ def de_condition_within_group_pseudobulk(
     keep = (counts.sum(axis=0) >= min_total)
     counts = counts.loc[:, keep]
     if counts.shape[1] == 0:
+        LOGGER.info(
+            "Skipping DE: no genes left after filtering (group=%r, condition_key=%r, test=%r, reference=%r).",
+            str(group_value),
+            str(condition_key),
+            str(test),
+            str(reference),
+        )
         return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
 
     # Cell-level prevalence filter within this cluster (min_pct on either condition)
@@ -1374,13 +1381,49 @@ def de_condition_within_group_pseudobulk(
         keep_genes = totals.index[: int(max_genes)]
         counts = counts.loc[:, keep_genes].copy()
     if counts.shape[1] == 0:
+        LOGGER.info(
+            "Skipping DE: no genes left after filtering (group=%r, condition_key=%r, test=%r, reference=%r).",
+            str(group_value),
+            str(condition_key),
+            str(test),
+            str(reference),
+        )
+        return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
+
+    lib_totals = counts.sum(axis=1)
+    keep_libs = lib_totals > 0
+    if not bool(keep_libs.all()):
+        counts = counts.loc[keep_libs].copy()
+        metadata = metadata.loc[counts.index].copy()
+    if counts.shape[0] == 0:
+        LOGGER.info(
+            "Skipping DE: no pseudobulk libraries after filtering (group=%r, condition_key=%r, test=%r, reference=%r).",
+            str(group_value),
+            str(condition_key),
+            str(test),
+            str(reference),
+        )
+        return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
+
+    vc_after = metadata[condition_key].astype(str).value_counts()
+    if int(vc_after.get(str(reference), 0)) < int(opts.min_samples_per_level) or int(vc_after.get(str(test), 0)) < int(opts.min_samples_per_level):
+        LOGGER.info(
+            "Skipping DE: not enough pseudobulk libraries (group=%r, condition_key=%r, test=%r=%d, reference=%r=%d, min=%d).",
+            str(group_value),
+            str(condition_key),
+            str(test),
+            int(vc_after.get(str(test), 0)),
+            str(reference),
+            int(vc_after.get(str(reference), 0)),
+            int(opts.min_samples_per_level),
+        )
         return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
 
     try:
         res, meta = _run_pydeseq2(
             counts,
             metadata.rename(columns={sample_key: "sample"}),
-            design_factors=["sample", *covariates, condition_key],
+            design_factors=[*covariates, condition_key],
             contrast=(condition_key, str(test), str(reference)),
             alpha=opts.alpha,
             shrink_lfc=opts.shrink_lfc,
@@ -2307,7 +2350,8 @@ def de_condition_within_group_pseudobulk_multi(
         return {}
 
     # get levels present *within this cluster*
-    levels = pd.Index(pd.unique(adata.obs.loc[mask, condition_key].astype(str))).sort_values().tolist()
+    cond_norm = adata.obs[condition_key].astype(str).str.strip().str.replace(r"\\s+", " ", regex=True)
+    levels = pd.Index(pd.unique(cond_norm.loc[mask])).sort_values().tolist()
     if len(levels) < 2:
         return {}
 
@@ -2325,7 +2369,7 @@ def de_condition_within_group_pseudobulk_multi(
         # Run A vs B by calling your existing function,
         # but it currently wants reference and assumes exactly 2 levels.
         # We can *temporarily* treat reference=B and restrict to only A/B cells:
-        m2 = mask & adata.obs[condition_key].astype(str).isin([A, B]).to_numpy()
+        m2 = mask & cond_norm.isin([A, B]).to_numpy()
         if m2.sum() == 0:
             continue
 

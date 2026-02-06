@@ -9,7 +9,7 @@ from pandas.errors import PerformanceWarning
 from .load_and_filter import run_load_and_filter
 from .integrate import run_integrate
 from .cluster_and_annotate import run_clustering
-from .markers_and_de import run_cluster_vs_rest, run_within_cluster
+from .markers_and_de import run_cluster_vs_rest, run_within_cluster, run_composition
 
 from .config import LoadAndFilterConfig, IntegrateConfig, ClusterAnnotateConfig, MarkersAndDEConfig
 import logging
@@ -1106,6 +1106,12 @@ class RunWhich(str, Enum):
     pseudobulk = "pseudobulk"
 
 
+class CompositionBackend(str, Enum):
+    sccoda = "sccoda"
+    glm = "glm"
+    clr = "clr"
+
+
 def _parse_csv_repeat(items: Optional[List[str]]) -> List[str]:
     if not items:
         return []
@@ -1282,6 +1288,72 @@ def _build_cfg(
         plot_use_raw=plot_use_raw,
         plot_layer=plot_layer,
         plot_umap_ncols=plot_umap_ncols,
+    )
+
+
+def _build_cfg_composition(
+    *,
+    input_path: Path,
+    output_dir: Optional[Path],
+    output_name: str,
+    save_h5ad: bool,
+    n_jobs: int,
+    make_figures: bool,
+    figdir_name: str,
+    figure_formats: Sequence[str],
+    round_id: Optional[str],
+    replicate_key: Optional[str],
+    condition_key: str,
+    covariates: Optional[List[str]],
+    backend: CompositionBackend,
+    reference: str,
+    min_mean_prop: float,
+    min_cells_per_sample_cluster: int,
+    alpha: float,
+    stratify: bool,
+    stratify_key: Optional[str],
+    stratify_levels: Optional[List[str]],
+    consensus_backends: Optional[List[str]],
+) -> MarkersAndDEConfig:
+    out_dir = output_dir or input_path.parent
+    log_dir = out_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "markers-and-de.composition.log"
+    init_logging(log_path)
+
+    covars = tuple(_parse_csv_repeat(covariates) or ())
+    levels = tuple(_parse_csv_repeat(stratify_levels) or ())
+    consensus = tuple(_parse_csv_repeat(consensus_backends) or ())
+
+    return MarkersAndDEConfig(
+        input_path=input_path,
+        output_dir=out_dir,
+        output_name=output_name,
+        save_h5ad=save_h5ad,
+        run="pseudobulk",
+        n_jobs=n_jobs,
+        logfile=log_path,
+        make_figures=make_figures,
+        figdir_name=figdir_name,
+        figure_formats=figure_formats,
+        groupby=None,
+        label_source="pretty",
+        round_id=round_id,
+        sample_key=replicate_key,
+        batch_key=None,
+        condition_key=condition_key,
+        condition_keys=(),
+        condition_contrasts=(),
+        composition_backend=str(backend.value),
+        composition_reference=str(reference),
+        composition_min_mean_prop=float(min_mean_prop),
+        composition_min_cells_per_sample_cluster=int(min_cells_per_sample_cluster),
+        composition_alpha=float(alpha),
+        composition_covariates=covars,
+        composition_stratify=bool(stratify),
+        composition_stratify_key=str(stratify_key) if stratify_key is not None else None,
+        composition_stratify_levels=levels,
+        composition_consensus_backends=consensus,
     )
 
 
@@ -1466,6 +1538,69 @@ def cluster_vs_rest(
     cfg.contrast_conditional_de = False
 
     run_cluster_vs_rest(cfg)
+
+
+@markers_and_de_app.command(
+    "composition",
+    help="Composition: cluster abundance vs condition (compositional models).",
+)
+def composition(
+    input_path: Path = typer.Option(..., "--input-path", "-i"),
+    output_dir: Optional[Path] = typer.Option(None, "--output-dir", "-o"),
+    output_name: Optional[str] = typer.Option(None, "--output-name"),
+    save_h5ad: bool = typer.Option(False, "--save-h5ad/--no-save-h5ad"),
+    n_jobs: int = typer.Option(1, "--n-jobs"),
+
+    make_figures: bool = typer.Option(True, "--make-figures/--no-make-figures"),
+    figdir_name: str = typer.Option("figures", "--figdir-name"),
+    figure_formats: List[str] = typer.Option(["png", "pdf"], "--figure-formats", "-F"),
+
+    round_id: Optional[str] = typer.Option(None, "--round-id"),
+    replicate_key: Optional[str] = typer.Option(None, "--replicate-key"),
+
+    condition_key: str = typer.Option(..., "--condition-key"),
+    covariates: List[str] = typer.Option([], "--covariates"),
+    backend: CompositionBackend = typer.Option(CompositionBackend.sccoda, "--backend", case_sensitive=False),
+    reference: str = typer.Option("most_stable", "--reference"),
+    min_mean_prop: float = typer.Option(0.01, "--min-mean-prop"),
+    min_cells_per_sample_cluster: int = typer.Option(20, "--min-cells-per-sample-cluster"),
+    alpha: float = typer.Option(0.05, "--alpha"),
+
+    stratify: bool = typer.Option(False, "--stratify/--no-stratify"),
+    stratify_key: Optional[str] = typer.Option(None, "--stratify-key"),
+    stratify_levels: List[str] = typer.Option([], "--stratify-levels"),
+    consensus_backends: List[str] = typer.Option([], "--consensus-backends"),
+):
+    if output_name is None:
+        output_name = _default_output_name(input_path, "composition")
+    if stratify and not stratify_key:
+        raise typer.BadParameter("--stratify requires --stratify-key.")
+
+    cfg = _build_cfg_composition(
+        input_path=input_path,
+        output_dir=output_dir,
+        output_name=str(output_name),
+        save_h5ad=save_h5ad,
+        n_jobs=n_jobs,
+        make_figures=make_figures,
+        figdir_name=figdir_name,
+        figure_formats=figure_formats,
+        round_id=round_id,
+        replicate_key=replicate_key,
+        condition_key=condition_key,
+        covariates=covariates,
+        backend=backend,
+        reference=reference,
+        min_mean_prop=min_mean_prop,
+        min_cells_per_sample_cluster=min_cells_per_sample_cluster,
+        alpha=alpha,
+        stratify=stratify,
+        stratify_key=stratify_key,
+        stratify_levels=stratify_levels,
+        consensus_backends=consensus_backends,
+    )
+
+    run_composition(cfg)
 
 
 @markers_and_de_app.command(

@@ -670,6 +670,20 @@ class MarkersAndDEConfig(BaseModel):
     min_cells_condition: int = 20
 
     # ------------------------------------------------------------------
+    # Composition analysis (cluster abundance vs condition)
+    # ------------------------------------------------------------------
+    composition_backend: str = "sccoda"
+    composition_reference: str = "most_stable"
+    composition_min_mean_prop: float = 0.01
+    composition_min_cells_per_sample_cluster: int = 20
+    composition_alpha: float = 0.05
+    composition_covariates: Tuple[str, ...] = ()
+    composition_stratify: bool = False
+    composition_stratify_key: Optional[str] = None
+    composition_stratify_levels: Tuple[str, ...] = ()
+    composition_consensus_backends: Tuple[str, ...] = ()
+
+    # ------------------------------------------------------------------
     # DE-based decoupler (pathway/TF activity from DE stats)
     # ------------------------------------------------------------------
     de_decoupler_source: str = "auto"

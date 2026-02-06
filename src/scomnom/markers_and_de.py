@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 import anndata as ad
+import numpy as np
 import pandas as pd
 
 from scomnom import __version__
@@ -28,6 +29,7 @@ LOGGER = logging.getLogger(__name__)
 # Internal policy guard
 # -----------------------------------------------------------------------------
 _MIN_TOTAL_SAMPLES_FOR_PSEUDOBULK = 6
+_MIN_SAMPLES_PER_LEVEL_COMPOSITION = 2
 
 
 def _prune_uns_de(adata: ad.AnnData, store_key: str, *, top_n: int = 50, decoupler_top_n: int = 20) -> None:
@@ -378,6 +380,406 @@ def _write_settings(out_dir: Path, name: str, lines: list[str]) -> None:
     out_path = out_dir / name
     with out_path.open("w", encoding="utf-8") as f:
         f.write("\n".join(lines).rstrip() + "\n")
+
+
+def _resolve_active_cluster_key(adata: ad.AnnData, *, round_id: Optional[str]) -> str:
+    rid = round_id
+    if rid is None:
+        rid0 = adata.uns.get("active_cluster_round", None)
+        rid = str(rid0) if rid0 else None
+    rounds = adata.uns.get("cluster_rounds", {})
+    if not rid or not isinstance(rounds, dict) or rid not in rounds:
+        raise RuntimeError(
+            "composition: active cluster round not resolved. "
+            f"Resolved round_id={rid!r}, active_round={adata.uns.get('active_cluster_round', None)!r}."
+        )
+    rinfo = rounds[rid]
+    cluster_key = rinfo.get("cluster_key", None)
+    if not cluster_key or str(cluster_key) not in adata.obs:
+        raise RuntimeError(
+            f"composition: cluster_key not found in adata.obs for round_id={rid!r}."
+        )
+    return str(cluster_key)
+
+
+def _prepare_counts_and_metadata(
+    adata: ad.AnnData,
+    *,
+    cluster_key: str,
+    sample_key: str,
+    condition_key: str,
+    covariates: Sequence[str],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    counts = pd.crosstab(
+        adata.obs[str(sample_key)],
+        adata.obs[str(cluster_key)],
+        dropna=False,
+    )
+    meta_cols = [str(sample_key), str(condition_key), *[str(c) for c in covariates]]
+    missing = [c for c in meta_cols if c not in adata.obs]
+    if missing:
+        raise RuntimeError(f"composition: missing covariate columns in adata.obs: {missing}")
+    metadata = (
+        adata.obs.loc[:, meta_cols]
+        .drop_duplicates(subset=[str(sample_key)])
+        .set_index(str(sample_key))
+    )
+    common = counts.index.intersection(metadata.index)
+    counts = counts.loc[common]
+    metadata = metadata.loc[common]
+    return counts, metadata
+
+
+def _choose_reference_most_stable(
+    counts: pd.DataFrame,
+    *,
+    min_mean_prop: float,
+) -> str:
+    totals = counts.sum(axis=1).replace(0, np.nan)
+    props = counts.div(totals, axis=0)
+    mean_prop = props.mean(axis=0)
+    keep = mean_prop[mean_prop >= float(min_mean_prop)].index.tolist()
+    if not keep:
+        keep = mean_prop.sort_values(ascending=False).head(1).index.tolist()
+    props = props.loc[:, keep]
+    center = props.median(axis=0)
+    mad = (props.sub(center, axis=1)).abs().median(axis=0)
+    if mad.isna().all():
+        ref = mean_prop.sort_values(ascending=False).index[0]
+        return str(ref)
+    ref = mad.sort_values(ascending=True).index[0]
+    return str(ref)
+
+
+def _validate_min_samples_per_level(
+    metadata: pd.DataFrame,
+    *,
+    condition_key: str,
+) -> None:
+    vc = metadata[str(condition_key)].value_counts(dropna=False)
+    if (vc < _MIN_SAMPLES_PER_LEVEL_COMPOSITION).any():
+        bad = vc[vc < _MIN_SAMPLES_PER_LEVEL_COMPOSITION]
+        raise RuntimeError(
+            "composition: too few samples per condition level. "
+            f"Minimum required={_MIN_SAMPLES_PER_LEVEL_COMPOSITION}. "
+            f"Levels below minimum: {bad.to_dict()}"
+        )
+
+
+def _run_sccoda_model(
+    adata: ad.AnnData,
+    *,
+    cluster_key: str,
+    sample_key: str,
+    condition_key: str,
+    covariates: Sequence[str],
+    reference_cell_type: str,
+    fdr: float,
+    num_samples: int,
+    num_warmup: int,
+) -> pd.DataFrame:
+    try:
+        import pertpy as pt
+    except Exception as e:
+        raise RuntimeError(f"composition: failed to import pertpy: {e}")
+    try:
+        from jax import random as jrandom
+        rng_key = jrandom.PRNGKey(0)
+    except Exception:
+        rng_key = 0
+
+    cov_cols = [str(condition_key), *[str(c) for c in covariates]]
+    sccoda = pt.tl.Sccoda()
+    mdata = sccoda.load(
+        adata,
+        type="cell_level",
+        generate_sample_level=True,
+        cell_type_identifier=str(cluster_key),
+        sample_identifier=str(sample_key),
+        covariate_obs=cov_cols,
+    )
+
+    terms = " + ".join([str(condition_key), *[str(c) for c in covariates]])
+    formula = str(terms)
+    mdata = sccoda.prepare(
+        mdata,
+        formula=formula,
+        reference_cell_type=str(reference_cell_type),
+    )
+    sccoda.run_nuts(
+        mdata,
+        modality_key="coda",
+        num_samples=int(num_samples),
+        num_warmup=int(num_warmup),
+        rng_key=rng_key,
+    )
+    sccoda.set_fdr(mdata, est_fdr=float(fdr))
+    effects = sccoda.get_effect_df(mdata, modality_key="coda")
+    effects.index = effects.index.astype(str)
+    return effects
+
+
+def _run_glm_composition(
+    counts: pd.DataFrame,
+    metadata: pd.DataFrame,
+    *,
+    condition_key: str,
+    covariates: Sequence[str],
+    reference_level: Optional[str],
+) -> pd.DataFrame:
+    try:
+        import statsmodels.api as sm
+    except Exception as e:
+        raise RuntimeError(f"composition: failed to import statsmodels: {e}")
+
+    meta = metadata.copy()
+    cond = str(condition_key)
+    meta[cond] = meta[cond].astype("category")
+    if reference_level is not None and reference_level in meta[cond].cat.categories:
+        meta[cond] = meta[cond].cat.reorder_categories(
+            [reference_level] + [c for c in meta[cond].cat.categories if c != reference_level],
+            ordered=True,
+        )
+
+    design = pd.get_dummies(meta[[cond] + [str(c) for c in covariates]], drop_first=True)
+    design = sm.add_constant(design, has_constant="add")
+
+    totals = counts.sum(axis=1)
+    results = []
+    for cl in counts.columns:
+        y = counts[cl].astype(float)
+        if (totals == 0).all():
+            continue
+        try:
+            model = sm.GLM(
+                y,
+                design,
+                family=sm.families.Binomial(),
+                offset=np.log(totals.replace(0, np.nan)),
+            )
+            fit = model.fit()
+        except Exception:
+            continue
+
+        for term in design.columns:
+            if term == "const":
+                continue
+            coef = fit.params.get(term, np.nan)
+            se = fit.bse.get(term, np.nan)
+            z = coef / se if se and np.isfinite(se) else np.nan
+            ci_low = coef - 1.96 * se if se and np.isfinite(se) else np.nan
+            ci_high = coef + 1.96 * se if se and np.isfinite(se) else np.nan
+            pval = fit.pvalues.get(term, np.nan)
+            effect = coef / np.log(2) if np.isfinite(coef) else np.nan
+            results.append(
+                {
+                    "cluster": str(cl),
+                    "term": str(term),
+                    "coef": float(coef),
+                    "ci_low": float(ci_low),
+                    "ci_high": float(ci_high),
+                    "z": float(z) if np.isfinite(z) else np.nan,
+                    "pval": float(pval) if np.isfinite(pval) else np.nan,
+                    "effect": float(effect) if np.isfinite(effect) else np.nan,
+                }
+            )
+
+    out = pd.DataFrame(results)
+    if out.empty:
+        return out
+    from statsmodels.stats.multitest import multipletests
+    _, fdr, _, _ = multipletests(out["pval"].to_numpy(), method="fdr_bh")
+    out["fdr"] = fdr
+    return out
+
+
+def _run_clr_mannwhitney(
+    counts: pd.DataFrame,
+    metadata: pd.DataFrame,
+    *,
+    condition_key: str,
+    pseudocount: float = 1e-6,
+) -> pd.DataFrame:
+    from scipy import stats
+    from statsmodels.stats.multitest import multipletests
+
+    cond = metadata[str(condition_key)].astype(str)
+    totals = counts.sum(axis=1).replace(0, np.nan)
+    props = counts.div(totals, axis=0)
+    clr = np.log(props + float(pseudocount))
+    clr = clr.sub(clr.mean(axis=1), axis=0)
+
+    levels = sorted(cond.dropna().unique().tolist())
+    if len(levels) < 2:
+        raise RuntimeError(
+            "composition: CLR backend requires at least 2 condition levels. "
+            f"Found levels={levels}."
+        )
+
+    from itertools import combinations
+
+    all_blocks = []
+    for ref_level, test_level in combinations(levels, 2):
+        ref_mask = cond == ref_level
+        test_mask = cond == test_level
+
+        rows = []
+        for cl in counts.columns:
+            ref_vals = clr.loc[ref_mask, cl]
+            test_vals = clr.loc[test_mask, cl]
+            if ref_vals.empty or test_vals.empty:
+                continue
+            try:
+                pval = stats.mannwhitneyu(ref_vals, test_vals, alternative="two-sided")[1]
+            except Exception:
+                pval = np.nan
+
+            ref_prop = props.loc[ref_mask, cl].mean()
+            test_prop = props.loc[test_mask, cl].mean()
+            log2fc = np.log2((test_prop + float(pseudocount)) / (ref_prop + float(pseudocount)))
+
+            rows.append(
+                {
+                    "cluster": str(cl),
+                    "level_ref": str(ref_level),
+                    "level_test": str(test_level),
+                    "log2fc_test_vs_ref": float(log2fc),
+                    "clr_mean_ref": float(ref_vals.mean()),
+                    "clr_mean_test": float(test_vals.mean()),
+                    "pval": float(pval) if np.isfinite(pval) else np.nan,
+                }
+            )
+
+        block = pd.DataFrame(rows)
+        if block.empty:
+            continue
+        _, fdr, _, _ = multipletests(block["pval"].to_numpy(), method="fdr_bh")
+        block["fdr"] = fdr
+        block["pair"] = f"{ref_level}_vs_{test_level}"
+        all_blocks.append(block)
+
+    if not all_blocks:
+        return pd.DataFrame()
+
+    out = pd.concat(all_blocks, axis=0, ignore_index=True)
+    return out.sort_values(["pair", "pval"])
+
+
+def _standardize_composition_results(
+    df: pd.DataFrame,
+    *,
+    backend: str,
+    condition_key: str,
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+
+    if "cluster" not in out.columns:
+        out["cluster"] = out.index.astype(str)
+
+    if "term" not in out.columns:
+        out["term"] = str(condition_key)
+
+    if "effect" not in out.columns:
+        for cand in ("Final Parameter", "final_parameter", "effect_size", "coef"):
+            if cand in out.columns:
+                out["effect"] = pd.to_numeric(out[cand], errors="coerce")
+                break
+
+    if "pval" not in out.columns:
+        for cand in ("pval", "p_value", "pvalue"):
+            if cand in out.columns:
+                out["pval"] = pd.to_numeric(out[cand], errors="coerce")
+                break
+
+    if "fdr" not in out.columns:
+        for cand in ("fdr", "FDR", "qval", "q_value"):
+            if cand in out.columns:
+                out["fdr"] = pd.to_numeric(out[cand], errors="coerce")
+                break
+
+    if "ci_low" not in out.columns:
+        for cand in ("ci_low", "ci_lower", "lower_ci", "lower"):
+            if cand in out.columns:
+                out["ci_low"] = pd.to_numeric(out[cand], errors="coerce")
+                break
+
+    if "ci_high" not in out.columns:
+        for cand in ("ci_high", "ci_upper", "upper_ci", "upper"):
+            if cand in out.columns:
+                out["ci_high"] = pd.to_numeric(out[cand], errors="coerce")
+                break
+
+    if backend == "sccoda":
+        for cand in ("Inclusion probability", "inclusion_prob", "inclusion_probability"):
+            if cand in out.columns:
+                out["inclusion_prob"] = pd.to_numeric(out[cand], errors="coerce")
+                break
+
+    return out
+
+
+def _build_composition_consensus_summary(
+    results_by_backend: dict[str, pd.DataFrame],
+    *,
+    alpha: float,
+    condition_key: str,
+) -> pd.DataFrame:
+    rows = []
+    for backend, df in results_by_backend.items():
+        if df is None or df.empty:
+            continue
+        if "cluster" not in df.columns:
+            continue
+        sub = df.copy()
+        if "term" in sub.columns:
+            sub = sub[sub["term"].astype(str).str.startswith(str(condition_key))]
+        if "effect" in sub.columns:
+            sub["effect"] = pd.to_numeric(sub["effect"], errors="coerce")
+        if "pval" in sub.columns:
+            sub["pval"] = pd.to_numeric(sub["pval"], errors="coerce")
+        if "fdr" in sub.columns:
+            sub["fdr"] = pd.to_numeric(sub["fdr"], errors="coerce")
+
+        for _, row in sub.iterrows():
+            cluster = str(row.get("cluster"))
+            contrast = None
+            if "pair" in sub.columns and row.get("pair", None):
+                contrast = str(row.get("pair"))
+            elif "term" in sub.columns and row.get("term", None):
+                contrast = str(row.get("term"))
+            effect = row.get("effect", np.nan)
+            sign = 1 if effect > 0 else (-1 if effect < 0 else 0)
+            is_sig = False
+            if "fdr" in sub.columns and np.isfinite(row.get("fdr", np.nan)):
+                is_sig = bool(row.get("fdr") <= alpha)
+            elif "pval" in sub.columns and np.isfinite(row.get("pval", np.nan)):
+                is_sig = bool(row.get("pval") <= alpha)
+            rows.append(
+                {
+                    "backend": str(backend),
+                    "cluster": cluster,
+                    "contrast": contrast if contrast is not None else "NA",
+                    "effect": float(effect) if np.isfinite(effect) else np.nan,
+                    "sign": int(sign),
+                    "is_sig": bool(is_sig),
+                }
+            )
+
+    if not rows:
+        return pd.DataFrame()
+
+    base = pd.DataFrame(rows)
+    summary = base.groupby(["cluster", "contrast"]).agg(
+        n_backends=("backend", "nunique"),
+        n_sig=("is_sig", "sum"),
+        mean_effect=("effect", "mean"),
+        sign_consensus=("sign", lambda x: int(np.sign(np.nansum(x)))),
+        sign_agree=("sign", lambda x: int(len(set([s for s in x if s != 0])) == 1)),
+    )
+    summary = summary.reset_index()
+    return summary
 
 
 # -----------------------------------------------------------------------------
@@ -751,6 +1153,257 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
         io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
 
     LOGGER.info("Finished markers-and-de (cluster-vs-rest).")
+    return adata
+
+
+def run_composition(cfg) -> ad.AnnData:
+    init_logging(getattr(cfg, "logfile", None))
+    LOGGER.info("Starting markers-and-de (composition)...")
+
+    output_dir = Path(getattr(cfg, "output_dir"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    figdir = output_dir / str(getattr(cfg, "figdir_name", "figures"))
+    plot_utils.setup_scanpy_figs(figdir, getattr(cfg, "figure_formats", ["png", "pdf"]))
+
+    adata = io_utils.load_dataset(getattr(cfg, "input_path"))
+
+    sample_key = (
+        getattr(cfg, "sample_key", None)
+        or getattr(cfg, "batch_key", None)
+        or adata.uns.get("batch_key")
+        or "sample_id"
+    )
+    if str(sample_key) not in adata.obs:
+        raise RuntimeError(f"composition: sample_key={sample_key!r} not found in adata.obs")
+
+    condition_key = getattr(cfg, "condition_key", None)
+    if not condition_key:
+        raise RuntimeError("composition: condition_key is required.")
+    if str(condition_key) not in adata.obs:
+        raise RuntimeError(f"composition: condition_key={condition_key!r} not found in adata.obs")
+
+    cluster_key = _resolve_active_cluster_key(adata, round_id=getattr(cfg, "round_id", None))
+    covariates = tuple(getattr(cfg, "composition_covariates", ()) or ())
+
+    counts, metadata = _prepare_counts_and_metadata(
+        adata,
+        cluster_key=cluster_key,
+        sample_key=str(sample_key),
+        condition_key=str(condition_key),
+        covariates=covariates,
+    )
+    _validate_min_samples_per_level(metadata, condition_key=str(condition_key))
+
+    min_mean_prop = float(getattr(cfg, "composition_min_mean_prop", 0.01))
+    reference = str(getattr(cfg, "composition_reference", "most_stable"))
+    if reference.lower() == "most_stable":
+        reference = _choose_reference_most_stable(counts, min_mean_prop=min_mean_prop)
+
+    backend = str(getattr(cfg, "composition_backend", "sccoda")).lower()
+    alpha = float(getattr(cfg, "composition_alpha", 0.05))
+
+    results: dict[str, object] = {}
+    n_iterations = int(getattr(cfg, "composition_n_iterations", 10000) or 10000)
+    n_warmup = int(getattr(cfg, "composition_n_warmup", max(1000, n_iterations // 10)) or max(1000, n_iterations // 10))
+
+    def _run_backend(tag: str) -> pd.DataFrame:
+        if tag == "sccoda":
+            res = _run_sccoda_model(
+                adata,
+                cluster_key=cluster_key,
+                sample_key=str(sample_key),
+                condition_key=str(condition_key),
+                covariates=covariates,
+                reference_cell_type=reference,
+                fdr=alpha,
+                num_samples=n_iterations,
+                num_warmup=n_warmup,
+            )
+        elif tag == "glm":
+            res = _run_glm_composition(
+                counts,
+                metadata,
+                condition_key=str(condition_key),
+                covariates=covariates,
+                reference_level=None,
+            )
+        elif tag == "clr":
+            res = _run_clr_mannwhitney(
+                counts,
+                metadata,
+                condition_key=str(condition_key),
+            )
+            if not res.empty:
+                res = res.assign(effect=res["log2fc_test_vs_ref"])
+        else:
+            raise RuntimeError(f"composition: unsupported backend={tag!r}")
+
+        return _standardize_composition_results(
+            res,
+            backend=tag,
+            condition_key=str(condition_key),
+        )
+
+    results["global"] = _run_backend(backend)
+
+    consensus_backends = tuple(getattr(cfg, "composition_consensus_backends", ()) or ())
+    consensus_sources: dict[str, pd.DataFrame] = {backend: results.get("global")}
+    if consensus_backends:
+        for b in consensus_backends:
+            btag = str(b).lower()
+            if btag in consensus_sources:
+                continue
+            consensus_sources[btag] = _run_backend(btag)
+
+    consensus = _build_composition_consensus_summary(
+        consensus_sources,
+        alpha=alpha,
+        condition_key=str(condition_key),
+    )
+
+    if bool(getattr(cfg, "composition_stratify", False)):
+        strat_key = getattr(cfg, "composition_stratify_key", None)
+        if not strat_key or str(strat_key) not in metadata.columns:
+            raise RuntimeError("composition: stratify requested but stratify_key missing in metadata.")
+        levels = list(getattr(cfg, "composition_stratify_levels", ()) or ())
+        if not levels:
+            levels = sorted(metadata[str(strat_key)].dropna().astype(str).unique().tolist())
+
+        strat_results = {}
+        for level in levels:
+            mask = metadata[str(strat_key)].astype(str) == str(level)
+            if mask.sum() < _MIN_SAMPLES_PER_LEVEL_COMPOSITION * 2:
+                continue
+            counts_s = counts.loc[mask]
+            meta_s = metadata.loc[mask].copy()
+            adata_s = adata[adata.obs[str(sample_key)].astype(str).isin(meta_s.index.astype(str))]
+            try:
+                _validate_min_samples_per_level(meta_s, condition_key=str(condition_key))
+            except Exception:
+                continue
+
+            if backend == "sccoda":
+                res = _run_sccoda_model(
+                    adata_s,
+                    cluster_key=cluster_key,
+                    sample_key=str(sample_key),
+                    condition_key=str(condition_key),
+                    covariates=covariates,
+                    reference_cell_type=reference,
+                    fdr=alpha,
+                    num_samples=n_iterations,
+                    num_warmup=n_warmup,
+                )
+            elif backend == "glm":
+                res = _run_glm_composition(
+                    counts_s,
+                    meta_s,
+                    condition_key=str(condition_key),
+                    covariates=covariates,
+                    reference_level=None,
+                )
+            else:
+                res = _run_clr_mannwhitney(
+                    counts_s,
+                    meta_s,
+                    condition_key=str(condition_key),
+                )
+                if not res.empty:
+                    res = res.assign(effect=res["log2fc_test_vs_ref"])
+            strat_results[str(level)] = _standardize_composition_results(
+                res,
+                backend=backend,
+                condition_key=str(condition_key),
+            )
+
+        results["stratified"] = strat_results
+
+    adata.uns.setdefault("markers_and_de", {})
+    adata.uns["markers_and_de"]["composition"] = {
+        "version": __version__,
+        "timestamp_utc": datetime.utcnow().isoformat(),
+        "backend": backend,
+        "reference": reference,
+        "round_id": getattr(cfg, "round_id", None),
+        "cluster_key": cluster_key,
+        "sample_key": str(sample_key),
+        "condition_key": str(condition_key),
+        "covariates": list(covariates),
+        "alpha": alpha,
+        "min_mean_prop": min_mean_prop,
+        "n_samples": int(counts.shape[0]),
+        "n_clusters": int(counts.shape[1]),
+    }
+
+    run_round = plot_utils.get_run_round_tag("composition")
+    results_dir = output_dir / "tables" / f"composition_tables_{run_round}"
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    if isinstance(results.get("global"), pd.DataFrame):
+        results["global"].to_csv(results_dir / "composition_global.tsv", sep="\t")
+    if isinstance(consensus, pd.DataFrame) and not consensus.empty:
+        consensus.to_csv(results_dir / "composition_consensus.tsv", sep="\t", index=False)
+    if isinstance(results.get("stratified"), dict):
+        for level, df in results["stratified"].items():
+            if isinstance(df, pd.DataFrame):
+                df.to_csv(results_dir / f"composition_stratified_{level}.tsv", sep="\t")
+
+    _write_settings(
+        results_dir,
+        "composition_settings.txt",
+        [
+            f"backend={backend}",
+            f"reference={reference}",
+            f"round_id={getattr(cfg, 'round_id', None)}",
+            f"cluster_key={cluster_key}",
+            f"sample_key={sample_key}",
+            f"condition_key={condition_key}",
+            f"covariates={list(covariates)}",
+            f"alpha={alpha}",
+            f"min_mean_prop={min_mean_prop}",
+            f"stratify={bool(getattr(cfg, 'composition_stratify', False))}",
+            f"stratify_key={getattr(cfg, 'composition_stratify_key', None)}",
+            f"stratify_levels={list(getattr(cfg, 'composition_stratify_levels', ()) or ())}",
+            f"consensus_backends={list(getattr(cfg, 'composition_consensus_backends', ()) or ())}",
+        ],
+    )
+
+    if bool(getattr(cfg, "make_figures", True)):
+        try:
+            import matplotlib.pyplot as plt
+            global_df = results.get("global")
+            if isinstance(global_df, pd.DataFrame) and not global_df.empty:
+                fig, ax = plt.subplots(figsize=(7, 4))
+                if "effect" in global_df.columns:
+                    vals = global_df["effect"].astype(float)
+                    ax.bar(global_df["cluster"].astype(str) if "cluster" in global_df.columns else global_df.index.astype(str), vals)
+                    ax.set_ylabel("Effect")
+                elif backend == "sccoda" and "Final Parameter" in global_df.columns:
+                    vals = global_df["Final Parameter"].astype(float)
+                    ax.bar(global_df.index.astype(str), vals)
+                    ax.set_ylabel("Effect")
+                elif backend == "glm" and "coef" in global_df.columns:
+                    vals = global_df.groupby("cluster")["coef"].mean()
+                    ax.bar(vals.index.astype(str), vals.values)
+                    ax.set_ylabel("Effect")
+                ax.set_title("Composition effects (global)")
+                ax.tick_params(axis="x", labelrotation=45)
+                plot_utils.save_multi("composition_effects_global", Path("composition"), fig=fig)
+                plt.close(fig)
+        except Exception as e:
+            LOGGER.warning("composition: failed to generate plots: %s", e)
+
+    out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.composition")) + ".zarr")
+    LOGGER.info("Saving dataset → %s", out_zarr)
+    io_utils.save_dataset(adata, out_zarr, fmt="zarr")
+
+    if bool(getattr(cfg, "save_h5ad", False)):
+        out_h5ad = output_dir / (str(getattr(cfg, "output_name", "adata.composition")) + ".h5ad")
+        LOGGER.warning("Writing additional H5AD output (loads full matrix into RAM): %s", out_h5ad)
+        io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
+
+    LOGGER.info("Finished markers-and-de (composition).")
     return adata
 
 
