@@ -27,6 +27,7 @@ dependencies:
   - h5py
   - scikit-learn
   - psutil
+  - statsmodels
   - xlsxwriter
 
   # Scanpy ecosystem
@@ -69,3 +70,4 @@ dependencies:
       - requests
       - types-pytz
       - pydeseq2
+      - pertpy

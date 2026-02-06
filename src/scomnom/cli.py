@@ -18,6 +18,7 @@ from .logging_utils import init_logging
 
 ALLOWED_METHODS = {"scVI", "scANVI", "Harmony", "Scanorama", "BBKNN"}
 ALLOWED_DECOUPLER_METHODS = {"ulm", "mlm", "wsum", "aucell"}
+ALLOWED_COMP_METHODS = {"sccoda", "glm", "clr", "graph"}
 app = typer.Typer(help="scOmnom CLI — high-throughput scRNA-seq preprocessing and analysis pipeline.")
 
 # Globally suppress noisy warnings
@@ -1106,12 +1107,6 @@ class RunWhich(str, Enum):
     pseudobulk = "pseudobulk"
 
 
-class CompositionBackend(str, Enum):
-    sccoda = "sccoda"
-    glm = "glm"
-    clr = "clr"
-
-
 def _parse_csv_repeat(items: Optional[List[str]]) -> List[str]:
     if not items:
         return []
@@ -1305,7 +1300,7 @@ def _build_cfg_composition(
     replicate_key: Optional[str],
     condition_key: str,
     covariates: Optional[List[str]],
-    backend: CompositionBackend,
+    methods: Optional[List[str]],
     reference: str,
     min_mean_prop: float,
     min_cells_per_sample_cluster: int,
@@ -1313,7 +1308,11 @@ def _build_cfg_composition(
     stratify: bool,
     stratify_key: Optional[str],
     stratify_levels: Optional[List[str]],
-    consensus_backends: Optional[List[str]],
+    graph_n_seeds: int,
+    graph_k_ref: int,
+    graph_max_k: int,
+    graph_min_size: int,
+    graph_random_state: int,
 ) -> MarkersAndDEConfig:
     out_dir = output_dir or input_path.parent
     log_dir = out_dir / "logs"
@@ -1323,7 +1322,12 @@ def _build_cfg_composition(
 
     covars = tuple(_parse_csv_repeat(covariates) or ())
     levels = tuple(_parse_csv_repeat(stratify_levels) or ())
-    consensus = tuple(_parse_csv_repeat(consensus_backends) or ())
+    methods_list = _parse_csv_repeat(methods) or ["sccoda", "glm", "clr", "graph"]
+    bad = [m for m in methods_list if m not in ALLOWED_COMP_METHODS]
+    if bad:
+        raise typer.BadParameter(
+            f"Invalid --method value(s): {bad}. Allowed: {sorted(ALLOWED_COMP_METHODS)}"
+        )
 
     return MarkersAndDEConfig(
         input_path=input_path,
@@ -1344,7 +1348,7 @@ def _build_cfg_composition(
         condition_key=condition_key,
         condition_keys=(),
         condition_contrasts=(),
-        composition_backend=str(backend.value),
+        composition_methods=tuple(methods_list),
         composition_reference=str(reference),
         composition_min_mean_prop=float(min_mean_prop),
         composition_min_cells_per_sample_cluster=int(min_cells_per_sample_cluster),
@@ -1353,7 +1357,11 @@ def _build_cfg_composition(
         composition_stratify=bool(stratify),
         composition_stratify_key=str(stratify_key) if stratify_key is not None else None,
         composition_stratify_levels=levels,
-        composition_consensus_backends=consensus,
+        composition_graph_n_seeds=int(graph_n_seeds),
+        composition_graph_k_ref=int(graph_k_ref),
+        composition_graph_max_k=int(graph_max_k),
+        composition_graph_min_size=int(graph_min_size),
+        composition_graph_random_state=int(graph_random_state),
     )
 
 
@@ -1541,8 +1549,8 @@ def cluster_vs_rest(
 
 
 @markers_and_de_app.command(
-    "composition",
-    help="Composition: cluster abundance vs condition (compositional models).",
+    "da",
+    help="DA: differential abundance vs condition (compositional models).",
 )
 def composition(
     input_path: Path = typer.Option(..., "--input-path", "-i"),
@@ -1560,7 +1568,11 @@ def composition(
 
     condition_key: str = typer.Option(..., "--condition-key"),
     covariates: List[str] = typer.Option([], "--covariates"),
-    backend: CompositionBackend = typer.Option(CompositionBackend.sccoda, "--backend", case_sensitive=False),
+    method: List[str] = typer.Option(
+        ["sccoda", "glm", "clr", "graph"],
+        "--method",
+        help="Composition methods to run (default: all).",
+    ),
     reference: str = typer.Option("most_stable", "--reference"),
     min_mean_prop: float = typer.Option(0.01, "--min-mean-prop"),
     min_cells_per_sample_cluster: int = typer.Option(20, "--min-cells-per-sample-cluster"),
@@ -1569,7 +1581,11 @@ def composition(
     stratify: bool = typer.Option(False, "--stratify/--no-stratify"),
     stratify_key: Optional[str] = typer.Option(None, "--stratify-key"),
     stratify_levels: List[str] = typer.Option([], "--stratify-levels"),
-    consensus_backends: List[str] = typer.Option([], "--consensus-backends"),
+    graph_n_seeds: int = typer.Option(1000, "--graph-n-seeds"),
+    graph_k_ref: int = typer.Option(50, "--graph-k-ref"),
+    graph_max_k: int = typer.Option(200, "--graph-max-k"),
+    graph_min_size: int = typer.Option(20, "--graph-min-size"),
+    graph_random_state: int = typer.Option(42, "--graph-random-state"),
 ):
     if output_name is None:
         output_name = _default_output_name(input_path, "composition")
@@ -1589,7 +1605,7 @@ def composition(
         replicate_key=replicate_key,
         condition_key=condition_key,
         covariates=covariates,
-        backend=backend,
+        methods=method,
         reference=reference,
         min_mean_prop=min_mean_prop,
         min_cells_per_sample_cluster=min_cells_per_sample_cluster,
@@ -1597,7 +1613,11 @@ def composition(
         stratify=stratify,
         stratify_key=stratify_key,
         stratify_levels=stratify_levels,
-        consensus_backends=consensus_backends,
+        graph_n_seeds=graph_n_seeds,
+        graph_k_ref=graph_k_ref,
+        graph_max_k=graph_max_k,
+        graph_min_size=graph_min_size,
+        graph_random_state=graph_random_state,
     )
 
     run_composition(cfg)

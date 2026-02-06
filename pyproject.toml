@@ -37,6 +37,8 @@ dependencies = [
   "decoupler",
   "scvi-tools",
   "pydeseq2",
+  "statsmodels",
+  "pertpy",
 ]
 
 [project.scripts]

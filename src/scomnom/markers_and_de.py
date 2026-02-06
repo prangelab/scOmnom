@@ -22,6 +22,18 @@ from .de_utils import (
     de_cluster_vs_rest_pseudobulk,
     resolve_group_key,
 )
+from .composition_utils import (
+    _resolve_active_cluster_key,
+    prepare_counts_and_metadata,
+    _choose_reference_most_stable,
+    _validate_min_samples_per_level,
+    run_sccoda_model,
+    run_glm_composition,
+    run_clr_mannwhitney,
+    run_graph_da,
+    _standardize_composition_results,
+    _build_composition_consensus_summary,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -382,404 +394,6 @@ def _write_settings(out_dir: Path, name: str, lines: list[str]) -> None:
         f.write("\n".join(lines).rstrip() + "\n")
 
 
-def _resolve_active_cluster_key(adata: ad.AnnData, *, round_id: Optional[str]) -> str:
-    rid = round_id
-    if rid is None:
-        rid0 = adata.uns.get("active_cluster_round", None)
-        rid = str(rid0) if rid0 else None
-    rounds = adata.uns.get("cluster_rounds", {})
-    if not rid or not isinstance(rounds, dict) or rid not in rounds:
-        raise RuntimeError(
-            "composition: active cluster round not resolved. "
-            f"Resolved round_id={rid!r}, active_round={adata.uns.get('active_cluster_round', None)!r}."
-        )
-    rinfo = rounds[rid]
-    cluster_key = rinfo.get("cluster_key", None)
-    if not cluster_key or str(cluster_key) not in adata.obs:
-        raise RuntimeError(
-            f"composition: cluster_key not found in adata.obs for round_id={rid!r}."
-        )
-    return str(cluster_key)
-
-
-def _prepare_counts_and_metadata(
-    adata: ad.AnnData,
-    *,
-    cluster_key: str,
-    sample_key: str,
-    condition_key: str,
-    covariates: Sequence[str],
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    counts = pd.crosstab(
-        adata.obs[str(sample_key)],
-        adata.obs[str(cluster_key)],
-        dropna=False,
-    )
-    meta_cols = [str(sample_key), str(condition_key), *[str(c) for c in covariates]]
-    missing = [c for c in meta_cols if c not in adata.obs]
-    if missing:
-        raise RuntimeError(f"composition: missing covariate columns in adata.obs: {missing}")
-    metadata = (
-        adata.obs.loc[:, meta_cols]
-        .drop_duplicates(subset=[str(sample_key)])
-        .set_index(str(sample_key))
-    )
-    common = counts.index.intersection(metadata.index)
-    counts = counts.loc[common]
-    metadata = metadata.loc[common]
-    return counts, metadata
-
-
-def _choose_reference_most_stable(
-    counts: pd.DataFrame,
-    *,
-    min_mean_prop: float,
-) -> str:
-    totals = counts.sum(axis=1).replace(0, np.nan)
-    props = counts.div(totals, axis=0)
-    mean_prop = props.mean(axis=0)
-    keep = mean_prop[mean_prop >= float(min_mean_prop)].index.tolist()
-    if not keep:
-        keep = mean_prop.sort_values(ascending=False).head(1).index.tolist()
-    props = props.loc[:, keep]
-    center = props.median(axis=0)
-    mad = (props.sub(center, axis=1)).abs().median(axis=0)
-    if mad.isna().all():
-        ref = mean_prop.sort_values(ascending=False).index[0]
-        return str(ref)
-    ref = mad.sort_values(ascending=True).index[0]
-    return str(ref)
-
-
-def _validate_min_samples_per_level(
-    metadata: pd.DataFrame,
-    *,
-    condition_key: str,
-) -> None:
-    vc = metadata[str(condition_key)].value_counts(dropna=False)
-    if (vc < _MIN_SAMPLES_PER_LEVEL_COMPOSITION).any():
-        bad = vc[vc < _MIN_SAMPLES_PER_LEVEL_COMPOSITION]
-        raise RuntimeError(
-            "composition: too few samples per condition level. "
-            f"Minimum required={_MIN_SAMPLES_PER_LEVEL_COMPOSITION}. "
-            f"Levels below minimum: {bad.to_dict()}"
-        )
-
-
-def _run_sccoda_model(
-    adata: ad.AnnData,
-    *,
-    cluster_key: str,
-    sample_key: str,
-    condition_key: str,
-    covariates: Sequence[str],
-    reference_cell_type: str,
-    fdr: float,
-    num_samples: int,
-    num_warmup: int,
-) -> pd.DataFrame:
-    try:
-        import pertpy as pt
-    except Exception as e:
-        raise RuntimeError(f"composition: failed to import pertpy: {e}")
-    try:
-        from jax import random as jrandom
-        rng_key = jrandom.PRNGKey(0)
-    except Exception:
-        rng_key = 0
-
-    cov_cols = [str(condition_key), *[str(c) for c in covariates]]
-    sccoda = pt.tl.Sccoda()
-    mdata = sccoda.load(
-        adata,
-        type="cell_level",
-        generate_sample_level=True,
-        cell_type_identifier=str(cluster_key),
-        sample_identifier=str(sample_key),
-        covariate_obs=cov_cols,
-    )
-
-    terms = " + ".join([str(condition_key), *[str(c) for c in covariates]])
-    formula = str(terms)
-    mdata = sccoda.prepare(
-        mdata,
-        formula=formula,
-        reference_cell_type=str(reference_cell_type),
-    )
-    sccoda.run_nuts(
-        mdata,
-        modality_key="coda",
-        num_samples=int(num_samples),
-        num_warmup=int(num_warmup),
-        rng_key=rng_key,
-    )
-    sccoda.set_fdr(mdata, est_fdr=float(fdr))
-    effects = sccoda.get_effect_df(mdata, modality_key="coda")
-    effects.index = effects.index.astype(str)
-    return effects
-
-
-def _run_glm_composition(
-    counts: pd.DataFrame,
-    metadata: pd.DataFrame,
-    *,
-    condition_key: str,
-    covariates: Sequence[str],
-    reference_level: Optional[str],
-) -> pd.DataFrame:
-    try:
-        import statsmodels.api as sm
-    except Exception as e:
-        raise RuntimeError(f"composition: failed to import statsmodels: {e}")
-
-    meta = metadata.copy()
-    cond = str(condition_key)
-    meta[cond] = meta[cond].astype("category")
-    if reference_level is not None and reference_level in meta[cond].cat.categories:
-        meta[cond] = meta[cond].cat.reorder_categories(
-            [reference_level] + [c for c in meta[cond].cat.categories if c != reference_level],
-            ordered=True,
-        )
-
-    design = pd.get_dummies(meta[[cond] + [str(c) for c in covariates]], drop_first=True)
-    design = sm.add_constant(design, has_constant="add")
-
-    totals = counts.sum(axis=1)
-    results = []
-    for cl in counts.columns:
-        y = counts[cl].astype(float)
-        if (totals == 0).all():
-            continue
-        try:
-            model = sm.GLM(
-                y,
-                design,
-                family=sm.families.Binomial(),
-                offset=np.log(totals.replace(0, np.nan)),
-            )
-            fit = model.fit()
-        except Exception:
-            continue
-
-        for term in design.columns:
-            if term == "const":
-                continue
-            coef = fit.params.get(term, np.nan)
-            se = fit.bse.get(term, np.nan)
-            z = coef / se if se and np.isfinite(se) else np.nan
-            ci_low = coef - 1.96 * se if se and np.isfinite(se) else np.nan
-            ci_high = coef + 1.96 * se if se and np.isfinite(se) else np.nan
-            pval = fit.pvalues.get(term, np.nan)
-            effect = coef / np.log(2) if np.isfinite(coef) else np.nan
-            results.append(
-                {
-                    "cluster": str(cl),
-                    "term": str(term),
-                    "coef": float(coef),
-                    "ci_low": float(ci_low),
-                    "ci_high": float(ci_high),
-                    "z": float(z) if np.isfinite(z) else np.nan,
-                    "pval": float(pval) if np.isfinite(pval) else np.nan,
-                    "effect": float(effect) if np.isfinite(effect) else np.nan,
-                }
-            )
-
-    out = pd.DataFrame(results)
-    if out.empty:
-        return out
-    from statsmodels.stats.multitest import multipletests
-    _, fdr, _, _ = multipletests(out["pval"].to_numpy(), method="fdr_bh")
-    out["fdr"] = fdr
-    return out
-
-
-def _run_clr_mannwhitney(
-    counts: pd.DataFrame,
-    metadata: pd.DataFrame,
-    *,
-    condition_key: str,
-    pseudocount: float = 1e-6,
-) -> pd.DataFrame:
-    from scipy import stats
-    from statsmodels.stats.multitest import multipletests
-
-    cond = metadata[str(condition_key)].astype(str)
-    totals = counts.sum(axis=1).replace(0, np.nan)
-    props = counts.div(totals, axis=0)
-    clr = np.log(props + float(pseudocount))
-    clr = clr.sub(clr.mean(axis=1), axis=0)
-
-    levels = sorted(cond.dropna().unique().tolist())
-    if len(levels) < 2:
-        raise RuntimeError(
-            "composition: CLR backend requires at least 2 condition levels. "
-            f"Found levels={levels}."
-        )
-
-    from itertools import combinations
-
-    all_blocks = []
-    for ref_level, test_level in combinations(levels, 2):
-        ref_mask = cond == ref_level
-        test_mask = cond == test_level
-
-        rows = []
-        for cl in counts.columns:
-            ref_vals = clr.loc[ref_mask, cl]
-            test_vals = clr.loc[test_mask, cl]
-            if ref_vals.empty or test_vals.empty:
-                continue
-            try:
-                pval = stats.mannwhitneyu(ref_vals, test_vals, alternative="two-sided")[1]
-            except Exception:
-                pval = np.nan
-
-            ref_prop = props.loc[ref_mask, cl].mean()
-            test_prop = props.loc[test_mask, cl].mean()
-            log2fc = np.log2((test_prop + float(pseudocount)) / (ref_prop + float(pseudocount)))
-
-            rows.append(
-                {
-                    "cluster": str(cl),
-                    "level_ref": str(ref_level),
-                    "level_test": str(test_level),
-                    "log2fc_test_vs_ref": float(log2fc),
-                    "clr_mean_ref": float(ref_vals.mean()),
-                    "clr_mean_test": float(test_vals.mean()),
-                    "pval": float(pval) if np.isfinite(pval) else np.nan,
-                }
-            )
-
-        block = pd.DataFrame(rows)
-        if block.empty:
-            continue
-        _, fdr, _, _ = multipletests(block["pval"].to_numpy(), method="fdr_bh")
-        block["fdr"] = fdr
-        block["pair"] = f"{ref_level}_vs_{test_level}"
-        all_blocks.append(block)
-
-    if not all_blocks:
-        return pd.DataFrame()
-
-    out = pd.concat(all_blocks, axis=0, ignore_index=True)
-    return out.sort_values(["pair", "pval"])
-
-
-def _standardize_composition_results(
-    df: pd.DataFrame,
-    *,
-    backend: str,
-    condition_key: str,
-) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
-    out = df.copy()
-
-    if "cluster" not in out.columns:
-        out["cluster"] = out.index.astype(str)
-
-    if "term" not in out.columns:
-        out["term"] = str(condition_key)
-
-    if "effect" not in out.columns:
-        for cand in ("Final Parameter", "final_parameter", "effect_size", "coef"):
-            if cand in out.columns:
-                out["effect"] = pd.to_numeric(out[cand], errors="coerce")
-                break
-
-    if "pval" not in out.columns:
-        for cand in ("pval", "p_value", "pvalue"):
-            if cand in out.columns:
-                out["pval"] = pd.to_numeric(out[cand], errors="coerce")
-                break
-
-    if "fdr" not in out.columns:
-        for cand in ("fdr", "FDR", "qval", "q_value"):
-            if cand in out.columns:
-                out["fdr"] = pd.to_numeric(out[cand], errors="coerce")
-                break
-
-    if "ci_low" not in out.columns:
-        for cand in ("ci_low", "ci_lower", "lower_ci", "lower"):
-            if cand in out.columns:
-                out["ci_low"] = pd.to_numeric(out[cand], errors="coerce")
-                break
-
-    if "ci_high" not in out.columns:
-        for cand in ("ci_high", "ci_upper", "upper_ci", "upper"):
-            if cand in out.columns:
-                out["ci_high"] = pd.to_numeric(out[cand], errors="coerce")
-                break
-
-    if backend == "sccoda":
-        for cand in ("Inclusion probability", "inclusion_prob", "inclusion_probability"):
-            if cand in out.columns:
-                out["inclusion_prob"] = pd.to_numeric(out[cand], errors="coerce")
-                break
-
-    return out
-
-
-def _build_composition_consensus_summary(
-    results_by_backend: dict[str, pd.DataFrame],
-    *,
-    alpha: float,
-    condition_key: str,
-) -> pd.DataFrame:
-    rows = []
-    for backend, df in results_by_backend.items():
-        if df is None or df.empty:
-            continue
-        if "cluster" not in df.columns:
-            continue
-        sub = df.copy()
-        if "term" in sub.columns:
-            sub = sub[sub["term"].astype(str).str.startswith(str(condition_key))]
-        if "effect" in sub.columns:
-            sub["effect"] = pd.to_numeric(sub["effect"], errors="coerce")
-        if "pval" in sub.columns:
-            sub["pval"] = pd.to_numeric(sub["pval"], errors="coerce")
-        if "fdr" in sub.columns:
-            sub["fdr"] = pd.to_numeric(sub["fdr"], errors="coerce")
-
-        for _, row in sub.iterrows():
-            cluster = str(row.get("cluster"))
-            contrast = None
-            if "pair" in sub.columns and row.get("pair", None):
-                contrast = str(row.get("pair"))
-            elif "term" in sub.columns and row.get("term", None):
-                contrast = str(row.get("term"))
-            effect = row.get("effect", np.nan)
-            sign = 1 if effect > 0 else (-1 if effect < 0 else 0)
-            is_sig = False
-            if "fdr" in sub.columns and np.isfinite(row.get("fdr", np.nan)):
-                is_sig = bool(row.get("fdr") <= alpha)
-            elif "pval" in sub.columns and np.isfinite(row.get("pval", np.nan)):
-                is_sig = bool(row.get("pval") <= alpha)
-            rows.append(
-                {
-                    "backend": str(backend),
-                    "cluster": cluster,
-                    "contrast": contrast if contrast is not None else "NA",
-                    "effect": float(effect) if np.isfinite(effect) else np.nan,
-                    "sign": int(sign),
-                    "is_sig": bool(is_sig),
-                }
-            )
-
-    if not rows:
-        return pd.DataFrame()
-
-    base = pd.DataFrame(rows)
-    summary = base.groupby(["cluster", "contrast"]).agg(
-        n_backends=("backend", "nunique"),
-        n_sig=("is_sig", "sum"),
-        mean_effect=("effect", "mean"),
-        sign_consensus=("sign", lambda x: int(np.sign(np.nansum(x)))),
-        sign_agree=("sign", lambda x: int(len(set([s for s in x if s != 0])) == 1)),
-    )
-    summary = summary.reset_index()
-    return summary
 
 
 # -----------------------------------------------------------------------------
@@ -1186,30 +800,38 @@ def run_composition(cfg) -> ad.AnnData:
     cluster_key = _resolve_active_cluster_key(adata, round_id=getattr(cfg, "round_id", None))
     covariates = tuple(getattr(cfg, "composition_covariates", ()) or ())
 
-    counts, metadata = _prepare_counts_and_metadata(
+    counts, metadata = prepare_counts_and_metadata(
         adata,
         cluster_key=cluster_key,
         sample_key=str(sample_key),
         condition_key=str(condition_key),
         covariates=covariates,
     )
-    _validate_min_samples_per_level(metadata, condition_key=str(condition_key))
+    _validate_min_samples_per_level(
+        metadata,
+        condition_key=str(condition_key),
+        min_samples=_MIN_SAMPLES_PER_LEVEL_COMPOSITION,
+    )
 
     min_mean_prop = float(getattr(cfg, "composition_min_mean_prop", 0.01))
     reference = str(getattr(cfg, "composition_reference", "most_stable"))
     if reference.lower() == "most_stable":
         reference = _choose_reference_most_stable(counts, min_mean_prop=min_mean_prop)
 
-    backend = str(getattr(cfg, "composition_backend", "sccoda")).lower()
+    methods = [str(m).lower() for m in (getattr(cfg, "composition_methods", ()) or ())]
+    if not methods:
+        methods = ["sccoda", "glm", "clr", "graph"]
+    primary_method = methods[0]
     alpha = float(getattr(cfg, "composition_alpha", 0.05))
 
     results: dict[str, object] = {}
     n_iterations = int(getattr(cfg, "composition_n_iterations", 10000) or 10000)
     n_warmup = int(getattr(cfg, "composition_n_warmup", max(1000, n_iterations // 10)) or max(1000, n_iterations // 10))
 
-    def _run_backend(tag: str) -> pd.DataFrame:
+    def _run_method(tag: str) -> tuple[pd.DataFrame, Optional[pd.DataFrame]]:
+        graph_meta = None
         if tag == "sccoda":
-            res = _run_sccoda_model(
+            res = run_sccoda_model(
                 adata,
                 cluster_key=cluster_key,
                 sample_key=str(sample_key),
@@ -1221,7 +843,7 @@ def run_composition(cfg) -> ad.AnnData:
                 num_warmup=n_warmup,
             )
         elif tag == "glm":
-            res = _run_glm_composition(
+            res = run_glm_composition(
                 counts,
                 metadata,
                 condition_key=str(condition_key),
@@ -1229,35 +851,52 @@ def run_composition(cfg) -> ad.AnnData:
                 reference_level=None,
             )
         elif tag == "clr":
-            res = _run_clr_mannwhitney(
+            res = run_clr_mannwhitney(
                 counts,
                 metadata,
                 condition_key=str(condition_key),
             )
             if not res.empty:
                 res = res.assign(effect=res["log2fc_test_vs_ref"])
+        elif tag == "graph":
+            res, graph_meta = run_graph_da(
+                adata,
+                cluster_key=cluster_key,
+                sample_key=str(sample_key),
+                condition_key=str(condition_key),
+                covariates=covariates,
+                embedding_key="X_integrated",
+                n_seeds=int(getattr(cfg, "composition_graph_n_seeds", 1000)),
+                k_ref=int(getattr(cfg, "composition_graph_k_ref", 50)),
+                max_k=int(getattr(cfg, "composition_graph_max_k", 200)),
+                min_size=int(getattr(cfg, "composition_graph_min_size", 20)),
+                random_state=int(getattr(cfg, "composition_graph_random_state", 42)),
+            )
+            if graph_meta is not None and not graph_meta.empty:
+                graph_meta = graph_meta.set_index("neighborhood")
+                res = res.merge(graph_meta, left_on="cluster", right_index=True, how="left")
         else:
-            raise RuntimeError(f"composition: unsupported backend={tag!r}")
+            raise RuntimeError(f"composition: unsupported method={tag!r}")
 
-        return _standardize_composition_results(
+        res = _standardize_composition_results(
             res,
             backend=tag,
             condition_key=str(condition_key),
         )
+        return res, graph_meta
 
-    results["global"] = _run_backend(backend)
+    results_by_method: dict[str, pd.DataFrame] = {}
+    graph_meta_global: Optional[pd.DataFrame] = None
+    for method in methods:
+        res_df, meta_df = _run_method(method)
+        results_by_method[method] = res_df
+        if method == "graph" and meta_df is not None and not meta_df.empty:
+            graph_meta_global = meta_df
 
-    consensus_backends = tuple(getattr(cfg, "composition_consensus_backends", ()) or ())
-    consensus_sources: dict[str, pd.DataFrame] = {backend: results.get("global")}
-    if consensus_backends:
-        for b in consensus_backends:
-            btag = str(b).lower()
-            if btag in consensus_sources:
-                continue
-            consensus_sources[btag] = _run_backend(btag)
+    results["global"] = results_by_method.get(primary_method)
 
     consensus = _build_composition_consensus_summary(
-        consensus_sources,
+        results_by_method,
         alpha=alpha,
         condition_key=str(condition_key),
     )
@@ -1279,12 +918,16 @@ def run_composition(cfg) -> ad.AnnData:
             meta_s = metadata.loc[mask].copy()
             adata_s = adata[adata.obs[str(sample_key)].astype(str).isin(meta_s.index.astype(str))]
             try:
-                _validate_min_samples_per_level(meta_s, condition_key=str(condition_key))
+                _validate_min_samples_per_level(
+                    meta_s,
+                    condition_key=str(condition_key),
+                    min_samples=_MIN_SAMPLES_PER_LEVEL_COMPOSITION,
+                )
             except Exception:
                 continue
 
-            if backend == "sccoda":
-                res = _run_sccoda_model(
+            if primary_method == "sccoda":
+                res = run_sccoda_model(
                     adata_s,
                     cluster_key=cluster_key,
                     sample_key=str(sample_key),
@@ -1295,25 +938,42 @@ def run_composition(cfg) -> ad.AnnData:
                     num_samples=n_iterations,
                     num_warmup=n_warmup,
                 )
-            elif backend == "glm":
-                res = _run_glm_composition(
+            elif primary_method == "glm":
+                res = run_glm_composition(
                     counts_s,
                     meta_s,
                     condition_key=str(condition_key),
                     covariates=covariates,
                     reference_level=None,
                 )
-            else:
-                res = _run_clr_mannwhitney(
+            elif primary_method == "clr":
+                res = run_clr_mannwhitney(
                     counts_s,
                     meta_s,
                     condition_key=str(condition_key),
                 )
                 if not res.empty:
                     res = res.assign(effect=res["log2fc_test_vs_ref"])
+            else:
+                res, graph_meta = run_graph_da(
+                    adata_s,
+                    cluster_key=cluster_key,
+                    sample_key=str(sample_key),
+                    condition_key=str(condition_key),
+                    covariates=covariates,
+                    embedding_key="X_integrated",
+                    n_seeds=int(getattr(cfg, "composition_graph_n_seeds", 1000)),
+                    k_ref=int(getattr(cfg, "composition_graph_k_ref", 50)),
+                    max_k=int(getattr(cfg, "composition_graph_max_k", 200)),
+                    min_size=int(getattr(cfg, "composition_graph_min_size", 20)),
+                    random_state=int(getattr(cfg, "composition_graph_random_state", 42)),
+                )
+                if graph_meta is not None and not graph_meta.empty:
+                    graph_meta = graph_meta.set_index("neighborhood")
+                    res = res.merge(graph_meta, left_on="cluster", right_index=True, how="left")
             strat_results[str(level)] = _standardize_composition_results(
                 res,
-                backend=backend,
+                backend=primary_method,
                 condition_key=str(condition_key),
             )
 
@@ -1323,7 +983,8 @@ def run_composition(cfg) -> ad.AnnData:
     adata.uns["markers_and_de"]["composition"] = {
         "version": __version__,
         "timestamp_utc": datetime.utcnow().isoformat(),
-        "backend": backend,
+        "methods": list(methods),
+        "primary_method": primary_method,
         "reference": reference,
         "round_id": getattr(cfg, "round_id", None),
         "cluster_key": cluster_key,
@@ -1340,10 +1001,145 @@ def run_composition(cfg) -> ad.AnnData:
     results_dir = output_dir / "tables" / f"composition_tables_{run_round}"
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    if isinstance(results.get("global"), pd.DataFrame):
-        results["global"].to_csv(results_dir / "composition_global.tsv", sep="\t")
+    for method, df in results_by_method.items():
+        if isinstance(df, pd.DataFrame):
+            df.to_csv(results_dir / f"composition_global_{method}.tsv", sep="\t")
     if isinstance(consensus, pd.DataFrame) and not consensus.empty:
         consensus.to_csv(results_dir / "composition_consensus.tsv", sep="\t", index=False)
+    if graph_meta_global is not None and not graph_meta_global.empty:
+        graph_meta_global.to_csv(results_dir / "composition_graph_neighborhoods.tsv", sep="\t", index=False)
+        try:
+            import matplotlib.pyplot as plt
+            fig, ax = plt.subplots(figsize=(6, 4))
+            ax.hist(graph_meta_global["neighborhood_size"].astype(int), bins=30, color="steelblue", edgecolor="white")
+            ax.set_xlabel("Neighborhood size")
+            ax.set_ylabel("Count")
+            ax.set_title("GraphDA neighborhood sizes")
+            plot_utils.save_multi("graphda_neighborhood_sizes", Path("composition"), fig=fig)
+            plt.close(fig)
+            if "effect" in results_by_method.get("graph", pd.DataFrame()).columns:
+                gdf = results_by_method["graph"].copy()
+                if "cluster_label" not in gdf.columns and "cluster_label" in graph_meta_global.columns:
+                    gdf = gdf.merge(
+                        graph_meta_global[["neighborhood", "cluster_label"]],
+                        left_on="cluster",
+                        right_on="neighborhood",
+                        how="left",
+                    )
+                if "cluster_label" not in gdf.columns:
+                    gdf["cluster_label"] = "NA"
+                if "fdr" in gdf.columns:
+                    gdf = gdf.sort_values("fdr")
+                else:
+                    gdf = gdf.sort_values("pval") if "pval" in gdf.columns else gdf
+                top = gdf.head(25)
+                fig, ax = plt.subplots(figsize=(8, 4))
+                color_map = plot_utils._cluster_color_map(adata, cluster_key)
+                labels = top["cluster_label"].astype(str) if "cluster_label" in top.columns else top["cluster"].astype(str)
+                colors = [color_map.get(lbl, "#7a7a7a") for lbl in labels]
+                ax.bar(top["cluster"].astype(str), top["effect"].astype(float), color=colors)
+                ax.set_ylabel("Effect")
+                ax.set_title("GraphDA top neighborhoods")
+                ax.tick_params(axis="x", labelrotation=45)
+                plot_utils.save_multi("graphda_top_neighborhoods", Path("composition"), fig=fig)
+                plt.close(fig)
+
+                labels = gdf["cluster_label"].astype(str)
+                order = pd.Index(pd.unique(labels))
+                y_pos = {lab: i for i, lab in enumerate(order)}
+                x = gdf["effect"].astype(float)
+                y = labels.map(y_pos).astype(float)
+                jitter = (np.random.default_rng(0).random(len(y)) - 0.5) * 0.4
+                yj = y + jitter
+
+                if "fdr" in gdf.columns:
+                    sig = gdf["fdr"].astype(float) <= float(alpha)
+                elif "pval" in gdf.columns:
+                    sig = gdf["pval"].astype(float) <= float(alpha)
+                else:
+                    sig = pd.Series(False, index=gdf.index)
+
+                color_map = plot_utils._cluster_color_map(adata, cluster_key)
+                colors = [color_map.get(lbl, "#7a7a7a") for lbl in labels]
+                alphas = [0.35 if not s else 0.9 for s in sig]
+
+                fig, ax = plt.subplots(figsize=(8, max(4, 0.25 * len(order))))
+                ax.scatter(x, yj, s=16, c=colors, alpha=alphas, edgecolors="none")
+                ax.axvline(0, color="black", linestyle="--", linewidth=1)
+                ax.set_yticks(list(y_pos.values()))
+                ax.set_yticklabels(list(y_pos.keys()))
+                ax.set_xlabel("Effect (log2-odds)")
+                ax.set_ylabel("Cluster")
+                ax.set_title("GraphDA effects by cluster")
+                plot_utils.save_multi("graphda_effects_by_cluster", Path("composition"), fig=fig)
+                plt.close(fig)
+        except Exception as e:
+            LOGGER.warning("composition: failed to plot GraphDA summary: %s", e)
+
+    if bool(getattr(cfg, "make_figures", True)):
+        try:
+            import matplotlib.pyplot as plt
+            for method in methods:
+                df = results_by_method.get(method, pd.DataFrame())
+                if df is None or df.empty:
+                    continue
+
+                if method in ("glm", "clr"):
+                    if "effect" in df.columns:
+                        x = pd.to_numeric(df["effect"], errors="coerce")
+                    else:
+                        continue
+                    if "fdr" in df.columns:
+                        y = -np.log10(pd.to_numeric(df["fdr"], errors="coerce"))
+                    elif "pval" in df.columns:
+                        y = -np.log10(pd.to_numeric(df["pval"], errors="coerce"))
+                    else:
+                        continue
+
+                    fig, ax = plt.subplots(figsize=(6, 4))
+                    ax.scatter(x, y, s=14, c="#7a7a7a", alpha=0.7, edgecolors="none")
+                    ax.axvline(0, color="black", linestyle="--", linewidth=1)
+                    ax.set_xlabel("Effect (log2 scale)")
+                    ax.set_ylabel("-log10(FDR)" if "fdr" in df.columns else "-log10(pval)")
+                    ax.set_title(f"{method.upper()} volcano")
+                    plot_utils.save_multi(f"{method}_volcano", Path("composition"), fig=fig)
+                    plt.close(fig)
+
+                if method == "sccoda":
+                    if "effect" in df.columns:
+                        eff = pd.to_numeric(df["effect"], errors="coerce")
+                    elif "Final Parameter" in df.columns:
+                        eff = pd.to_numeric(df["Final Parameter"], errors="coerce")
+                    else:
+                        continue
+
+                    top = df.copy()
+                    if "fdr" in top.columns:
+                        top = top.sort_values("fdr")
+                    top = top.head(25)
+
+                    fig, ax = plt.subplots(figsize=(7, 4))
+                    x = np.arange(len(top))
+                    y = pd.to_numeric(top.get("effect", top.get("Final Parameter")), errors="coerce")
+                    color_map = plot_utils._cluster_color_map(adata, cluster_key)
+                    labels = top["cluster"].astype(str) if "cluster" in top.columns else top.index.astype(str)
+                    colors = [color_map.get(lbl, "#7a7a7a") for lbl in labels]
+                    if "ci_low" in top.columns and "ci_high" in top.columns:
+                        err_low = y - pd.to_numeric(top["ci_low"], errors="coerce")
+                        err_high = pd.to_numeric(top["ci_high"], errors="coerce") - y
+                        ax.errorbar(x, y, yerr=[err_low, err_high], fmt="o", color="#4c5bd9", ecolor="#999999")
+                        ax.scatter(x, y, s=20, color=colors, zorder=3)
+                    else:
+                        ax.scatter(x, y, s=20, color=colors)
+                    ax.axhline(0, color="black", linestyle="--", linewidth=1)
+                    ax.set_xticks(x)
+                    ax.set_xticklabels(labels, rotation=45, ha="right")
+                    ax.set_ylabel("Effect")
+                    ax.set_title("scCODA effects (top)")
+                    plot_utils.save_multi("sccoda_effects_top", Path("composition"), fig=fig)
+                    plt.close(fig)
+        except Exception as e:
+            LOGGER.warning("composition: failed to plot method-specific summaries: %s", e)
     if isinstance(results.get("stratified"), dict):
         for level, df in results["stratified"].items():
             if isinstance(df, pd.DataFrame):
@@ -1353,7 +1149,8 @@ def run_composition(cfg) -> ad.AnnData:
         results_dir,
         "composition_settings.txt",
         [
-            f"backend={backend}",
+            f"methods={list(methods)}",
+            f"primary_method={primary_method}",
             f"reference={reference}",
             f"round_id={getattr(cfg, 'round_id', None)}",
             f"cluster_key={cluster_key}",
@@ -1362,10 +1159,14 @@ def run_composition(cfg) -> ad.AnnData:
             f"covariates={list(covariates)}",
             f"alpha={alpha}",
             f"min_mean_prop={min_mean_prop}",
+            f"graph_n_seeds={getattr(cfg, 'composition_graph_n_seeds', None)}",
+            f"graph_k_ref={getattr(cfg, 'composition_graph_k_ref', None)}",
+            f"graph_max_k={getattr(cfg, 'composition_graph_max_k', None)}",
+            f"graph_min_size={getattr(cfg, 'composition_graph_min_size', None)}",
+            f"graph_random_state={getattr(cfg, 'composition_graph_random_state', None)}",
             f"stratify={bool(getattr(cfg, 'composition_stratify', False))}",
             f"stratify_key={getattr(cfg, 'composition_stratify_key', None)}",
             f"stratify_levels={list(getattr(cfg, 'composition_stratify_levels', ()) or ())}",
-            f"consensus_backends={list(getattr(cfg, 'composition_consensus_backends', ()) or ())}",
         ],
     )
 
@@ -1375,17 +1176,28 @@ def run_composition(cfg) -> ad.AnnData:
             global_df = results.get("global")
             if isinstance(global_df, pd.DataFrame) and not global_df.empty:
                 fig, ax = plt.subplots(figsize=(7, 4))
+                color_map = plot_utils._cluster_color_map(adata, cluster_key)
                 if "effect" in global_df.columns:
                     vals = global_df["effect"].astype(float)
-                    ax.bar(global_df["cluster"].astype(str) if "cluster" in global_df.columns else global_df.index.astype(str), vals)
+                    labels = (
+                        global_df["cluster"].astype(str)
+                        if "cluster" in global_df.columns
+                        else global_df.index.astype(str)
+                    )
+                    colors = [color_map.get(lbl, "#7a7a7a") for lbl in labels]
+                    ax.bar(labels, vals, color=colors)
                     ax.set_ylabel("Effect")
-                elif backend == "sccoda" and "Final Parameter" in global_df.columns:
+                elif primary_method == "sccoda" and "Final Parameter" in global_df.columns:
                     vals = global_df["Final Parameter"].astype(float)
-                    ax.bar(global_df.index.astype(str), vals)
+                    labels = global_df.index.astype(str)
+                    colors = [color_map.get(lbl, "#7a7a7a") for lbl in labels]
+                    ax.bar(labels, vals, color=colors)
                     ax.set_ylabel("Effect")
-                elif backend == "glm" and "coef" in global_df.columns:
+                elif primary_method == "glm" and "coef" in global_df.columns:
                     vals = global_df.groupby("cluster")["coef"].mean()
-                    ax.bar(vals.index.astype(str), vals.values)
+                    labels = vals.index.astype(str)
+                    colors = [color_map.get(lbl, "#7a7a7a") for lbl in labels]
+                    ax.bar(labels, vals.values, color=colors)
                     ax.set_ylabel("Effect")
                 ax.set_title("Composition effects (global)")
                 ax.tick_params(axis="x", labelrotation=45)
@@ -1393,6 +1205,164 @@ def run_composition(cfg) -> ad.AnnData:
                 plt.close(fig)
         except Exception as e:
             LOGGER.warning("composition: failed to generate plots: %s", e)
+
+    if bool(getattr(cfg, "make_figures", True)):
+        try:
+            import matplotlib.pyplot as plt
+            tab20 = plt.colormaps["tab20"]
+            tab20b = plt.colormaps["tab20b"]
+
+            totals = counts.sum(axis=1).replace(0, np.nan)
+            props = counts.div(totals, axis=0)
+            cluster_order = props.mean(axis=0).sort_values(ascending=False).index.tolist()
+            color_map = plot_utils._cluster_color_map(adata, cluster_key)
+            if not color_map:
+                colors = [
+                    tab20(i / 20) if i < 20 else tab20b((i - 20) / 20)
+                    for i in range(len(cluster_order))
+                ]
+                color_map = dict(zip(cluster_order, colors))
+            else:
+                fallback_colors = [
+                    tab20(i / 20) if i < 20 else tab20b((i - 20) / 20)
+                    for i in range(len(cluster_order))
+                ]
+                for cl, c in zip(cluster_order, fallback_colors):
+                    color_map.setdefault(cl, c)
+
+            cond_levels = sorted(metadata[str(condition_key)].astype(str).dropna().unique().tolist())
+            panels = [("Global", metadata.index)]
+            if bool(getattr(cfg, "composition_stratify", False)):
+                strat_key = getattr(cfg, "composition_stratify_key", None)
+                if strat_key and str(strat_key) in metadata.columns:
+                    for level in sorted(metadata[str(strat_key)].astype(str).dropna().unique().tolist()):
+                        idx = metadata.index[metadata[str(strat_key)].astype(str) == str(level)]
+                        panels.append((str(level), idx))
+
+            fig, axes = plt.subplots(
+                1,
+                len(panels),
+                figsize=(3.5 * len(panels), 6),
+                sharey=True,
+            )
+            if len(panels) == 1:
+                axes = [axes]
+
+            for ax, (title, idx) in zip(axes, panels):
+                sub = props.loc[idx]
+                bottom = np.zeros(len(cond_levels), dtype=float)
+                for cl in cluster_order:
+                    means = []
+                    for c in cond_levels:
+                        mask = metadata.loc[idx, str(condition_key)].astype(str) == str(c)
+                        means.append(float(sub.loc[mask, cl].mean()))
+                    ax.bar(
+                        np.arange(len(cond_levels)),
+                        means,
+                        bottom=bottom,
+                        color=color_map[cl],
+                        edgecolor="white",
+                        linewidth=0.3,
+                        width=0.6,
+                    )
+                    bottom += np.asarray(means)
+
+                xt = []
+                for c in cond_levels:
+                    n = int((metadata.loc[idx, str(condition_key)].astype(str) == str(c)).sum())
+                    xt.append(f"{c}\n(n={n})")
+                ax.set_xticks(np.arange(len(cond_levels)))
+                ax.set_xticklabels(xt, fontsize=9)
+                ax.set_ylim(0, 1)
+                ax.set_title(title, fontsize=11, fontweight="bold")
+
+            axes[0].set_ylabel("Mean Proportion")
+            handles = [plt.Rectangle((0, 0), 1, 1, facecolor=color_map[cl]) for cl in cluster_order]
+            fig.legend(
+                handles,
+                cluster_order,
+                bbox_to_anchor=(1.02, 0.95),
+                loc="upper left",
+                fontsize=6,
+                ncol=1,
+                title="Cluster",
+                title_fontsize=7,
+            )
+            fig.suptitle("Cell Type Composition by Condition", fontsize=13, y=1.02)
+            plt.tight_layout()
+            plot_utils.save_multi("composition_stacked_bar", Path("composition"), fig=fig)
+            plt.close(fig)
+
+            if len(cond_levels) == 2:
+                fig, axes = plt.subplots(
+                    1,
+                    len(panels),
+                    figsize=(3.8 * len(panels), 6),
+                    sharey=True,
+                )
+                if len(panels) == 1:
+                    axes = [axes]
+
+                for ax, (title, idx) in zip(axes, panels):
+                    sub = props.loc[idx]
+                    left = sub.loc[metadata.loc[idx, str(condition_key)].astype(str) == cond_levels[0]].mean()
+                    right = sub.loc[metadata.loc[idx, str(condition_key)].astype(str) == cond_levels[1]].mean()
+
+                    left = left.reindex(cluster_order).fillna(0.0)
+                    right = right.reindex(cluster_order).fillna(0.0)
+
+                    left_bottom = 0.0
+                    right_bottom = 0.0
+                    for cl in cluster_order:
+                        l = float(left.loc[cl])
+                        r = float(right.loc[cl])
+                        if l == 0 and r == 0:
+                            continue
+                        y0 = left_bottom
+                        y1 = left_bottom + l
+                        y2 = right_bottom + r
+                        y3 = right_bottom
+                        t = np.linspace(0, 1, 40)
+                        xs_top = t
+                        ys_top = y1 + (y2 - y1) * (3 * t**2 - 2 * t**3)
+                        xs_bot = t[::-1]
+                        ys_bot = y0 + (y3 - y0) * (3 * t**2 - 2 * t**3)
+                        xs = np.concatenate([xs_top, xs_bot])
+                        ys = np.concatenate([ys_top, ys_bot])
+                        ax.fill(xs, ys, color=color_map[cl], alpha=0.85, linewidth=0.2, edgecolor="white")
+                        left_bottom += l
+                        right_bottom += r
+
+                    ax.set_xlim(-0.2, 1.2)
+                    ax.set_xticks([0, 1])
+                    n0 = int((metadata.loc[idx, str(condition_key)].astype(str) == cond_levels[0]).sum())
+                    n1 = int((metadata.loc[idx, str(condition_key)].astype(str) == cond_levels[1]).sum())
+                    ax.set_xticklabels([f"{cond_levels[0]}\n(n={n0})", f"{cond_levels[1]}\n(n={n1})"], fontsize=9)
+                    ax.set_ylim(0, 1)
+                    ax.set_title(title, fontsize=11, fontweight="bold")
+
+                axes[0].set_ylabel("Mean Proportion")
+                fig.legend(
+                    handles,
+                    cluster_order,
+                    bbox_to_anchor=(1.02, 0.95),
+                    loc="upper left",
+                    fontsize=6,
+                    ncol=1,
+                    title="Cluster",
+                    title_fontsize=7,
+                )
+                fig.suptitle("Cell Type Composition Flow", fontsize=13, y=1.02)
+                plt.tight_layout()
+                plot_utils.save_multi("composition_alluvial", Path("composition"), fig=fig)
+                plt.close(fig)
+            else:
+                LOGGER.warning(
+                    "composition: alluvial plot skipped (requires exactly 2 condition levels, found %d).",
+                    len(cond_levels),
+                )
+        except Exception as e:
+            LOGGER.warning("composition: failed to plot composition stacks: %s", e)
 
     out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.composition")) + ".zarr")
     LOGGER.info("Saving dataset → %s", out_zarr)
