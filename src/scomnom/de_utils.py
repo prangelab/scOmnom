@@ -1294,7 +1294,7 @@ def de_condition_within_group_pseudobulk(
     cond = meta_df[condition_key].astype(str)
     vc = cond.value_counts()
     if str(reference) not in vc.index:
-        raise ValueError(f"reference={reference!r} not present in {condition_key!r} within group {group_value!r}")
+        return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
 
     levels = list(vc.index.astype(str))
     other_levels = [x for x in levels if x != str(reference)]
