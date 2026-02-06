@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -1530,124 +1531,152 @@ def run_within_cluster(cfg) -> ad.AnnData:
 
             groups = pd.Index(pd.unique(adata.obs[str(groupby)].astype(str))).sort_values()
 
-            from .de_utils import de_condition_within_group_pseudobulk_multi
+            from .de_utils import de_condition_within_group_pseudobulk_multi, _normalize_pair, _select_pairs
 
-            for condition_key in condition_keys:
-                if str(condition_key) not in adata.obs:
-                    raise RuntimeError(f"within-cluster: condition_key={condition_key!r} not found in adata.obs")
+            tasks: list[tuple[str, str, str, str]] = []
+            tasks_by_key: dict[str, int] = {}
+            groups_with_tasks_by_key: dict[str, set[str]] = {}
+
+            for cond_key in condition_keys:
+                if str(cond_key) not in adata.obs:
+                    raise RuntimeError(f"within-cluster: condition_key={cond_key!r} not found in adata.obs")
 
                 LOGGER.info(
                     "within-cluster: pseudobulk DE across %d groups (groupby=%r) for condition_key=%r",
                     len(groups),
                     str(groupby),
-                    str(condition_key),
+                    str(cond_key),
                 )
 
-                total_cpus = int(getattr(cfg, "n_jobs", 1))
-                if total_cpus > 1:
-                    from concurrent.futures import ThreadPoolExecutor, as_completed
-                    from .de_utils import _normalize_pair, _select_pairs
+                cond_norm = adata.obs[str(cond_key)].astype(str).str.strip().str.replace(r"\s+", " ", regex=True)
+                for g in groups:
+                    g_mask = adata.obs[str(groupby)].astype(str).to_numpy() == str(g)
+                    levels = pd.Index(pd.unique(cond_norm.loc[g_mask])).sort_values().tolist()
+                    if len(levels) < 2:
+                        continue
+                    pairs = _select_pairs(levels, condition_contrasts if condition_contrasts else None)
+                    for A, B in pairs:
+                        tasks.append((str(cond_key), str(g), str(A), str(B)))
+                        tasks_by_key[str(cond_key)] = tasks_by_key.get(str(cond_key), 0) + 1
+                        groups_with_tasks_by_key.setdefault(str(cond_key), set()).add(str(g))
 
-                    cond_norm = adata.obs[str(condition_key)].astype(str).str.strip().str.replace(r"\s+", " ", regex=True)
-                    tasks: list[tuple[str, str, str]] = []
-                    for g in groups:
-                        g_mask = adata.obs[str(groupby)].astype(str).to_numpy() == str(g)
-                        levels = pd.Index(pd.unique(cond_norm.loc[g_mask])).sort_values().tolist()
-                        if len(levels) < 2:
-                            continue
-                        pairs = _select_pairs(levels, condition_contrasts if condition_contrasts else None)
-                        for A, B in pairs:
-                            tasks.append((str(g), str(A), str(B)))
+            for cond_key in condition_keys:
+                total_pairs = int(tasks_by_key.get(str(cond_key), 0))
+                groups_with_tasks = len(groups_with_tasks_by_key.get(str(cond_key), set()))
+                LOGGER.info(
+                    "within-cluster: pseudobulk task build summary (condition_key=%r, groups_skipped=%d, total_pairs=%d).",
+                    str(cond_key),
+                    int(len(groups) - groups_with_tasks),
+                    int(total_pairs),
+                )
 
-                    max_workers = min(int(total_cpus), max(1, int(len(tasks))))
-                    LOGGER.info(
-                        "within-cluster: pseudobulk parallel run (groups=%d, tasks=%d, workers=%d, total_cpus=%d).",
-                        int(len(groups)),
-                        int(len(tasks)),
-                        int(max_workers),
-                        int(total_cpus),
-                    )
-                    LOGGER.info(
-                        "within-cluster: pseudobulk task build summary (condition_key=%r, groups_skipped=%d, total_pairs=%d).",
-                        str(condition_key),
-                        int(len(groups) - len({g for g, _, _ in tasks})),
-                        int(len(tasks)),
-                    )
+            total = int(len(tasks))
+            total_cpus = int(getattr(cfg, "n_jobs", 1))
+            max_workers = min(int(total_cpus), max(1, total))
+            LOGGER.info(
+                "within-cluster: pseudobulk parallel run (tasks=%d, workers=%d, total_cpus=%d).",
+                int(total),
+                int(max_workers),
+                int(total_cpus),
+            )
 
-                    def _run_task(gval: str, A: str, B: str):
-                        res = de_condition_within_group_pseudobulk_multi(
-                            adata,
-                            group_value=str(gval),
-                            groupby=str(groupby),
-                            round_id=getattr(cfg, "round_id", None),
-                            condition_key=str(condition_key),
-                            spec=pb_spec,
-                            opts=pb_opts,
-                            contrasts=[f"{A}_vs_{B}"],
-                            store_key=None,
-                            store=False,
-                            n_cpus=1,
-                        )
-                        return str(gval), str(A), str(B), res
+            entries: list[tuple[str, dict]] = []
 
-                    total = int(len(tasks))
-                    done = 0
-                    t0 = time.perf_counter()
-                    if tasks:
-                        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-                            futs = {
-                                ex.submit(_run_task, gval, A, B): (gval, A, B)
-                                for (gval, A, B) in tasks
+            def _run_task(cond_key: str, gval: str, A: str, B: str):
+                res = de_condition_within_group_pseudobulk_multi(
+                    adata,
+                    group_value=str(gval),
+                    groupby=str(groupby),
+                    round_id=getattr(cfg, "round_id", None),
+                    condition_key=str(cond_key),
+                    spec=pb_spec,
+                    opts=pb_opts,
+                    contrasts=[f"{A}_vs_{B}"],
+                    store_key=None,
+                    store=False,
+                    n_cpus=1,
+                )
+                return str(cond_key), str(gval), res
+
+            done = 0
+            t0 = time.perf_counter()
+            if tasks and max_workers > 1:
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+
+                with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                    futs = {
+                        ex.submit(_run_task, cond_key, gval, A, B): (cond_key, gval, A, B)
+                        for (cond_key, gval, A, B) in tasks
+                    }
+                    for fut in as_completed(futs):
+                        cond_key, gval, res = fut.result()
+                        for contrast_key, df in res.items():
+                            A2, B2 = _normalize_pair(contrast_key)
+                            key = f"{groupby}={gval}::{cond_key}::{A2}_vs_{B2}"
+                            payload = {
+                                "group_key": str(groupby),
+                                "group_value": str(gval),
+                                "condition_key": str(cond_key),
+                                "test": str(A2),
+                                "reference": str(B2),
+                                "results": df,
+                                "options": {
+                                    "min_cells_per_sample_group": int(pb_opts.min_cells_per_sample_group),
+                                    "min_samples_per_level": int(pb_opts.min_samples_per_level),
+                                    "alpha": float(pb_opts.alpha),
+                                    "shrink_lfc": bool(pb_opts.shrink_lfc),
+                                },
                             }
-                            for fut in as_completed(futs):
-                                gval, A, B, res = fut.result()
-                                if store_key:
-                                    adata.uns.setdefault(store_key, {})
-                                    adata.uns[store_key].setdefault("pseudobulk_condition_within_group_multi", {})
-                                    for contrast_key, df in res.items():
-                                        A2, B2 = _normalize_pair(contrast_key)
-                                        key = f"{groupby}={gval}::{condition_key}::{A2}_vs_{B2}"
-                                        adata.uns[store_key]["pseudobulk_condition_within_group_multi"][key] = {
-                                            "group_key": str(groupby),
-                                            "group_value": str(gval),
-                                            "condition_key": str(condition_key),
-                                            "test": str(A2),
-                                            "reference": str(B2),
-                                            "results": df,
-                                            "options": {
-                                                "min_cells_per_sample_group": int(pb_opts.min_cells_per_sample_group),
-                                                "min_samples_per_level": int(pb_opts.min_samples_per_level),
-                                                "alpha": float(pb_opts.alpha),
-                                                "shrink_lfc": bool(pb_opts.shrink_lfc),
-                                            },
-                                        }
-                                done += 1
-                                elapsed = time.perf_counter() - t0
-                                eta_s = (elapsed / max(1, done)) * (total - done)
-                                LOGGER.info(
-                                    "within-cluster: pseudobulk progress %d/%d (elapsed=%.1fs, eta=%.1fs).",
-                                    int(done),
-                                    int(total),
-                                    elapsed,
-                                    eta_s,
-                                )
-                else:
-                    for g in groups:
-                        _ = de_condition_within_group_pseudobulk_multi(
-                            adata,
-                            group_value=str(g),
-                            groupby=str(groupby),
-                            round_id=getattr(cfg, "round_id", None),
-                            condition_key=str(condition_key),
-                            spec=pb_spec,
-                            opts=pb_opts,
-                            contrasts=condition_contrasts,
-                            store_key=store_key,
-                            store=True,
-                            n_cpus=1,
+                            entries.append((key, payload))
+                        done += 1
+                        elapsed = time.perf_counter() - t0
+                        eta_s = (elapsed / max(1, done)) * (total - done)
+                        LOGGER.info(
+                            "within-cluster: pseudobulk progress %d/%d (elapsed=%.1fs, eta=%.1fs).",
+                            int(done),
+                            int(total),
+                            elapsed,
+                            eta_s,
+                        )
+            else:
+                for cond_key, gval, A, B in tasks:
+                    _, _, res = _run_task(cond_key, gval, A, B)
+                    for contrast_key, df in res.items():
+                        A2, B2 = _normalize_pair(contrast_key)
+                        key = f"{groupby}={gval}::{cond_key}::{A2}_vs_{B2}"
+                        payload = {
+                            "group_key": str(groupby),
+                            "group_value": str(gval),
+                            "condition_key": str(cond_key),
+                            "test": str(A2),
+                            "reference": str(B2),
+                            "results": df,
+                            "options": {
+                                "min_cells_per_sample_group": int(pb_opts.min_cells_per_sample_group),
+                                "min_samples_per_level": int(pb_opts.min_samples_per_level),
+                                "alpha": float(pb_opts.alpha),
+                                "shrink_lfc": bool(pb_opts.shrink_lfc),
+                            },
+                        }
+                        entries.append((key, payload))
+                        done += 1
+                        elapsed = time.perf_counter() - t0
+                        eta_s = (elapsed / max(1, done)) * (total - done)
+                        LOGGER.info(
+                            "within-cluster: pseudobulk progress %d/%d (elapsed=%.1fs, eta=%.1fs).",
+                            int(done),
+                            int(total),
+                            elapsed,
+                            eta_s,
                         )
 
-                ran_pseudobulk = True
+            if store_key:
+                adata.uns.setdefault(store_key, {})
+                adata.uns[store_key].setdefault("pseudobulk_condition_within_group_multi", {})
+                for key, payload in entries:
+                    adata.uns[store_key]["pseudobulk_condition_within_group_multi"][key] = payload
+
+            ran_pseudobulk = True
     else:
         LOGGER.info("within-cluster: skipping pseudobulk (run=%r).", mode)
 
@@ -1656,52 +1685,67 @@ def run_within_cluster(cfg) -> ad.AnnData:
     # ----------------------------
     ran_cell_contrast = False
     if run_cell_requested:
-        from .de_utils import ContrastConditionalSpec, contrast_conditional_markers
+        from .de_utils import ContrastConditionalSpec
 
+        total_cpus = int(getattr(cfg, "n_jobs", 1))
+        specs = []
         for condition_key in condition_keys:
             if str(condition_key) not in adata.obs:
                 raise RuntimeError(f"within-cluster: condition_key={condition_key!r} not found in adata.obs")
-
-            # What defines the levels to contrast at cell-level:
-            # prefer explicit cfg.contrast_key; else condition_key.
             contrast_key = getattr(cfg, "contrast_key", None) or str(condition_key)
-
-            cc_spec = ContrastConditionalSpec(
-                contrast_key=str(contrast_key),
-                methods=tuple(getattr(cfg, "contrast_methods", ("wilcoxon", "logreg"))),
-                min_cells_per_level_in_cluster=int(getattr(cfg, "contrast_min_cells_per_level", 50)),
-                max_cells_per_level_in_cluster=int(getattr(cfg, "contrast_max_cells_per_level", 2000)),
-                min_total_counts=int(getattr(cfg, "contrast_min_total_counts", 10)),
-                pseudocount=float(getattr(cfg, "contrast_pseudocount", 1.0)),
-                cl_alpha=float(getattr(cfg, "contrast_cl_alpha", 0.05)),
-                cl_min_abs_logfc=float(getattr(cfg, "contrast_cl_min_abs_logfc", 0.25)),
-                lr_min_abs_coef=float(getattr(cfg, "contrast_lr_min_abs_coef", 0.25)),
-                pb_min_abs_log2fc=float(getattr(cfg, "contrast_pb_min_abs_log2fc", 0.5)),
-                random_state=int(getattr(cfg, "random_state", 42)),
-                min_pct=float(getattr(cfg, "min_pct", 0.25)),
-                min_diff_pct=float(getattr(cfg, "min_diff_pct", 0.25)),
+            specs.append(
+                ContrastConditionalSpec(
+                    contrast_key=str(contrast_key),
+                    methods=tuple(getattr(cfg, "contrast_methods", ("wilcoxon", "logreg"))),
+                    min_cells_per_level_in_cluster=int(getattr(cfg, "contrast_min_cells_per_level", 50)),
+                    max_cells_per_level_in_cluster=int(getattr(cfg, "contrast_max_cells_per_level", 2000)),
+                    min_total_counts=int(getattr(cfg, "contrast_min_total_counts", 10)),
+                    pseudocount=float(getattr(cfg, "contrast_pseudocount", 1.0)),
+                    cl_alpha=float(getattr(cfg, "contrast_cl_alpha", 0.05)),
+                    cl_min_abs_logfc=float(getattr(cfg, "contrast_cl_min_abs_logfc", 0.25)),
+                    lr_min_abs_coef=float(getattr(cfg, "contrast_lr_min_abs_coef", 0.25)),
+                    pb_min_abs_log2fc=float(getattr(cfg, "contrast_pb_min_abs_log2fc", 0.5)),
+                    random_state=int(getattr(cfg, "random_state", 42)),
+                    min_pct=float(getattr(cfg, "min_pct", 0.25)),
+                    min_diff_pct=float(getattr(cfg, "min_diff_pct", 0.25)),
+                )
             )
 
-            _ = contrast_conditional_markers(
-                adata,
-                groupby=str(groupby),
-                round_id=getattr(cfg, "round_id", None),
-                spec=cc_spec,
-                pb_spec=pb_spec,  # may be None; function should tolerate (cell-only mode)
-                store_key=store_key,
-                store=True,
-                n_jobs=int(getattr(cfg, "n_jobs", 1)),
-            )
+        from .de_utils import contrast_conditional_markers_multi
+        results_by_key, summaries_by_key = contrast_conditional_markers_multi(
+            adata,
+            groupby=str(groupby),
+            round_id=getattr(cfg, "round_id", None),
+            specs=specs,
+            pb_spec=pb_spec,
+            n_jobs=total_cpus,
+        )
 
-            # Persist per-contrast_key results in a multi-store block
-            if store_key in adata.uns and isinstance(adata.uns.get(store_key), dict):
-                cc_block = adata.uns[store_key].get("contrast_conditional", None)
-                if isinstance(cc_block, dict):
-                    from copy import deepcopy
-                    adata.uns[store_key].setdefault("contrast_conditional_multi", {})
-                    adata.uns[store_key]["contrast_conditional_multi"][str(contrast_key)] = deepcopy(cc_block)
+        for condition_key in condition_keys:
+            contrast_key = getattr(cfg, "contrast_key", None) or str(condition_key)
+            out_local = results_by_key.get(str(contrast_key), {})
+            summary_local = summaries_by_key.get(str(contrast_key), pd.DataFrame())
 
-            # tables for contrast-conditional markers
+            if store_key:
+                adata.uns.setdefault(store_key, {})
+                adata.uns[store_key].setdefault("contrast_conditional", {})
+                adata.uns[store_key]["contrast_conditional"]["group_key"] = str(groupby)
+                adata.uns[store_key]["contrast_conditional"]["contrast_key"] = str(contrast_key)
+                counts_layer = pb_spec.counts_layer if pb_spec is not None else None
+                adata.uns[store_key]["contrast_conditional"]["counts_layer"] = str(counts_layer) if counts_layer else None
+                spec_match = next((s for s in specs if str(s.contrast_key) == str(contrast_key)), None)
+                if spec_match is not None:
+                    adata.uns[store_key]["contrast_conditional"]["spec"] = {**spec_match.__dict__, "methods": list(spec_match.methods)}
+                adata.uns[store_key]["contrast_conditional"]["pseudobulk_effect_included"] = bool(pb_spec is not None)
+                adata.uns[store_key]["contrast_conditional"]["summary"] = summary_local
+                adata.uns[store_key]["contrast_conditional"]["results"] = out_local
+
+                from copy import deepcopy
+                adata.uns[store_key].setdefault("contrast_conditional_multi", {})
+                adata.uns[store_key]["contrast_conditional_multi"][str(contrast_key)] = deepcopy(
+                    adata.uns[store_key]["contrast_conditional"]
+                )
+
             io_utils.export_contrast_conditional_markers_tables(
                 adata,
                 output_dir=output_dir,
@@ -1755,7 +1799,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                     "design_formula=NA (cell-level)",
                 ],
             )
-            ran_cell_contrast = True
+        ran_cell_contrast = True
     else:
         LOGGER.info("within-cluster: skipping cell-level within-cluster contrasts (run=%r).", mode)
 
