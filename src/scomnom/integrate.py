@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import warnings
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Sequence
@@ -15,9 +16,10 @@ import scanpy as sc
 import torch
 
 from scomnom import __version__
-from . import io_utils, plot_utils, reporting
+from . import io_utils, plot_utils, reporting, ct_utils
 from .config import IntegrateConfig
 from .logging_utils import init_logging
+from .clustering_utils import run_BISC
 
 torch.set_float32_matmul_precision("high")
 LOGGER = logging.getLogger(__name__)
@@ -33,31 +35,23 @@ def _sanitize_tag(s: str) -> str:
     return s or "NA"
 
 
-def _resolve_scib_truth_label_key(
+def _resolve_scib_truth(
     adata: ad.AnnData,
     cfg: IntegrateConfig,
     *,
     round_id: str | None,  # same round selector used for annotated-run labels (default active)
-) -> tuple[str, str]:
+) -> tuple[str, str, Optional[np.ndarray]]:
     """
-    Returns (truth_label_key_in_obs, truth_tag_for_filenames).
-
-    Supported values for cfg.scib_truth_label_key:
-      - "leiden" (default): uses adata.obs["leiden"]
-      - "final": uses the round-derived pretty cluster labels (annotation.pretty_cluster_key)
-
-    round_id is the SAME round selector used elsewhere (default active).
+    Returns (truth_label_key_in_obs, truth_tag_for_filenames, truth_mask_or_none).
     """
-    requested = str(getattr(cfg, "scib_truth_label_key", "leiden") or "leiden").strip()
+    requested = str(getattr(cfg, "scib_truth_label_key", "celltypist") or "celltypist").strip()
     requested_l = requested.lower()
 
-    # 1) default: leiden
     if requested_l in ("leiden", "default"):
         key = "leiden"
         _ensure_label_key(adata, key)
-        return key, "truth-leiden"
+        return key, "truth-leiden", None
 
-    # 2) final labels from the chosen round (pretty cluster labels)
     if requested_l in ("final", "annotated", "annotated_labels", "final_labels"):
         rid = round_id
         if rid is None:
@@ -78,11 +72,10 @@ def _resolve_scib_truth_label_key(
 
         pretty_key = ann.get("pretty_cluster_key", None)
         if pretty_key and str(pretty_key) in adata.obs:
-            return str(pretty_key), f"truth-final_{_sanitize_tag(rid)}"
+            return str(pretty_key), f"truth-final_{_sanitize_tag(rid)}", None
 
-        # fallback (should usually exist, but be defensive)
         if "cluster_label" in adata.obs:
-            return "cluster_label", f"truth-final_{_sanitize_tag(rid)}"
+            return "cluster_label", f"truth-final_{_sanitize_tag(rid)}", None
 
         raise RuntimeError(
             "scIB truth requested as 'final', but final labels were not found.\n"
@@ -92,9 +85,49 @@ def _resolve_scib_truth_label_key(
             f"Resolved round_id={rid!r}."
         )
 
+    if requested_l in ("celltypist", "ct", "celltypist_labels"):
+        label_key = str(getattr(cfg, "celltypist_label_key", "celltypist_label"))
+        labels, proba, _ = ct_utils.get_celltypist_outputs(adata, label_key)
+
+        if labels is None or proba is None:
+            if getattr(cfg, "celltypist_model", None) is None:
+                raise RuntimeError(
+                    "scIB truth requested as 'celltypist', but celltypist_model is None."
+                )
+            labels, proba, _ = ct_utils.ensure_celltypist(adata, cfg, reuse=True, store=True)
+
+        if labels is None:
+            raise RuntimeError("scIB truth requested as 'celltypist', but no CellTypist labels are available.")
+
+        if label_key not in adata.obs:
+            ct_utils.store_celltypist_outputs(adata, label_key, labels, proba)
+
+        if proba is None:
+            raise RuntimeError(
+                "scIB truth requested as 'celltypist', but CellTypist probability matrix is missing."
+            )
+
+        mask, _ = ct_utils.build_entropy_margin_mask(
+            proba,
+            entropy_abs_limit=float(getattr(cfg, "bio_entropy_abs_limit", 0.5)),
+            entropy_quantile=float(getattr(cfg, "bio_entropy_quantile", 0.7)),
+            margin_min=float(getattr(cfg, "bio_margin_min", 0.10)),
+        )
+
+        if mask.shape[0] != adata.n_obs:
+            raise RuntimeError(
+                "scIB truth requested as 'celltypist', but mask length does not match adata.n_obs."
+            )
+        if int(mask.sum()) == 0:
+            raise RuntimeError(
+                "scIB truth requested as 'celltypist', but no cells passed the confidence mask."
+            )
+
+        return label_key, "truth-celltypist", mask
+
     raise RuntimeError(
         f"--scib-truth-label-key={requested!r} not understood.\n"
-        "Use 'leiden' (default) or 'final'."
+        "Use 'celltypist', 'leiden', or 'final'."
     )
 
 
@@ -253,366 +286,51 @@ def _run_scanvi_from_scvi(
     return np.asarray(lvae.get_latent_representation())
 
 
-# ---------------------------------------------------------------------
-# Optional: scVI-latent preflight labels for scANVI
-# ---------------------------------------------------------------------
-def _compute_scanvi_prelabels(
-    adata_hvg: ad.AnnData,
-    *,
-    scvi_latent: np.ndarray,
-    batch_key: str,
-    out_key: str = "scanvi_prelabels",
-    resolutions: Optional[Sequence[float]] = None,
-    max_prelabel_clusters: int = 25,
-    min_stability_ok: float = 0.60,
-    parsimony_eps: float = 0.03,
-    w_stab: float = 0.50,
-    w_sil: float = 0.35,
-    w_tiny: float = 0.15,
-    batch_trap_threshold: float = 0.90,
-    batch_trap_min_cells: int = 200,
-    tiny_cluster_min_cells: int = 30,
-) -> str:
-    """
-    Create coarse, structural labels for scANVI by sweeping Leiden resolutions
-    on scVI latent space, then selecting a parsimonious resolution using
-    BISC-inspired structural scoring:
+@dataclass
+class _BiscQuickConfig:
+    label_key: str
+    random_state: int = 42
+    res_min: float = 0.4
+    res_max: float = 1.6
+    n_resolutions: int = 7
+    penalty_alpha: float = 0.02
+    stability_repeats: int = 5
+    subsample_frac: float = 0.8
+    min_cluster_size: int = 20
+    tiny_cluster_size: int = 20
+    min_plateau_len: int = 3
+    max_cluster_jump_frac: float = 0.4
+    stability_threshold: float = 0.85
+    w_stab: float = 0.50
+    w_sil: float = 0.35
+    w_tiny: float = 0.15
+    w_hom: float = 0.0
+    w_frag: float = 0.0
+    w_bioari: float = 0.0
+    bio_guided_clustering: bool = False
+    bio_mask_mode: str = "none"
+    bio_entropy_abs_limit: float = 0.5
+    bio_entropy_quantile: float = 0.7
+    bio_margin_min: float = 0.10
+    bio_mask_min_cells: int = 500
+    bio_mask_min_frac: float = 0.05
+    batch_key: Optional[str] = None
+    make_figures: bool = False
 
-      score = w_stab * stability_norm + w_sil * centroid_sil_norm + w_tiny * tiny_penalty_norm
 
-    where:
-      - stability = smoothed ARI between adjacent resolutions (higher is better)
-      - centroid silhouette = _centroid_silhouette (higher is better)
-      - tiny penalty = discourages many tiny clusters (higher is better)
-
-    Additional selection constraints:
-      - prefer resolutions with n_clusters <= max_prelabel_clusters (configurable; default 25)
-      - prefer interior resolutions (exclude endpoints when possible)
-      - require stability >= min_stability_ok when feasible
-      - pick the *lowest* resolution within (1 - parsimony_eps) of best
-
-    Writes:
-      - adata_hvg.obsm["X_scvi_latent"]
-      - adata_hvg.obs[out_key]
-
-    Returns:
-      out_key
-    """
-    from sklearn.metrics import adjusted_rand_score
-
-    # Import the centroid silhouette used by BISC
-    # (kept as local import to avoid circular imports in some layouts)
-    try:
-        from .clustering_utils import _centroid_silhouette  # type: ignore
-    except Exception:
-        # fallback if integrate.py is executed in a different import context
-        from scomnom.clustering_utils import _centroid_silhouette  # type: ignore
-
-    if batch_key not in adata_hvg.obs:
-        raise KeyError(f"batch_key '{batch_key}' not found in adata.obs")
-
-    Z = np.asarray(scvi_latent)
-    if Z.ndim != 2 or Z.shape[0] != adata_hvg.n_obs:
-        raise RuntimeError(
-            f"scVI latent shape mismatch: got {Z.shape}, expected ({adata_hvg.n_obs}, k)"
-        )
-
-    adata_hvg.obsm["X_scvi_latent"] = Z
-
-    # default sparse grid (coarse sweep)
-    if not resolutions:
-        resolutions = [0.2, 0.6, 1.0, 1.4, 1.8]
-
-    res_list = [float(r) for r in resolutions]
-    res_list = sorted(res_list)
-
-    # Ensure neighbors once on the latent
-    sc.pp.neighbors(adata_hvg, use_rep="X_scvi_latent")
-
-    # ------------------------------------------------------------------
-    # Helpers (self-contained mini-BISC)
-    # ------------------------------------------------------------------
-    def _normalize_scores(d: dict[float, float]) -> dict[float, float]:
-        if not d:
-            return {}
-        vals = np.array(list(d.values()), dtype=float)
-        vmin = float(np.nanmin(vals))
-        vmax = float(np.nanmax(vals))
-        if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax == vmin:
-            return {k: 0.0 for k in d}
-        return {k: (float(v) - vmin) / (vmax - vmin) for k, v in d.items()}
-
-    def _compute_tiny_cluster_penalty(cluster_sizes: np.ndarray, tiny_threshold: int) -> float:
-        """
-        Higher is better. Penalizes:
-          - many tiny clusters
-          - many cells falling into tiny clusters
-        """
-        cluster_sizes = np.asarray(cluster_sizes, dtype=int)
-        total_clusters = int(cluster_sizes.size)
-        total_cells = int(cluster_sizes.sum())
-
-        if total_clusters == 0 or total_cells == 0:
-            return 1.0
-
-        tiny_mask = cluster_sizes < int(tiny_threshold)
-        n_tiny = int(np.sum(tiny_mask))
-        cells_in_tiny = int(np.sum(cluster_sizes[tiny_mask]))
-
-        frac_tiny_clusters = n_tiny / total_clusters
-        penalty_cluster_fraction = 1.0 - frac_tiny_clusters
-
-        frac_cells_in_tiny = cells_in_tiny / total_cells
-        penalty_cell_fraction = 1.0 - frac_cells_in_tiny
-
-        return float(0.5 * (penalty_cluster_fraction + penalty_cell_fraction))
-
-    def _compute_smoothed_stability(
-        res_sorted: list[float],
-        ari_adjacent: dict[tuple[float, float], float],
-    ) -> dict[float, float]:
-        stab: dict[float, float] = {}
-        for i, r in enumerate(res_sorted):
-            terms: list[float] = []
-            if i > 0:
-                r_prev = res_sorted[i - 1]
-                if (r_prev, r) in ari_adjacent:
-                    terms.append(float(ari_adjacent[(r_prev, r)]))
-            if i < len(res_sorted) - 1:
-                r_next = res_sorted[i + 1]
-                if (r, r_next) in ari_adjacent:
-                    terms.append(float(ari_adjacent[(r, r_next)]))
-            stab[r] = float(np.mean(terms)) if terms else 0.0
-        return stab
-
-    def _pick_parsimonious(cands: list[float], scores: dict[float, float], eps: float) -> float | None:
-        if not cands:
-            return None
-        best = max(cands, key=lambda r: scores.get(r, -np.inf))
-        best_val = float(scores.get(best, -np.inf))
-        if not np.isfinite(best_val):
-            return min(cands)
-        near = [r for r in cands if float(scores.get(r, -np.inf)) >= (1.0 - float(eps)) * best_val]
-        return min(near) if near else best
-
-    # ------------------------------------------------------------------
-    # Sweep: Leiden + metrics per resolution
-    # ------------------------------------------------------------------
-    labels_by_res: dict[float, np.ndarray] = {}
-    n_clusters_by_res: dict[float, int] = {}
-    sizes_by_res: dict[float, np.ndarray] = {}
-    sil_by_res: dict[float, float] = {}
-    tiny_by_res: dict[float, float] = {}
-
-    for r in res_list:
-        key = f"__scanvi_pre_leiden_{r:.3f}"
-        sc.tl.leiden(adata_hvg, resolution=float(r), key_added=key)
-
-        labels = adata_hvg.obs[key].astype(str).to_numpy()
-        labels_by_res[r] = labels
-
-        vc = pd.Series(labels).value_counts()
-        n_clusters = int(vc.size)
-        n_clusters_by_res[r] = n_clusters
-
-        sizes = vc.to_numpy(dtype=int)
-        sizes_by_res[r] = sizes
-
-        sil = float(_centroid_silhouette(Z, labels))
-        sil_by_res[r] = sil
-
-        tiny = float(_compute_tiny_cluster_penalty(sizes, tiny_threshold=int(tiny_cluster_min_cells)))
-        tiny_by_res[r] = tiny
-
-        LOGGER.info(
-            "scanVI prelabels sweep: res=%.3f -> n_clusters=%d, centroid_silhouette=%.4f, tiny_penalty=%.4f",
-            float(r),
-            int(n_clusters),
-            float(sil) if np.isfinite(sil) else float("nan"),
-            float(tiny) if np.isfinite(tiny) else float("nan"),
-        )
-
-    # ------------------------------------------------------------------
-    # Stability: ARI adjacent + smoothing
-    # ------------------------------------------------------------------
-    ari_adjacent: dict[tuple[float, float], float] = {}
-    for r1, r2 in zip(res_list[:-1], res_list[1:]):
-        ari = float(adjusted_rand_score(labels_by_res[r1], labels_by_res[r2]))
-        ari_adjacent[(r1, r2)] = ari
-
-    stability_by_res = _compute_smoothed_stability(res_list, ari_adjacent)
-
-    # ------------------------------------------------------------------
-    # Composite score (normalized)
-    # ------------------------------------------------------------------
-    sil_norm = _normalize_scores(sil_by_res)
-    tiny_norm = _normalize_scores(tiny_by_res)
-    stab_norm = _normalize_scores(stability_by_res)
-
-    composite: dict[float, float] = {}
-    for r in res_list:
-        composite[r] = float(
-            float(w_stab) * stab_norm.get(r, 0.0)
-            + float(w_sil) * sil_norm.get(r, 0.0)
-            + float(w_tiny) * tiny_norm.get(r, 0.0)
-        )
-
-        LOGGER.info(
-            "scanVI prelabels score: res=%.3f -> stability=%.4f (norm=%.3f), sil=%.4f (norm=%.3f), tiny=%.4f (norm=%.3f) | composite=%.4f",
-            float(r),
-            float(stability_by_res.get(r, 0.0)),
-            float(stab_norm.get(r, 0.0)),
-            float(sil_by_res.get(r, float("nan"))),
-            float(sil_norm.get(r, 0.0)),
-            float(tiny_by_res.get(r, float("nan"))),
-            float(tiny_norm.get(r, 0.0)),
-            float(composite[r]),
-        )
-
-    # ------------------------------------------------------------------
-    # Candidate set selection (BISC-ish)
-    # ------------------------------------------------------------------
-    # Prefer interior resolutions when possible
-    interior = res_list[1:-1] if len(res_list) > 2 else res_list
-
-    # Feasible: stability >= min_stability_ok
-    feasible = [r for r in interior if float(stability_by_res.get(r, 0.0)) >= float(min_stability_ok)]
-
-    # Cap cluster count if requested
-    if max_prelabel_clusters is not None and int(max_prelabel_clusters) > 0:
-        feasible = [r for r in feasible if int(n_clusters_by_res.get(r, 0)) <= int(max_prelabel_clusters)]
-
-    # If feasible set is empty, relax in stages:
-    search_set = feasible
-    relaxed_reason = None
-
-    if not search_set:
-        relaxed_reason = "no resolution met stability+cap constraints; relaxing constraints"
-        search_set = interior.copy()
-
-        if max_prelabel_clusters is not None and int(max_prelabel_clusters) > 0:
-            capped = [r for r in search_set if int(n_clusters_by_res.get(r, 0)) <= int(max_prelabel_clusters)]
-            if capped:
-                search_set = capped
-                relaxed_reason = "relaxed stability constraint (kept cap)"
-
-    if not search_set:
-        # absolute fallback: everything
-        search_set = res_list.copy()
-        relaxed_reason = "relaxed to all resolutions (cap may be impossible)"
-
-    if relaxed_reason:
-        LOGGER.warning("scanVI prelabels: %s. Candidates=%s", relaxed_reason, search_set)
-
-    # Parsimonious pick among near-best
-    best_res = _pick_parsimonious(search_set, composite, eps=float(parsimony_eps))
-    if best_res is None:
-        raise RuntimeError("Failed to select a preflight resolution for scANVI labels")
-
-    chosen_key = f"__scanvi_pre_leiden_{best_res:.3f}"
-    raw = adata_hvg.obs[chosen_key].astype(str)
-
-    # ------------------------------------------------------------------
-    # Guardrail 1: tiny clusters -> Unknown
-    # ------------------------------------------------------------------
-    counts = raw.value_counts()
-    tiny_clusters = set(counts[counts < int(tiny_cluster_min_cells)].index.astype(str))
-
-    # ------------------------------------------------------------------
-    # Guardrail 2: batch trap -> Unknown
-    # ------------------------------------------------------------------
-    batch = adata_hvg.obs[batch_key].astype(str)
-    trap_clusters = set()
-
-    for cid, n_c in counts.items():
-        cid = str(cid)
-        if int(n_c) < int(batch_trap_min_cells):
-            continue
-        m = raw == cid
-        frac = float(batch[m].value_counts(normalize=True).max())
-        if frac >= float(batch_trap_threshold):
-            trap_clusters.add(cid)
-
-    unknown_clusters = sorted(tiny_clusters | trap_clusters)
-
-    out = raw.copy()
-    if unknown_clusters:
-        out = out.where(~out.isin(unknown_clusters), other="Unknown")
-
-    out = out.astype("category")
-    adata_hvg.obs[out_key] = out
-
-    # Log summary
-    n_unknown = int((out.astype(str) == "Unknown").sum())
-    LOGGER.info(
-        "scanVI prelabels selected: res=%.3f -> n_clusters=%d; stability=%.4f; centroid_silhouette=%.4f; tiny_penalty=%.4f; composite=%.4f; Unknown=%d (tiny<%d: %d clusters; batch_trap>=%.2f & n>=%d: %d clusters; cap<=%d)",
-        float(best_res),
-        int(n_clusters_by_res.get(best_res, 0)),
-        float(stability_by_res.get(best_res, 0.0)),
-        float(sil_by_res.get(best_res, float("nan"))),
-        float(tiny_by_res.get(best_res, float("nan"))),
-        float(composite.get(best_res, float("nan"))),
-        int(n_unknown),
-        int(tiny_cluster_min_cells),
-        int(len(tiny_clusters)),
-        float(batch_trap_threshold),
-        int(batch_trap_min_cells),
-        int(len(trap_clusters)),
-        int(max_prelabel_clusters),
+def _make_bisc_quick_cfg(cfg: IntegrateConfig, *, batch_key: str, label_key: str) -> _BiscQuickConfig:
+    return _BiscQuickConfig(
+        label_key=label_key,
+        bio_entropy_abs_limit=float(getattr(cfg, "bio_entropy_abs_limit", 0.5)),
+        bio_entropy_quantile=float(getattr(cfg, "bio_entropy_quantile", 0.7)),
+        bio_margin_min=float(getattr(cfg, "bio_margin_min", 0.10)),
+        batch_key=batch_key,
     )
 
-    return out_key
 
 # ---------------------------------------------------------------------
 # Annotated-run helpers (secondary integration using final cluster labels)
 # ---------------------------------------------------------------------
-
-def _celltypist_entropy_margin_mask(
-    prob_matrix: pd.DataFrame,
-    *,
-    entropy_abs_limit: float = 0.5,
-    entropy_quantile: float = 0.7,
-    margin_min: float = 0.10,
-) -> tuple[np.ndarray, dict]:
-    """
-    Reconstruct the CellTypist 'entropy_margin' confidence mask.
-
-    Policy: good = (H <= max(H_abs, H_q)) AND (margin >= margin_min)
-    Returns: (mask, stats)
-    """
-    P = prob_matrix.to_numpy(dtype=np.float64, copy=False)
-    n = int(P.shape[0])
-    if n == 0:
-        return np.zeros((0,), dtype=bool), {"n_cells": 0}
-
-    eps = 1e-12
-    P_clip = np.clip(P, eps, 1.0)
-    entropy = -np.sum(P_clip * np.log(P_clip), axis=1)
-
-    # top1-top2 margin
-    top2 = np.partition(P, kth=-2, axis=1)[:, -2:]
-    p1 = np.max(top2, axis=1)
-    p2 = np.min(top2, axis=1)
-    margin = p1 - p2
-
-    H_q = float(np.quantile(entropy, float(entropy_quantile)))
-    H_abs = float(entropy_abs_limit)
-    H_cut = max(H_abs, H_q)
-
-    mask = (entropy <= H_cut) & (margin >= float(margin_min))
-
-    stats = {
-        "n_cells": int(n),
-        "kept": int(mask.sum()),
-        "kept_frac": float(mask.mean()) if n > 0 else 0.0,
-        "entropy_abs_limit": float(H_abs),
-        "entropy_quantile": float(entropy_quantile),
-        "entropy_q_value": float(H_q),
-        "entropy_cut_used": float(H_cut),
-        "margin_min": float(margin_min),
-    }
-    return mask, stats
-
 
 def _extract_final_labels_and_mask_for_annotated_run(
     adata: ad.AnnData,
@@ -987,7 +705,7 @@ def _run_integrations(
                 purpose="integration",
             )
 
-            # Always compute latent once (needed for preflight labels)
+            # Always compute latent once (needed for BISC labels)
             Z_scvi = np.asarray(scvi_model.get_latent_representation(adata_hvg))
 
             if "scvi" in method_set:
@@ -995,53 +713,25 @@ def _run_integrations(
                 created.append("scVI")
 
             if "scanvi" in method_set:
-                # ----------------------------
-                # Enhanced mode (flag-gated): preflight labels on scVI latent
-                # ----------------------------
-                use_preflight = str(
-                    getattr(cfg, "scanvi_label_source", "leiden")
-                ).lower() == "bisc_light"
-
-                if use_preflight:
-                    # --- BISC-light structural preflight for scANVI ---
-                    labels_key_for_scanvi = _compute_scanvi_prelabels(
-                        adata_hvg,
-                        scvi_latent=Z_scvi,
+                use_bisc = str(getattr(cfg, "scanvi_label_source", "leiden")).lower() == "bisc"
+                if use_bisc:
+                    adata_hvg.obsm["X_scvi_latent"] = np.asarray(Z_scvi)
+                    bisc_cfg = _make_bisc_quick_cfg(
+                        cfg,
                         batch_key=batch_key,
-                        out_key=str(getattr(cfg, "scanvi_prelabels_key", "scanvi_prelabels")),
-                        resolutions=getattr(cfg, "scanvi_preflight_resolutions", None),
-
-                        # ---- new, explicit structural controls ----
-                        max_prelabel_clusters=int(
-                            getattr(cfg, "scanvi_max_prelabel_clusters", 25)
-                        ),
-
-                        # ---- selection / parsimony ----
-                        min_stability_ok=float(
-                            getattr(cfg, "scanvi_preflight_min_stability", 0.60)
-                        ),
-                        parsimony_eps=float(
-                            getattr(cfg, "scanvi_preflight_parsimony_eps", 0.03)
-                        ),
-
-                        # ---- score weights (structural-only) ----
-                        w_stab=float(getattr(cfg, "scanvi_w_stability", 0.50)),
-                        w_sil=float(getattr(cfg, "scanvi_w_silhouette", 0.35)),
-                        w_tiny=float(getattr(cfg, "scanvi_w_tiny", 0.15)),
-
-                        # ---- guardrails ----
-                        batch_trap_threshold=float(
-                            getattr(cfg, "scanvi_batch_trap_threshold", 0.90)
-                        ),
-                        batch_trap_min_cells=int(
-                            getattr(cfg, "scanvi_batch_trap_min_cells", 200)
-                        ),
-                        tiny_cluster_min_cells=int(
-                            getattr(cfg, "scanvi_tiny_cluster_min_cells", 30)
-                        ),
+                        label_key="scanvi_bisc_labels",
                     )
+                    run_BISC(
+                        adata_hvg,
+                        bisc_cfg,
+                        embedding_key="X_scvi_latent",
+                        celltypist_labels=None,
+                        celltypist_proba=None,
+                        round_suffix="scanvi_bisc",
+                        make_figures=False,
+                    )
+                    labels_key_for_scanvi = bisc_cfg.label_key
                 else:
-                    # Default: plain Leiden labels already present
                     labels_key_for_scanvi = str(getattr(cfg, "scanvi_labels_key", "leiden"))
 
                 Zs = _run_scanvi_from_scvi(scvi_model, adata_hvg, labels_key_for_scanvi)
@@ -1103,20 +793,18 @@ def _run_annotated_scanvi_secondary_integration(
     )
 
     # Compute entropy_margin confidence mask from CellTypist probability matrix (cfg-controlled thresholds)
-    if "celltypist_proba" not in adata.obsm or "celltypist_proba_columns" not in adata.uns:
+    _, pm, _ = ct_utils.get_celltypist_outputs(
+        adata,
+        str(getattr(cfg, "celltypist_label_key", "celltypist_label")),
+    )
+    if pm is None or pm.empty:
         raise RuntimeError(
             "annotated_run: missing CellTypist probability matrix; cannot compute entropy_margin mask. "
             "Expected outputs from cluster_and_annotate: adata.obsm['celltypist_proba'] and "
             "adata.uns['celltypist_proba_columns']."
         )
 
-    pm = pd.DataFrame(
-        adata.obsm["celltypist_proba"],
-        index=adata.obs_names,
-        columns=[str(x) for x in adata.uns["celltypist_proba_columns"]],
-    )
-
-    mask, mstats = _celltypist_entropy_margin_mask(
+    mask, mstats = ct_utils.build_entropy_margin_mask(
         pm,
         entropy_abs_limit=float(getattr(cfg, "bio_entropy_abs_limit", 0.5)),
         entropy_quantile=float(getattr(cfg, "bio_entropy_quantile", 0.7)),
@@ -1242,6 +930,7 @@ def _select_best_embedding(
     benchmark_n_cells: int = 100000,
     benchmark_random_state: int = 42,
     run_tag: str | None = None,
+    truth_mask: Optional[np.ndarray] = None,
 ) -> str:
     from scib_metrics.benchmark import Benchmarker, BioConservation, BatchCorrection
 
@@ -1316,7 +1005,24 @@ def _select_best_embedding(
             "Expected at least one embedding in adata.obsm among created keys or known existing keys."
         )
 
-    n_total = int(adata.n_obs)
+    n_total_full = int(adata.n_obs)
+
+    if truth_mask is not None:
+        truth_mask = np.asarray(truth_mask, dtype=bool)
+        if truth_mask.shape[0] != n_total_full:
+            raise RuntimeError("scIB truth mask length does not match adata.n_obs.")
+        idx_pool = np.where(truth_mask)[0]
+        if idx_pool.size == 0:
+            raise RuntimeError("scIB truth mask has zero cells after filtering.")
+        LOGGER.info(
+            "scIB benchmarking: using %d/%d confident cells from truth mask",
+            int(idx_pool.size),
+            int(n_total_full),
+        )
+    else:
+        idx_pool = np.arange(n_total_full)
+
+    n_total = int(idx_pool.size)
     do_subsample = (
         benchmark_threshold is not None
         and benchmark_n_cells is not None
@@ -1333,9 +1039,9 @@ def _select_best_embedding(
         target = int(benchmark_n_cells)
         rng = np.random.default_rng(int(benchmark_random_state))
 
-        batch_series = adata.obs[batch_key].astype("category")
+        batch_series = adata.obs[batch_key].astype("category").iloc[idx_pool]
         batches = batch_series.cat.categories.tolist()
-        batch_counts = batch_series.value_counts().reindex(batches).to_numpy()
+        batch_counts = batch_series.value_counts().reindex(batches).fillna(0).to_numpy()
         batch_props = batch_counts / batch_counts.sum()
 
         alloc = np.floor(batch_props * target).astype(int)
@@ -1381,7 +1087,7 @@ def _select_best_embedding(
                 chosen = idx
             else:
                 chosen = rng.choice(idx, size=int(k), replace=False)
-            picked_obs.append(chosen)
+            picked_obs.append(idx_pool[chosen])
 
         if not picked_obs:
             raise RuntimeError("Stratified subsample produced zero cells (unexpected).")
@@ -1407,7 +1113,7 @@ def _select_best_embedding(
             n_total,
             str(benchmark_threshold),
         )
-        adata_bm = adata.copy()
+        adata_bm = adata[idx_pool].copy()
 
     LOGGER.info("Running scIB benchmarking on embeddings: %s", benchmark_embeddings)
 
@@ -1666,17 +1372,20 @@ def run_integrate(cfg: IntegrateConfig) -> ad.AnnData:
             batch_key=batch_key,
         )
 
+        truth_key, truth_tag, truth_mask = _resolve_scib_truth(adata, cfg, round_id=None)
+
         best = _select_best_embedding(
             adata,
             embedding_keys=emb_keys,
             batch_key=batch_key,
-            label_key=cfg.label_key,
+            label_key=truth_key,
             n_jobs=cfg.benchmark_n_jobs,
             output_dir=cfg.output_dir,
             benchmark_threshold=cfg.benchmark_threshold,
             benchmark_n_cells=cfg.benchmark_n_cells,
             benchmark_random_state=cfg.benchmark_random_state,
-            run_tag=None,
+            run_tag=truth_tag,
+            truth_mask=truth_mask,
         )
 
         plot_keys = list(emb_keys)
@@ -1714,6 +1423,7 @@ def run_integrate(cfg: IntegrateConfig) -> ad.AnnData:
                 "available_embeddings": list(emb_keys),
                 "selection_timestamp": datetime.utcnow().isoformat(),
                 "scanvi_label_source": str(getattr(cfg, "scanvi_label_source", "leiden")),
+                "scib_truth_label_key": str(getattr(cfg, "scib_truth_label_key", "celltypist")),
             }
         )
 

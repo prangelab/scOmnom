@@ -13,8 +13,7 @@ import scanpy as sc
 from sklearn.metrics import adjusted_rand_score, silhouette_samples
 
 from .config import ClusterAnnotateConfig
-from .io_utils import get_celltypist_model
-from . import plot_utils
+from . import plot_utils, ct_utils
 
 LOGGER = logging.getLogger(__name__)
 
@@ -283,110 +282,6 @@ def _centroid_silhouette(X: np.ndarray, labels: np.ndarray) -> float:
     return float(np.mean(s_vals)) if s_vals else float("nan")
 
 
-# -------------------------------------------------------------------------
-# CellTypist precompute + bio mask (used by BISC sweep only; not decoupler)
-# -------------------------------------------------------------------------
-def _precompute_celltypist(
-    adata: ad.AnnData,
-    cfg: ClusterAnnotateConfig,
-) -> tuple[Optional[np.ndarray], Optional[pd.DataFrame]]:
-    """
-    Run CellTypist once to obtain per-cell predictions and probability matrix.
-
-    Policy:
-      - Trust counts-like layers only: "counts_raw" then "counts_cb".
-      - NEVER assume adata.raw is counts-like.
-      - If neither exists, fall back to adata.X as-is (no normalize/log).
-    """
-    if cfg.celltypist_model is None:
-        LOGGER.info("No CellTypist model provided; skipping CellTypist precompute.")
-        return None, None
-
-    try:
-        LOGGER.info("Running CellTypist precompute (predictions + probabilities).")
-
-        picked_layer: Optional[str] = None
-        X_src = None
-
-        for layer in ("counts_cb", "counts_raw"):
-            if layer in adata.layers:
-                picked_layer = layer
-                X_src = adata.layers[layer]
-                break
-
-        if picked_layer is not None:
-            LOGGER.info("CellTypist input: using counts-like layer adata.layers[%r].", picked_layer)
-            adata_ct = ad.AnnData(
-                X=X_src,
-                obs=adata.obs.copy(),
-                var=adata.var.copy(),
-            )
-            adata_ct.obs_names = adata.obs_names.copy()
-            adata_ct.var_names = adata.var_names.copy()
-            sc.pp.normalize_total(adata_ct, target_sum=1e4)
-            sc.pp.log1p(adata_ct)
-        else:
-            LOGGER.warning(
-                "CellTypist input: no counts-like layers found ('counts_raw'/'counts_cb'). "
-                "Falling back to adata.X as-is (no normalize_total/log1p)."
-            )
-            adata_ct = adata.copy()
-
-        model_path = get_celltypist_model(cfg.celltypist_model)
-
-        from celltypist.models import Model
-        import celltypist
-
-        LOGGER.info("Loading CellTypist model from %s", model_path)
-        model = Model.load(str(model_path))
-
-        preds = celltypist.annotate(
-            adata_ct,
-            model=model,
-            majority_voting=False,
-        )
-
-        raw = preds.predicted_labels
-        if isinstance(raw, pd.DataFrame):
-            labels = raw.squeeze(axis=1).to_numpy().ravel()
-        elif isinstance(raw, pd.Series):
-            labels = raw.to_numpy().ravel()
-        else:
-            labels = np.asarray(raw).ravel()
-
-        if labels.size != adata.n_obs:
-            LOGGER.warning(
-                "CellTypist returned %d labels for %d cells; ignoring CellTypist outputs.",
-                int(labels.size),
-                int(adata.n_obs),
-            )
-            return None, None
-
-        prob_matrix = preds.probability_matrix
-        if not isinstance(prob_matrix, pd.DataFrame) or prob_matrix.empty:
-            LOGGER.warning("CellTypist returned no/empty probability_matrix; returning labels only.")
-            return labels, None
-
-        try:
-            prob_matrix = prob_matrix.loc[adata.obs_names]
-        except Exception:
-            prob_matrix = prob_matrix.reindex(adata.obs_names)
-
-        LOGGER.info(
-            "CellTypist precompute completed: %d labels, probability_matrix shape=%s (input=%s).",
-            int(labels.size),
-            tuple(prob_matrix.shape),
-            f"layer:{picked_layer}" if picked_layer is not None else "adata.X(as-is)",
-        )
-        return labels, prob_matrix
-
-    except Exception as e:
-        LOGGER.warning(
-            "CellTypist precompute failed: %s. Proceeding without biological metrics.",
-            e,
-        )
-        return None, None
-
 def _run_celltypist_annotation(
     adata: ad.AnnData,
     cfg: ClusterAnnotateConfig,
@@ -578,7 +473,7 @@ def _run_celltypist_annotation(
                 index=adata.obs_names,
                 columns=list(map(str, adata.uns["celltypist_proba_columns"])),
             )
-            bio_mask, bio_mask_stats = _celltypist_entropy_margin_mask(
+            bio_mask, bio_mask_stats = ct_utils.build_entropy_margin_mask(
                 pm,
                 entropy_abs_limit=float(getattr(cfg, "bio_entropy_abs_limit", 0.5)),
                 entropy_quantile=float(getattr(cfg, "bio_entropy_quantile", 0.7)),
@@ -713,63 +608,6 @@ def _run_celltypist_annotation(
 
 
 
-def _celltypist_entropy_margin_mask(
-    prob_matrix: pd.DataFrame,
-    *,
-    entropy_abs_limit: float,
-    entropy_quantile: float,
-    margin_min: float,
-) -> tuple[np.ndarray, dict]:
-    """
-    good = (H <= max(H_abs, H_q)) AND (margin >= margin_min)
-    """
-    P = prob_matrix.to_numpy(dtype=np.float64, copy=False)
-    n = P.shape[0]
-    if n == 0:
-        return np.zeros((0,), dtype=bool), {"n_cells": 0}
-
-    eps = 1e-12
-    P_clip = np.clip(P, eps, 1.0)
-    entropy = -np.sum(P_clip * np.log(P_clip), axis=1)
-
-    top2 = np.partition(P, kth=-2, axis=1)[:, -2:]
-    p1 = np.max(top2, axis=1)
-    p2 = np.min(top2, axis=1)
-    margin = p1 - p2
-
-    H_q = float(np.quantile(entropy, float(entropy_quantile)))
-    H_abs = float(entropy_abs_limit)
-    H_cut = max(H_abs, H_q)
-
-    mask = (entropy <= H_cut) & (margin >= float(margin_min))
-
-    stats = {
-        "n_cells": int(n),
-        "kept": int(mask.sum()),
-        "kept_frac": float(mask.mean()),
-        "entropy_abs_limit": H_abs,
-        "entropy_quantile": float(entropy_quantile),
-        "entropy_q_value": H_q,
-        "entropy_cut_used": H_cut,
-        "margin_min": float(margin_min),
-        "entropy_summary": {
-            "min": float(np.min(entropy)),
-            "p10": float(np.percentile(entropy, 10)),
-            "median": float(np.median(entropy)),
-            "p90": float(np.percentile(entropy, 90)),
-            "max": float(np.max(entropy)),
-        },
-        "margin_summary": {
-            "min": float(np.min(margin)),
-            "p10": float(np.percentile(margin, 10)),
-            "median": float(np.median(margin)),
-            "p90": float(np.percentile(margin, 90)),
-            "max": float(np.max(margin)),
-        },
-    }
-    return mask, stats
-
-
 def _maybe_build_bio_mask(
     cfg: ClusterAnnotateConfig,
     celltypist_proba: Optional[pd.DataFrame],
@@ -797,7 +635,7 @@ def _maybe_build_bio_mask(
         stats["disabled_reason"] = f"unknown_mode={mode}"
         return None, stats
 
-    mask, mstats = _celltypist_entropy_margin_mask(
+    mask, mstats = ct_utils.build_entropy_margin_mask(
         celltypist_proba,
         entropy_abs_limit=float(getattr(cfg, "bio_entropy_abs_limit", 0.5)),
         entropy_quantile=float(getattr(cfg, "bio_entropy_quantile", 0.7)),
@@ -1383,6 +1221,7 @@ def _final_real_silhouette_qc(
     *,
     cluster_key: str,
     round_id: str | None = None,
+    make_figures: Optional[bool] = None,
 ) -> Optional[float]:
     if cluster_key not in adata.obs:
         LOGGER.warning("final_real_silhouette_qc: cluster_key '%s' not in adata.obs; skipping.", cluster_key)
@@ -1414,7 +1253,8 @@ def _final_real_silhouette_qc(
             }
             adata.uns["cluster_rounds"] = rounds
 
-    if cfg.make_figures:
+    do_figures = cfg.make_figures if make_figures is None else bool(make_figures)
+    if do_figures:
         import matplotlib.pyplot as plt
 
         fig, ax = plt.subplots(figsize=(5, 4))
@@ -1441,6 +1281,7 @@ def run_BISC(
     celltypist_labels: Optional[np.ndarray],
     celltypist_proba: Optional[pd.DataFrame],
     round_suffix: str = "BISC",
+    make_figures: bool = True,
 ) -> ad.AnnData:
     _ensure_cluster_rounds(adata)
 
@@ -1448,7 +1289,7 @@ def run_BISC(
         LOGGER.info("BISC: neighbors not found; computing neighbors using embedding_key=%r", embedding_key)
         sc.pp.neighbors(adata, use_rep=embedding_key)
 
-    if "X_umap" not in adata.obsm:
+    if make_figures and "X_umap" not in adata.obsm:
         LOGGER.info("BISC: UMAP not found; computing UMAP.")
         sc.tl.umap(adata)
 
@@ -1567,6 +1408,7 @@ def run_BISC(
         Path("cluster_and_annotate") / round_id / "clustering",
         cluster_key=cfg.label_key,
         round_id=round_id,
+        make_figures=make_figures,
     )
 
     LOGGER.info(

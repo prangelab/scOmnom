@@ -135,32 +135,16 @@ class IntegrateConfig(BaseModel):
     benchmark_random_state: int = 42
 
     # ------------------------------------------------------------------
-    # scANVI supervision (NEW)
+    # scANVI supervision
     # ------------------------------------------------------------------
-    scanvi_label_source: Literal["leiden", "bisc_light"] = "bisc_light"
-
-    scanvi_max_prelabel_clusters: int = 25  # ↑ increase for atlas-scale data
-    scanvi_preflight_resolutions: Optional[list[float]] = None
-
-    scanvi_preflight_min_stability: float = 0.60
-    scanvi_preflight_parsimony_eps: float = 0.03
-
-    scanvi_w_stability: float = 0.50
-    scanvi_w_silhouette: float = 0.35
-    scanvi_w_tiny: float = 0.15
-
-    scanvi_prelabels_key: str = "scanvi_prelabels"
-    scanvi_labels_key: str = "leiden"  # only used when scanvi_label_source != "bisc_light"
-
-    scanvi_batch_trap_threshold: float = 0.90
-    scanvi_batch_trap_min_cells: int = 200
-    scanvi_tiny_cluster_min_cells: int = 30
+    scanvi_label_source: Literal["leiden", "bisc"] = "bisc"
+    scanvi_labels_key: str = "leiden"  # only used when scanvi_label_source == "leiden"
 
     # ------------------------------------------------------------------
     # Annotated secondary integration (SECOND PASS; explicit + guarded)
     # ------------------------------------------------------------------
     annotated_run: bool = False
-    scib_truth_label_key: str = "leiden"
+    scib_truth_label_key: str = "celltypist"
 
     # Which cluster round to source "final" labels from. If None -> use active_cluster_round.
     annotated_run_cluster_round: Optional[str] = None
@@ -175,10 +159,65 @@ class IntegrateConfig(BaseModel):
     # Where to store the scANVI supervision labels (final label where confident, else "Unknown")
     annotated_run_scanvi_labels_key: str = "scanvi_labels__annotated"
 
-    # Entropy-margin mask thresholds (must match cluster_and_annotate policy)
-    bio_entropy_abs_limit: float = 0.5
-    bio_entropy_quantile: float = 0.7
-    bio_margin_min: float = 0.10
+    # ------------------------------------------------------------------
+    # CellTypist (shared with cluster_and_annotate)
+    # ------------------------------------------------------------------
+    celltypist_model: Optional[str] = Field(
+        "Immune_All_Low.pkl",
+        description="Path or name of CellTypist model (.pkl). If None, skip annotation",
+    )
+    celltypist_majority_voting: bool = True
+    celltypist_label_key: str = "celltypist_label"
+    celltypist_cluster_label_key: str = "celltypist_cluster_label"
+
+    # ------------------------------------------------------------------
+    # Bio mask (CellTypist confidence gate)
+    # ------------------------------------------------------------------
+    bio_mask_mode: Literal["entropy_margin", "none"] = Field(
+        "entropy_margin",
+        description="Bio mask mode. 'entropy_margin' uses entropy+margin on CellTypist probabilities; 'none' disables bio mask.",
+    )
+
+    bio_entropy_abs_limit: float = Field(
+        0.5,
+        description="Absolute entropy ceiling for CellTypist proba mask (cells with H <= this pass).",
+    )
+
+    bio_entropy_quantile: float = Field(
+        0.7,
+        description="Entropy quantile threshold for mask. Final entropy cut is max(abs_limit, quantile value).",
+    )
+
+    bio_margin_min: float = Field(
+        0.10,
+        description="Minimum CellTypist margin (top1 - top2) to pass mask.",
+    )
+
+    bio_mask_min_cells: int = Field(
+        500,
+        ge=0,
+        description="Safety gate: disable bio mask if fewer than this many cells pass.",
+    )
+
+    bio_mask_min_frac: float = Field(
+        0.05,
+        ge=0.0,
+        le=1.0,
+        description="Safety gate: disable bio mask if fewer than this fraction of cells pass.",
+    )
+
+    pretty_label_min_masked_cells: int = Field(
+        25,
+        ge=0,
+        description="Minimum number of masked (high-confidence) cells required in a cluster to assign a CellTypist cluster label.",
+    )
+
+    pretty_label_min_masked_frac: float = Field(
+        0.10,
+        ge=0.0,
+        le=1.0,
+        description="Minimum fraction of masked cells within a cluster required to assign a CellTypist cluster label.",
+    )
 
     # ------------------------------------------------------------------
     # Figures
@@ -206,7 +245,7 @@ class IntegrateConfig(BaseModel):
     @field_validator("scanvi_label_source")
     @classmethod
     def validate_scanvi_label_source(cls, v):
-        allowed = {"leiden", "bisc_light"}
+        allowed = {"leiden", "bisc"}
         if v not in allowed:
             raise ValueError(
                 f"scanvi_label_source must be one of {sorted(allowed)}, got {v!r}"

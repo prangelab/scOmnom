@@ -427,9 +427,9 @@ def integrate(
     # scANVI supervision (NEW)
     # ------------------------------------------------------------------
     scanvi_label_source: str = typer.Option(
-        "bisc_light",
+        "bisc",
         "--scanvi-label-source",
-        help="[scANVI] How to generate supervision labels for scANVI: 'leiden' or 'bisc_light'.",
+        help="[scANVI] How to generate supervision labels for scANVI: 'leiden' or 'bisc'.",
         case_sensitive=False,
     ),
     scanvi_labels_key: str = typer.Option(
@@ -437,63 +437,69 @@ def integrate(
         "--scanvi-labels-key",
         help="[scANVI] If scanvi_label_source='leiden', use this adata.obs key as labels_key.",
     ),
-    scanvi_prelabels_key: str = typer.Option(
-        "scanvi_prelabels",
-        "--scanvi-prelabels-key",
-        help="[scANVI] If scanvi_label_source='bisc_light', write prelabels to this adata.obs key and use it for scANVI.",
+    # ------------------------------------------------------------------
+    # CellTypist (shared)
+    # ------------------------------------------------------------------
+    celltypist_model: Optional[str] = typer.Option(
+        "Immune_All_Low.pkl",
+        "--celltypist-model",
+        help="[CellTypist] Path or name of model. If None, skip annotation.",
+        autocompletion=_celltypist_models_completion,
     ),
-    scanvi_preflight_resolutions: Optional[List[float]] = typer.Option(
-        None,
-        "--scanvi-preflight-resolutions",
-        help="[scANVI/BISC-light] Sparse Leiden resolution grid (repeatable option). If omitted, uses defaults.",
+    celltypist_majority_voting: bool = typer.Option(
+        True,
+        "--celltypist-majority-voting/--no-celltypist-majority-voting",
+        help="[CellTypist] Use majority voting.",
     ),
-    scanvi_max_prelabel_clusters: int = typer.Option(
+    celltypist_label_key: str = typer.Option(
+        "celltypist_label",
+        "--celltypist-label-key",
+        help="[CellTypist] adata.obs key to store cell-level labels.",
+    ),
+    celltypist_cluster_label_key: str = typer.Option(
+        "celltypist_cluster_label",
+        "--celltypist-cluster-label-key",
+        help="[CellTypist] adata.obs key to store cluster-level labels.",
+    ),
+    bio_mask_mode: Literal["entropy_margin", "none"] = typer.Option(
+        "entropy_margin",
+        "--bio-mask-mode",
+        help="[Bio] CellTypist confidence mask mode for bio metrics: entropy_margin or none.",
+    ),
+    bio_entropy_abs_limit: float = typer.Option(
+        0.5,
+        "--bio-entropy-abs-limit",
+        help="[Bio] Entropy absolute limit for CellTypist confidence mask.",
+    ),
+    bio_entropy_quantile: float = typer.Option(
+        0.7,
+        "--bio-entropy-quantile",
+        help="[Bio] Entropy quantile for CellTypist confidence mask (cut uses max(abs, quantile)).",
+    ),
+    bio_margin_min: float = typer.Option(
+        0.10,
+        "--bio-margin-min",
+        help="[Bio] Minimum top1-top2 probability margin for CellTypist confidence mask.",
+    ),
+    bio_mask_min_cells: int = typer.Option(
+        500,
+        "--bio-mask-min-cells",
+        help="[Bio] Disable bio mask if fewer than this many cells pass.",
+    ),
+    bio_mask_min_frac: float = typer.Option(
+        0.05,
+        "--bio-mask-min-frac",
+        help="[Bio] Disable bio mask if fewer than this fraction of cells pass.",
+    ),
+    pretty_label_min_masked_cells: int = typer.Option(
         25,
-        "--scanvi-max-prelabel-clusters",
-        help="[scANVI/BISC-light] Cap the number of prelabel clusters (increase for atlas-scale data).",
+        "--pretty-label-min-masked-cells",
+        help="[CellTypist] Min masked cells in a cluster to assign cluster-level label; else Unknown.",
     ),
-    scanvi_preflight_min_stability: float = typer.Option(
-        0.60,
-        "--scanvi-preflight-min-stability",
-        help="[scANVI/BISC-light] Minimum smoothed adjacent-ARI stability to be considered feasible.",
-    ),
-    scanvi_preflight_parsimony_eps: float = typer.Option(
-        0.03,
-        "--scanvi-preflight-parsimony-eps",
-        help="[scANVI/BISC-light] Parsimony epsilon: pick lowest resolution within (1-eps) of best composite score.",
-    ),
-    scanvi_w_stability: float = typer.Option(
-        0.50,
-        "--scanvi-w-stability",
-        help="[scANVI/BISC-light] Weight for stability term in composite score.",
-    ),
-    scanvi_w_silhouette: float = typer.Option(
-        0.35,
-        "--scanvi-w-silhouette",
-        help="[scANVI/BISC-light] Weight for centroid-silhouette term in composite score.",
-    ),
-    scanvi_w_tiny: float = typer.Option(
-        0.15,
-        "--scanvi-w-tiny",
-        help="[scANVI/BISC-light] Weight for tiny-cluster penalty term in composite score.",
-    ),
-    # ------------------------------------------------------------------
-    # Guardrails (batch-trap / tiny clusters)
-    # ------------------------------------------------------------------
-    scanvi_batch_trap_threshold: float = typer.Option(
-        0.90,
-        "--scanvi-batch-trap-threshold",
-        help="[scANVI] If a cluster is >= this fraction one batch, mark it 'Unknown' for scANVI supervision.",
-    ),
-    scanvi_batch_trap_min_cells: int = typer.Option(
-        200,
-        "--scanvi-batch-trap-min-cells",
-        help="[scANVI] Only apply batch-trap logic to clusters with at least this many cells.",
-    ),
-    scanvi_tiny_cluster_min_cells: int = typer.Option(
-        30,
-        "--scanvi-tiny-cluster-min-cells",
-        help="[scANVI] Cluster size below which clusters are marked 'Unknown' for scANVI supervision.",
+    pretty_label_min_masked_frac: float = typer.Option(
+        0.10,
+        "--pretty-label-min-masked-frac",
+        help="[CellTypist] Min masked fraction in a cluster to assign cluster-level label; else Unknown.",
     ),
 
     # ------------------------------------------------------------------
@@ -506,11 +512,10 @@ def integrate(
              "This mode is explicit and should be used with care.",
     ),
     scib_truth_label_key: str = typer.Option(
-        "leiden",
+        "celltypist",
         "--scib-truth-label-key",
         help="[scIB] Label key treated as 'truth' for scIB. "
-             "Defaults to 'leiden'. Set to 'celltypist' to use CellTypist cell-level labels "
-             "(resolved from the selected cluster round, default=active).",
+             "Defaults to 'celltypist'. Set to 'leiden' or 'final' to use existing labels.",
         case_sensitive=False,
     ),
     annotated_run_cluster_round: Optional[str] = typer.Option(
@@ -535,22 +540,6 @@ def integrate(
         help="[Annotated secondary] adata.obs key to store scANVI supervision labels "
              "(final_label where confident, else 'Unknown').",
     ),
-    bio_entropy_abs_limit: float = typer.Option(
-        0.5,
-        "--bio-entropy-abs-limit",
-        help="[Annotated secondary] Entropy absolute limit for CellTypist confidence mask.",
-    ),
-    bio_entropy_quantile: float = typer.Option(
-        0.7,
-        "--bio-entropy-quantile",
-        help="[Annotated secondary] Entropy quantile for CellTypist confidence mask (cut uses max(abs, quantile)).",
-    ),
-    bio_margin_min: float = typer.Option(
-        0.10,
-        "--bio-margin-min",
-        help="[Annotated secondary] Minimum top1-top2 probability margin for CellTypist confidence mask.",
-    ),
-
 ):
     outdir = output_dir or input_path.parent
     log_dir = outdir / "logs"
@@ -588,19 +577,18 @@ def integrate(
         # scANVI supervision
         scanvi_label_source=str(scanvi_label_source).lower(),
         scanvi_labels_key=scanvi_labels_key,
-        scanvi_prelabels_key=scanvi_prelabels_key,
-        scanvi_preflight_resolutions=scanvi_preflight_resolutions,
-        scanvi_max_prelabel_clusters=scanvi_max_prelabel_clusters,
-        scanvi_preflight_min_stability=scanvi_preflight_min_stability,
-        scanvi_preflight_parsimony_eps=scanvi_preflight_parsimony_eps,
-        scanvi_w_stability=scanvi_w_stability,
-        scanvi_w_silhouette=scanvi_w_silhouette,
-        scanvi_w_tiny=scanvi_w_tiny,
-        # guardrails
-        scanvi_batch_trap_threshold=scanvi_batch_trap_threshold,
-        scanvi_batch_trap_min_cells=scanvi_batch_trap_min_cells,
-        scanvi_tiny_cluster_min_cells=scanvi_tiny_cluster_min_cells,
         logfile=logfile,
+        # CellTypist
+        celltypist_model=celltypist_model,
+        celltypist_majority_voting=celltypist_majority_voting,
+        celltypist_label_key=celltypist_label_key,
+        celltypist_cluster_label_key=celltypist_cluster_label_key,
+        # Bio mask
+        bio_mask_mode=bio_mask_mode,
+        bio_mask_min_cells=bio_mask_min_cells,
+        bio_mask_min_frac=bio_mask_min_frac,
+        pretty_label_min_masked_cells=pretty_label_min_masked_cells,
+        pretty_label_min_masked_frac=pretty_label_min_masked_frac,
         # annotated secondary integration
         annotated_run=annotated_run,
         scib_truth_label_key=str(scib_truth_label_key).lower(),
@@ -1298,16 +1286,13 @@ def _build_cfg_composition(
     figure_formats: Sequence[str],
     round_id: Optional[str],
     replicate_key: Optional[str],
-    condition_key: str,
+    condition_keys: Optional[List[str]],
     covariates: Optional[List[str]],
     methods: Optional[List[str]],
     reference: str,
     min_mean_prop: float,
     min_cells_per_sample_cluster: int,
     alpha: float,
-    stratify: bool,
-    stratify_key: Optional[str],
-    stratify_levels: Optional[List[str]],
     graph_n_seeds: int,
     graph_k_ref: int,
     graph_max_k: int,
@@ -1321,7 +1306,7 @@ def _build_cfg_composition(
     init_logging(log_path)
 
     covars = tuple(_parse_csv_repeat(covariates) or ())
-    levels = tuple(_parse_csv_repeat(stratify_levels) or ())
+    cond_keys = tuple(_parse_csv_repeat(condition_keys) or ())
     methods_list = _parse_csv_repeat(methods) or ["sccoda", "glm", "clr", "graph"]
     bad = [m for m in methods_list if m not in ALLOWED_COMP_METHODS]
     if bad:
@@ -1345,8 +1330,8 @@ def _build_cfg_composition(
         round_id=round_id,
         sample_key=replicate_key,
         batch_key=None,
-        condition_key=condition_key,
-        condition_keys=(),
+        condition_key=None,
+        condition_keys=cond_keys,
         condition_contrasts=(),
         composition_methods=tuple(methods_list),
         composition_reference=str(reference),
@@ -1354,9 +1339,6 @@ def _build_cfg_composition(
         composition_min_cells_per_sample_cluster=int(min_cells_per_sample_cluster),
         composition_alpha=float(alpha),
         composition_covariates=covars,
-        composition_stratify=bool(stratify),
-        composition_stratify_key=str(stratify_key) if stratify_key is not None else None,
-        composition_stratify_levels=levels,
         composition_graph_n_seeds=int(graph_n_seeds),
         composition_graph_k_ref=int(graph_k_ref),
         composition_graph_max_k=int(graph_max_k),
@@ -1566,7 +1548,11 @@ def composition(
     round_id: Optional[str] = typer.Option(None, "--round-id"),
     replicate_key: Optional[str] = typer.Option(None, "--replicate-key"),
 
-    condition_key: str = typer.Option(..., "--condition-key"),
+    condition_keys: List[str] = typer.Option(
+        [],
+        "--condition-keys",
+        help="One or more condition keys. Use ':' to build composite keys (e.g., MASLD:sex).",
+    ),
     covariates: List[str] = typer.Option([], "--covariates"),
     method: List[str] = typer.Option(
         ["sccoda", "glm", "clr", "graph"],
@@ -1578,9 +1564,6 @@ def composition(
     min_cells_per_sample_cluster: int = typer.Option(20, "--min-cells-per-sample-cluster"),
     alpha: float = typer.Option(0.05, "--alpha"),
 
-    stratify: bool = typer.Option(False, "--stratify/--no-stratify"),
-    stratify_key: Optional[str] = typer.Option(None, "--stratify-key"),
-    stratify_levels: List[str] = typer.Option([], "--stratify-levels"),
     graph_n_seeds: int = typer.Option(1000, "--graph-n-seeds"),
     graph_k_ref: int = typer.Option(50, "--graph-k-ref"),
     graph_max_k: int = typer.Option(200, "--graph-max-k"),
@@ -1588,9 +1571,9 @@ def composition(
     graph_random_state: int = typer.Option(42, "--graph-random-state"),
 ):
     if output_name is None:
-        output_name = _default_output_name(input_path, "composition")
-    if stratify and not stratify_key:
-        raise typer.BadParameter("--stratify requires --stratify-key.")
+        output_name = _default_output_name(input_path, "da")
+    if not condition_keys:
+        raise typer.BadParameter("--condition-keys is required.")
 
     cfg = _build_cfg_composition(
         input_path=input_path,
@@ -1603,16 +1586,13 @@ def composition(
         figure_formats=figure_formats,
         round_id=round_id,
         replicate_key=replicate_key,
-        condition_key=condition_key,
+        condition_keys=condition_keys,
         covariates=covariates,
         methods=method,
         reference=reference,
         min_mean_prop=min_mean_prop,
         min_cells_per_sample_cluster=min_cells_per_sample_cluster,
         alpha=alpha,
-        stratify=stratify,
-        stratify_key=stratify_key,
-        stratify_levels=stratify_levels,
         graph_n_seeds=graph_n_seeds,
         graph_k_ref=graph_k_ref,
         graph_max_k=graph_max_k,

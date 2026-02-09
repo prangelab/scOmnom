@@ -12,7 +12,7 @@ import scanpy as sc
 
 from .config import ClusterAnnotateConfig
 from .logging_utils import init_logging
-from . import io_utils, plot_utils, reporting
+from . import io_utils, plot_utils, reporting, ct_utils
 from .plot_utils import _extract_series
 
 
@@ -24,7 +24,6 @@ from .clustering_utils import (
     _next_round_index,
     _make_round_id,
     _res_key,
-    _precompute_celltypist,
     _run_celltypist_annotation,
 
 )
@@ -285,7 +284,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
     LOGGER.info("Using embedding_key='%s', batch_key='%s'", embedding_key, batch_key)
 
     # CellTypist precompute (must happen BEFORE BISC for bioARI)
-    celltypist_labels, celltypist_proba = _precompute_celltypist(adata, cfg)
+    celltypist_labels, celltypist_proba, _ = ct_utils.ensure_celltypist(adata, cfg, reuse=True, store=True)
 
     # neighbors + UMAP
     sc.pp.neighbors(adata, use_rep=embedding_key)
@@ -300,6 +299,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
         celltypist_labels=celltypist_labels,
         celltypist_proba=celltypist_proba,
         round_suffix=f"{best_emb}_BISC",
+        make_figures=True,
     )
 
     if cfg.make_figures:

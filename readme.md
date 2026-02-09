@@ -4,37 +4,13 @@ Modular scRNA-seq preprocessing and analysis pipeline built on the scVerse ecosy
 
 `scOmnom` is a **CLI-first**, reproducible workflow for large-scale single-cell RNA-seq data, designed for robustness, scalability, and efficient execution on HPC systems.
 
-At its current stage, `scOmnom` provides two stable pipeline stages:
+At its current stage, `scOmnom` provides a multi-stage pipeline:
 
 1. **Load & filter** — droplet selection, QC, HVG selection, and doublet detection
 2. **Integrate** — multi-method batch correction with optional benchmarking
-
-Clustering and annotation functionality is under active development and not yet considered stable.
-
----
-
-## Quickstart
-
-Minimal end-to-end example using the recommended input mode (raw counts + CellBender):
-
-```bash
-# Activate environment
-conda activate scOmnom_env
-
-# Load, QC, and filter
-scomnom load-and-filter \
-  --raw-sample-dir path/to/all_raw_samples/ \
-  --cellbender-dir path/to/all_cellbender_outputs/ \
-  --metadata-tsv path/to/metadata.tsv \
-  --batch-key sample_id \
-  --out results/load_and_filter/
-
-# Integrate batches
-scomnom integrate \
-  --input-path results/load_and_filter/adata.merged.zarr \
-  --batch-key sample_id \
-  --output-dir results/integrate/
-```
+3. **Cluster & annotate** — BISC-guided clustering, CellTypist labels, and decoupler activities
+4. **Annotated integration (optional)** — scANVI refinement for clean UMAPs
+5. **Markers and DE** — marker discovery, within-cluster DE, and differential abundance
 
 ---
 
@@ -85,6 +61,55 @@ The standard workflow consists of:
 
 1. `load-and-filter`
 2. `integrate`
+3. `cluster-and-annotate`
+4. `integrate --annotated-run` (optional refinement)
+5. `markers-and-de` (run `markers`, `de`, and `da`)
+
+Minimal end-to-end example (stringing outputs across modules):
+
+```bash
+# 1) Load, QC, and filter
+scomnom load-and-filter \
+  --raw-sample-dir path/to/all_raw_samples/ \
+  --cellbender-dir path/to/all_cellbender_outputs/ \
+  --metadata-tsv path/to/metadata.tsv \
+  --batch-key sample_id \
+  --out results/
+
+# 2) Integrate batches
+scomnom integrate \
+  --input-path results/adata.filtered.zarr \
+  --output-dir results/
+
+# 3) Cluster and annotate
+scomnom cluster-and-annotate \
+  --input-path results/adata.integrated.zarr \
+  --output-dir results/ \
+  --celltypist-model Immune_All_Low.pkl
+
+# 4) Optional: refined integration after annotation
+scomnom integrate \
+  --input-path results/adata.clustered.annotated.zarr \
+  --annotated-run \
+  --output-dir results/ \
+  --output-name adata.clustered.annotated.projected
+
+# If you skip step 4, use results/adata.clustered.annotated.zarr below.
+
+# 5a) Markers (cluster-vs-rest)
+scomnom markers-and-de markers \
+  --input-path results/adata.clustered.annotated.projected.zarr
+
+# 5b) DE (within-cluster contrasts)
+scomnom markers-and-de de \
+  --input-path results/adata.clustered.annotated.projected.markers.zarr \
+  --condition-key condition
+
+# 5c) DA (composition)
+scomnom markers-and-de da \
+  --input-path results/adata.clustered.annotated.projected.markers.de.zarr \
+  --condition-key condition
+```
 
 ---
 
@@ -119,7 +144,106 @@ The standard workflow consists of:
 │  • scIB benchmarking                                       │
 │                                                            │
 │  → integrated AnnData + figures                            │
+└───────────────┬────────────────────────────────────────────┘
+                │
+                ▼
+┌────────────────────────────────────────────────────────────┐
+│                  cluster-and-annotate                      │
+│                                                            │
+│  • BISC resolution selection                               │
+│  • CellTypist annotation                                   │
+│  • Decoupler activities + optional compaction              │
+│                                                            │
+│  → annotated AnnData + figures                             │
+└───────────────┬────────────────────────────────────────────┘
+                │
+                ▼
+┌────────────────────────────────────────────────────────────┐
+│          integrate --annotated-run (optional)              │
+│                                                            │
+│  • scANVI refinement using final labels                    │
+│  • clean UMAPs / latent space                              │
+│                                                            │
+│  → projected AnnData + figures                             │
+└───────────────┬────────────────────────────────────────────┘
+                │
+                ▼
+┌────────────────────────────────────────────────────────────┐
+│                    markers-and-de                          │
+│                                                            │
+│  • markers (cluster-vs-rest)                               │
+│  • de (within-cluster contrasts)                           │
+│  • da (composition)                                        │
+│                                                            │
+│  → tables + reports + updated AnnData                      │
 └────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## scOmnom AnnData conventions
+
+`scOmnom` stores results in standard AnnData fields with a few consistent conventions so downstream modules can find prior outputs.
+
+### Counts layers
+
+* `counts_raw`: raw (uncorrected) counts
+* `counts_cb`: CellBender-corrected counts
+* `adata.X`: used only when no preferred counts layer is available and a command explicitly allows fallback
+
+### Integration outputs
+
+* Integrated embeddings are stored in `adata.obsm` (for example `X_integrated` or method-specific embeddings).
+* The selected best embedding is recorded in `adata.uns["integration"]["best_embedding"]` when available.
+
+### Clustering rounds
+
+* Each clustering run creates a new round in `adata.uns["cluster_rounds"]`.
+* The currently active round id is stored in `adata.uns["active_cluster_round"]`.
+* Each round stores its `cluster_key` and, when available, a `pretty_cluster_key` that points to human-readable labels.
+
+### Annotations and activities
+
+* CellTypist outputs and pretty labels are stored in `adata.obs` and referenced from `adata.uns["cluster_and_annotate"]`.
+* Decoupler activities are stored in `adata.uns` under keys such as `msigdb`, `progeny`, and `dorothea`.
+
+### Where to look
+
+* `adata.uns["integration"]`: integration metadata, including the selected best embedding (if available)
+* `adata.uns["cluster_rounds"]`: all clustering rounds and their settings
+* `adata.uns["active_cluster_round"]`: the currently active clustering round id
+* `adata.uns["cluster_and_annotate"]`: pointers to CellTypist and pretty label keys
+* `adata.uns["markers_and_de"]`: provenance for markers, DE, and DA runs
+* `adata.uns["scomnom_de"]`: detailed DE tables and summaries (pseudobulk and cell-level contrasts)
+
+---
+
+## Using scOmnom AnnData in notebooks/scripts
+
+For manual analysis in notebooks or scripts, always use `load_dataset()` and `save_dataset()` from `src/scomnom/io_utils.py`. This ensures consistent handling of Zarr/H5AD, metadata, and safety checks.
+
+```python
+from pathlib import Path
+from scomnom.io_utils import load_dataset, save_dataset
+
+adata = load_dataset("results/integrate/adata.integrated.zarr")
+
+# ... custom analysis ...
+
+out_path = Path("results/custom/adata.custom.zarr")
+save_dataset(adata, out_path, fmt="zarr")
+```
+
+Notes:
+
+* Avoid calling `anndata.read_*` or `adata.write_*` directly in new code.
+* Use `fmt="h5ad"` only when needed (it loads the full matrix into RAM).
+
+H5AD example (only if you need a single-file artifact and have enough RAM):
+
+```python
+out_path = Path("results/custom/adata.custom.h5ad")
+save_dataset(adata, out_path, fmt="h5ad")
 ```
 
 ---
@@ -178,7 +302,9 @@ This stage performs:
 - doublet detection
 - dataset merging across samples
 
-Example (preferred mode):
+### Quick entry point
+
+Example (preferred mode, raw + CellBender):
 
 ```bash
 scomnom load-and-filter \
@@ -189,11 +315,18 @@ scomnom load-and-filter \
   --out results/load_and_filter/
 ```
 
-Outputs:
+### What it does
 
-- merged AnnData object (Zarr by default)
-- QC figures in `figures/`
-- `load-and-filter.log`
+* Discovers samples from the provided parent directories (glob patterns can be overridden).
+* Resolves droplets from CellBender or Cell Ranger, or infers droplets in raw-only mode.
+* Runs QC filters, HVG selection, and doublet detection.
+* Merges per-sample AnnData into a single dataset with consistent metadata.
+
+### Outputs
+
+* merged AnnData object (`.zarr`, optionally `.h5ad`)
+* QC figures under `figures/`
+* `load-and-filter.log`
 
 ---
 
@@ -205,7 +338,7 @@ By default, integration is **non-destructive**: all embeddings, metrics, and sel
 
 ---
 
-### Standard integration run
+### Quick entry point
 
 A typical integration run starts from the output of `load-and-filter`:
 
@@ -216,7 +349,7 @@ scomnom integrate \
   --output-dir results/integrate/
 ```
 
-This will:
+### What it does
 
 * recompute PCA on HVGs
 * run multiple integration methods
@@ -239,7 +372,7 @@ Supported methods include:
 * **Scanorama** — panoramic batch integration
 * **BBKNN** — graph-based batch correction (baseline)
 
-**Default methods:** all of the above except `scPoli`.
+**Default methods:** all of the above.
 
 Methods can be restricted explicitly:
 
@@ -253,35 +386,22 @@ scomnom integrate \
 
 ---
 
-### Intelligent scANVI supervision (BISC-light)
+### Intelligent scANVI supervision (BISC)
 
-When `scANVI` is enabled, `scOmnom` can automatically generate supervision labels instead of relying on a single, user-chosen clustering.
+When `scANVI` is enabled, `scOmnom` can generate supervision labels automatically instead of relying on a single user-chosen clustering.
 
-This **BISC-light** procedure is inspired by the full BISC framework used in `cluster-and-annotate` (see that section for detailed documentation).
-
-At a high level:
+The supervision step uses **BISC** on the **scVI latent space** with a structural-only sweep:
 
 1. **Latent-space resolution sweep**
    A coarse Leiden sweep is performed on the scVI latent space.
 
-2. **Structural scoring**
-   Candidate resolutions are scored using:
+2. **Structural selection**
+   Candidate resolutions are scored using stability, centroid-based silhouette, and tiny-cluster penalties.
 
-   * clustering stability (smoothed ARI between adjacent resolutions)
-   * centroid-based silhouette separation
-   * penalties for excessive tiny clusters
+3. **Parsimony**
+   The lowest resolution near the top score is selected.
 
-3. **Parsimony selection**
-   The *lowest* resolution within a small epsilon of the best score is selected.
-
-4. **Guardrails**
-
-   * clusters dominated by a single batch are masked (`Unknown`)
-   * very small clusters are masked
-
-The resulting labels are used **only for scANVI supervision** and are written to `adata.obs` (default: `scanvi_prelabels`). They do *not* overwrite downstream clustering or annotation results.
-
-This provides robust, automated supervision without requiring curated biological labels.
+This produces labels used **only for scANVI supervision** and does not overwrite downstream clustering or annotation results.
 
 ---
 
@@ -289,11 +409,9 @@ This provides robust, automated supervision without requiring curated biological
 
 Integration methods are benchmarked using `scIB`.
 
-By default, benchmarking uses:
+By default, benchmarking uses **CellTypist confident cell-level labels**. Cells that do not pass the confidence mask are excluded from benchmarking.
 
-* **`leiden`** labels (computed during `load-and-filter`, resolution = 1.0)
-
-This can be overridden via:
+You can override the truth labels via:
 
 ```bash
 --scib-truth-label-key <key>
@@ -301,9 +419,9 @@ This can be overridden via:
 
 Valid options include:
 
-* `leiden` (default, recommended for general use)
+* `celltypist` (default)
+* `leiden`
 * `final` / final cluster labels from `cluster-and-annotate`
-* any explicit `adata.obs` column name
 
 This choice affects **benchmarking only** and does not influence integration itself.
 
@@ -360,7 +478,7 @@ Notes:
 
 ---
 
-### Output files
+### Outputs
 
 Each integration run produces:
 
@@ -401,7 +519,8 @@ The secondary integration step is **purely optional** and should be used only wh
 
 ---
 
-# Cluster and annotate (BISC + compaction)
+
+## Cluster and annotate (BISC + compaction)
 
 The cluster-and-annotate module performs automated clustering, biologically informed resolution selection, cell type annotation, and optional cluster compaction on an integrated dataset.
 
@@ -411,14 +530,13 @@ At a high level, this module provides:
 
 * automated Leiden resolution selection using BISC
 * biologically informed clustering diagnostics
-* CellTypist-based cluster annotation
+* CellTypist-based cluster annotation (reusing existing CellTypist outputs if present)
 * decoupler-based pathway and transcription factor activity analysis
 * optional cluster compaction to improve interpretability
-* a self-contained HTML report
 
 ---
 
-## Minimal usage
+### Quick entry point
 
 Minimal example showing only the essential inputs:
 
@@ -437,7 +555,7 @@ scomnom cluster-and-annotate \
 
 ---
 
-## CellTypist models
+### CellTypist models
 
 To list available CellTypist models:
 
@@ -451,7 +569,7 @@ For model descriptions, training data, and usage guidance, see the official Cell
 
 ---
 
-## Reproducibility and non-destructive design
+### Reproducibility and non-destructive design
 
 All clustering, annotation, and compaction steps in scOmnom are **non-destructive**:
 
@@ -463,7 +581,7 @@ This design ensures that clustering results are fully reproducible, auditable, a
 
 ---
 
-## BISC: Biology-Informed Structural Clustering
+### BISC: Biology-Informed Structural Clustering
 
 BISC automates Leiden resolution selection by combining structural, stability, and biological signals.
 
@@ -471,7 +589,26 @@ The goal is to replace manual resolution tuning with a reproducible, data-driven
 
 ---
 
-### Resolution sweep
+#### Inputs
+
+* `--embedding-key` (default `X_integrated`) is used for neighbors, UMAP, and clustering.
+* `--batch-key` is used for batch diagnostics and plotting (auto-detected if not provided).
+* CellTypist labels are optional but enable bio-guided scoring (`--bio-guided`).
+
+#### Outputs
+
+* A new clustering round in `adata.uns["cluster_rounds"]` with the chosen resolution.
+* The selected round id is recorded in `adata.uns["active_cluster_round"]`.
+* Cluster labels are stored in `adata.obs` under the round’s `cluster_key`.
+
+#### When to tune
+
+* Adjust `res_min`, `res_max`, and `n_resolutions` if the dataset is extremely small or highly heterogeneous.
+* Disable bio-guided clustering (`--no-bio-guided`) if no suitable CellTypist model exists.
+
+---
+
+#### Resolution sweep
 
 Leiden clustering is evaluated over a resolution range:
 
@@ -492,7 +629,7 @@ A small penalty proportional to cluster count is applied:
 
 ---
 
-### Structural stability (ARI)
+#### Structural stability (ARI)
 
 BISC measures clustering stability using the **Adjusted Rand Index (ARI)** between adjacent resolutions.
 
@@ -511,7 +648,7 @@ Stability is smoothed across neighboring resolutions and used to identify robust
 
 ---
 
-### Biological metrics (CellTypist-guided)
+#### Biological metrics (CellTypist-guided)
 
 If CellTypist predictions are available, BISC incorporates biological consistency metrics.
 
@@ -552,7 +689,7 @@ These metrics encourage clusterings that align with known biology while avoiding
 
 ---
 
-### Composite score and resolution selection
+#### Composite score and resolution selection
 
 All metrics are normalized and combined into a single composite score:
 
@@ -565,7 +702,7 @@ The final resolution is selected from stable plateaus, with a bias toward simple
 
 ---
 
-## Cluster annotation
+### Cluster annotation
 
 After clustering:
 
@@ -583,13 +720,13 @@ Clusters with insufficient high-confidence cells are labeled **Unknown** to avoi
 
 ---
 
-## Compaction: merging redundant clusters
+### Compaction: merging redundant clusters
 
 Large datasets can yield clusters that are transcriptionally distinct but *biologically redundant*. The optional **compaction** step merges such clusters using **multi-view biological agreement** computed from decoupler activities.
 
 Compaction is **CellTypist-grouped**: cluster pairs are only compared *within the same* CellTypist cluster label group (with an option to skip `Unknown` groups).
 
-### What signals are used
+#### What signals are used
 
 Compaction requires decoupler outputs from:
 
@@ -597,7 +734,7 @@ Compaction requires decoupler outputs from:
 - **DoRothEA** activity (required)
 - **MSigDB activity split by GMT** (required by default; can be made optional)
 
-### Similarity metric
+#### Similarity metric
 
 For each pair of clusters within the same CellTypist group:
 
@@ -608,7 +745,7 @@ For MSigDB, similarity is computed using a **Top-K union** strategy (default **K
 - take the union of the top-|z| features from both clusters (by absolute z-score)
 - compute cosine similarity on that union vector
 
-### Z-score scope (with guardrail)
+#### Z-score scope (with guardrail)
 
 Compaction supports two z-scoring modes:
 
@@ -620,7 +757,7 @@ Guardrail: `within_celltypist_label` falls back to `global` if a CellTypist grou
 Default in the config:
 - `compact_zscore_scope = "global"`
 
-### Adaptive thresholds (per CellTypist group)
+#### Adaptive thresholds (per CellTypist group)
 
 Rather than using fixed similarity thresholds only, compaction computes **adaptive per-group thresholds** based on within-group similarity distributions:
 
@@ -644,7 +781,7 @@ Caps (from config defaults; can be overridden):
 - `thr_msigdb_default = 0.98`
 - optional per-GMT caps via `thr_msigdb_by_gmt`
 
-### MSigDB majority rule
+#### MSigDB majority rule
 
 MSigDB is evaluated per GMT block, then combined using a majority rule:
 
@@ -656,7 +793,7 @@ Default MSigDB majority fraction: **0.67**.
 
 If `msigdb_required = False`, MSigDB is not required for passing (but similarities are still computed if available).
 
-### Pass condition and grouping
+#### Pass condition and grouping
 
 An edge (merge suggestion) between two clusters is created only if all required views pass:
 
@@ -672,26 +809,23 @@ Edges are then converted into merge groups using one of:
 Default in the config:
 - `compact_grouping = "connected_components"`
 
-### Size and label filters
+#### Size and label filters
 
 - `compact_min_cells` (default `0`): clusters smaller than this are excluded from compaction decisions
 - `compact_skip_unknown_celltypist_groups` (default `False`): optionally exclude CellTypist groups labeled `Unknown`/`UNKNOWN`
 
-### Outputs
+#### Compaction outputs
 
 Compaction produces:
 
-- a new clustering stored as a new, non-destructive result
-- a full **pairwise audit table** of edges with:
-  - per-view similarities
-  - adaptive thresholds (and which scope was effectively used)
-  - MSigDB majority statistics and failing GMTs
-- a **decision log** listing multi-cluster merge groups and their rationale
-- a mapping from original cluster ids to compacted ids (e.g. `C00`, `C01`, …), sorted by total component size
+* a new clustering stored as a new, non-destructive result
+* a full **pairwise audit table** of edges with per-view similarities, adaptive thresholds (and which scope was effectively used), and MSigDB majority statistics
+* a **decision log** listing multi-cluster merge groups and their rationale
+* a mapping from original cluster ids to compacted ids (e.g. `C00`, `C01`, …), sorted by total component size
 
 ---
 
-## Decoupler configuration
+### Decoupler configuration
 
 Decoupler is enabled by default (`run_decoupler = True`) and is used for:
 
@@ -703,7 +837,7 @@ Decoupler is enabled by default (`run_decoupler = True`) and is used for:
 
 * aggregation: **mean**
 * method: **consensus** (`ulm`, `mlm`, `wsum`)
-* databases **MSigDB, DoRohEA, PROGENy"**: (`HALLMARK`, `REACTOME`)
+* databases **MSigDB, DoRothEA, PROGENy**: (`HALLMARK`, `REACTOME`)
 * minimum targets per source: **5**
 
 All decoupler settings — including databases, methods, thresholds, and organisms — are fully configurable.
@@ -714,12 +848,19 @@ For details on decoupler methods and resources, see:
 
 ---
 
-## Reporting
+### Outputs
+
+* clustered/annotated AnnData (`.zarr`, optionally `.h5ad`) in the output directory
+* figures under `figures/cluster_and_annotate/` (organized by round)
+* `cluster-and-annotate.log` under `logs/`
+* optional per-cluster annotation CSV (only if `--annotation-csv` is provided)
+
+### Reporting
 
 All modules generate a self-contained HTML report including:
 
 * Run information
-* All genreated plots
+* All generated plots
 
 The report is written to:
 
@@ -727,7 +868,137 @@ The report is written to:
 figures/<MODULE>/<MODULE>_report.html
 ```
 
-## Running on HPC / SLURM clusters
+---
+
+## Markers and DE (markers-and-de)
+
+The `markers-and-de` module covers three related analyses:
+
+* **Markers**: cluster-vs-rest marker discovery
+* **DE**: within-cluster differential expression across condition levels
+* **DA**: differential abundance (compositional shifts of cell types)
+
+All three subcommands are CLI-first and store results in tables plus a self-contained report.
+
+### Quick entry points
+
+```bash
+# Marker discovery (cluster-vs-rest)
+scomnom markers-and-de markers \
+  --input-path results/adata.clustered.annotated.projected.zarr
+
+# Within-cluster DE (condition contrasts)
+scomnom markers-and-de de \
+  --input-path results/adata.clustered.annotated.projected.markers.zarr \
+  --condition-key condition
+
+# Differential abundance (composition)
+scomnom markers-and-de da \
+  --input-path results/adata.clustered.annotated.projected.markers.de.zarr \
+  --condition-key condition
+```
+
+---
+
+### Markers (cluster-vs-rest)
+
+Markers are computed per cluster against all other cells. The module supports **cell-level markers**, **pseudobulk markers**, or **both** (`--run cell|pseudobulk|both`).
+
+**Cell-level markers**
+
+* Uses Scanpy `rank_genes_groups` with `wilcoxon`, `t-test`, or `logreg`.
+* Optional per-cluster downsampling for very large datasets.
+* Filters by `min_pct` and `min_diff_pct` to remove low-coverage or weakly differential genes.
+
+**Pseudobulk markers**
+
+* Aggregates counts by sample and cluster, then runs DESeq2 (via PyDESeq2).
+* Requires at least **6 unique samples** (guard to avoid unstable estimates).
+* Uses count layers in priority order: `counts_cb`, `counts_raw`, then `adata.X` (if allowed).
+* Supports sample-level covariates (`--pb-covariates`) and filters on minimum cells per sample-cluster.
+
+**Outputs**
+
+* Tables: `tables/marker_tables_<run>/cell_based/` and `tables/marker_tables_<run>/pseudobulk_based/`
+* Reports: `figures/markers/markers_report.html` (plus PDFs/PNGs under `figures/markers/`)
+
+---
+
+### DE (within-cluster contrasts)
+
+Within-cluster DE compares **condition levels inside each cluster**, e.g. `treated vs control` within each cell type. You can provide a single `--condition-key` or multiple `--condition-keys`, plus optional explicit contrasts (`--contrasts`).
+
+**Cell-level within-cluster DE**
+
+* Runs contrast-conditional markers per cluster using `wilcoxon` and `logreg` (configurable).
+* Uses `min_pct` and `min_diff_pct` to focus on robust signals.
+* Does not require the pseudobulk sample guard.
+
+**Pseudobulk within-cluster DE**
+
+* Aggregates counts by sample and cluster, then runs DESeq2 per cluster and contrast.
+* Requires at least **6 unique samples** (guarded).
+* Supports sample-level covariates and minimum cells per sample-cluster.
+
+**DE → pathway/TF activity (decoupler)**
+
+* Optional activity inference from DE statistics for each contrast.
+* Sources can be `cell`, `pseudobulk`, `all`, or `auto` (prefer pseudobulk if present).
+* Supports MSigDB, PROGENy, and DoRothEA with configurable methods and target filters.
+
+**Outputs**
+
+* Tables: `tables/de_tables_<run>/cell_based/` and `tables/de_tables_<run>/pseudobulk_based/`
+* Reports: `figures/DE/DE_report.html` (plus PDFs/PNGs under `figures/DE/`)
+
+---
+
+### Cell-level vs pseudobulk: why both exist
+
+* **Cell-level** tests are sensitive and can detect subtle expression shifts, but they can overweight large samples, inflate p-values on big datasets, and ignore replicate structure. By default, scOmnom caps marker output at 300 genes per cluster for cell-level runs.
+* **Pseudobulk** respects sample-level independence, improves control of confounders via covariates, applies the `min_pct` filter, and yields more conservative inference, but requires enough replicates and loses single-cell resolution.
+
+Running both can be informative: cell-level for discovery, pseudobulk for robustness.
+
+---
+
+### DA (differential abundance / composition)
+
+The DA submodule tests whether **cluster proportions change across conditions**. It works on per-sample cell-type counts and provides multiple backends, each with different assumptions:
+
+**Reference selection**
+
+* Default reference is `most_stable`, chosen as the cluster with the lowest median absolute deviation of proportions among clusters with mean proportion ≥ `min_mean_prop`.
+* If none meet the threshold, the most abundant cluster is used.
+
+**Methods**
+
+* `sccoda`: Bayesian compositional model (pertpy scCODA). Uses NUTS sampling and inclusion probabilities with FDR control. Works directly from cell-level data but models sample-level composition.
+* `glm`: Per-cluster binomial GLM on counts with a log-total offset (statsmodels). Supports covariates and returns log2-scale effects with Wald tests and BH FDR.
+* `clr`: Centered log-ratio transform of proportions followed by Mann–Whitney tests for each pair of condition levels. Returns log2 fold-change of mean proportions and per-pair FDR.
+* `graph`: Graph-based DA on neighborhoods in the integrated embedding, inspired by MiloR. Builds local neighborhoods around random seeds, counts cells per sample per neighborhood, and runs the same GLM on neighborhood counts. Outputs neighborhood metadata (size, dominant cluster label, radius).
+
+**When to use which DA method**
+
+| Method | Best for | Key assumptions | Notes |
+| --- | --- | --- | --- |
+| `sccoda` | Small-to-moderate sample sizes with clear compositional shifts | Compositional Bayesian model; needs a reference | Most conservative; provides inclusion probabilities |
+| `glm` | Larger sample sizes, covariate adjustment | Binomial GLM with log-total offset | Fast, interpretable log2 effects |
+| `clr` | Simple two-group comparisons, quick screening | CLR transform + nonparametric test | Pairwise only; less model structure |
+| `graph` | Substructure or neighborhood-level shifts | Embedding-based neighborhoods + GLM | Can detect local DA beyond discrete clusters |
+
+**Stratified analysis**
+
+* Optional `--stratify` runs the primary method separately per level of `--stratify-key` (only if each condition level has ≥ 2 samples).
+
+**Outputs**
+
+* Tables: `tables/composition_tables_<run>/` (global, consensus, stratified, and graph metadata)
+* Reports: `figures/composition/composition_report.html` (plus PDFs/PNGs under `figures/composition/`)
+
+---
+
+### Running on HPC / SLURM clusters
 
 Example SLURM job scripts are provided:
 
@@ -739,9 +1010,12 @@ slurm/
 
 These scripts are configured for **SURF’s Snellius** compute cluster. Users on other systems must adapt module names, CUDA/driver versions, and conda initialization paths.
 
-For large datasets, running on a **GPU partition is strongly recommended**, particularly for scVI/scANVI-based integration.
+For large datasets, running on a **GPU partition is strongly recommended**, particularly for:
 
-### Performance reference (Snellius)
+* `load-and-filter` doublet detection (scVI-SOLO)
+* `integrate` (scVI/scANVI)
+
+#### Performance reference (Snellius)
 
 Benchmarks obtained using **1× NVIDIA A100 GPU** and **18 CPU cores**.
 
@@ -765,4 +1039,3 @@ The provided SLURM scripts are intended as starting points, not drop-in solution
 ## License
 
 MIT License.
-
