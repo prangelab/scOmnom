@@ -882,9 +882,10 @@ def run_composition(cfg) -> ad.AnnData:
                     min_size=int(getattr(cfg, "composition_graph_min_size", 20)),
                     random_state=int(getattr(cfg, "composition_graph_random_state", 42)),
                 )
-                if graph_meta is not None and not graph_meta.empty:
-                    graph_meta = graph_meta.set_index("neighborhood")
-                    res = res.merge(graph_meta, left_on="cluster", right_index=True, how="left")
+                if graph_meta is not None and not graph_meta.empty and isinstance(res, pd.DataFrame) and not res.empty:
+                    if "cluster" in res.columns:
+                        graph_meta = graph_meta.set_index("neighborhood")
+                        res = res.merge(graph_meta, left_on="cluster", right_index=True, how="left")
             else:
                 raise RuntimeError(f"composition: unsupported method={tag!r}")
 
