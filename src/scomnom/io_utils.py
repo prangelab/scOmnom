@@ -113,13 +113,21 @@ def fetch_ensembl_gene_annotations(
     if df is None or df.empty:
         raise RuntimeError(f"BioMart query returned no results for dataset={dataset_name!r}")
 
+    col_lc = {str(c).strip().lower(): c for c in df.columns}
     df = df.rename(
         columns={
-            "external_gene_name": "gene",
-            "gene_biotype": "gene_type",
-            "chromosome_name": "gene_chrom",
+            col_lc.get("external_gene_name", "external_gene_name"): "gene",
+            col_lc.get("gene name", "gene name"): "gene",
+            col_lc.get("gene_biotype", "gene_biotype"): "gene_type",
+            col_lc.get("gene type", "gene type"): "gene_type",
+            col_lc.get("chromosome_name", "chromosome_name"): "gene_chrom",
+            col_lc.get("chromosome/scaffold name", "chromosome/scaffold name"): "gene_chrom",
         }
     )
+    if "gene" not in df.columns or "gene_type" not in df.columns or "gene_chrom" not in df.columns:
+        raise RuntimeError(
+            f"BioMart columns not found after rename. Available columns: {list(df.columns)}"
+        )
     df["gene"] = df["gene"].astype(str)
     df["gene_type"] = df["gene_type"].astype(str)
     df["gene_chrom"] = df["gene_chrom"].astype(str)
