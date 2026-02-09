@@ -107,11 +107,7 @@ def run_sccoda_model(
         import pertpy as pt
     except Exception as e:
         raise RuntimeError(f"composition: failed to import pertpy: {e}")
-    try:
-        from jax import random as jrandom
-        rng_key = jrandom.PRNGKey(0)
-    except Exception:
-        rng_key = 0
+    rng_key = 42
 
     cov_cols = [str(condition_key), *[str(c) for c in covariates]]
     sccoda = pt.tl.Sccoda()
