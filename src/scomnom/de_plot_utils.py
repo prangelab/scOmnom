@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
-from . import gene_utils
+from . import io_utils
 
 
 
@@ -167,13 +167,7 @@ def _filter_protein_coding(
         return df
     if gene_col not in df.columns:
         return df
-    df2 = gene_utils.add_gene_type_column(
-        adata,
-        df,
-        gene_col=gene_col,
-        gene_type_col=gene_type_col,
-        inplace=False,
-    )
+    df2 = io_utils._add_gene_type_column(adata, df, gene_col=gene_col, gene_type_col=gene_type_col)
     if gene_type_col not in df2.columns:
         return df2
     return df2[df2[gene_type_col] == "protein_coding"].copy()

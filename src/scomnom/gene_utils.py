@@ -1,129 +1,58 @@
 from __future__ import annotations
 
-from typing import Iterable
-
 import pandas as pd
 
 
-_RAW_TYPE_COLS = (
-    "gene_type",
-    "gene_biotype",
-    "biotype",
-    "gene_type_ensembl",
-)
-
-
-def _normalize_type(val: object) -> str:
-    s = str(val).strip().lower()
-    s = s.replace(" ", "_")
-    return s
-
-
-def _classify_gene_type(raw_type: str | None, gene_name: str, has_raw: bool) -> str:
-    name = str(gene_name)
-    upper = name.upper()
-    raw = _normalize_type(raw_type) if raw_type is not None else ""
-
-    if upper.startswith("MT-"):
-        return "mt"
-
-    if raw in ("protein_coding", "protein-coding"):
-        return "protein_coding"
-
-    if raw.startswith("mt_") or "mitochond" in raw:
-        return "mt"
-
-    if "mirna" in raw or "micro" in raw or raw == "mir":
-        return "mir"
-
-    if "linc" in raw:
-        return "linc"
-
-    if raw in ("lncrna", "lnc_rna"):
-        return "other_noncoding"
-
-    if "pseudogene" in raw:
-        return "other_noncoding"
-
-    if raw in (
-        "snorna",
-        "snrna",
-        "scarna",
-        "rrna",
-        "trna",
-        "misc_rna",
-        "vault_rna",
-        "ribozyme",
-        "ribozymes",
-        "antisense",
-        "sense_intronic",
-        "sense_overlapping",
-        "processed_transcript",
-        "retained_intron",
-        "non_coding",
-        "noncoding",
-    ):
-        return "other_noncoding"
-
-    if upper.startswith("MIR"):
-        return "mir"
-
-    if upper.startswith("LINC"):
-        return "linc"
-
-    if upper.startswith(("SNORD", "SNORA", "SCARNA", "RNU", "RN7SK", "RMRP", "RPPH1")):
-        return "other_noncoding"
-
-    if upper in ("MALAT1", "NEAT1"):
-        return "other_noncoding"
-
-    if has_raw:
-        return "other"
-    return "protein_coding"
-
-
-def gene_type_map(adata) -> dict[str, str]:
-    if adata is None:
-        return {}
-
-    raw_series = None
-    for col in _RAW_TYPE_COLS:
-        if col in adata.var.columns:
-            raw_series = adata.var[col]
-            break
-
-    has_raw = raw_series is not None
-    if raw_series is None:
-        raw_series = pd.Series(index=adata.var_names, data=[None] * adata.var_names.size)
-
-    out: dict[str, str] = {}
-    for gene, raw in raw_series.items():
-        out[str(gene)] = _classify_gene_type(raw, str(gene), has_raw=has_raw)
-    return out
-
-
-def add_gene_type_column(
-    adata,
+def apply_gene_type_map(
     df: pd.DataFrame,
+    gene_map: dict[str, str],
     *,
     gene_col: str = "gene",
     gene_type_col: str = "gene_type",
+    gene_chrom_col: str = "gene_chrom",
+    source_col: str = "gene_type_source",
+    source_label: str | None = None,
+    chrom_map: dict[str, str] | None = None,
+    chrom_source_col: str = "gene_chrom_source",
+    chrom_source_label: str | None = None,
     inplace: bool = False,
 ) -> pd.DataFrame:
     if df is None or df.empty or gene_col not in df.columns:
         return df
 
     out = df if inplace else df.copy()
-    if gene_type_col in out.columns:
-        return out
+    if gene_type_col not in out.columns:
+        out[gene_type_col] = out[gene_col].astype(str).map(gene_map).fillna("unknown")
 
-    gmap = gene_type_map(adata)
-    out[gene_type_col] = out[gene_col].astype(str).map(gmap).fillna("other")
+    if source_col not in out.columns:
+        if source_label is None:
+            source_label = "unknown"
+        out[source_col] = str(source_label)
+
+    if chrom_map is not None and gene_chrom_col not in out.columns:
+        out[gene_chrom_col] = out[gene_col].astype(str).map(chrom_map)
+        if chrom_source_col not in out.columns:
+            if chrom_source_label is None:
+                chrom_source_label = source_label or "unknown"
+            out[chrom_source_col] = str(chrom_source_label)
 
     if gene_col in out.columns:
         cols = list(out.columns)
-        cols.remove(gene_type_col)
-        idx = cols.index(gene_col) + 1 if gene_col in cols else 0
-        cols.insert(idx, gene_type_col)
+        if gene_type_col in cols:
+            cols.remove(gene_type_col)
+            idx = cols.index(gene_col) + 1 if gene_col in cols else 0
+            cols.insert(idx, gene_type_col)
+        if source_col in cols:
+            cols.remove(source_col)
+            idx = cols.index(gene_type_col) + 1 if gene_type_col in cols else 0
+            cols.insert(idx, source_col)
+        if gene_chrom_col in cols:
+            cols.remove(gene_chrom_col)
+            idx = cols.index(source_col) + 1 if source_col in cols else 0
+            cols.insert(idx, gene_chrom_col)
+        if chrom_source_col in cols:
+            cols.remove(chrom_source_col)
+            idx = cols.index(gene_chrom_col) + 1 if gene_chrom_col in cols else 0
+            cols.insert(idx, chrom_source_col)
         out = out.loc[:, cols]
     return out

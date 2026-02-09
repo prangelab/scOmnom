@@ -71,3 +71,4 @@ dependencies:
       - types-pytz
       - pydeseq2
       - pertpy
+      - pybiomart

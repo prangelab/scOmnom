@@ -789,6 +789,7 @@ def cluster_and_annotate(
     # -----------------------------
     list_models: bool = typer.Option(False, "--list-models"),
     download_models: bool = typer.Option(False, "--download-models"),
+    download_gene_models: bool = typer.Option(False, "--download-gene-models"),
 
     # -----------------------------
     # Decoupler (cluster-level nets)
@@ -923,7 +924,7 @@ def cluster_and_annotate(
     ),
 ):
     # ---------------------------------------------------------
-    # Handle --list-models / --download-models
+    # Handle --list-models / --download-models / --download-gene-models
     # ---------------------------------------------------------
     if list_models:
         from .io_utils import get_available_celltypist_models
@@ -936,6 +937,11 @@ def cluster_and_annotate(
     if download_models:
         from .io_utils import download_all_celltypist_models
         download_all_celltypist_models()
+        raise typer.Exit()
+
+    if download_gene_models:
+        from .io_utils import download_gene_models
+        download_gene_models(species="hsapiens")
         raise typer.Exit()
 
     # ---------------------------------------------------------

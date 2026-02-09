@@ -26,6 +26,18 @@ CELLTYPIST_REGISTRY_URL = "https://celltypist.cog.sanger.ac.uk/models/models.jso
 CELLTYPIST_CACHE = Path.home() / ".cache" / "scomnom" / "celltypist_models"
 CELLTYPIST_CACHE.mkdir(parents=True, exist_ok=True)
 
+GENE_ANNOTATION_CACHE = Path.home() / ".cache" / "scomnom" / "gene_annotations"
+GENE_ANNOTATION_CACHE.mkdir(parents=True, exist_ok=True)
+
+_GENE_TYPE_COLS = (
+    "gene_type",
+    "gene_biotype",
+    "biotype",
+    "gene_type_ensembl",
+)
+_GENE_TYPE_MAP_CACHE: dict[tuple[str, str], dict[str, str]] = {}
+_GENE_TYPE_SOURCE_CACHE: dict[tuple[str, str], str] = {}
+
 
 def _add_gene_type_column(
     adata: ad.AnnData,
@@ -34,13 +46,166 @@ def _add_gene_type_column(
     gene_col: str = "gene",
     gene_type_col: str = "gene_type",
 ) -> pd.DataFrame:
-    return gene_utils.add_gene_type_column(
+    gene_map, source_label, chrom_map, chrom_source = get_gene_type_map(
         adata,
+        species="hsapiens",
+        allow_fallback=True,
+        force_download=False,
+    )
+    return gene_utils.apply_gene_type_map(
         df,
+        gene_map,
         gene_col=gene_col,
         gene_type_col=gene_type_col,
+        source_col="gene_type_source",
+        source_label=source_label,
+        gene_chrom_col="gene_chrom",
+        chrom_map=chrom_map,
+        chrom_source_col="gene_chrom_source",
+        chrom_source_label=chrom_source,
         inplace=False,
     )
+
+
+def _fallback_gene_type_map(genes: list[str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for g in genes:
+        name = str(g)
+        upper = name.upper()
+        if upper.startswith("MT-"):
+            out[name] = "mt_inferred"
+        elif upper.startswith("LINC"):
+            out[name] = "linc_inferred"
+        elif upper.startswith("LOC"):
+            out[name] = "loc_inferred"
+        elif upper.startswith("MIR"):
+            out[name] = "mir_inferred"
+        elif upper.startswith("RNP"):
+            out[name] = "rnp_inferred"
+        elif upper.startswith("RNU"):
+            out[name] = "rnu_inferred"
+        elif upper.startswith(("SNORD", "SNORA", "SCARNA")):
+            out[name] = "snorna_inferred"
+        else:
+            out[name] = "protein_coding"
+    return out
+
+
+def fetch_ensembl_gene_annotations(
+    *,
+    species: str = "hsapiens",
+    force: bool = False,
+) -> pd.DataFrame:
+    species = str(species).strip().lower()
+    dataset_name = f"{species}_gene_ensembl"
+    cache_path = GENE_ANNOTATION_CACHE / f"{dataset_name}__gene_annotations.tsv.gz"
+
+    if cache_path.exists() and not force:
+        return pd.read_csv(cache_path, sep="\t")
+
+    try:
+        from pybiomart import Dataset
+    except Exception as e:
+        raise RuntimeError(f"pybiomart is required for Ensembl gene annotations: {e}") from e
+
+    ds = Dataset(name=dataset_name, host="http://www.ensembl.org")
+    df = ds.query(attributes=["external_gene_name", "gene_biotype", "chromosome_name"])
+    if df is None or df.empty:
+        raise RuntimeError(f"BioMart query returned no results for dataset={dataset_name!r}")
+
+    df = df.rename(
+        columns={
+            "external_gene_name": "gene",
+            "gene_biotype": "gene_type",
+            "chromosome_name": "gene_chrom",
+        }
+    )
+    df["gene"] = df["gene"].astype(str)
+    df["gene_type"] = df["gene_type"].astype(str)
+    df["gene_chrom"] = df["gene_chrom"].astype(str)
+    df = df[df["gene"].astype(bool)]
+    df = df.drop_duplicates(subset=["gene"], keep="first")
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(cache_path, sep="\t", index=False, compression="gzip")
+    return df
+
+
+def get_gene_type_map(
+    adata: ad.AnnData,
+    *,
+    species: str = "hsapiens",
+    allow_fallback: bool = True,
+    force_download: bool = False,
+) -> tuple[dict[str, str], str, dict[str, str], str]:
+    if adata is None:
+        return {}, "unknown", {}, "unknown"
+
+    raw_series = None
+    for col in _GENE_TYPE_COLS:
+        if col in adata.var.columns:
+            raw_series = adata.var[col]
+            break
+
+    if raw_series is not None:
+        gmap = raw_series.astype(str).to_dict()
+        chrom_map = {}
+        if "chromosome" in adata.var.columns:
+            chrom_map = adata.var["chromosome"].astype(str).to_dict()
+        elif "chrom" in adata.var.columns:
+            chrom_map = adata.var["chrom"].astype(str).to_dict()
+        return gmap, f"adata:{str(raw_series.name)}", chrom_map, "adata"
+
+    cache_key = ("biomart", str(species))
+    if cache_key in _GENE_TYPE_MAP_CACHE and not force_download:
+        chrom_key = ("biomart_chrom", str(species))
+        chrom_map = _GENE_TYPE_MAP_CACHE.get(chrom_key, {})
+        return (
+            _GENE_TYPE_MAP_CACHE[cache_key],
+            _GENE_TYPE_SOURCE_CACHE.get(cache_key, "biomart"),
+            chrom_map,
+            "biomart",
+        )
+
+    try:
+        df = fetch_ensembl_gene_annotations(species=species, force=force_download)
+        gmap = dict(zip(df["gene"].astype(str), df["gene_type"].astype(str)))
+        chrom_map = dict(zip(df["gene"].astype(str), df["gene_chrom"].astype(str)))
+        _GENE_TYPE_MAP_CACHE[cache_key] = gmap
+        _GENE_TYPE_SOURCE_CACHE[cache_key] = "biomart"
+        _GENE_TYPE_MAP_CACHE[("biomart_chrom", str(species))] = chrom_map
+        return gmap, "biomart", chrom_map, "biomart"
+    except Exception as e:
+        if not allow_fallback:
+            raise
+        LOGGER.warning(
+            "Gene annotation lookup failed for species=%r (%s). Falling back to simple pattern rules.",
+            str(species),
+            str(e),
+        )
+
+    cache_key = ("fallback", str(species))
+    if cache_key in _GENE_TYPE_MAP_CACHE:
+        chrom_key = ("fallback_chrom", str(species))
+        chrom_map = _GENE_TYPE_MAP_CACHE.get(chrom_key, {})
+        return (
+            _GENE_TYPE_MAP_CACHE[cache_key],
+            _GENE_TYPE_SOURCE_CACHE.get(cache_key, "fallback"),
+            chrom_map,
+            "fallback",
+        )
+
+    genes = list(adata.var_names.astype(str))
+    gmap = _fallback_gene_type_map(genes)
+    _GENE_TYPE_MAP_CACHE[cache_key] = gmap
+    _GENE_TYPE_SOURCE_CACHE[cache_key] = "fallback"
+    chrom_map = {}
+    _GENE_TYPE_MAP_CACHE[("fallback_chrom", str(species))] = chrom_map
+    return gmap, "fallback", chrom_map, "fallback"
+
+
+def download_gene_models(*, species: str = "hsapiens") -> None:
+    fetch_ensembl_gene_annotations(species=species, force=True)
 
 
 def sanitize_identifier(

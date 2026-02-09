@@ -39,6 +39,7 @@ dependencies = [
   "pydeseq2",
   "statsmodels",
   "pertpy",
+  "pybiomart",
 ]
 
 [project.scripts]
