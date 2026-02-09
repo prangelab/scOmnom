@@ -136,7 +136,10 @@ def run_sccoda_model(
     )
     sccoda.set_fdr(mdata, est_fdr=float(fdr))
     effects = sccoda.get_effect_df(mdata, modality_key="coda")
-    effects.index = effects.index.astype(str)
+    if isinstance(effects.index, pd.MultiIndex):
+        effects.index = effects.index.map(lambda x: "|".join(map(str, x)))
+    else:
+        effects.index = effects.index.astype(str)
     return effects
 
 
