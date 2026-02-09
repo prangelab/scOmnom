@@ -828,11 +828,15 @@ def run_composition(cfg) -> ad.AnnData:
             condition_key=str(condition_key),
             covariates=covariates,
         )
-        _validate_min_samples_per_level(
-            metadata,
-            condition_key=str(condition_key),
-            min_samples=_MIN_SAMPLES_PER_LEVEL_COMPOSITION,
-        )
+        try:
+            _validate_min_samples_per_level(
+                metadata,
+                condition_key=str(condition_key),
+                min_samples=_MIN_SAMPLES_PER_LEVEL_COMPOSITION,
+            )
+        except Exception as e:
+            LOGGER.warning("composition: skipping condition_key=%r (%s)", condition_key, e)
+            continue
 
         reference = str(getattr(cfg, "composition_reference", "most_stable"))
         if reference.lower() == "most_stable":
