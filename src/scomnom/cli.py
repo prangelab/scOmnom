@@ -1127,10 +1127,11 @@ app.add_typer(markers_and_de_app, name="markers-and-de")
 @markers_and_de_app.callback()
 def markers_and_de_callback(
     download_gene_models: bool = typer.Option(False, "--download-gene-models"),
+    gene_species: str = typer.Option("hsapiens", "--gene-species"),
 ):
     if download_gene_models:
         from .io_utils import download_gene_models
-        download_gene_models(species="hsapiens")
+        download_gene_models(species=str(gene_species))
         raise typer.Exit()
 
 

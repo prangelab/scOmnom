@@ -957,8 +957,8 @@ def run_composition(cfg) -> ad.AnnData:
                 ax.set_title("GraphDA neighborhood sizes")
                 plot_utils.save_multi("graphda_neighborhood_sizes", fig_subdir, fig=fig)
                 plt.close(fig)
-                if "effect" in results_by_method.get("graph", pd.DataFrame()).columns:
-                    gdf = results_by_method["graph"].copy()
+            if "effect" in results_by_method.get("graph", pd.DataFrame()).columns:
+                gdf = results_by_method["graph"].copy()
                     if "cluster_label" not in gdf.columns and "cluster_label" in graph_meta_global.columns:
                         gdf = gdf.merge(
                             graph_meta_global[["neighborhood", "cluster_label"]],
@@ -966,53 +966,56 @@ def run_composition(cfg) -> ad.AnnData:
                             right_on="neighborhood",
                             how="left",
                         )
-                    if "cluster_label" not in gdf.columns:
-                        gdf["cluster_label"] = "NA"
-                    if "fdr" in gdf.columns:
-                        gdf = gdf.sort_values("fdr")
-                    else:
-                        gdf = gdf.sort_values("pval") if "pval" in gdf.columns else gdf
-                    top = gdf.head(25)
-                    fig, ax = plt.subplots(figsize=(8, 4))
-                    color_map = plot_utils._cluster_color_map(adata, cluster_key)
-                    labels = top["cluster_label"].astype(str) if "cluster_label" in top.columns else top["cluster"].astype(str)
-                    colors = [color_map.get(lbl, "#7a7a7a") for lbl in labels]
-                    ax.bar(top["cluster"].astype(str), top["effect"].astype(float), color=colors)
-                    ax.set_ylabel("Effect")
-                    ax.set_title("GraphDA top neighborhoods")
-                    ax.tick_params(axis="x", labelrotation=45)
-                    plot_utils.save_multi("graphda_top_neighborhoods", fig_subdir, fig=fig)
-                    plt.close(fig)
+                if "cluster_label" not in gdf.columns:
+                    gdf["cluster_label"] = "NA"
+                if "fdr" in gdf.columns:
+                    gdf = gdf.sort_values("fdr")
+                else:
+                    gdf = gdf.sort_values("pval") if "pval" in gdf.columns else gdf
+                top = gdf.head(25)
+                fig, ax = plt.subplots(figsize=(8, 4))
+                color_map = plot_utils._cluster_color_map(adata, cluster_key)
+                labels = top["cluster_label"].astype(str) if "cluster_label" in top.columns else top["cluster"].astype(str)
+                colors = [color_map.get(lbl, "#7a7a7a") for lbl in labels]
+                ax.bar(top["cluster"].astype(str), pd.to_numeric(top["effect"], errors="coerce"), color=colors)
+                ax.set_ylabel("Effect")
+                ax.set_title("GraphDA top neighborhoods")
+                ax.tick_params(axis="x", labelrotation=45)
+                plot_utils.save_multi("graphda_top_neighborhoods", fig_subdir, fig=fig)
+                plt.close(fig)
 
-                    labels = gdf["cluster_label"].astype(str)
-                    order = pd.Index(pd.unique(labels))
-                    y_pos = {lab: i for i, lab in enumerate(order)}
-                    x = gdf["effect"].astype(float)
-                    y = labels.map(y_pos).astype(float)
-                    jitter = (np.random.default_rng(0).random(len(y)) - 0.5) * 0.4
-                    yj = y + jitter
+                labels = gdf["cluster_label"].astype(str)
+                order = pd.Index(pd.unique(labels))
+                y_pos = {lab: i for i, lab in enumerate(order)}
+                x = pd.to_numeric(gdf["effect"], errors="coerce")
+                y = labels.map(y_pos).astype(float)
+                jitter = (np.random.default_rng(0).random(len(y)) - 0.5) * 0.4
+                yj = y + jitter
 
-                    if "fdr" in gdf.columns:
-                        sig = gdf["fdr"].astype(float) <= float(alpha)
-                    elif "pval" in gdf.columns:
-                        sig = gdf["pval"].astype(float) <= float(alpha)
-                    else:
-                        sig = pd.Series(False, index=gdf.index)
+                if "fdr" in gdf.columns:
+                    sig = gdf["fdr"].astype(float) <= float(alpha)
+                elif "pval" in gdf.columns:
+                    sig = gdf["pval"].astype(float) <= float(alpha)
+                else:
+                    sig = pd.Series(False, index=gdf.index)
 
-                    color_map = plot_utils._cluster_color_map(adata, cluster_key)
-                    colors = [color_map.get(lbl, "#7a7a7a") for lbl in labels]
-                    alphas = [0.35 if not s else 0.9 for s in sig]
+                color_map = plot_utils._cluster_color_map(adata, cluster_key)
+                colors = [color_map.get(lbl, "#7a7a7a") for lbl in labels]
+                alphas = [0.35 if not s else 0.9 for s in sig]
 
-                    fig, ax = plt.subplots(figsize=(8, max(4, 0.25 * len(order))))
-                    ax.scatter(x, yj, s=16, c=colors, alpha=alphas, edgecolors="none")
-                    ax.axvline(0, color="black", linestyle="--", linewidth=1)
-                    ax.set_yticks(list(y_pos.values()))
-                    ax.set_yticklabels(list(y_pos.keys()))
+                fig, ax = plt.subplots(figsize=(8, max(4, 0.25 * len(order))))
+                ax.scatter(x, yj, s=16, c=colors, alpha=alphas, edgecolors="none")
+                ax.axvline(0, color="black", linestyle="--", linewidth=1)
+                ax.set_yticks(list(y_pos.values()))
+                ax.set_yticklabels(list(y_pos.keys()))
+                if "log2fc_test_vs_ref" in gdf.columns:
+                    ax.set_xlabel("Log2 fold change")
+                else:
                     ax.set_xlabel("Effect (log2-odds)")
-                    ax.set_ylabel("Cluster")
-                    ax.set_title("GraphDA effects by cluster")
-                    plot_utils.save_multi("graphda_effects_by_cluster", fig_subdir, fig=fig)
-                    plt.close(fig)
+                ax.set_ylabel("Cluster")
+                ax.set_title("GraphDA effects by cluster")
+                plot_utils.save_multi("graphda_effects_by_cluster", fig_subdir, fig=fig)
+                plt.close(fig)
             except Exception as e:
                 LOGGER.warning("composition: failed to plot GraphDA summary: %s", e)
 
@@ -1028,12 +1031,23 @@ def run_composition(cfg) -> ad.AnnData:
                             x = pd.to_numeric(df["effect"], errors="coerce")
                         else:
                             continue
+                        y_source = None
                         if "fdr" in df.columns:
-                            y = -np.log10(pd.to_numeric(df["fdr"], errors="coerce"))
+                            y = pd.to_numeric(df["fdr"], errors="coerce")
+                            y_source = "FDR"
                         elif "pval" in df.columns:
-                            y = -np.log10(pd.to_numeric(df["pval"], errors="coerce"))
+                            y = pd.to_numeric(df["pval"], errors="coerce")
+                            y_source = "pval"
                         else:
                             continue
+
+                        if y_source == "FDR":
+                            finite = y[np.isfinite(y)]
+                            if finite.nunique(dropna=True) <= 1 and "pval" in df.columns:
+                                y = pd.to_numeric(df["pval"], errors="coerce")
+                                y_source = "pval"
+
+                        y = -np.log10(y)
 
                         mask = np.isfinite(x) & np.isfinite(y)
                         x = x[mask]
@@ -1045,19 +1059,12 @@ def run_composition(cfg) -> ad.AnnData:
                         ax.scatter(x, y, s=14, c="#7a7a7a", alpha=0.7, edgecolors="none")
                         ax.axvline(0, color="black", linestyle="--", linewidth=1)
                         ax.set_xlabel("Effect (log2 scale)")
-                        ax.set_ylabel("-log10(FDR)" if "fdr" in df.columns else "-log10(pval)")
+                        ax.set_ylabel(f"-log10({y_source})" if y_source else "-log10(pval)")
                         ax.set_title(f"{method.upper()} volcano")
                         plot_utils.save_multi(f"{method}_volcano", fig_subdir, fig=fig)
                         plt.close(fig)
 
                     if method == "sccoda":
-                        if "effect" in df.columns:
-                            eff = pd.to_numeric(df["effect"], errors="coerce")
-                        elif "Final Parameter" in df.columns:
-                            eff = pd.to_numeric(df["Final Parameter"], errors="coerce")
-                        else:
-                            continue
-
                         top = df.copy()
                         if "fdr" in top.columns:
                             top = top.sort_values("fdr")
@@ -1065,24 +1072,43 @@ def run_composition(cfg) -> ad.AnnData:
                         if top.empty:
                             continue
 
-                        fig, ax = plt.subplots(figsize=(7, 4))
-                        x = np.arange(len(top))
-                        y = pd.to_numeric(top.get("effect", top.get("Final Parameter")), errors="coerce")
-                        color_map = plot_utils._cluster_color_map(adata, cluster_key)
-                        labels = top["cluster"].astype(str) if "cluster" in top.columns else top.index.astype(str)
-                        colors = [color_map.get(lbl, "#7a7a7a") for lbl in labels]
-                        if "ci_low" in top.columns and "ci_high" in top.columns:
-                            err_low = y - pd.to_numeric(top["ci_low"], errors="coerce")
-                            err_high = pd.to_numeric(top["ci_high"], errors="coerce") - y
-                            ax.errorbar(x, y, yerr=[err_low, err_high], fmt="o", color="#4c5bd9", ecolor="#999999")
-                            ax.scatter(x, y, s=20, color=colors, zorder=3)
+                        if "effect" in top.columns:
+                            eff = pd.to_numeric(top["effect"], errors="coerce")
+                        elif "Final Parameter" in top.columns:
+                            eff = pd.to_numeric(top["Final Parameter"], errors="coerce")
                         else:
-                            ax.scatter(x, y, s=20, color=colors)
-                        ax.axhline(0, color="black", linestyle="--", linewidth=1)
-                        ax.set_xticks(x)
-                        ax.set_xticklabels(labels, rotation=45, ha="right")
-                        ax.set_ylabel("Effect")
+                            continue
+
+                        if "ci_low" in top.columns and "ci_high" in top.columns:
+                            ci_low = pd.to_numeric(top["ci_low"], errors="coerce")
+                            ci_high = pd.to_numeric(top["ci_high"], errors="coerce")
+                        elif "HDI 3%" in top.columns and "HDI 97%" in top.columns:
+                            ci_low = pd.to_numeric(top["HDI 3%"], errors="coerce")
+                            ci_high = pd.to_numeric(top["HDI 97%"], errors="coerce")
+                        elif "SD" in top.columns:
+                            sd = pd.to_numeric(top["SD"], errors="coerce")
+                            ci_low = eff - sd
+                            ci_high = eff + sd
+                        else:
+                            ci_low = None
+                            ci_high = None
+
+                        labels = top["cluster"].astype(str) if "cluster" in top.columns else top.index.astype(str)
+                        order = pd.Index(labels)
+                        y_pos = np.arange(len(order))
+                        color_map = plot_utils._cluster_color_map(adata, cluster_key)
+                        colors = [color_map.get(lbl, "#7a7a7a") for lbl in labels]
+
+                        fig, ax = plt.subplots(figsize=(7, max(4, 0.3 * len(order))))
+                        if ci_low is not None and ci_high is not None:
+                            ax.hlines(y_pos, ci_low, ci_high, color="#999999", linewidth=1.5)
+                        ax.scatter(eff, y_pos, s=30, color=colors, zorder=3)
+                        ax.axvline(0, color="black", linestyle="--", linewidth=1)
+                        ax.set_yticks(y_pos)
+                        ax.set_yticklabels(labels)
+                        ax.set_xlabel("Effect")
                         ax.set_title("scCODA effects (top)")
+                        plt.tight_layout()
                         plot_utils.save_multi("sccoda_effects_top", fig_subdir, fig=fig)
                         plt.close(fig)
                 except Exception as e:
