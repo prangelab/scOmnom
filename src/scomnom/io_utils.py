@@ -14,6 +14,7 @@ import json
 import urllib.request
 import urllib.error
 import hashlib
+from . import gene_utils
 
 
 LOGGER = logging.getLogger(__name__)
@@ -24,6 +25,22 @@ CELLTYPIST_REGISTRY_URL = "https://celltypist.cog.sanger.ac.uk/models/models.jso
 # Local cache directory for downloaded models
 CELLTYPIST_CACHE = Path.home() / ".cache" / "scomnom" / "celltypist_models"
 CELLTYPIST_CACHE.mkdir(parents=True, exist_ok=True)
+
+
+def _add_gene_type_column(
+    adata: ad.AnnData,
+    df: pd.DataFrame,
+    *,
+    gene_col: str = "gene",
+    gene_type_col: str = "gene_type",
+) -> pd.DataFrame:
+    return gene_utils.add_gene_type_column(
+        adata,
+        df,
+        gene_col=gene_col,
+        gene_type_col=gene_type_col,
+        inplace=False,
+    )
 
 
 def sanitize_identifier(
@@ -1766,6 +1783,7 @@ def export_pseudobulk_de_tables(
                     df2 = df.copy()
                     if "gene" not in df2.columns:
                         df2["gene"] = df2.index.astype(str)
+                    df2 = _add_gene_type_column(adata, df2, gene_col="gene")
                     df2.to_csv(out_csv, index=False)
 
         summ = pb.get("summary", None)
@@ -1818,6 +1836,7 @@ def export_pseudobulk_de_tables(
                     df2 = df.copy()
                     if "gene" not in df2.columns:
                         df2["gene"] = df2.index.astype(str)
+                    df2 = _add_gene_type_column(adata, df2, gene_col="gene")
                     df2.to_csv(out_csv, index=False)
 
 
@@ -1904,6 +1923,9 @@ def export_rank_genes_groups_tables(
         df_all.insert(1, "groupby", str(groupby))
     df_all.insert(2, "key_added", str(key_added))
 
+    if "gene" in df_all.columns:
+        df_all = _add_gene_type_column(adata, df_all, gene_col="gene")
+
     out_csv = out_dir / f"{_safe_filename(prefix)}__all_groups.csv"
     df_all.to_csv(out_csv, index=False)
 
@@ -1958,6 +1980,7 @@ def export_pseudobulk_cluster_vs_rest_excel(
                 df2 = df.copy()
                 if "gene" not in df2.columns:
                     df2["gene"] = df2.index.astype(str)
+                df2 = _add_gene_type_column(adata, df2, gene_col="gene")
                 df2.to_excel(writer, sheet_name=sheet, index=False)
 
 
@@ -2020,6 +2043,7 @@ def export_pseudobulk_condition_within_cluster_excel(
                 df2 = df.copy()
                 if "gene" not in df2.columns:
                     df2["gene"] = df2.index.astype(str)
+                df2 = _add_gene_type_column(adata, df2, gene_col="gene")
                 df2.to_excel(writer, sheet_name=sheet, index=False)
 
 
@@ -2114,6 +2138,8 @@ def export_rank_genes_groups_excel(
         df_all.insert(1, "groupby", str(groupby))
     if "key_added" not in df_all.columns:
         df_all.insert(2, "key_added", str(key_added))
+    if "gene" in df_all.columns:
+        df_all = _add_gene_type_column(adata, df_all, gene_col="gene")
 
     # Write workbook: 1 sheet per group
     if "group" not in df_all.columns:
@@ -2121,6 +2147,8 @@ def export_rank_genes_groups_excel(
         with pd.ExcelWriter(out_xlsx, engine="xlsxwriter") as writer:
             df_write = df_all.copy()
             if max_genes is not None and max_genes > 0:
+                if "gene_type" in df_write.columns:
+                    df_write = df_write[df_write["gene_type"] == "protein_coding"]
                 df_write = df_write.head(int(max_genes))
             df_write.to_excel(writer, sheet_name=_safe_excel_sheet_name("markers"), index=False)
         return
@@ -2130,6 +2158,8 @@ def export_rank_genes_groups_excel(
         for g in groups:
             dfg = df_all[df_all["group"].astype(str) == str(g)].copy()
             if max_genes is not None and max_genes > 0:
+                if "gene_type" in dfg.columns:
+                    dfg = dfg[dfg["gene_type"] == "protein_coding"]
                 dfg = dfg.head(int(max_genes))
             sheet = _safe_excel_sheet_name(str(g))
             dfg.to_excel(writer, sheet_name=sheet, index=False)
@@ -2195,7 +2225,10 @@ def export_contrast_conditional_markers_tables(
                 if df is None or getattr(df, "empty", True):
                     pd.DataFrame().to_csv(subdir / f"{stem}__{kind}.csv", index=False)
                 else:
-                    df.to_csv(subdir / f"{stem}__{kind}.csv", index=False)
+                    df2 = df.copy()
+                    if "gene" in df2.columns:
+                        df2 = _add_gene_type_column(adata, df2, gene_col="gene")
+                    df2.to_csv(subdir / f"{stem}__{kind}.csv", index=False)
 
         out_xlsx = out_dir / (filename or f"{_safe_filename(condition)}_{_safe_filename(pair_key)}_DE.xlsx")
         with pd.ExcelWriter(out_xlsx, engine="xlsxwriter") as writer:
@@ -2213,7 +2246,10 @@ def export_contrast_conditional_markers_tables(
                 if getattr(df, "empty", True):
                     pd.DataFrame().to_excel(writer, sheet_name=sheet, index=False)
                 else:
-                    df.to_excel(writer, sheet_name=sheet, index=False)
+                    df2 = df.copy()
+                    if "gene" in df2.columns:
+                        df2 = _add_gene_type_column(adata, df2, gene_col="gene")
+                    df2.to_excel(writer, sheet_name=sheet, index=False)
 
 
 def export_contrast_conditional_markers_tables_multi(

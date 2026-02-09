@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
+from . import gene_utils
 
 
 
@@ -155,6 +156,29 @@ def _select_top_genes(
     return out
 
 
+def _filter_protein_coding(
+    adata,
+    df: pd.DataFrame,
+    *,
+    gene_col: str = "gene",
+    gene_type_col: str = "gene_type",
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    if gene_col not in df.columns:
+        return df
+    df2 = gene_utils.add_gene_type_column(
+        adata,
+        df,
+        gene_col=gene_col,
+        gene_type_col=gene_type_col,
+        inplace=False,
+    )
+    if gene_type_col not in df2.columns:
+        return df2
+    return df2[df2[gene_type_col] == "protein_coding"].copy()
+
+
 # -----------------------------------------------------------------------------
 # Volcano plot
 # -----------------------------------------------------------------------------
@@ -167,6 +191,7 @@ def volcano(
     padj_thresh: float = 0.05,
     lfc_thresh: float = 1.0,
     top_label_n: int = 15,
+    label_genes: Optional[Sequence[str]] = None,
     title: Optional[str] = None,
     figsize: tuple[float, float] = (7.5, 6.0),
     alpha: float = 0.65,
@@ -273,15 +298,16 @@ def volcano(
 
     # labels
     if int(top_label_n) > 0:
-        label_genes = _select_top_genes(
-            tmp,
-            gene_col=gene_col,
-            padj_col=padj_col,
-            lfc_col=lfc_col,
-            padj_thresh=padj_thresh,
-            top_n=int(top_label_n),
-            require_sig=True,
-        )
+        if label_genes is None:
+            label_genes = _select_top_genes(
+                tmp,
+                gene_col=gene_col,
+                padj_col=padj_col,
+                lfc_col=lfc_col,
+                padj_thresh=padj_thresh,
+                top_n=int(top_label_n),
+                require_sig=True,
+            )
         if label_genes:
             # annotate those rows (pick first occurrence per gene)
             tmp_idx = tmp_plot.reset_index(drop=True)
@@ -930,18 +956,29 @@ def plot_marker_genes_pseudobulk(
     genes_by_cluster: dict[str, list[str]] = {}
 
     for cl, df_de in pb_results.items():
+        df_pc = _filter_protein_coding(adata, df_de, gene_col="gene")
+        label_genes = _select_top_genes(
+            df_pc,
+            gene_col="gene",
+            padj_col="padj",
+            lfc_col="log2FoldChange",
+            padj_thresh=float(alpha),
+            top_n=int(top_label_n),
+            require_sig=True,
+        )
         fig = volcano(
             df_de,
             padj_thresh=float(alpha),
             lfc_thresh=float(lfc_thresh),
             top_label_n=int(top_label_n),
+            label_genes=label_genes,
             title=f"Pseudobulk marker genes: {cl} vs rest",
             show=False,
         )
         plot_utils.save_multi(stem=f"volcano__{cl}", figdir=d_volcano, fig=fig)
 
         topg = _select_top_genes(
-            df_de,
+            df_pc,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
@@ -950,7 +987,7 @@ def plot_marker_genes_pseudobulk(
             require_sig=True,
         )
         topg_dot = _select_top_genes(
-            df_de,
+            df_pc,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
@@ -1140,6 +1177,16 @@ def plot_marker_genes_ranksum(
                 df = None
 
         df_v = _normalize_df_for_volcano(df)
+        df_pc = _filter_protein_coding(adata, df_v, gene_col="gene")
+        label_genes = _select_top_genes(
+            df_pc,
+            gene_col="gene",
+            padj_col="padj",
+            lfc_col="log2FoldChange",
+            padj_thresh=float(alpha),
+            top_n=int(top_label_n),
+            require_sig=True,
+        )
 
         # If df_v has no valid numeric rows, still save a placeholder volcano
         fig = volcano(
@@ -1150,6 +1197,7 @@ def plot_marker_genes_ranksum(
             padj_thresh=float(alpha),
             lfc_thresh=float(lfc_thresh),
             top_label_n=int(top_label_n),
+            label_genes=label_genes,
             title=f"Ranksum marker genes: {cl} vs rest",
             show=False,
         )
@@ -1157,7 +1205,7 @@ def plot_marker_genes_ranksum(
 
         # top genes for expression plots
         topg = _select_top_genes(
-            df_v,
+            df_pc,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
@@ -1168,7 +1216,7 @@ def plot_marker_genes_ranksum(
         genes_by_cluster[str(cl)] = topg
 
         topg_dot = _select_top_genes(
-            df_v,
+            df_pc,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
@@ -1296,12 +1344,24 @@ def plot_condition_within_cluster(
         out_violin = base / pair_dir / "violin"
         out_heat = base / pair_dir / "heatmap"
 
+        df_pc = _filter_protein_coding(adata, df_de, gene_col="gene")
+        label_genes = _select_top_genes(
+            df_pc,
+            gene_col="gene",
+            padj_col="padj",
+            lfc_col="log2FoldChange",
+            padj_thresh=float(alpha),
+            top_n=int(top_label_n),
+            require_sig=True,
+        )
+
         # volcano
         fig = volcano(
             df_de,
             padj_thresh=float(alpha),
             lfc_thresh=float(lfc_thresh),
             top_label_n=int(top_label_n),
+            label_genes=label_genes,
             title=str(k),
             show=False,
         )
@@ -1309,7 +1369,7 @@ def plot_condition_within_cluster(
 
         # top up/down for dot/violin
         up9 = _select_top_signed(
-            df_de,
+            df_pc,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
@@ -1318,7 +1378,7 @@ def plot_condition_within_cluster(
             direction="up",
         )
         down9 = _select_top_signed(
-            df_de,
+            df_pc,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
@@ -1362,7 +1422,7 @@ def plot_condition_within_cluster(
 
         # heatmap: top 25 up + top 25 down
         up25 = _select_top_signed(
-            df_de,
+            df_pc,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
@@ -1371,7 +1431,7 @@ def plot_condition_within_cluster(
             direction="up",
         )
         down25 = _select_top_signed(
-            df_de,
+            df_pc,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
@@ -1565,7 +1625,19 @@ def plot_contrast_conditional_markers(
                     }
                 )
 
+            df_pc = None
+            label_genes = None
             if df_volc is not None and not df_volc.empty:
+                df_pc = _filter_protein_coding(adata, df_volc, gene_col="gene")
+                label_genes = _select_top_genes(
+                    df_pc,
+                    gene_col="gene",
+                    padj_col="padj",
+                    lfc_col="log2FoldChange",
+                    padj_thresh=float(alpha),
+                    top_n=int(top_label_n),
+                    require_sig=True,
+                )
                 fig = volcano(
                     df_volc,
                     padj_col="padj",
@@ -1573,13 +1645,14 @@ def plot_contrast_conditional_markers(
                     padj_thresh=float(alpha),
                     lfc_thresh=float(lfc_thresh),
                     top_label_n=int(top_label_n),
+                    label_genes=label_genes,
                     title=f"Within-cluster contrast: {cl} {pair_key}",
                     show=False,
                 )
                 plot_utils.save_multi(stem=f"volcano__{cl}__{pair_key}", figdir=d_volcano, fig=fig)
 
             topg = _select_top_genes(
-                df_volc if df_volc is not None else pd.DataFrame(),
+                df_pc if df_pc is not None else pd.DataFrame(),
                 gene_col="gene",
                 padj_col="padj",
                 lfc_col="log2FoldChange",
@@ -1588,7 +1661,7 @@ def plot_contrast_conditional_markers(
                 require_sig=True,
             )
             topg_dot = _select_top_genes(
-                df_volc if df_volc is not None else pd.DataFrame(),
+                df_pc if df_pc is not None else pd.DataFrame(),
                 gene_col="gene",
                 padj_col="padj",
                 lfc_col="log2FoldChange",
