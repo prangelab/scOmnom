@@ -34,6 +34,7 @@ from .composition_utils import (
     run_graph_da,
     _standardize_composition_results,
     _build_composition_consensus_summary,
+    _MIN_GLM_SAMPLES_PER_LEVEL,
 )
 
 LOGGER = logging.getLogger(__name__)

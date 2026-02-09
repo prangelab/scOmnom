@@ -1393,12 +1393,14 @@ def run_integrate(cfg: IntegrateConfig) -> ad.AnnData:
             plot_keys.append("BBKNN")
         plot_keys = list(dict.fromkeys(plot_keys))
 
-        plot_utils.plot_integration_umaps(
-            adata,
-            embedding_keys=plot_keys,
-            batch_key=batch_key,
-            color=batch_key,
-        )
+        if getattr(cfg, "make_figures", True):
+            plot_utils.plot_integration_umaps(
+                adata,
+                embedding_keys=plot_keys,
+                batch_key=batch_key,
+                color=batch_key,
+                selected_embedding=best,
+            )
 
         if best.lower().startswith("bbknn"):
             LOGGER.warning(
