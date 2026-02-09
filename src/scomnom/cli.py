@@ -1118,7 +1118,8 @@ def _parse_csv_repeat(items: Optional[List[str]]) -> List[str]:
 
 
 markers_and_de_app = typer.Typer(
-    help="Discovery markers + DE (cluster-vs-rest and within-cluster contrasts)."
+    help="Discovery markers + DE (cluster-vs-rest and within-cluster contrasts).",
+    invoke_without_command=True,
 )
 app.add_typer(markers_and_de_app, name="markers-and-de")
 
