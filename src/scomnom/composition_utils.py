@@ -158,6 +158,10 @@ def run_glm_composition(
 
     meta = metadata.copy()
     cond = str(condition_key)
+    covar_cols = [str(c) for c in covariates]
+    meta = meta[[cond] + covar_cols].dropna()
+    if meta.empty:
+        return pd.DataFrame()
     meta[cond] = meta[cond].astype("category")
     if reference_level is not None and reference_level in meta[cond].cat.categories:
         meta[cond] = meta[cond].cat.reorder_categories(
@@ -165,10 +169,20 @@ def run_glm_composition(
             ordered=True,
         )
 
-    design = pd.get_dummies(meta[[cond] + [str(c) for c in covariates]], drop_first=True)
-    design = sm.add_constant(design, has_constant="add")
-
+    counts = counts.loc[meta.index]
     totals = counts.sum(axis=1)
+    valid = totals > 0
+    if not valid.all():
+        counts = counts.loc[valid]
+        meta = meta.loc[valid]
+        totals = totals.loc[valid]
+    if counts.empty or meta.empty:
+        return pd.DataFrame()
+
+    design = pd.get_dummies(meta[[cond] + covar_cols], drop_first=True)
+    if design.empty:
+        return pd.DataFrame()
+    design = sm.add_constant(design, has_constant="add")
     results = []
     for cl in counts.columns:
         y = counts[cl].astype(float)

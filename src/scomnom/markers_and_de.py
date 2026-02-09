@@ -1035,6 +1035,12 @@ def run_composition(cfg) -> ad.AnnData:
                         else:
                             continue
 
+                        mask = np.isfinite(x) & np.isfinite(y)
+                        x = x[mask]
+                        y = y[mask]
+                        if len(x) == 0:
+                            continue
+
                         fig, ax = plt.subplots(figsize=(6, 4))
                         ax.scatter(x, y, s=14, c="#7a7a7a", alpha=0.7, edgecolors="none")
                         ax.axvline(0, color="black", linestyle="--", linewidth=1)
@@ -1056,6 +1062,8 @@ def run_composition(cfg) -> ad.AnnData:
                         if "fdr" in top.columns:
                             top = top.sort_values("fdr")
                         top = top.head(25)
+                        if top.empty:
+                            continue
 
                         fig, ax = plt.subplots(figsize=(7, 4))
                         x = np.arange(len(top))
@@ -1110,24 +1118,33 @@ def run_composition(cfg) -> ad.AnnData:
                     fig, ax = plt.subplots(figsize=(7, 4))
                     color_map = plot_utils._cluster_color_map(adata, cluster_key)
                     if "effect" in global_df.columns:
-                        vals = global_df["effect"].astype(float)
+                        vals = pd.to_numeric(global_df["effect"], errors="coerce")
                         labels = (
                             global_df["cluster"].astype(str)
                             if "cluster" in global_df.columns
                             else global_df.index.astype(str)
                         )
+                        if vals.isna().all():
+                            plt.close(fig)
+                            continue
                         colors = [color_map.get(lbl, "#7a7a7a") for lbl in labels]
                         ax.bar(labels, vals, color=colors)
                         ax.set_ylabel("Effect")
                     elif primary_method == "sccoda" and "Final Parameter" in global_df.columns:
-                        vals = global_df["Final Parameter"].astype(float)
+                        vals = pd.to_numeric(global_df["Final Parameter"], errors="coerce")
                         labels = global_df.index.astype(str)
+                        if vals.isna().all():
+                            plt.close(fig)
+                            continue
                         colors = [color_map.get(lbl, "#7a7a7a") for lbl in labels]
                         ax.bar(labels, vals, color=colors)
                         ax.set_ylabel("Effect")
                     elif primary_method == "glm" and "coef" in global_df.columns:
                         vals = global_df.groupby("cluster")["coef"].mean()
                         labels = vals.index.astype(str)
+                        if vals.isna().all():
+                            plt.close(fig)
+                            continue
                         colors = [color_map.get(lbl, "#7a7a7a") for lbl in labels]
                         ax.bar(labels, vals.values, color=colors)
                         ax.set_ylabel("Effect")
@@ -1146,6 +1163,9 @@ def run_composition(cfg) -> ad.AnnData:
 
                 totals = counts.sum(axis=1).replace(0, np.nan)
                 props = counts.div(totals, axis=0)
+                if props.empty:
+                    LOGGER.warning("composition: no proportions available for plotting")
+                    continue
                 cluster_order = props.mean(axis=0).sort_values(ascending=False).index.tolist()
                 color_map = plot_utils._cluster_color_map(adata, cluster_key)
                 if not color_map:
@@ -1157,13 +1177,19 @@ def run_composition(cfg) -> ad.AnnData:
                     colors = [color_map.get(str(c), "#7a7a7a") for c in cluster_order]
 
                 cond_levels = sorted(metadata[str(condition_key)].astype(str).dropna().unique().tolist())
+                if not cond_levels:
+                    LOGGER.warning("composition: no condition levels available for plotting")
+                    continue
                 if len(cond_levels) >= 2:
                     fig, axes = plt.subplots(1, len(cond_levels), figsize=(4 * len(cond_levels), 4), sharey=True)
                     if len(cond_levels) == 1:
                         axes = [axes]
                     for ax, cond in zip(axes, cond_levels):
                         mask = metadata.loc[metadata.index, str(condition_key)].astype(str) == str(cond)
-                        mean_props = props.loc[mask].mean(axis=0).reindex(cluster_order)
+                        if mask.sum() == 0:
+                            mean_props = pd.Series(0.0, index=cluster_order)
+                        else:
+                            mean_props = props.loc[mask].mean(axis=0).reindex(cluster_order)
                         bottom = 0.0
                         for idx, cl in enumerate(cluster_order):
                             val = mean_props[cl]
