@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
 import numpy as np
 import pandas as pd
 import anndata as ad
 from typing import Optional, Sequence
+
+LOGGER = logging.getLogger(__name__)
+_MIN_GLM_SAMPLES_PER_LEVEL = 2
 
 
 def _resolve_active_cluster_key(adata: ad.AnnData, *, round_id: Optional[str]) -> str:
@@ -162,6 +166,19 @@ def run_glm_composition(
     meta = meta[[cond] + covar_cols].dropna()
     if meta.empty:
         return pd.DataFrame()
+    levels = meta[cond].dropna().unique().tolist()
+    if len(levels) <= 2:
+        LOGGER.info("composition: GLM skipped for %s (n_levels=%d; use CLR instead)", cond, len(levels))
+        return pd.DataFrame()
+    vc = meta[cond].value_counts(dropna=False)
+    if (vc < _MIN_GLM_SAMPLES_PER_LEVEL).any():
+        LOGGER.warning(
+            "composition: GLM skipped for %s (min samples per level=%d; counts=%s)",
+            cond,
+            _MIN_GLM_SAMPLES_PER_LEVEL,
+            vc.to_dict(),
+        )
+        return pd.DataFrame()
     meta[cond] = meta[cond].astype("category")
     if reference_level is not None and reference_level in meta[cond].cat.categories:
         meta[cond] = meta[cond].cat.reorder_categories(
@@ -203,11 +220,13 @@ def run_glm_composition(
             if term == "const":
                 continue
             coef = fit.params.get(term, np.nan)
-            se = fit.bse.get(term, np.nan)
+            bse = getattr(fit, "bse", None)
+            se = bse.get(term, np.nan) if hasattr(bse, "get") else np.nan
             z = coef / se if se and np.isfinite(se) else np.nan
             ci_low = coef - 1.96 * se if se and np.isfinite(se) else np.nan
             ci_high = coef + 1.96 * se if se and np.isfinite(se) else np.nan
-            pval = fit.pvalues.get(term, np.nan)
+            pvals = getattr(fit, "pvalues", None)
+            pval = pvals.get(term, np.nan) if hasattr(pvals, "get") else np.nan
             effect = coef / np.log(2) if np.isfinite(coef) else np.nan
             results.append(
                 {
@@ -392,13 +411,31 @@ def run_graph_da(
         .loc[counts.index]
     )
 
-    results = run_glm_composition(
-        counts,
-        metadata,
-        condition_key=str(condition_key),
-        covariates=covariates,
-        reference_level=None,
-    )
+    levels = metadata[str(condition_key)].dropna().unique().tolist()
+    if len(levels) <= 2:
+        results = run_clr_mannwhitney(
+            counts,
+            metadata,
+            condition_key=str(condition_key),
+        )
+        if not results.empty:
+            results = results.assign(effect=results["log2fc_test_vs_ref"])
+    else:
+        results = run_glm_composition(
+            counts,
+            metadata,
+            condition_key=str(condition_key),
+            covariates=covariates,
+            reference_level=None,
+        )
+        if results.empty:
+            results = run_clr_mannwhitney(
+                counts,
+                metadata,
+                condition_key=str(condition_key),
+            )
+            if not results.empty:
+                results = results.assign(effect=results["log2fc_test_vs_ref"])
     neighborhoods_df = pd.DataFrame(
         {
             "neighborhood": [n for n, _, _, _, _ in neighborhoods],
@@ -463,6 +500,10 @@ def _standardize_composition_results(
                 break
 
     if backend == "sccoda":
+        if "cluster" in out.columns:
+            cl = out["cluster"].astype(str)
+            if cl.str.contains(r"\|").any():
+                out["cluster"] = cl.str.split("|", n=1, expand=True).iloc[:, -1]
         for cand in ("Inclusion probability", "inclusion_prob", "inclusion_probability"):
             if cand in out.columns:
                 out["inclusion_prob"] = pd.to_numeric(out[cand], errors="coerce")

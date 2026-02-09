@@ -1106,6 +1106,8 @@ def run_composition(cfg) -> ad.AnnData:
                 f"graph_max_k={getattr(cfg, 'composition_graph_max_k', None)}",
                 f"graph_min_size={getattr(cfg, 'composition_graph_min_size', None)}",
                 f"graph_random_state={getattr(cfg, 'composition_graph_random_state', None)}",
+                f"glm_min_samples_per_level={_MIN_GLM_SAMPLES_PER_LEVEL}",
+                f"glm_min_levels=3",
             ],
         )
 
@@ -1179,6 +1181,30 @@ def run_composition(cfg) -> ad.AnnData:
                 if not cond_levels:
                     LOGGER.warning("composition: no condition levels available for plotting")
                     continue
+
+                fig, ax = plt.subplots(figsize=(max(4, 1.4 * len(cond_levels)), 4))
+                for j, cond in enumerate(cond_levels):
+                    mask = metadata.loc[metadata.index, str(condition_key)].astype(str) == str(cond)
+                    if mask.sum() == 0:
+                        mean_props = pd.Series(0.0, index=cluster_order)
+                    else:
+                        mean_props = props.loc[mask].mean(axis=0).reindex(cluster_order)
+                    bottom = 0.0
+                    for idx, cl in enumerate(cluster_order):
+                        val = mean_props[cl]
+                        ax.bar(j, val, bottom=bottom, color=colors[idx], edgecolor="white", linewidth=0.3)
+                        bottom += val
+                ax.set_xticks(range(len(cond_levels)))
+                labels = [
+                    f"{cond}\n(n={(metadata[str(condition_key)].astype(str) == str(cond)).sum()})"
+                    for cond in cond_levels
+                ]
+                ax.set_xticklabels(labels)
+                ax.set_ylabel("Mean proportion")
+                ax.set_title("Cell Type Composition (100% stacked)")
+                plt.tight_layout()
+                plot_utils.save_multi("composition_stacked_bar_100", fig_subdir, fig=fig)
+                plt.close(fig)
                 if len(cond_levels) >= 2:
                     fig, axes = plt.subplots(1, len(cond_levels), figsize=(4 * len(cond_levels), 4), sharey=True)
                     if len(cond_levels) == 1:
