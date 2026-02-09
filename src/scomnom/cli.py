@@ -1123,6 +1123,16 @@ markers_and_de_app = typer.Typer(
 app.add_typer(markers_and_de_app, name="markers-and-de")
 
 
+@markers_and_de_app.callback()
+def markers_and_de_callback(
+    download_gene_models: bool = typer.Option(False, "--download-gene-models"),
+):
+    if download_gene_models:
+        from .io_utils import download_gene_models
+        download_gene_models(species="hsapiens")
+        raise typer.Exit()
+
+
 def _build_cfg(
     *,
     input_path: Path,
