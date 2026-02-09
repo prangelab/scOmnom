@@ -1016,13 +1016,12 @@ def run_composition(cfg) -> ad.AnnData:
                 LOGGER.warning("composition: failed to plot GraphDA summary: %s", e)
 
         if bool(getattr(cfg, "make_figures", True)):
-            try:
-                import matplotlib.pyplot as plt
-                for method in methods:
-                    df = results_by_method.get(method, pd.DataFrame())
-                    if df is None or df.empty:
-                        continue
-
+            import matplotlib.pyplot as plt
+            for method in methods:
+                df = results_by_method.get(method, pd.DataFrame())
+                if df is None or df.empty:
+                    continue
+                try:
                     if method in ("glm", "clr"):
                         if "effect" in df.columns:
                             x = pd.to_numeric(df["effect"], errors="coerce")
@@ -1085,8 +1084,8 @@ def run_composition(cfg) -> ad.AnnData:
                         ax.set_title("scCODA effects (top)")
                         plot_utils.save_multi("sccoda_effects_top", fig_subdir, fig=fig)
                         plt.close(fig)
-            except Exception as e:
-                LOGGER.warning("composition: failed to plot method-specific summaries: %s", e)
+                except Exception as e:
+                    LOGGER.debug("composition: method plot failed for %s (%r)", method, e)
 
         _write_settings(
             results_dir,
@@ -1153,7 +1152,7 @@ def run_composition(cfg) -> ad.AnnData:
                     plot_utils.save_multi("composition_effects_global", fig_subdir, fig=fig)
                     plt.close(fig)
             except Exception as e:
-                LOGGER.warning("composition: failed to generate plots: %s", e)
+                LOGGER.debug("composition: failed to generate plots (%r)", e)
 
         if bool(getattr(cfg, "make_figures", True)):
             try:
@@ -1266,7 +1265,7 @@ def run_composition(cfg) -> ad.AnnData:
                         len(cond_levels),
                     )
             except Exception as e:
-                LOGGER.warning("composition: failed to plot composition stacks: %s", e)
+                LOGGER.debug("composition: failed to plot composition stacks (%r)", e)
 
     out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.da")) + ".zarr")
     LOGGER.info("Saving dataset → %s", out_zarr)
