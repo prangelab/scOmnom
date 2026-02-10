@@ -88,6 +88,9 @@ def _drop_redundant_group_cols(df: pd.DataFrame) -> pd.DataFrame:
             "n_cells_A_used",
             "n_cells_B_used",
             "downsampled",
+            "pct_nz_group",
+            "pct_nz_reference",
+            "key_added",
         )
         if c in df.columns
     ]
@@ -166,13 +169,18 @@ def fetch_ensembl_gene_annotations(
     df["gene"] = df["gene"].astype(str)
     df["gene_type"] = df["gene_type"].astype(str)
     df["gene_chrom"] = df["gene_chrom"].astype(str)
+    df["gene_id"] = df["gene_id"].astype(str)
+
     chrom = df["gene_chrom"].astype(str).str.strip()
     chrom = chrom.str.replace(r"^chr", "", case=False, regex=True)
-    chrom = chrom.where(chrom.isin(_STANDARD_CHROMS), "")
+    is_standard = chrom.isin(_STANDARD_CHROMS)
+    chrom = chrom.where(is_standard, "")
     df["gene_chrom"] = chrom
-    df["gene_id"] = df["gene_id"].astype(str)
+    df["__chrom_standard"] = is_standard
+
     df = df[df["gene"].astype(bool)]
-    df = df.drop_duplicates(subset=["gene"], keep="first")
+    df = df.sort_values(["gene", "__chrom_standard"], ascending=[True, False])
+    df = df.drop_duplicates(subset=["gene"], keep="first").drop(columns=["__chrom_standard"])
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(cache_path, sep="\t", index=False, compression="gzip")

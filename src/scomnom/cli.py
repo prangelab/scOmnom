@@ -1460,8 +1460,8 @@ def cluster_vs_rest(
 
     plot_lfc_thresh: float = typer.Option(1.0, "--plot-lfc-thresh"),
     plot_volcano_top_label_n: int = typer.Option(15, "--plot-volcano-top-label-n"),
-    plot_top_n_per_cluster: int = typer.Option(10, "--plot-top-n-per-cluster"),
-    plot_dotplot_top_n_per_cluster: int = typer.Option(15, "--plot-dotplot-top-n-per-cluster"),
+    plot_top_n_per_cluster: int = typer.Option(12, "--plot-top-n-per-cluster"),
+    plot_dotplot_top_n_per_cluster: int = typer.Option(16, "--plot-dotplot-top-n-per-cluster"),
     plot_max_genes_total: int = typer.Option(80, "--plot-max-genes-total"),
     plot_use_raw: bool = typer.Option(False, "--plot-use-raw/--no-plot-use-raw"),
     plot_layer: Optional[str] = typer.Option(None, "--plot-layer"),
@@ -1712,8 +1712,8 @@ def within_cluster(
 
     plot_lfc_thresh: float = typer.Option(1.0, "--plot-lfc-thresh"),
     plot_volcano_top_label_n: int = typer.Option(15, "--plot-volcano-top-label-n"),
-    plot_top_n_per_cluster: int = typer.Option(10, "--plot-top-n-per-cluster"),
-    plot_dotplot_top_n_per_cluster: int = typer.Option(15, "--plot-dotplot-top-n-per-cluster"),
+    plot_top_n_per_cluster: int = typer.Option(12, "--plot-top-n-per-cluster"),
+    plot_dotplot_top_n_per_cluster: int = typer.Option(16, "--plot-dotplot-top-n-per-cluster"),
     plot_max_genes_total: int = typer.Option(80, "--plot-max-genes-total"),
     plot_use_raw: bool = typer.Option(False, "--plot-use-raw/--no-plot-use-raw"),
     plot_layer: Optional[str] = typer.Option(None, "--plot-layer"),

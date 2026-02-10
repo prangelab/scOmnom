@@ -923,7 +923,7 @@ def plot_marker_genes_pseudobulk(
     lfc_thresh: float = 1.0,
     top_label_n: int = 15,
     top_n_genes: int = 9,
-    dotplot_top_n_genes: int | None = None,
+    dotplot_top_n_genes: int | None = 16,
     use_raw: bool = False,
     layer: str | None = None,
     umap_ncols: int = 3,
@@ -1053,7 +1053,7 @@ def plot_marker_genes_ranksum(
     lfc_thresh: float = 1.0,
     top_label_n: int = 15,
     top_n_genes: int = 9,
-    dotplot_top_n_genes: int | None = None,
+    dotplot_top_n_genes: int | None = 16,
     use_raw: bool = False,
     layer: str | None = None,
     umap_ncols: int = 3,
@@ -1282,8 +1282,8 @@ def plot_condition_within_cluster(
     alpha: float = 0.05,
     lfc_thresh: float = 1.0,
     top_label_n: int = 15,
-    dotplot_top_n: int = 9,
-    violin_top_n: int = 9,
+    dotplot_top_n: int = 16,
+    violin_top_n: int = 12,
     heatmap_top_n: int = 25,
     use_raw: bool = False,
     layer: str | None = None,
@@ -1291,8 +1291,8 @@ def plot_condition_within_cluster(
     """
     For each stored conditional DE result (per cluster, per contrast):
       - volcano
-      - dotplot (top 9 up + top 9 down)
-      - violin grid (top 9 up + top 9 down)
+      - dotplot (top N/2 up + top N/2 down)
+      - violin grid (top N/2 up + top N/2 down)
       - heatmap (top 25 up + top 25 down), within-cluster, grouped by condition
 
     Saves under:
@@ -1364,31 +1364,57 @@ def plot_condition_within_cluster(
         )
         plot_utils.save_multi(stem=f"volcano__{group_value}__{pair_dir}", figdir=out_volcano, fig=fig)
 
-        # top up/down for dot/violin
-        up9 = _select_top_signed(
+        dot_half = max(1, int(dotplot_top_n) // 2)
+        dot_remainder = int(dotplot_top_n) - dot_half
+        vio_half = max(1, int(violin_top_n) // 2)
+        vio_remainder = int(violin_top_n) - vio_half
+
+        # top up/down for dotplot
+        up_dot = _select_top_signed(
             df_pc,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
             padj_thresh=float(alpha),
-            top_n=int(dotplot_top_n),
+            top_n=int(dot_half),
             direction="up",
         )
-        down9 = _select_top_signed(
+        down_dot = _select_top_signed(
             df_pc,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
             padj_thresh=float(alpha),
-            top_n=int(dotplot_top_n),
+            top_n=int(dot_remainder),
             direction="down",
         )
-        genes_9_9 = _unique_keep_order(list(up9) + list(down9))
+        genes_dot = _unique_keep_order(list(up_dot) + list(down_dot))
 
-        if genes_9_9 and condition_key in sub.obs:
+        # top up/down for violin
+        up_vio = _select_top_signed(
+            df_pc,
+            gene_col="gene",
+            padj_col="padj",
+            lfc_col="log2FoldChange",
+            padj_thresh=float(alpha),
+            top_n=int(vio_half),
+            direction="up",
+        )
+        down_vio = _select_top_signed(
+            df_pc,
+            gene_col="gene",
+            padj_col="padj",
+            lfc_col="log2FoldChange",
+            padj_thresh=float(alpha),
+            top_n=int(vio_remainder),
+            direction="down",
+        )
+        genes_vio = _unique_keep_order(list(up_vio) + list(down_vio))
+
+        if genes_dot and condition_key in sub.obs:
             fig = dotplot_top_genes(
                 sub,
-                genes=genes_9_9,
+                genes=genes_dot,
                 groupby=str(condition_key),
                 use_raw=bool(use_raw),
                 layer=layer,
@@ -1401,9 +1427,10 @@ def plot_condition_within_cluster(
                 fig=fig,
             )
 
+        if genes_vio and condition_key in sub.obs:
             fig = violin_grid_genes(
                 sub,
-                genes=genes_9_9,
+                genes=genes_vio,
                 groupby=str(condition_key),
                 use_raw=bool(use_raw),
                 layer=layer,
@@ -1466,8 +1493,8 @@ def plot_condition_within_cluster_all(
     alpha: float = 0.05,
     lfc_thresh: float = 1.0,
     top_label_n: int = 15,
-    dotplot_top_n: int = 9,
-    violin_top_n: int = 9,
+    dotplot_top_n: int = 16,
+    violin_top_n: int = 12,
     heatmap_top_n: int = 25,
     use_raw: bool = False,
     layer: str | None = None,
@@ -1518,7 +1545,7 @@ def plot_contrast_conditional_markers(
     alpha: float = 0.05,
     lfc_thresh: float = 1.0,
     top_label_n: int = 15,
-    top_n_genes: int = 9,
+    top_n_genes: int = 12,
     dotplot_top_n_genes: int | None = None,
     use_raw: bool = False,
     layer: str | None = None,
@@ -1648,24 +1675,51 @@ def plot_contrast_conditional_markers(
                 )
                 plot_utils.save_multi(stem=f"volcano__{cl}__{pair_key}", figdir=d_volcano, fig=fig)
 
-            topg = _select_top_genes(
-                df_pc if df_pc is not None else pd.DataFrame(),
+            dot_half = max(1, int(dot_n) // 2)
+            dot_remainder = int(dot_n) - dot_half
+            vio_half = max(1, int(top_n_genes) // 2)
+            vio_remainder = int(top_n_genes) - vio_half
+            df_sel = df_pc if df_pc is not None else pd.DataFrame()
+
+            up_dot = _select_top_signed(
+                df_sel,
                 gene_col="gene",
                 padj_col="padj",
                 lfc_col="log2FoldChange",
                 padj_thresh=float(alpha),
-                top_n=int(top_n_genes),
-                require_sig=True,
+                top_n=int(dot_half),
+                direction="up",
             )
-            topg_dot = _select_top_genes(
-                df_pc if df_pc is not None else pd.DataFrame(),
+            down_dot = _select_top_signed(
+                df_sel,
                 gene_col="gene",
                 padj_col="padj",
                 lfc_col="log2FoldChange",
                 padj_thresh=float(alpha),
-                top_n=int(dot_n),
-                require_sig=True,
+                top_n=int(dot_remainder),
+                direction="down",
             )
+            topg_dot = _unique_keep_order(list(up_dot) + list(down_dot))
+
+            up_vio = _select_top_signed(
+                df_sel,
+                gene_col="gene",
+                padj_col="padj",
+                lfc_col="log2FoldChange",
+                padj_thresh=float(alpha),
+                top_n=int(vio_half),
+                direction="up",
+            )
+            down_vio = _select_top_signed(
+                df_sel,
+                gene_col="gene",
+                padj_col="padj",
+                lfc_col="log2FoldChange",
+                padj_thresh=float(alpha),
+                top_n=int(vio_remainder),
+                direction="down",
+            )
+            topg = _unique_keep_order(list(up_vio) + list(down_vio))
 
             if topg_dot:
                 m = adata.obs[str(groupby)].astype(str).to_numpy() == str(cl)
@@ -1706,7 +1760,7 @@ def plot_contrast_conditional_markers_multi(
     alpha: float = 0.05,
     lfc_thresh: float = 1.0,
     top_label_n: int = 15,
-    top_n_genes: int = 9,
+    top_n_genes: int = 12,
     dotplot_top_n_genes: int | None = None,
     use_raw: bool = False,
     layer: str | None = None,

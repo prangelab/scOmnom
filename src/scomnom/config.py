@@ -781,8 +781,8 @@ class MarkersAndDEConfig(BaseModel):
     plot_volcano_top_label_n: int = 15
 
     # gene selection for expression plots (dotplot/heatmap/umap/violin)
-    plot_top_n_per_cluster: int = 10
-    plot_dotplot_top_n_genes: int = 15
+    plot_top_n_per_cluster: int = 12
+    plot_dotplot_top_n_genes: int = 16
     plot_max_genes_total: int = 80
 
     # scanpy expression plotting source
