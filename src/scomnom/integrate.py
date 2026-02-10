@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import torch
+import scipy.sparse as sp
 
 from scomnom import __version__
 from . import io_utils, plot_utils, reporting, ct_utils
@@ -1203,10 +1204,20 @@ def _select_best_embedding(
         .drop(index=["Metric Type"], errors="ignore")
         .dropna(axis=1, how="all")
     )
+    if numeric.empty:
+        raise RuntimeError(
+            "scIB results table has no numeric rows after parsing; cannot select best embedding."
+        )
+
+    if "Total" not in numeric.columns:
+        raise RuntimeError(
+            "scIB results table missing 'Total' column; cannot select best embedding."
+        )
 
     if "Unintegrated" not in numeric.index:
-        LOGGER.error("Unintegrated baseline missing from scIB table.")
-        return str(numeric["Total"].idxmax())
+        raise RuntimeError(
+            "Unintegrated baseline missing from scIB table; cannot select best embedding."
+        )
 
     baseline = numeric.loc["Unintegrated"]
 
@@ -1214,6 +1225,11 @@ def _select_best_embedding(
     batch_ok = numeric["Batch correction"] > baseline["Batch correction"]
 
     candidates = numeric.index != "Unintegrated"
+    if not np.any(candidates):
+        raise RuntimeError(
+            "scIB results table contains no candidate embeddings beyond Unintegrated; "
+            "cannot select best embedding."
+        )
 
     tier1 = numeric.loc[candidates & bio_ok & batch_ok]
     tier2 = numeric.loc[candidates & bio_ok]
