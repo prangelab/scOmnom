@@ -1323,11 +1323,11 @@ def run_composition(cfg) -> ad.AnnData:
                 plot_utils.save_multi("composition_alluvial", fig_subdir, fig=fig)
                 LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_alluvial")
                 plt.close(fig)
-                else:
-                    LOGGER.warning(
-                        "composition: alluvial plot skipped (requires exactly 2 condition levels, found %d).",
-                        len(cond_levels),
-                    )
+            else:
+                LOGGER.warning(
+                    "composition: alluvial plot skipped (requires exactly 2 condition levels, found %d).",
+                    len(cond_levels),
+                )
             except Exception as e:
                 LOGGER.debug("composition: failed to plot composition stacks (%r)", e)
 
