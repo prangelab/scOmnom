@@ -1980,9 +1980,9 @@ def export_pseudobulk_de_tables(
     Write pseudobulk DE results stored in adata.uns[store_key] to CSV files.
 
     Outputs (relative to output_dir):
-      - de_tables/cluster_vs_rest/cluster_vs_rest__<cluster>.csv
-      - de_tables/cluster_vs_rest/__summary.csv (if present)
-      - de_tables/condition_within_cluster__<condition_key>/condition_within_cluster__<group>__<test>_vs_<ref>.csv
+      - DE_tables/cluster_vs_rest/cluster_vs_rest__<cluster>.csv
+      - DE_tables/cluster_vs_rest/__summary.csv (if present)
+      - DE_tables/condition_within_cluster__<condition_key>/condition_within_cluster__<group>__<test>_vs_<ref>.csv
 
     Assumes storage schema from de_utils:
       adata.uns[store_key]["pseudobulk_cluster_vs_rest"]["results"] : dict[str, DataFrame]
@@ -1990,7 +1990,7 @@ def export_pseudobulk_de_tables(
       adata.uns[store_key]["pseudobulk_condition_within_group"]      : dict[key -> payload]
     """
     output_dir = Path(output_dir)
-    base = Path(tables_root) if tables_root is not None else (output_dir / "de_tables")
+    base = Path(tables_root) if tables_root is not None else (output_dir / "DE_tables")
     base.mkdir(parents=True, exist_ok=True)
 
     block = adata.uns.get(store_key, {})
@@ -2195,7 +2195,7 @@ def export_pseudobulk_cluster_vs_rest_excel(
     One cluster per sheet.
     """
     output_dir = Path(output_dir)
-    base = Path(tables_root) if tables_root is not None else (output_dir / "de_tables")
+    base = Path(tables_root) if tables_root is not None else (output_dir / "DE_tables")
     out_xlsx = base / filename
     out_xlsx.parent.mkdir(parents=True, exist_ok=True)
 
@@ -2240,7 +2240,7 @@ def export_pseudobulk_condition_within_cluster_excel(
         return
 
     output_dir = Path(output_dir)
-    base = Path(tables_root) if tables_root is not None else (output_dir / "de_tables")
+    base = Path(tables_root) if tables_root is not None else (output_dir / "DE_tables")
     if filename is None:
         filename = f"condition_within_cluster__{_safe_filename(condition_key)}.xlsx"
 

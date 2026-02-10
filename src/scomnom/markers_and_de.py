@@ -1680,8 +1680,8 @@ def run_within_cluster(cfg) -> ad.AnnData:
     results_dir = output_dir
     results_dir.mkdir(parents=True, exist_ok=True)
     run_round = plot_utils.get_run_round_tag("DE")
-    de_cell_dir = results_dir / "tables" / f"de_tables_{run_round}" / "cell_based"
-    de_pb_dir = results_dir / "tables" / f"de_tables_{run_round}" / "pseudobulk_based"
+    de_cell_dir = results_dir / "tables" / f"DE_tables_{run_round}" / "cell_based"
+    de_pb_dir = results_dir / "tables" / f"DE_tables_{run_round}" / "pseudobulk_based"
 
     # ----------------------------
     # Resolve groupby + sample_key
