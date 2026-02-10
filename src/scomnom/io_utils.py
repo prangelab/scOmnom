@@ -37,6 +37,7 @@ _GENE_TYPE_COLS = (
 )
 _GENE_TYPE_MAP_CACHE: dict[tuple[str, str], dict[str, str]] = {}
 _GENE_TYPE_SOURCE_CACHE: dict[tuple[str, str], str] = {}
+_STANDARD_CHROMS = {*(str(i) for i in range(1, 23)), "X", "Y", "MT"}
 
 
 def _add_gene_type_column(
@@ -46,25 +47,53 @@ def _add_gene_type_column(
     gene_col: str = "gene",
     gene_type_col: str = "gene_type",
 ) -> pd.DataFrame:
-    gene_map, source_label, chrom_map, chrom_source = get_gene_type_map(
+    gene_map, source_label, chrom_map, chrom_source, gene_id_map = get_gene_type_map(
         adata,
         species="hsapiens",
         allow_fallback=True,
         force_download=False,
     )
-    return gene_utils.apply_gene_type_map(
+    out = gene_utils.apply_gene_type_map(
         df,
         gene_map,
         gene_col=gene_col,
         gene_type_col=gene_type_col,
-        source_col="gene_type_source",
-        source_label=source_label,
         gene_chrom_col="gene_chrom",
         chrom_map=chrom_map,
-        chrom_source_col="gene_chrom_source",
-        chrom_source_label=chrom_source,
+        gene_id_col="gene_id",
+        gene_id_map=gene_id_map,
+        add_source_cols=False,
         inplace=False,
     )
+    for col in ("gene_type_source", "gene_chrom_source"):
+        if col in out.columns:
+            out = out.drop(columns=[col])
+    return out
+
+
+def _drop_redundant_group_cols(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or getattr(df, "empty", False):
+        return df
+    drop_cols = [
+        c
+        for c in (
+            "cluster",
+            "group",
+            "groupby",
+            "contrast_key",
+            "A",
+            "B",
+            "n_cells_A",
+            "n_cells_B",
+            "n_cells_A_used",
+            "n_cells_B_used",
+            "downsampled",
+        )
+        if c in df.columns
+    ]
+    if drop_cols:
+        return df.drop(columns=drop_cols)
+    return df
 
 
 def _fallback_gene_type_map(genes: list[str]) -> dict[str, str]:
@@ -109,7 +138,7 @@ def fetch_ensembl_gene_annotations(
         raise RuntimeError(f"pybiomart is required for Ensembl gene annotations: {e}") from e
 
     ds = Dataset(name=dataset_name, host="http://www.ensembl.org")
-    df = ds.query(attributes=["external_gene_name", "gene_biotype", "chromosome_name"])
+    df = ds.query(attributes=["external_gene_name", "gene_biotype", "chromosome_name", "ensembl_gene_id"])
     if df is None or df.empty:
         raise RuntimeError(f"BioMart query returned no results for dataset={dataset_name!r}")
 
@@ -122,15 +151,26 @@ def fetch_ensembl_gene_annotations(
             col_lc.get("gene type", "gene type"): "gene_type",
             col_lc.get("chromosome_name", "chromosome_name"): "gene_chrom",
             col_lc.get("chromosome/scaffold name", "chromosome/scaffold name"): "gene_chrom",
+            col_lc.get("ensembl_gene_id", "ensembl_gene_id"): "gene_id",
+            col_lc.get("gene stable id", "gene stable id"): "gene_id",
         }
     )
     if "gene" not in df.columns or "gene_type" not in df.columns or "gene_chrom" not in df.columns:
         raise RuntimeError(
             f"BioMart columns not found after rename. Available columns: {list(df.columns)}"
         )
+    if "gene_id" not in df.columns:
+        raise RuntimeError(
+            f"BioMart gene_id column not found after rename. Available columns: {list(df.columns)}"
+        )
     df["gene"] = df["gene"].astype(str)
     df["gene_type"] = df["gene_type"].astype(str)
     df["gene_chrom"] = df["gene_chrom"].astype(str)
+    chrom = df["gene_chrom"].astype(str).str.strip()
+    chrom = chrom.str.replace(r"^chr", "", case=False, regex=True)
+    chrom = chrom.where(chrom.isin(_STANDARD_CHROMS), "")
+    df["gene_chrom"] = chrom
+    df["gene_id"] = df["gene_id"].astype(str)
     df = df[df["gene"].astype(bool)]
     df = df.drop_duplicates(subset=["gene"], keep="first")
 
@@ -145,9 +185,9 @@ def get_gene_type_map(
     species: str = "hsapiens",
     allow_fallback: bool = True,
     force_download: bool = False,
-) -> tuple[dict[str, str], str, dict[str, str], str]:
+) -> tuple[dict[str, str], str, dict[str, str], str, dict[str, str]]:
     if adata is None:
-        return {}, "unknown", {}, "unknown"
+        return {}, "unknown", {}, "unknown", {}
 
     raw_series = None
     for col in _GENE_TYPE_COLS:
@@ -158,31 +198,41 @@ def get_gene_type_map(
     if raw_series is not None:
         gmap = raw_series.astype(str).to_dict()
         chrom_map = {}
+        gene_id_map = {}
         if "chromosome" in adata.var.columns:
             chrom_map = adata.var["chromosome"].astype(str).to_dict()
         elif "chrom" in adata.var.columns:
             chrom_map = adata.var["chrom"].astype(str).to_dict()
-        return gmap, f"adata:{str(raw_series.name)}", chrom_map, "adata"
+        if "gene_id" in adata.var.columns:
+            gene_id_map = adata.var["gene_id"].astype(str).to_dict()
+        elif "ensembl_gene_id" in adata.var.columns:
+            gene_id_map = adata.var["ensembl_gene_id"].astype(str).to_dict()
+        return gmap, f"adata:{str(raw_series.name)}", chrom_map, "adata", gene_id_map
 
     cache_key = ("biomart", str(species))
     if cache_key in _GENE_TYPE_MAP_CACHE and not force_download:
         chrom_key = ("biomart_chrom", str(species))
+        id_key = ("biomart_gene_id", str(species))
         chrom_map = _GENE_TYPE_MAP_CACHE.get(chrom_key, {})
+        gene_id_map = _GENE_TYPE_MAP_CACHE.get(id_key, {})
         return (
             _GENE_TYPE_MAP_CACHE[cache_key],
             _GENE_TYPE_SOURCE_CACHE.get(cache_key, "biomart"),
             chrom_map,
             "biomart",
+            gene_id_map,
         )
 
     try:
         df = fetch_ensembl_gene_annotations(species=species, force=force_download)
         gmap = dict(zip(df["gene"].astype(str), df["gene_type"].astype(str)))
         chrom_map = dict(zip(df["gene"].astype(str), df["gene_chrom"].astype(str)))
+        gene_id_map = dict(zip(df["gene"].astype(str), df["gene_id"].astype(str)))
         _GENE_TYPE_MAP_CACHE[cache_key] = gmap
         _GENE_TYPE_SOURCE_CACHE[cache_key] = "biomart"
         _GENE_TYPE_MAP_CACHE[("biomart_chrom", str(species))] = chrom_map
-        return gmap, "biomart", chrom_map, "biomart"
+        _GENE_TYPE_MAP_CACHE[("biomart_gene_id", str(species))] = gene_id_map
+        return gmap, "biomart", chrom_map, "biomart", gene_id_map
     except Exception as e:
         if not allow_fallback:
             raise
@@ -196,11 +246,14 @@ def get_gene_type_map(
     if cache_key in _GENE_TYPE_MAP_CACHE:
         chrom_key = ("fallback_chrom", str(species))
         chrom_map = _GENE_TYPE_MAP_CACHE.get(chrom_key, {})
+        id_key = ("fallback_gene_id", str(species))
+        gene_id_map = _GENE_TYPE_MAP_CACHE.get(id_key, {})
         return (
             _GENE_TYPE_MAP_CACHE[cache_key],
             _GENE_TYPE_SOURCE_CACHE.get(cache_key, "fallback"),
             chrom_map,
             "fallback",
+            gene_id_map,
         )
 
     genes = list(adata.var_names.astype(str))
@@ -208,8 +261,10 @@ def get_gene_type_map(
     _GENE_TYPE_MAP_CACHE[cache_key] = gmap
     _GENE_TYPE_SOURCE_CACHE[cache_key] = "fallback"
     chrom_map = {}
+    gene_id_map = {}
     _GENE_TYPE_MAP_CACHE[("fallback_chrom", str(species))] = chrom_map
-    return gmap, "fallback", chrom_map, "fallback"
+    _GENE_TYPE_MAP_CACHE[("fallback_gene_id", str(species))] = gene_id_map
+    return gmap, "fallback", chrom_map, "fallback", gene_id_map
 
 
 def download_gene_models(*, species: str = "hsapiens") -> None:
@@ -1957,6 +2012,7 @@ def export_pseudobulk_de_tables(
                     if "gene" not in df2.columns:
                         df2["gene"] = df2.index.astype(str)
                     df2 = _add_gene_type_column(adata, df2, gene_col="gene")
+                    df2 = _drop_redundant_group_cols(df2)
                     df2.to_csv(out_csv, index=False)
 
         summ = pb.get("summary", None)
@@ -2010,6 +2066,7 @@ def export_pseudobulk_de_tables(
                     if "gene" not in df2.columns:
                         df2["gene"] = df2.index.astype(str)
                     df2 = _add_gene_type_column(adata, df2, gene_col="gene")
+                    df2 = _drop_redundant_group_cols(df2)
                     df2.to_csv(out_csv, index=False)
 
 
@@ -2154,6 +2211,7 @@ def export_pseudobulk_cluster_vs_rest_excel(
                 if "gene" not in df2.columns:
                     df2["gene"] = df2.index.astype(str)
                 df2 = _add_gene_type_column(adata, df2, gene_col="gene")
+                df2 = _drop_redundant_group_cols(df2)
                 df2.to_excel(writer, sheet_name=sheet, index=False)
 
 
@@ -2217,6 +2275,7 @@ def export_pseudobulk_condition_within_cluster_excel(
                 if "gene" not in df2.columns:
                     df2["gene"] = df2.index.astype(str)
                 df2 = _add_gene_type_column(adata, df2, gene_col="gene")
+                df2 = _drop_redundant_group_cols(df2)
                 df2.to_excel(writer, sheet_name=sheet, index=False)
 
 
@@ -2323,6 +2382,7 @@ def export_rank_genes_groups_excel(
                 if "gene_type" in df_write.columns:
                     df_write = df_write[df_write["gene_type"] == "protein_coding"]
                 df_write = df_write.head(int(max_genes))
+            df_write = _drop_redundant_group_cols(df_write)
             df_write.to_excel(writer, sheet_name=_safe_excel_sheet_name("markers"), index=False)
         return
 
@@ -2334,6 +2394,7 @@ def export_rank_genes_groups_excel(
                 if "gene_type" in dfg.columns:
                     dfg = dfg[dfg["gene_type"] == "protein_coding"]
                 dfg = dfg.head(int(max_genes))
+            dfg = _drop_redundant_group_cols(dfg)
             sheet = _safe_excel_sheet_name(str(g))
             dfg.to_excel(writer, sheet_name=sheet, index=False)
 
@@ -2401,6 +2462,7 @@ def export_contrast_conditional_markers_tables(
                     df2 = df.copy()
                     if "gene" in df2.columns:
                         df2 = _add_gene_type_column(adata, df2, gene_col="gene")
+                    df2 = _drop_redundant_group_cols(df2)
                     df2.to_csv(subdir / f"{stem}__{kind}.csv", index=False)
 
         out_xlsx = out_dir / (filename or f"{_safe_filename(condition)}_{_safe_filename(pair_key)}_DE.xlsx")
@@ -2422,6 +2484,7 @@ def export_contrast_conditional_markers_tables(
                     df2 = df.copy()
                     if "gene" in df2.columns:
                         df2 = _add_gene_type_column(adata, df2, gene_col="gene")
+                    df2 = _drop_redundant_group_cols(df2)
                     df2.to_excel(writer, sheet_name=sheet, index=False)
 
 

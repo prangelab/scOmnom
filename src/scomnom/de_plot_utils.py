@@ -170,7 +170,10 @@ def _filter_protein_coding(
     df2 = io_utils._add_gene_type_column(adata, df, gene_col=gene_col, gene_type_col=gene_type_col)
     if gene_type_col not in df2.columns:
         return df2
-    return df2[df2[gene_type_col] == "protein_coding"].copy()
+    pc = df2[df2[gene_type_col] == "protein_coding"].copy()
+    if "gene_chrom" in pc.columns:
+        pc = pc[pc["gene_chrom"].astype(str) != "MT"].copy()
+    return pc
 
 
 # -----------------------------------------------------------------------------
@@ -389,7 +392,7 @@ def dotplot_top_genes(
     # 1) avoid cutoff of rotated gene labels
     fig.subplots_adjust(
         left=0.25,   # space for long cluster names
-        bottom=0.25  # space for rotated gene labels
+        bottom=0.30  # space for rotated gene labels
     )
 
     # 2) remove gridlines everywhere
@@ -405,7 +408,7 @@ def dotplot_top_genes(
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
 
-    fig.tight_layout(rect=(0.25, 0.25, 1, 1))
+    fig.tight_layout(rect=(0.25, 0.30, 1, 1))
 
     if show:
         plt.show()

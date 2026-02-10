@@ -2189,6 +2189,7 @@ def plot_integration_umaps(
     import matplotlib.pyplot as plt
     import scanpy as sc
     import logging
+    import time
 
     LOGGER = logging.getLogger(__name__)
     base = Path("integration")

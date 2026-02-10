@@ -2179,7 +2179,7 @@ def contrast_conditional_markers(
             if col in combined.columns:
                 combined[col] = pd.to_numeric(combined[col], errors="coerce")
 
-        combined["pass_minpct"] = True
+        pass_minpct = pd.Series(True, index=combined.index)
         if (cl_min_pct > 0.0 or cl_min_diff_pct > 0.0) and ("cl_pts" in combined.columns) and ("cl_pts_rest" in combined.columns):
             if not (combined["cl_pts"].notna().sum() == 0 and combined["cl_pts_rest"].notna().sum() == 0):
                 pass_mask = pd.Series(True, index=combined.index)
@@ -2187,19 +2187,19 @@ def contrast_conditional_markers(
                     pass_mask &= (combined["cl_pts"] >= cl_min_pct) | (combined["cl_pts_rest"] >= cl_min_pct)
                 if cl_min_diff_pct > 0.0:
                     pass_mask &= (combined["cl_pts"] - combined["cl_pts_rest"]).abs() >= cl_min_diff_pct
-                combined["pass_minpct"] = pass_mask.fillna(True)
+                pass_minpct = pass_mask.fillna(True)
 
         combined["hit_wilcoxon"] = False
         if "cl_padj" in combined.columns and "cl_logfc" in combined.columns:
             combined["hit_wilcoxon"] = (
                 (combined["cl_padj"] < float(spec.cl_alpha))
                 & (combined["cl_logfc"].abs() >= float(spec.cl_min_abs_logfc))
-                & (combined["pass_minpct"])
+                & (pass_minpct)
             )
 
         combined["hit_logreg"] = False
         if "lr_coef" in combined.columns:
-            combined["hit_logreg"] = (combined["lr_coef"].abs() >= float(spec.lr_min_abs_coef)) & (combined["pass_minpct"])
+            combined["hit_logreg"] = (combined["lr_coef"].abs() >= float(spec.lr_min_abs_coef)) & (pass_minpct)
 
         combined["hit_pseudobulk"] = False
         if pb_spec is not None and "pb_log2fc" in combined.columns:
@@ -2666,7 +2666,7 @@ def contrast_conditional_markers_multi(
             if col in combined.columns:
                 combined[col] = pd.to_numeric(combined[col], errors="coerce")
 
-        combined["pass_minpct"] = True
+        pass_minpct = pd.Series(True, index=combined.index)
         cl_min_pct = float(getattr(spec, "min_pct", 0.0))
         cl_min_diff_pct = float(getattr(spec, "min_diff_pct", 0.0))
         if (cl_min_pct > 0.0 or cl_min_diff_pct > 0.0) and ("cl_pts" in combined.columns) and ("cl_pts_rest" in combined.columns):
@@ -2676,19 +2676,19 @@ def contrast_conditional_markers_multi(
                     pass_mask &= (combined["cl_pts"] >= cl_min_pct) | (combined["cl_pts_rest"] >= cl_min_pct)
                 if cl_min_diff_pct > 0.0:
                     pass_mask &= (combined["cl_pts"] - combined["cl_pts_rest"]).abs() >= cl_min_diff_pct
-                combined["pass_minpct"] = pass_mask.fillna(True)
+                pass_minpct = pass_mask.fillna(True)
 
         combined["hit_wilcoxon"] = False
         if "cl_padj" in combined.columns and "cl_logfc" in combined.columns:
             combined["hit_wilcoxon"] = (
                 (combined["cl_padj"] < float(spec.cl_alpha))
                 & (combined["cl_logfc"].abs() >= float(spec.cl_min_abs_logfc))
-                & (combined["pass_minpct"])
+                & (pass_minpct)
             )
 
         combined["hit_logreg"] = False
         if "lr_coef" in combined.columns:
-            combined["hit_logreg"] = (combined["lr_coef"].abs() >= float(spec.lr_min_abs_coef)) & (combined["pass_minpct"])
+            combined["hit_logreg"] = (combined["lr_coef"].abs() >= float(spec.lr_min_abs_coef)) & (pass_minpct)
 
         combined["hit_pseudobulk"] = False
         if pb_spec is not None and "pb_log2fc" in combined.columns:
