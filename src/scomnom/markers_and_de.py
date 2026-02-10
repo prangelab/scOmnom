@@ -1260,9 +1260,14 @@ def run_composition(cfg) -> ad.AnnData:
                     axes[0].set_ylabel("Mean proportion")
                     fig.suptitle("Cell Type Composition", fontsize=12)
                     plt.tight_layout()
-                plot_utils.save_multi("composition_stacked_bar", fig_subdir, fig=fig)
-                LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_stacked_bar")
-                plt.close(fig)
+                    plot_utils.save_multi("composition_stacked_bar", fig_subdir, fig=fig)
+                    LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_stacked_bar")
+                    plt.close(fig)
+                else:
+                    LOGGER.warning(
+                        "composition: stacked bar plot skipped (requires at least 2 condition levels, found %d).",
+                        len(cond_levels),
+                    )
 
                 if len(cond_levels) == 2:
                     fig, ax = plt.subplots(figsize=(8, max(4, 0.25 * len(cluster_order))))
@@ -1278,9 +1283,14 @@ def run_composition(cfg) -> ad.AnnData:
                     ax.set_xlabel("Mean proportion")
                     ax.set_title("Cell Type Composition (stacked comparison)")
                     plt.tight_layout()
-                plot_utils.save_multi("composition_stacked_comparison", fig_subdir, fig=fig)
-                LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_stacked_comparison")
-                plt.close(fig)
+                    plot_utils.save_multi("composition_stacked_comparison", fig_subdir, fig=fig)
+                    LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_stacked_comparison")
+                    plt.close(fig)
+                else:
+                    LOGGER.warning(
+                        "composition: stacked comparison plot skipped (requires exactly 2 condition levels, found %d).",
+                        len(cond_levels),
+                    )
 
                 if len(cond_levels) == 2:
                     fig, ax = plt.subplots(figsize=(8, max(4, 0.3 * len(cluster_order))))
@@ -1299,9 +1309,14 @@ def run_composition(cfg) -> ad.AnnData:
                     ax.set_xlabel("Mean proportion")
                     ax.set_title("Cell Type Composition Flow")
                     plt.tight_layout()
-                plot_utils.save_multi("composition_flow", fig_subdir, fig=fig)
-                LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_flow")
-                plt.close(fig)
+                    plot_utils.save_multi("composition_flow", fig_subdir, fig=fig)
+                    LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_flow")
+                    plt.close(fig)
+                else:
+                    LOGGER.warning(
+                        "composition: flow plot skipped (requires exactly 2 condition levels, found %d).",
+                        len(cond_levels),
+                    )
 
                 if len(cond_levels) == 2:
                     fig, ax = plt.subplots(figsize=(8, max(4, 0.35 * len(cluster_order))))
@@ -1320,14 +1335,14 @@ def run_composition(cfg) -> ad.AnnData:
                     ax.set_xlabel("Mean proportion")
                     ax.set_title("Cell Type Composition Alluvial")
                     plt.tight_layout()
-                plot_utils.save_multi("composition_alluvial", fig_subdir, fig=fig)
-                LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_alluvial")
-                plt.close(fig)
-            else:
-                LOGGER.warning(
-                    "composition: alluvial plot skipped (requires exactly 2 condition levels, found %d).",
-                    len(cond_levels),
-                )
+                    plot_utils.save_multi("composition_alluvial", fig_subdir, fig=fig)
+                    LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_alluvial")
+                    plt.close(fig)
+                else:
+                    LOGGER.warning(
+                        "composition: alluvial plot skipped (requires exactly 2 condition levels, found %d).",
+                        len(cond_levels),
+                    )
             except Exception as e:
                 LOGGER.debug("composition: failed to plot composition stacks (%r)", e)
 
