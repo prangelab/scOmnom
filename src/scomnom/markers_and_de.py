@@ -956,6 +956,7 @@ def run_composition(cfg) -> ad.AnnData:
                 ax.set_ylabel("Count")
                 ax.set_title("GraphDA neighborhood sizes")
                 plot_utils.save_multi("graphda_neighborhood_sizes", fig_subdir, fig=fig)
+                LOGGER.info("Saved plot: %s/%s", fig_subdir, "graphda_neighborhood_sizes")
                 plt.close(fig)
                 if "effect" in results_by_method.get("graph", pd.DataFrame()).columns:
                     gdf = results_by_method["graph"].copy()
@@ -982,6 +983,7 @@ def run_composition(cfg) -> ad.AnnData:
                     ax.set_title("GraphDA top neighborhoods")
                     ax.tick_params(axis="x", labelrotation=45)
                     plot_utils.save_multi("graphda_top_neighborhoods", fig_subdir, fig=fig)
+                    LOGGER.info("Saved plot: %s/%s", fig_subdir, "graphda_top_neighborhoods")
                     plt.close(fig)
 
                     labels = gdf["cluster_label"].astype(str)
@@ -1015,6 +1017,7 @@ def run_composition(cfg) -> ad.AnnData:
                     ax.set_ylabel("Cluster")
                     ax.set_title("GraphDA effects by cluster")
                     plot_utils.save_multi("graphda_effects_by_cluster", fig_subdir, fig=fig)
+                    LOGGER.info("Saved plot: %s/%s", fig_subdir, "graphda_effects_by_cluster")
                     plt.close(fig)
             except Exception as e:
                 LOGGER.warning("composition: failed to plot GraphDA summary: %s", e)
@@ -1062,6 +1065,7 @@ def run_composition(cfg) -> ad.AnnData:
                         ax.set_ylabel(f"-log10({y_source})" if y_source else "-log10(pval)")
                         ax.set_title(f"{method.upper()} volcano")
                         plot_utils.save_multi(f"{method}_volcano", fig_subdir, fig=fig)
+                        LOGGER.info("Saved plot: %s/%s", fig_subdir, f"{method}_volcano")
                         plt.close(fig)
 
                     if method == "sccoda":
@@ -1110,6 +1114,7 @@ def run_composition(cfg) -> ad.AnnData:
                         ax.set_title("scCODA effects (top)")
                         plt.tight_layout()
                         plot_utils.save_multi("sccoda_effects_top", fig_subdir, fig=fig)
+                        LOGGER.info("Saved plot: %s/%s", fig_subdir, "sccoda_effects_top")
                         plt.close(fig)
                 except Exception as e:
                     LOGGER.debug("composition: method plot failed for %s (%r)", method, e)
@@ -1179,6 +1184,7 @@ def run_composition(cfg) -> ad.AnnData:
                     ax.set_title("Composition effects (global)")
                     ax.tick_params(axis="x", labelrotation=45)
                     plot_utils.save_multi("composition_effects_global", fig_subdir, fig=fig)
+                    LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_effects_global")
                     plt.close(fig)
             except Exception as e:
                 LOGGER.debug("composition: failed to generate plots (%r)", e)
@@ -1231,6 +1237,7 @@ def run_composition(cfg) -> ad.AnnData:
                 ax.set_title("Cell Type Composition (100% stacked)")
                 plt.tight_layout()
                 plot_utils.save_multi("composition_stacked_bar_100", fig_subdir, fig=fig)
+                LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_stacked_bar_100")
                 plt.close(fig)
                 if len(cond_levels) >= 2:
                     fig, axes = plt.subplots(1, len(cond_levels), figsize=(4 * len(cond_levels), 4), sharey=True)
@@ -1253,8 +1260,9 @@ def run_composition(cfg) -> ad.AnnData:
                     axes[0].set_ylabel("Mean proportion")
                     fig.suptitle("Cell Type Composition", fontsize=12)
                     plt.tight_layout()
-                    plot_utils.save_multi("composition_stacked_bar", fig_subdir, fig=fig)
-                    plt.close(fig)
+                plot_utils.save_multi("composition_stacked_bar", fig_subdir, fig=fig)
+                LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_stacked_bar")
+                plt.close(fig)
 
                 if len(cond_levels) == 2:
                     fig, ax = plt.subplots(figsize=(8, max(4, 0.25 * len(cluster_order))))
@@ -1270,8 +1278,9 @@ def run_composition(cfg) -> ad.AnnData:
                     ax.set_xlabel("Mean proportion")
                     ax.set_title("Cell Type Composition (stacked comparison)")
                     plt.tight_layout()
-                    plot_utils.save_multi("composition_stacked_comparison", fig_subdir, fig=fig)
-                    plt.close(fig)
+                plot_utils.save_multi("composition_stacked_comparison", fig_subdir, fig=fig)
+                LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_stacked_comparison")
+                plt.close(fig)
 
                 if len(cond_levels) == 2:
                     fig, ax = plt.subplots(figsize=(8, max(4, 0.3 * len(cluster_order))))
@@ -1290,8 +1299,9 @@ def run_composition(cfg) -> ad.AnnData:
                     ax.set_xlabel("Mean proportion")
                     ax.set_title("Cell Type Composition Flow")
                     plt.tight_layout()
-                    plot_utils.save_multi("composition_flow", fig_subdir, fig=fig)
-                    plt.close(fig)
+                plot_utils.save_multi("composition_flow", fig_subdir, fig=fig)
+                LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_flow")
+                plt.close(fig)
 
                 if len(cond_levels) == 2:
                     fig, ax = plt.subplots(figsize=(8, max(4, 0.35 * len(cluster_order))))
@@ -1310,8 +1320,9 @@ def run_composition(cfg) -> ad.AnnData:
                     ax.set_xlabel("Mean proportion")
                     ax.set_title("Cell Type Composition Alluvial")
                     plt.tight_layout()
-                    plot_utils.save_multi("composition_alluvial", fig_subdir, fig=fig)
-                    plt.close(fig)
+                plot_utils.save_multi("composition_alluvial", fig_subdir, fig=fig)
+                LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_alluvial")
+                plt.close(fig)
                 else:
                     LOGGER.warning(
                         "composition: alluvial plot skipped (requires exactly 2 condition levels, found %d).",

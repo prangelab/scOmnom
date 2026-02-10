@@ -251,6 +251,8 @@ def _run_scanvi_from_scvi(
     scvi_model,
     adata: ad.AnnData,
     label_key: str,
+    *,
+    layer: str | None = None,
 ) -> np.ndarray:
     """Run scANVI using an existing, already-trained SCVI model."""
     from scvi.model import SCANVI
@@ -260,12 +262,54 @@ def _run_scanvi_from_scvi(
     accelerator, devices = _select_device()
     max_epochs = _auto_scanvi_epochs(adata.n_obs)
 
+    label_counts = adata.obs[label_key].astype(str).value_counts(dropna=False)
+    n_unknown = int(label_counts.get("Unknown", 0))
+    n_labels = int(label_counts.size)
+    top_labels = ", ".join(
+        f"{k}:{v}" for k, v in label_counts.head(10).items()
+    )
     LOGGER.info(
-        "Running scANVI (reuse SCVI, n_cells=%d, max_epochs=%d, labels_key=%r)",
+        "Running scANVI (reuse SCVI, n_cells=%d, max_epochs=%d, labels_key=%r, unknown=%d/%d)",
         adata.n_obs,
         max_epochs,
         label_key,
+        n_unknown,
+        adata.n_obs,
     )
+    LOGGER.info(
+        "scANVI label summary: n_labels=%d, top10=%s",
+        n_labels,
+        top_labels,
+    )
+
+    layer_to_check = layer or "X"
+    X = adata.layers.get(layer_to_check, None) if layer_to_check != "X" else adata.X
+    if X is None:
+        raise RuntimeError(f"scANVI input layer missing: {layer_to_check!r}")
+
+    if sp.issparse(X):
+        data = X.data
+        has_nonfinite = bool(np.any(~np.isfinite(data)))
+        has_negative = bool(np.any(data < 0))
+        min_val = float(np.min(data)) if data.size else 0.0
+        max_val = float(np.max(data)) if data.size else 0.0
+    else:
+        has_nonfinite = bool(np.any(~np.isfinite(X)))
+        has_negative = bool(np.any(X < 0))
+        min_val = float(np.min(X))
+        max_val = float(np.max(X))
+
+    LOGGER.info(
+        "scANVI input check: layer=%r, sparse=%s, min=%.4g, max=%.4g, negative=%s, nonfinite=%s",
+        layer_to_check,
+        sp.issparse(X),
+        min_val,
+        max_val,
+        has_negative,
+        has_nonfinite,
+    )
+    if has_nonfinite:
+        raise RuntimeError(f"scANVI input contains non-finite values in layer {layer_to_check!r}")
 
     lvae = SCANVI.from_scvi_model(
         scvi_model,
@@ -734,7 +778,12 @@ def _run_integrations(
                 else:
                     labels_key_for_scanvi = str(getattr(cfg, "scanvi_labels_key", "leiden"))
 
-                Zs = _run_scanvi_from_scvi(scvi_model, adata_hvg, labels_key_for_scanvi)
+                Zs = _run_scanvi_from_scvi(
+                    scvi_model,
+                    adata_hvg,
+                    labels_key_for_scanvi,
+                    layer=layer,
+                )
                 _write_embedding_from_hvg("scANVI", np.asarray(Zs), adata_hvg.obs_names)
                 created.append("scANVI")
 
