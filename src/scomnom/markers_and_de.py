@@ -977,9 +977,19 @@ def run_composition(cfg) -> ad.AnnData:
                     top = gdf.head(25)
                     fig, ax = plt.subplots(figsize=(8, 4))
                     color_map = plot_utils._cluster_color_map(adata, cluster_key)
-                    labels = top["cluster_label"].astype(str) if "cluster_label" in top.columns else top["cluster"].astype(str)
+                    if "cluster_label" in top.columns:
+                        labels = top["cluster_label"].astype(str)
+                    elif "cluster" in top.columns:
+                        labels = top["cluster"].astype(str)
+                    else:
+                        labels = top.index.astype(str)
+                    labels = pd.Index(labels).astype(str)
                     colors = [color_map.get(lbl, "#7a7a7a") for lbl in labels]
-                    ax.bar(top["cluster"].astype(str), pd.to_numeric(top["effect"], errors="coerce"), color=colors)
+                    x = np.arange(len(labels))
+                    y = pd.to_numeric(top["effect"], errors="coerce").to_numpy()
+                    ax.bar(x, y, color=colors)
+                    ax.set_xticks(x)
+                    ax.set_xticklabels(labels, rotation=45, ha="right")
                     ax.set_ylabel("Effect")
                     ax.set_title("GraphDA top neighborhoods")
                     ax.tick_params(axis="x", labelrotation=45)
@@ -1020,8 +1030,8 @@ def run_composition(cfg) -> ad.AnnData:
                     plot_utils.save_multi("graphda_effects_by_cluster", fig_subdir, fig=fig)
                     LOGGER.info("Saved plot: %s/%s", fig_subdir, "graphda_effects_by_cluster")
                     plt.close(fig)
-            except Exception as e:
-                LOGGER.warning("composition: failed to plot GraphDA summary (%s: %r)", type(e).__name__, e)
+            except Exception:
+                LOGGER.exception("composition: failed to plot GraphDA summary")
 
         if bool(getattr(cfg, "make_figures", True)):
             import matplotlib.pyplot as plt
@@ -1099,7 +1109,10 @@ def run_composition(cfg) -> ad.AnnData:
                             ci_low = None
                             ci_high = None
 
-                        labels = top["cluster"].astype(str) if "cluster" in top.columns else top.index.astype(str)
+                        if "cluster" in top.columns:
+                            labels = top["cluster"].astype(str)
+                        else:
+                            labels = top.index.astype(str)
                         order = pd.Index(labels)
                         y_pos = np.arange(len(order))
                         color_map = plot_utils._cluster_color_map(adata, cluster_key)
@@ -1118,8 +1131,8 @@ def run_composition(cfg) -> ad.AnnData:
                         plot_utils.save_multi("sccoda_effects_top", fig_subdir, fig=fig)
                         LOGGER.info("Saved plot: %s/%s", fig_subdir, "sccoda_effects_top")
                         plt.close(fig)
-                except Exception as e:
-                    LOGGER.warning("composition: method plot failed for %s (%s: %r)", method, type(e).__name__, e)
+                except Exception:
+                    LOGGER.exception("composition: method plot failed for %s", method)
 
         _write_settings(
             results_dir,
@@ -1155,16 +1168,19 @@ def run_composition(cfg) -> ad.AnnData:
                     color_map = plot_utils._cluster_color_map(adata, cluster_key)
                     if "effect" in global_df.columns:
                         vals = pd.to_numeric(global_df["effect"], errors="coerce")
-                        labels = (
-                            global_df["cluster"].astype(str)
-                            if "cluster" in global_df.columns
-                            else global_df.index.astype(str)
-                        )
+                        if "cluster" in global_df.columns:
+                            labels = global_df["cluster"].astype(str)
+                        else:
+                            labels = global_df.index.astype(str)
                         if vals.isna().all():
                             plt.close(fig)
                             continue
+                        labels = pd.Index(labels).astype(str)
                         colors = [color_map.get(lbl, "#7a7a7a") for lbl in labels]
-                        ax.bar(labels, vals, color=colors)
+                        x = np.arange(len(labels))
+                        ax.bar(x, vals.to_numpy(), color=colors)
+                        ax.set_xticks(x)
+                        ax.set_xticklabels(labels, rotation=45, ha="right")
                         ax.set_ylabel("Effect")
                     elif primary_method == "sccoda" and "Final Parameter" in global_df.columns:
                         vals = pd.to_numeric(global_df["Final Parameter"], errors="coerce")
@@ -1172,8 +1188,12 @@ def run_composition(cfg) -> ad.AnnData:
                         if vals.isna().all():
                             plt.close(fig)
                             continue
+                        labels = pd.Index(labels).astype(str)
                         colors = [color_map.get(lbl, "#7a7a7a") for lbl in labels]
-                        ax.bar(labels, vals, color=colors)
+                        x = np.arange(len(labels))
+                        ax.bar(x, vals.to_numpy(), color=colors)
+                        ax.set_xticks(x)
+                        ax.set_xticklabels(labels, rotation=45, ha="right")
                         ax.set_ylabel("Effect")
                     elif primary_method == "glm" and "coef" in global_df.columns:
                         vals = global_df.groupby("cluster")["coef"].mean()
@@ -1181,16 +1201,20 @@ def run_composition(cfg) -> ad.AnnData:
                         if vals.isna().all():
                             plt.close(fig)
                             continue
+                        labels = pd.Index(labels).astype(str)
                         colors = [color_map.get(lbl, "#7a7a7a") for lbl in labels]
-                        ax.bar(labels, vals.values, color=colors)
+                        x = np.arange(len(labels))
+                        ax.bar(x, vals.values, color=colors)
+                        ax.set_xticks(x)
+                        ax.set_xticklabels(labels, rotation=45, ha="right")
                         ax.set_ylabel("Effect")
                     ax.set_title("Composition effects (global)")
                     ax.tick_params(axis="x", labelrotation=45)
                     plot_utils.save_multi("composition_effects_global", fig_subdir, fig=fig)
                     LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_effects_global")
                     plt.close(fig)
-            except Exception as e:
-                LOGGER.warning("composition: failed to generate plots (%s: %r)", type(e).__name__, e)
+            except Exception:
+                LOGGER.exception("composition: failed to generate plots")
 
         if bool(getattr(cfg, "make_figures", True)):
             try:
@@ -1204,7 +1228,9 @@ def run_composition(cfg) -> ad.AnnData:
                 if props.empty:
                     LOGGER.warning("composition: no proportions available for plotting")
                     continue
-                cluster_order = props.mean(axis=0).sort_values(ascending=False).index.tolist()
+                props_plot = props.copy()
+                props_plot.columns = props_plot.columns.astype(str)
+                cluster_order = props_plot.mean(axis=0).sort_values(ascending=False).index.tolist()
                 color_map = plot_utils._cluster_color_map(adata, cluster_key)
                 if not color_map:
                     colors = [
@@ -1225,7 +1251,7 @@ def run_composition(cfg) -> ad.AnnData:
                     if mask.sum() == 0:
                         mean_props = pd.Series(0.0, index=cluster_order)
                     else:
-                        mean_props = props.loc[mask].mean(axis=0).reindex(cluster_order)
+                        mean_props = props_plot.loc[mask].mean(axis=0).reindex(cluster_order)
                     bottom = 0.0
                     for idx, cl in enumerate(cluster_order):
                         val = mean_props[cl]
@@ -1252,7 +1278,7 @@ def run_composition(cfg) -> ad.AnnData:
                         if mask.sum() == 0:
                             mean_props = pd.Series(0.0, index=cluster_order)
                         else:
-                            mean_props = props.loc[mask].mean(axis=0).reindex(cluster_order)
+                            mean_props = props_plot.loc[mask].mean(axis=0).reindex(cluster_order)
                         bottom = 0.0
                         for idx, cl in enumerate(cluster_order):
                             val = mean_props[cl]
@@ -1275,8 +1301,8 @@ def run_composition(cfg) -> ad.AnnData:
 
                 if len(cond_levels) == 2:
                     fig, ax = plt.subplots(figsize=(8, max(4, 0.25 * len(cluster_order))))
-                    left = props.loc[metadata[str(condition_key)].astype(str) == cond_levels[0]].mean()
-                    right = props.loc[metadata[str(condition_key)].astype(str) == cond_levels[1]].mean()
+                    left = props_plot.loc[metadata[str(condition_key)].astype(str) == cond_levels[0]].mean()
+                    right = props_plot.loc[metadata[str(condition_key)].astype(str) == cond_levels[1]].mean()
                     left = left.reindex(cluster_order)
                     right = right.reindex(cluster_order)
                     y = np.arange(len(cluster_order))
@@ -1298,8 +1324,8 @@ def run_composition(cfg) -> ad.AnnData:
 
                 if len(cond_levels) == 2:
                     fig, ax = plt.subplots(figsize=(8, max(4, 0.3 * len(cluster_order))))
-                    left = props.loc[metadata[str(condition_key)].astype(str) == cond_levels[0]].mean()
-                    right = props.loc[metadata[str(condition_key)].astype(str) == cond_levels[1]].mean()
+                    left = props_plot.loc[metadata[str(condition_key)].astype(str) == cond_levels[0]].mean()
+                    right = props_plot.loc[metadata[str(condition_key)].astype(str) == cond_levels[1]].mean()
                     left = left.reindex(cluster_order)
                     right = right.reindex(cluster_order)
                     y = np.arange(len(cluster_order))
@@ -1324,8 +1350,8 @@ def run_composition(cfg) -> ad.AnnData:
 
                 if len(cond_levels) == 2:
                     fig, ax = plt.subplots(figsize=(8, max(4, 0.35 * len(cluster_order))))
-                    left = props.loc[metadata[str(condition_key)].astype(str) == cond_levels[0]].mean()
-                    right = props.loc[metadata[str(condition_key)].astype(str) == cond_levels[1]].mean()
+                    left = props_plot.loc[metadata[str(condition_key)].astype(str) == cond_levels[0]].mean()
+                    right = props_plot.loc[metadata[str(condition_key)].astype(str) == cond_levels[1]].mean()
                     left = left.reindex(cluster_order)
                     right = right.reindex(cluster_order)
                     y = np.arange(len(cluster_order))
@@ -1347,8 +1373,8 @@ def run_composition(cfg) -> ad.AnnData:
                         "composition: alluvial plot skipped (requires exactly 2 condition levels, found %d).",
                         len(cond_levels),
                     )
-            except Exception as e:
-                LOGGER.warning("composition: failed to plot composition stacks (%s: %r)", type(e).__name__, e)
+            except Exception:
+                LOGGER.exception("composition: failed to plot composition stacks")
 
     out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.da")) + ".zarr")
     LOGGER.info("Saving dataset → %s", out_zarr)
