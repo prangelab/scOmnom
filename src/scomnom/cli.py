@@ -423,6 +423,11 @@ def integrate(
         "--benchmark-random-state",
         help="[scIB] RNG seed for stratified benchmarking subsample.",
     ),
+    multi_gpu: bool = typer.Option(
+        False,
+        "--multi-gpu/--single-gpu",
+        help="[scVI/scANVI] Use all available CUDA devices via DDP.",
+    ),
     # ------------------------------------------------------------------
     # scANVI supervision (NEW)
     # ------------------------------------------------------------------
@@ -574,6 +579,7 @@ def integrate(
         benchmark_threshold=benchmark_threshold,
         benchmark_n_cells=benchmark_n_cells,
         benchmark_random_state=benchmark_random_state,
+        multi_gpu=multi_gpu,
         # scANVI supervision
         scanvi_label_source=str(scanvi_label_source).lower(),
         scanvi_labels_key=scanvi_labels_key,

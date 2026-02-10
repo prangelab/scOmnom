@@ -149,12 +149,17 @@ def _ensure_label_key(adata: ad.AnnData, label_key: str) -> None:
         )
 
 
-def _select_device():
+def _select_device(*, use_multi_gpu: bool = False):
     if torch.cuda.is_available():
-        return "gpu", "auto"
+        if use_multi_gpu:
+            n_gpus = int(torch.cuda.device_count())
+            if n_gpus > 1:
+                return "gpu", n_gpus, "ddp"
+            LOGGER.warning("multi-gpu requested but only one CUDA device is available.")
+        return "gpu", "auto", None
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-        return "mps", 1
-    return "cpu", "auto"
+        return "mps", 1, None
+    return "cpu", "auto", None
 
 
 def _is_oom_error(e: Exception) -> bool:
@@ -193,11 +198,12 @@ def _train_scvi(
     batch_key: Optional[str],
     layer: Optional[str],
     purpose: str,
+    use_multi_gpu: bool = False,
 ):
     """Train an SCVI model with auto batch-size + auto epochs."""
     from scvi.model import SCVI
 
-    accelerator, devices = _select_device()
+    accelerator, devices, strategy = _select_device(use_multi_gpu=use_multi_gpu)
     epochs = _auto_scvi_epochs(adata.n_obs)
 
     batch_ladder = [1024, 512, 256, 128, 64, 32]
@@ -221,13 +227,16 @@ def _train_scvi(
                 )
 
             model = SCVI(adata)
-            model.train(
-                max_epochs=epochs,
-                accelerator=accelerator,
-                devices=devices,
-                batch_size=bsz,
-                enable_progress_bar=True,
-            )
+            train_kwargs = {
+                "max_epochs": epochs,
+                "accelerator": accelerator,
+                "devices": devices,
+                "batch_size": bsz,
+                "enable_progress_bar": True,
+            }
+            if strategy:
+                train_kwargs["strategy"] = strategy
+            model.train(**train_kwargs)
 
             LOGGER.info("SCVI trained successfully (batch_size=%d)", bsz)
             return model
@@ -254,13 +263,14 @@ def _run_scanvi_from_scvi(
     label_key: str,
     *,
     layer: str | None = None,
+    use_multi_gpu: bool = False,
 ) -> np.ndarray:
     """Run scANVI using an existing, already-trained SCVI model."""
     from scvi.model import SCANVI
 
     _ensure_label_key(adata, label_key)
 
-    accelerator, devices = _select_device()
+    accelerator, devices, strategy = _select_device(use_multi_gpu=use_multi_gpu)
     max_epochs = _auto_scanvi_epochs(adata.n_obs)
 
     label_counts = adata.obs[label_key].astype(str).value_counts(dropna=False)
@@ -319,14 +329,17 @@ def _run_scanvi_from_scvi(
         unlabeled_category="Unknown",
     )
 
-    lvae.train(
-        max_epochs=max_epochs,
-        n_samples_per_label=100,
-        early_stopping=True,
-        enable_progress_bar=False,
-        accelerator=accelerator,
-        devices=devices,
-    )
+    train_kwargs = {
+        "max_epochs": max_epochs,
+        "n_samples_per_label": 100,
+        "early_stopping": True,
+        "enable_progress_bar": False,
+        "accelerator": accelerator,
+        "devices": devices,
+    }
+    if strategy:
+        train_kwargs["strategy"] = strategy
+    lvae.train(**train_kwargs)
 
     return np.asarray(lvae.get_latent_representation())
 
@@ -748,6 +761,7 @@ def _run_integrations(
                 batch_key=batch_key,
                 layer=layer,
                 purpose="integration",
+                use_multi_gpu=bool(getattr(cfg, "multi_gpu", False)),
             )
 
             # Always compute latent once (needed for BISC labels)
@@ -784,6 +798,7 @@ def _run_integrations(
                     adata_hvg,
                     labels_key_for_scanvi,
                     layer=layer,
+                    use_multi_gpu=bool(getattr(cfg, "multi_gpu", False)),
                 )
                 _write_embedding_from_hvg("scANVI", np.asarray(Zs), adata_hvg.obs_names)
                 created.append("scANVI")
@@ -922,9 +937,15 @@ def _run_annotated_scanvi_secondary_integration(
         batch_key=batch_key,
         layer=layer,
         purpose="annotated_secondary_integration",
+        use_multi_gpu=bool(getattr(cfg, "multi_gpu", False)),
     )
 
-    Z_scanvi = _run_scanvi_from_scvi(scvi_model, adata_hvg, labels_for_scanvi_key)
+    Z_scanvi = _run_scanvi_from_scvi(
+        scvi_model,
+        adata_hvg,
+        labels_for_scanvi_key,
+        use_multi_gpu=bool(getattr(cfg, "multi_gpu", False)),
+    )
 
     # write embedding to full adata
     def _write_embedding_from_hvg(full_key: str, Z_hvg: np.ndarray, obs_names_hvg) -> None:

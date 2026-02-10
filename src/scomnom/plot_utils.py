@@ -36,6 +36,13 @@ def _cluster_color_map(adata, label_key: str) -> dict[str, str]:
     palette = adata.uns.get(f"{label_key}_colors", None)
     if not palette:
         return {}
+    if isinstance(palette, dict):
+        return {str(k): str(v) for k, v in palette.items()}
+    if hasattr(palette, "to_dict"):
+        try:
+            return {str(k): str(v) for k, v in palette.to_dict().items()}
+        except Exception:
+            pass
     try:
         cats = list(adata.obs[label_key].cat.categories)
     except Exception:

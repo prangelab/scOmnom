@@ -139,6 +139,7 @@ class IntegrateConfig(BaseModel):
     # ------------------------------------------------------------------
     scanvi_label_source: Literal["leiden", "bisc"] = "bisc"
     scanvi_labels_key: str = "leiden"  # only used when scanvi_label_source == "leiden"
+    multi_gpu: bool = False
 
     # ------------------------------------------------------------------
     # Annotated secondary integration (SECOND PASS; explicit + guarded)
