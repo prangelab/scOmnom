@@ -819,7 +819,7 @@ def run_composition(cfg) -> ad.AnnData:
 
     n_iterations = int(getattr(cfg, "composition_n_iterations", 10000) or 10000)
     n_warmup = int(getattr(cfg, "composition_n_warmup", max(1000, n_iterations // 10)) or max(1000, n_iterations // 10))
-    run_round = plot_utils.get_run_round_tag("composition")
+    run_round = plot_utils.get_run_round_tag("DA")
 
     for condition_key in condition_keys:
         counts, metadata = prepare_counts_and_metadata(
@@ -937,9 +937,9 @@ def run_composition(cfg) -> ad.AnnData:
         }
 
         cond_tag = _safe_combo_token(str(condition_key))
-        results_dir = output_dir / "tables" / f"composition_tables_{run_round}" / cond_tag
+        results_dir = output_dir / "tables" / f"DA_tables_{run_round}" / cond_tag
         results_dir.mkdir(parents=True, exist_ok=True)
-        fig_subdir = Path("composition") / cond_tag
+        fig_subdir = Path("DA") / cond_tag
 
         for method, df in results_by_method.items():
             if isinstance(df, pd.DataFrame):
