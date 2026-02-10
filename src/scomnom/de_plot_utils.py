@@ -1609,16 +1609,16 @@ def plot_contrast_conditional_markers(
                 df_volc = pd.DataFrame(
                     {
                         "gene": wilcoxon_df.get("gene"),
-                        "log2FoldChange": wilcoxon_df.get("cl_logfc"),
-                        "padj": wilcoxon_df.get("cl_padj"),
+                        "log2FoldChange": wilcoxon_df.get("cell_wilcoxon_logfc"),
+                        "padj": wilcoxon_df.get("cell_wilcoxon_padj"),
                     }
                 )
             elif isinstance(combined_df, pd.DataFrame) and not combined_df.empty:
                 df_volc = pd.DataFrame(
                     {
                         "gene": combined_df.get("gene"),
-                        "log2FoldChange": combined_df.get("cl_logfc"),
-                        "padj": combined_df.get("cl_padj"),
+                        "log2FoldChange": combined_df.get("cell_wilcoxon_logfc"),
+                        "padj": combined_df.get("cell_wilcoxon_padj"),
                     }
                 )
 

@@ -2087,12 +2087,12 @@ def contrast_conditional_markers(
             wilcoxon_df = d.rename(
                 columns={
                     "names": "gene",
-                    "logfoldchanges": "cl_logfc",
-                    "scores": "cl_score",
-                    "pvals": "cl_pval",
-                    "pvals_adj": "cl_padj",
-                    "pts": "cl_pts",
-                    "pts_rest": "cl_pts_rest",
+                    "logfoldchanges": "cell_wilcoxon_logfc",
+                    "scores": "cell_wilcoxon_score",
+                    "pvals": "cell_wilcoxon_pval",
+                    "pvals_adj": "cell_wilcoxon_padj",
+                    "pts": "cell_wilcoxon_pts",
+                    "pts_rest": "cell_wilcoxon_pts_rest",
                 }
             )
             if "gene" in wilcoxon_df.columns:
@@ -2101,8 +2101,8 @@ def contrast_conditional_markers(
             if pct_A is not None and "gene" in wilcoxon_df.columns:
                 idx = adata_sub.var_names.get_indexer(wilcoxon_df["gene"].astype(str))
                 ok = idx >= 0
-                wilcoxon_df.loc[ok, "cl_pts"] = pct_A[idx[ok]]
-                wilcoxon_df.loc[ok, "cl_pts_rest"] = pct_B[idx[ok]]
+                wilcoxon_df.loc[ok, "cell_wilcoxon_pts"] = pct_A[idx[ok]]
+                wilcoxon_df.loc[ok, "cell_wilcoxon_pts_rest"] = pct_B[idx[ok]]
 
         logreg_df = pd.DataFrame()
         if "logreg" in spec.methods:
@@ -2123,19 +2123,22 @@ def contrast_conditional_markers(
 
             d = d.rename(columns={"names": "gene"})
             if "logfoldchanges" in d.columns:
-                d = d.rename(columns={"logfoldchanges": "lr_coef"})
+                d = d.rename(columns={"logfoldchanges": "cell_logreg_coef"})
             if "scores" in d.columns:
-                d = d.rename(columns={"scores": "lr_score"})
+                d = d.rename(columns={"scores": "cell_logreg_score"})
 
             rename_prev = {}
             if "pts" in d.columns:
-                rename_prev["pts"] = "cl_pts"
+                rename_prev["pts"] = "cell_wilcoxon_pts"
             if "pts_rest" in d.columns:
-                rename_prev["pts_rest"] = "cl_pts_rest"
+                rename_prev["pts_rest"] = "cell_wilcoxon_pts_rest"
             if rename_prev:
                 d = d.rename(columns=rename_prev)
 
-            cols = ["gene"] + [c for c in ["lr_coef", "lr_score", "cl_pts", "cl_pts_rest"] if c in d.columns]
+            cols = ["gene"] + [
+                c for c in ["cell_logreg_coef", "cell_logreg_score", "cell_wilcoxon_pts", "cell_wilcoxon_pts_rest"]
+                if c in d.columns
+            ]
             logreg_df = d[cols].copy()
             if "gene" in logreg_df.columns:
                 logreg_df["gene"] = logreg_df["gene"].astype(str)
@@ -2143,8 +2146,8 @@ def contrast_conditional_markers(
             if pct_A is not None and "gene" in logreg_df.columns:
                 idx = adata_sub.var_names.get_indexer(logreg_df["gene"].astype(str))
                 ok = idx >= 0
-                logreg_df.loc[ok, "cl_pts"] = pct_A[idx[ok]]
-                logreg_df.loc[ok, "cl_pts_rest"] = pct_B[idx[ok]]
+                logreg_df.loc[ok, "cell_wilcoxon_pts"] = pct_A[idx[ok]]
+                logreg_df.loc[ok, "cell_wilcoxon_pts_rest"] = pct_B[idx[ok]]
 
         if pb_df is not None and not pb_df.empty:
             combined = pb_df.copy()
@@ -2157,11 +2160,11 @@ def contrast_conditional_markers(
         if logreg_df is not None and not logreg_df.empty:
             combined = combined.merge(logreg_df, on="gene", how="outer", suffixes=("", "_lr"))
 
-            if "cl_pts_lr" in combined.columns and "cl_pts" not in combined.columns:
-                combined = combined.rename(columns={"cl_pts_lr": "cl_pts"})
-            if "cl_pts_rest_lr" in combined.columns and "cl_pts_rest" not in combined.columns:
-                combined = combined.rename(columns={"cl_pts_rest_lr": "cl_pts_rest"})
-            for c in ["cl_pts_lr", "cl_pts_rest_lr"]:
+            if "cell_wilcoxon_pts_lr" in combined.columns and "cell_wilcoxon_pts" not in combined.columns:
+                combined = combined.rename(columns={"cell_wilcoxon_pts_lr": "cell_wilcoxon_pts"})
+            if "cell_wilcoxon_pts_rest_lr" in combined.columns and "cell_wilcoxon_pts_rest" not in combined.columns:
+                combined = combined.rename(columns={"cell_wilcoxon_pts_rest_lr": "cell_wilcoxon_pts_rest"})
+            for c in ["cell_wilcoxon_pts_lr", "cell_wilcoxon_pts_rest_lr"]:
                 if c in combined.columns:
                     combined = combined.drop(columns=[c])
 
@@ -2175,40 +2178,47 @@ def contrast_conditional_markers(
         combined.insert(7, "n_cells_A_used", int(ds_meta["n_cells_A_used"]))
         combined.insert(8, "n_cells_B_used", int(ds_meta["n_cells_B_used"]))
 
-        for col in ["cl_logfc", "cl_padj", "lr_coef", "pb_log2fc", "cl_pts", "cl_pts_rest"]:
+        for col in [
+            "cell_wilcoxon_logfc",
+            "cell_wilcoxon_padj",
+            "cell_logreg_coef",
+            "pb_log2fc",
+            "cell_wilcoxon_pts",
+            "cell_wilcoxon_pts_rest",
+        ]:
             if col in combined.columns:
                 combined[col] = pd.to_numeric(combined[col], errors="coerce")
 
         pass_minpct = pd.Series(True, index=combined.index)
-        if (cl_min_pct > 0.0 or cl_min_diff_pct > 0.0) and ("cl_pts" in combined.columns) and ("cl_pts_rest" in combined.columns):
-            if not (combined["cl_pts"].notna().sum() == 0 and combined["cl_pts_rest"].notna().sum() == 0):
+        if (cl_min_pct > 0.0 or cl_min_diff_pct > 0.0) and ("cell_wilcoxon_pts" in combined.columns) and ("cell_wilcoxon_pts_rest" in combined.columns):
+            if not (combined["cell_wilcoxon_pts"].notna().sum() == 0 and combined["cell_wilcoxon_pts_rest"].notna().sum() == 0):
                 pass_mask = pd.Series(True, index=combined.index)
                 if cl_min_pct > 0.0:
-                    pass_mask &= (combined["cl_pts"] >= cl_min_pct) | (combined["cl_pts_rest"] >= cl_min_pct)
+                    pass_mask &= (combined["cell_wilcoxon_pts"] >= cl_min_pct) | (combined["cell_wilcoxon_pts_rest"] >= cl_min_pct)
                 if cl_min_diff_pct > 0.0:
-                    pass_mask &= (combined["cl_pts"] - combined["cl_pts_rest"]).abs() >= cl_min_diff_pct
+                    pass_mask &= (combined["cell_wilcoxon_pts"] - combined["cell_wilcoxon_pts_rest"]).abs() >= cl_min_diff_pct
                 pass_minpct = pass_mask.fillna(True)
 
         combined["hit_wilcoxon"] = False
-        if "cl_padj" in combined.columns and "cl_logfc" in combined.columns:
+        if "cell_wilcoxon_padj" in combined.columns and "cell_wilcoxon_logfc" in combined.columns:
             combined["hit_wilcoxon"] = (
-                (combined["cl_padj"] < float(spec.cl_alpha))
-                & (combined["cl_logfc"].abs() >= float(spec.cl_min_abs_logfc))
+                (combined["cell_wilcoxon_padj"] < float(spec.cl_alpha))
+                & (combined["cell_wilcoxon_logfc"].abs() >= float(spec.cl_min_abs_logfc))
                 & (pass_minpct)
             )
 
         combined["hit_logreg"] = False
-        if "lr_coef" in combined.columns:
-            combined["hit_logreg"] = (combined["lr_coef"].abs() >= float(spec.lr_min_abs_coef)) & (pass_minpct)
+        if "cell_logreg_coef" in combined.columns:
+            combined["hit_logreg"] = (combined["cell_logreg_coef"].abs() >= float(spec.lr_min_abs_coef)) & (pass_minpct)
 
         combined["hit_pseudobulk"] = False
         if pb_spec is not None and "pb_log2fc" in combined.columns:
             combined["hit_pseudobulk"] = combined["pb_log2fc"].abs() >= float(spec.pb_min_abs_log2fc)
 
         combined["sign_agree_pb_wilcoxon"] = False
-        if pb_spec is not None and "pb_log2fc" in combined.columns and "cl_logfc" in combined.columns:
+        if pb_spec is not None and "pb_log2fc" in combined.columns and "cell_wilcoxon_logfc" in combined.columns:
             combined["sign_agree_pb_wilcoxon"] = (
-                combined["pb_log2fc"].apply(_sgn) == combined["cl_logfc"].apply(_sgn)
+                combined["pb_log2fc"].apply(_sgn) == combined["cell_wilcoxon_logfc"].apply(_sgn)
             )
 
         hits = combined[["hit_wilcoxon", "hit_logreg", "hit_pseudobulk"]].sum(axis=1)
@@ -2251,12 +2261,12 @@ def contrast_conditional_markers(
         combined["__tier_order"] = tier_cat
         sort_cols = ["__tier_order"]
         asc = [True]
-        if "cl_padj" in combined.columns:
-            sort_cols.append("cl_padj"); asc.append(True)
+        if "cell_wilcoxon_padj" in combined.columns:
+            sort_cols.append("cell_wilcoxon_padj"); asc.append(True)
         if "pb_log2fc" in combined.columns:
             sort_cols.append("pb_log2fc"); asc.append(False)
-        if "lr_coef" in combined.columns:
-            sort_cols.append("lr_coef"); asc.append(False)
+        if "cell_logreg_coef" in combined.columns:
+            sort_cols.append("cell_logreg_coef"); asc.append(False)
 
         combined = combined.sort_values(sort_cols, ascending=asc).drop(columns=["__tier_order"])
 
@@ -2574,12 +2584,12 @@ def contrast_conditional_markers_multi(
             wilcoxon_df = d.rename(
                 columns={
                     "names": "gene",
-                    "logfoldchanges": "cl_logfc",
-                    "scores": "cl_score",
-                    "pvals": "cl_pval",
-                    "pvals_adj": "cl_padj",
-                    "pts": "cl_pts",
-                    "pts_rest": "cl_pts_rest",
+                    "logfoldchanges": "cell_wilcoxon_logfc",
+                    "scores": "cell_wilcoxon_score",
+                    "pvals": "cell_wilcoxon_pval",
+                    "pvals_adj": "cell_wilcoxon_padj",
+                    "pts": "cell_wilcoxon_pts",
+                    "pts_rest": "cell_wilcoxon_pts_rest",
                 }
             )
             if "gene" in wilcoxon_df.columns:
@@ -2588,8 +2598,8 @@ def contrast_conditional_markers_multi(
             if pct_A is not None and "gene" in wilcoxon_df.columns:
                 idx = adata_sub.var_names.get_indexer(wilcoxon_df["gene"].astype(str))
                 ok = idx >= 0
-                wilcoxon_df.loc[ok, "cl_pts"] = pct_A[idx[ok]]
-                wilcoxon_df.loc[ok, "cl_pts_rest"] = pct_B[idx[ok]]
+                wilcoxon_df.loc[ok, "cell_wilcoxon_pts"] = pct_A[idx[ok]]
+                wilcoxon_df.loc[ok, "cell_wilcoxon_pts_rest"] = pct_B[idx[ok]]
 
         logreg_df = pd.DataFrame()
         if "logreg" in spec.methods:
@@ -2610,19 +2620,22 @@ def contrast_conditional_markers_multi(
 
             d = d.rename(columns={"names": "gene"})
             if "logfoldchanges" in d.columns:
-                d = d.rename(columns={"logfoldchanges": "lr_coef"})
+                d = d.rename(columns={"logfoldchanges": "cell_logreg_coef"})
             if "scores" in d.columns:
-                d = d.rename(columns={"scores": "lr_score"})
+                d = d.rename(columns={"scores": "cell_logreg_score"})
 
             rename_prev = {}
             if "pts" in d.columns:
-                rename_prev["pts"] = "cl_pts"
+                rename_prev["pts"] = "cell_wilcoxon_pts"
             if "pts_rest" in d.columns:
-                rename_prev["pts_rest"] = "cl_pts_rest"
+                rename_prev["pts_rest"] = "cell_wilcoxon_pts_rest"
             if rename_prev:
                 d = d.rename(columns=rename_prev)
 
-            cols = ["gene"] + [c for c in ["lr_coef", "lr_score", "cl_pts", "cl_pts_rest"] if c in d.columns]
+            cols = ["gene"] + [
+                c for c in ["cell_logreg_coef", "cell_logreg_score", "cell_wilcoxon_pts", "cell_wilcoxon_pts_rest"]
+                if c in d.columns
+            ]
             logreg_df = d[cols].copy()
             if "gene" in logreg_df.columns:
                 logreg_df["gene"] = logreg_df["gene"].astype(str)
@@ -2630,8 +2643,8 @@ def contrast_conditional_markers_multi(
             if pct_A is not None and "gene" in logreg_df.columns:
                 idx = adata_sub.var_names.get_indexer(logreg_df["gene"].astype(str))
                 ok = idx >= 0
-                logreg_df.loc[ok, "cl_pts"] = pct_A[idx[ok]]
-                logreg_df.loc[ok, "cl_pts_rest"] = pct_B[idx[ok]]
+                logreg_df.loc[ok, "cell_wilcoxon_pts"] = pct_A[idx[ok]]
+                logreg_df.loc[ok, "cell_wilcoxon_pts_rest"] = pct_B[idx[ok]]
 
         if pb_df is not None and not pb_df.empty:
             combined = pb_df.copy()
@@ -2644,11 +2657,11 @@ def contrast_conditional_markers_multi(
         if logreg_df is not None and not logreg_df.empty:
             combined = combined.merge(logreg_df, on="gene", how="outer", suffixes=("", "_lr"))
 
-            if "cl_pts_lr" in combined.columns and "cl_pts" not in combined.columns:
-                combined = combined.rename(columns={"cl_pts_lr": "cl_pts"})
-            if "cl_pts_rest_lr" in combined.columns and "cl_pts_rest" not in combined.columns:
-                combined = combined.rename(columns={"cl_pts_rest_lr": "cl_pts_rest"})
-            for c in ["cl_pts_lr", "cl_pts_rest_lr"]:
+            if "cell_wilcoxon_pts_lr" in combined.columns and "cell_wilcoxon_pts" not in combined.columns:
+                combined = combined.rename(columns={"cell_wilcoxon_pts_lr": "cell_wilcoxon_pts"})
+            if "cell_wilcoxon_pts_rest_lr" in combined.columns and "cell_wilcoxon_pts_rest" not in combined.columns:
+                combined = combined.rename(columns={"cell_wilcoxon_pts_rest_lr": "cell_wilcoxon_pts_rest"})
+            for c in ["cell_wilcoxon_pts_lr", "cell_wilcoxon_pts_rest_lr"]:
                 if c in combined.columns:
                     combined = combined.drop(columns=[c])
 
@@ -2662,42 +2675,49 @@ def contrast_conditional_markers_multi(
         combined.insert(7, "n_cells_A_used", int(ds_meta["n_cells_A_used"]))
         combined.insert(8, "n_cells_B_used", int(ds_meta["n_cells_B_used"]))
 
-        for col in ["cl_logfc", "cl_padj", "lr_coef", "pb_log2fc", "cl_pts", "cl_pts_rest"]:
+        for col in [
+            "cell_wilcoxon_logfc",
+            "cell_wilcoxon_padj",
+            "cell_logreg_coef",
+            "pb_log2fc",
+            "cell_wilcoxon_pts",
+            "cell_wilcoxon_pts_rest",
+        ]:
             if col in combined.columns:
                 combined[col] = pd.to_numeric(combined[col], errors="coerce")
 
         pass_minpct = pd.Series(True, index=combined.index)
         cl_min_pct = float(getattr(spec, "min_pct", 0.0))
         cl_min_diff_pct = float(getattr(spec, "min_diff_pct", 0.0))
-        if (cl_min_pct > 0.0 or cl_min_diff_pct > 0.0) and ("cl_pts" in combined.columns) and ("cl_pts_rest" in combined.columns):
-            if not (combined["cl_pts"].notna().sum() == 0 and combined["cl_pts_rest"].notna().sum() == 0):
+        if (cl_min_pct > 0.0 or cl_min_diff_pct > 0.0) and ("cell_wilcoxon_pts" in combined.columns) and ("cell_wilcoxon_pts_rest" in combined.columns):
+            if not (combined["cell_wilcoxon_pts"].notna().sum() == 0 and combined["cell_wilcoxon_pts_rest"].notna().sum() == 0):
                 pass_mask = pd.Series(True, index=combined.index)
                 if cl_min_pct > 0.0:
-                    pass_mask &= (combined["cl_pts"] >= cl_min_pct) | (combined["cl_pts_rest"] >= cl_min_pct)
+                    pass_mask &= (combined["cell_wilcoxon_pts"] >= cl_min_pct) | (combined["cell_wilcoxon_pts_rest"] >= cl_min_pct)
                 if cl_min_diff_pct > 0.0:
-                    pass_mask &= (combined["cl_pts"] - combined["cl_pts_rest"]).abs() >= cl_min_diff_pct
+                    pass_mask &= (combined["cell_wilcoxon_pts"] - combined["cell_wilcoxon_pts_rest"]).abs() >= cl_min_diff_pct
                 pass_minpct = pass_mask.fillna(True)
 
         combined["hit_wilcoxon"] = False
-        if "cl_padj" in combined.columns and "cl_logfc" in combined.columns:
+        if "cell_wilcoxon_padj" in combined.columns and "cell_wilcoxon_logfc" in combined.columns:
             combined["hit_wilcoxon"] = (
-                (combined["cl_padj"] < float(spec.cl_alpha))
-                & (combined["cl_logfc"].abs() >= float(spec.cl_min_abs_logfc))
+                (combined["cell_wilcoxon_padj"] < float(spec.cl_alpha))
+                & (combined["cell_wilcoxon_logfc"].abs() >= float(spec.cl_min_abs_logfc))
                 & (pass_minpct)
             )
 
         combined["hit_logreg"] = False
-        if "lr_coef" in combined.columns:
-            combined["hit_logreg"] = (combined["lr_coef"].abs() >= float(spec.lr_min_abs_coef)) & (pass_minpct)
+        if "cell_logreg_coef" in combined.columns:
+            combined["hit_logreg"] = (combined["cell_logreg_coef"].abs() >= float(spec.lr_min_abs_coef)) & (pass_minpct)
 
         combined["hit_pseudobulk"] = False
         if pb_spec is not None and "pb_log2fc" in combined.columns:
             combined["hit_pseudobulk"] = combined["pb_log2fc"].abs() >= float(spec.pb_min_abs_log2fc)
 
         combined["sign_agree_pb_wilcoxon"] = False
-        if pb_spec is not None and "pb_log2fc" in combined.columns and "cl_logfc" in combined.columns:
+        if pb_spec is not None and "pb_log2fc" in combined.columns and "cell_wilcoxon_logfc" in combined.columns:
             combined["sign_agree_pb_wilcoxon"] = (
-                combined["pb_log2fc"].apply(_sgn) == combined["cl_logfc"].apply(_sgn)
+                combined["pb_log2fc"].apply(_sgn) == combined["cell_wilcoxon_logfc"].apply(_sgn)
             )
 
         hits = combined[["hit_wilcoxon", "hit_logreg", "hit_pseudobulk"]].sum(axis=1)
@@ -2740,12 +2760,12 @@ def contrast_conditional_markers_multi(
         combined["__tier_order"] = tier_cat
         sort_cols = ["__tier_order"]
         asc = [True]
-        if "cl_padj" in combined.columns:
-            sort_cols.append("cl_padj"); asc.append(True)
+        if "cell_wilcoxon_padj" in combined.columns:
+            sort_cols.append("cell_wilcoxon_padj"); asc.append(True)
         if "pb_log2fc" in combined.columns:
             sort_cols.append("pb_log2fc"); asc.append(False)
-        if "lr_coef" in combined.columns:
-            sort_cols.append("lr_coef"); asc.append(False)
+        if "cell_logreg_coef" in combined.columns:
+            sort_cols.append("cell_logreg_coef"); asc.append(False)
 
         combined = combined.sort_values(sort_cols, ascending=asc).drop(columns=["__tier_order"])
 
@@ -2934,12 +2954,13 @@ def _coerce_pts_columns(df: pd.DataFrame) -> pd.DataFrame:
             if "pct_nz_group" in out.columns and "pct_nz_reference" in out.columns:
                 out["pts"] = out["pct_nz_group"]
                 out["pts_rest"] = out["pct_nz_reference"]
-                out = out.drop(columns=["pct_nz_group", "pct_nz_reference"], errors="ignore")
+        out = out.drop(columns=["pct_nz_group", "pct_nz_reference"], errors="ignore")
         return out
 
     # common alternative naming
     if "pct_nz_group" in out.columns and "pct_nz_reference" in out.columns:
         out = out.rename(columns={"pct_nz_group": "pts", "pct_nz_reference": "pts_rest"})
+        out = out.drop(columns=["pct_nz_group", "pct_nz_reference"], errors="ignore")
         return out
 
     # If not present, create NaNs so downstream gating becomes a no-op unless user insists.
