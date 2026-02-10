@@ -136,16 +136,16 @@ def _prune_uns_de(adata: ad.AnnData, store_key: str, *, top_n: int = 50, decoupl
         cols = list(d.columns)
         if "gene" in cols:
             d["gene"] = d["gene"].astype(str)
-        if "cl_padj" in cols:
-            lfc_col = "cl_logfc" if "cl_logfc" in cols else None
+        if "cell_wilcoxon_padj" in cols:
+            lfc_col = "cell_wilcoxon_logfc" if "cell_wilcoxon_logfc" in cols else None
             if lfc_col:
                 d["_abs_lfc"] = d[lfc_col].abs()
-                d = d.sort_values(by=["cl_padj", "_abs_lfc"], ascending=[True, False], kind="mergesort")
+                d = d.sort_values(by=["cell_wilcoxon_padj", "_abs_lfc"], ascending=[True, False], kind="mergesort")
                 d = d.drop(columns=["_abs_lfc"], errors="ignore")
             else:
-                d = d.sort_values(by=["cl_padj"], ascending=[True], kind="mergesort")
+                d = d.sort_values(by=["cell_wilcoxon_padj"], ascending=[True], kind="mergesort")
         elif "padj" in cols:
-            lfc_col = "log2FoldChange" if "log2FoldChange" in cols else ("cl_logfc" if "cl_logfc" in cols else None)
+            lfc_col = "log2FoldChange" if "log2FoldChange" in cols else None
             if lfc_col:
                 d["_abs_lfc"] = d[lfc_col].abs()
                 d = d.sort_values(by=["padj", "_abs_lfc"], ascending=[True, False], kind="mergesort")
@@ -156,16 +156,19 @@ def _prune_uns_de(adata: ad.AnnData, store_key: str, *, top_n: int = 50, decoupl
             d = d.sort_values(by=["pval"], ascending=[True], kind="mergesort")
         elif "score" in cols:
             d = d.sort_values(by=["score"], ascending=[False], kind="mergesort")
-        elif "cl_score" in cols:
-            d = d.sort_values(by=["cl_score"], ascending=[False], kind="mergesort")
+        elif "cell_wilcoxon_score" in cols:
+            d = d.sort_values(by=["cell_wilcoxon_score"], ascending=[False], kind="mergesort")
         d = d.head(n)
         keep_cols = [
             "gene",
-            "cl_logfc",
-            "cl_padj",
-            "cl_pval",
-            "cl_score",
-            "lr_coef",
+            "cell_wilcoxon_logfc",
+            "cell_wilcoxon_padj",
+            "cell_wilcoxon_pval",
+            "cell_wilcoxon_score",
+            "cell_logreg_coef",
+            "cell_logreg_score",
+            "cell_wilcoxon_pts",
+            "cell_wilcoxon_pts_rest",
             "pb_log2fc",
             "log2FoldChange",
             "padj",
@@ -2130,7 +2133,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                     stats = _build_stats_matrix_from_tables(
                         tables,
                         preferred_col=stat_col,
-                        fallback_cols=("log2FoldChange", "cl_logfc", "lr_coef"),
+                        fallback_cols=("log2FoldChange", "cell_wilcoxon_logfc", "cell_logreg_coef"),
                     )
                     if stats is None or stats.empty:
                         continue
