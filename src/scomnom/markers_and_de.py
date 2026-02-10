@@ -101,15 +101,17 @@ def _resolve_cluster_colors(
 
         tab20 = plt.colormaps["tab20"]
         tab20b = plt.colormaps["tab20b"]
+        unique_labels = list(dict.fromkeys(labels))
         palette = [
             tab20(i / 20) if i < 20 else tab20b((i - 20) / 20)
-            for i in range(len(labels))
+            for i in range(len(unique_labels))
         ]
+        palette_map = dict(zip(unique_labels, palette))
         if not colors:
-            return palette
+            return [palette_map[l] for l in labels]
         filled = []
-        for idx, col in enumerate(colors):
-            filled.append(col if col is not None else palette[idx])
+        for lab, col in zip(labels, colors):
+            filled.append(col if col is not None else palette_map[lab])
         return filled
     return colors  # type: ignore[return-value]
 
@@ -1042,6 +1044,9 @@ def run_composition(cfg) -> ad.AnnData:
                         gdf = gdf.sort_values("fdr")
                     else:
                         gdf = gdf.sort_values("pval") if "pval" in gdf.columns else gdf
+                    if "effect" in gdf.columns:
+                        gdf = gdf.assign(_abs_effect=pd.to_numeric(gdf["effect"], errors="coerce").abs())
+                        gdf = gdf.sort_values("_abs_effect", ascending=False)
                     top = gdf.head(25)
                     fig, ax = plt.subplots(figsize=(8, 4))
                     if "cluster_label" in top.columns:
@@ -1051,12 +1056,7 @@ def run_composition(cfg) -> ad.AnnData:
                     else:
                         labels = top.index.astype(str)
                     labels = pd.Index(labels).astype(str)
-                    colors = _resolve_cluster_colors(
-                        adata,
-                        cluster_key=cluster_key,
-                        labels=labels,
-                        round_id=getattr(cfg, "round_id", None),
-                    )
+                    colors = ["#6b7aa1"] * len(labels)
                     x = np.arange(len(labels))
                     y = pd.to_numeric(top["effect"], errors="coerce").to_numpy()
                     ax.bar(x, y, color=colors)
@@ -1065,10 +1065,58 @@ def run_composition(cfg) -> ad.AnnData:
                     ax.set_ylabel("Effect")
                     ax.set_title("GraphDA top neighborhoods")
                     ax.tick_params(axis="x", labelrotation=45)
+                    if "level_ref" in top.columns and "level_test" in top.columns:
+                        ref_label = str(top["level_ref"].iloc[0])
+                        test_label = str(top["level_test"].iloc[0])
+                        ax.text(
+                            0.98,
+                            0.02,
+                            f"+ = {test_label}, - = {ref_label}",
+                            transform=ax.transAxes,
+                            ha="right",
+                            va="bottom",
+                            fontsize=9,
+                            color="#444444",
+                        )
                     ax.grid(False)
                     plot_utils.save_multi("graphda_top_neighborhoods", fig_subdir, fig=fig)
                     LOGGER.info("Saved plot: %s/%s", fig_subdir, "graphda_top_neighborhoods")
                     plt.close(fig)
+
+                    if "cluster_label" in gdf.columns:
+                        gdf["cluster_label"] = gdf["cluster_label"].astype(str)
+                        idx = gdf.groupby("cluster_label")["_abs_effect"].idxmax()
+                        top_by_cluster = gdf.loc[idx].copy().sort_values("cluster_label")
+                    else:
+                        top_by_cluster = pd.DataFrame()
+                    if not top_by_cluster.empty:
+                        fig, ax = plt.subplots(figsize=(8, max(4, 0.25 * len(top_by_cluster))))
+                        labels = top_by_cluster["cluster_label"].astype(str)
+                        x = np.arange(len(labels))
+                        y = pd.to_numeric(top_by_cluster["effect"], errors="coerce").to_numpy()
+                        ax.bar(x, y, color="#6b7aa1")
+                        ax.set_xticks(x)
+                        ax.set_xticklabels(labels, rotation=45, ha="right")
+                        ax.set_ylabel("Effect")
+                        ax.set_title("GraphDA top neighborhood per cluster")
+                        if "level_ref" in top_by_cluster.columns and "level_test" in top_by_cluster.columns:
+                            ref_label = str(top_by_cluster["level_ref"].iloc[0])
+                            test_label = str(top_by_cluster["level_test"].iloc[0])
+                            ax.text(
+                                0.98,
+                                0.02,
+                                f"+ = {test_label}, - = {ref_label}",
+                                transform=ax.transAxes,
+                                ha="right",
+                                va="bottom",
+                                fontsize=9,
+                                color="#444444",
+                            )
+                        ax.grid(False)
+                        plt.tight_layout()
+                        plot_utils.save_multi("graphda_top_by_cluster", fig_subdir, fig=fig)
+                        LOGGER.info("Saved plot: %s/%s", fig_subdir, "graphda_top_by_cluster")
+                        plt.close(fig)
 
                     labels = gdf["cluster_label"].astype(str)
                     order = pd.Index(pd.unique(labels))
@@ -1085,13 +1133,10 @@ def run_composition(cfg) -> ad.AnnData:
                     else:
                         sig = pd.Series(False, index=gdf.index)
 
-                    colors = _resolve_cluster_colors(
-                        adata,
-                        cluster_key=cluster_key,
-                        labels=labels,
-                        round_id=getattr(cfg, "round_id", None),
-                    )
-                    alphas = [0.35 if not s else 0.9 for s in sig]
+                    sig_color = "#d62728"
+                    ns_color = "#b0b0b0"
+                    colors = [sig_color if s else ns_color for s in sig]
+                    alphas = [0.9 if s else 0.35 for s in sig]
 
                     fig, ax = plt.subplots(figsize=(8, max(4, 0.25 * len(order))))
                     ax.scatter(x, yj, s=16, c=colors, alpha=alphas, edgecolors="none")
@@ -1104,6 +1149,7 @@ def run_composition(cfg) -> ad.AnnData:
                         ax.set_xlabel("Effect (log2-odds)")
                     ax.set_ylabel("Cluster")
                     ax.set_title("GraphDA effects by cluster")
+                    ax.grid(False)
                     plot_utils.save_multi("graphda_effects_by_cluster", fig_subdir, fig=fig)
                     LOGGER.info("Saved plot: %s/%s", fig_subdir, "graphda_effects_by_cluster")
                     plt.close(fig)
@@ -1207,6 +1253,7 @@ def run_composition(cfg) -> ad.AnnData:
                         ax.set_yticklabels(labels)
                         ax.set_xlabel("Effect")
                         ax.set_title("scCODA effects (top)")
+                        ax.grid(False)
                         plt.tight_layout()
                         plot_utils.save_multi("sccoda_effects_top", fig_subdir, fig=fig)
                         LOGGER.info("Saved plot: %s/%s", fig_subdir, "sccoda_effects_top")
@@ -1261,7 +1308,11 @@ def run_composition(cfg) -> ad.AnnData:
                             round_id=getattr(cfg, "round_id", None),
                         )
                         x = np.arange(len(labels))
-                        ax.bar(x, vals.to_numpy(), color=colors)
+                        vals_np = vals.to_numpy()
+                        ax.bar(x, vals_np, color=colors)
+                        if np.nanmax(np.abs(vals_np)) == 0:
+                            ax.scatter(x, vals_np, color=colors, s=30, zorder=3)
+                            ax.set_ylim(-0.05, 0.05)
                         ax.set_xticks(x)
                         ax.set_xticklabels(labels, rotation=45, ha="right")
                         ax.set_ylabel("Effect")
@@ -1279,7 +1330,11 @@ def run_composition(cfg) -> ad.AnnData:
                             round_id=getattr(cfg, "round_id", None),
                         )
                         x = np.arange(len(labels))
-                        ax.bar(x, vals.to_numpy(), color=colors)
+                        vals_np = vals.to_numpy()
+                        ax.bar(x, vals_np, color=colors)
+                        if np.nanmax(np.abs(vals_np)) == 0:
+                            ax.scatter(x, vals_np, color=colors, s=30, zorder=3)
+                            ax.set_ylim(-0.05, 0.05)
                         ax.set_xticks(x)
                         ax.set_xticklabels(labels, rotation=45, ha="right")
                         ax.set_ylabel("Effect")
@@ -1297,7 +1352,11 @@ def run_composition(cfg) -> ad.AnnData:
                             round_id=getattr(cfg, "round_id", None),
                         )
                         x = np.arange(len(labels))
-                        ax.bar(x, vals.values, color=colors)
+                        vals_np = vals.values
+                        ax.bar(x, vals_np, color=colors)
+                        if np.nanmax(np.abs(vals_np)) == 0:
+                            ax.scatter(x, vals_np, color=colors, s=30, zorder=3)
+                            ax.set_ylim(-0.05, 0.05)
                         ax.set_xticks(x)
                         ax.set_xticklabels(labels, rotation=45, ha="right")
                         ax.set_ylabel("Effect")
@@ -1390,6 +1449,8 @@ def run_composition(cfg) -> ad.AnnData:
                     )
 
                 if len(cond_levels) == 2:
+                    from matplotlib.patches import Patch
+
                     fig, ax = plt.subplots(figsize=(8, max(4, 0.25 * len(cluster_order))))
                     left = props_plot.loc[metadata[str(condition_key)].astype(str) == cond_levels[0]].mean()
                     right = props_plot.loc[metadata[str(condition_key)].astype(str) == cond_levels[1]].mean()
@@ -1402,6 +1463,18 @@ def run_composition(cfg) -> ad.AnnData:
                     ax.set_yticklabels(cluster_order)
                     ax.set_xlabel("Mean proportion")
                     ax.set_title("Cell Type Composition (stacked comparison)")
+                    legend_handles = [
+                        Patch(facecolor="#7a7a7a", edgecolor="none", alpha=1.0, label=str(cond_levels[0])),
+                        Patch(facecolor="#7a7a7a", edgecolor="none", alpha=0.6, label=str(cond_levels[1])),
+                    ]
+                    ax.legend(
+                        handles=legend_handles,
+                        title="Condition",
+                        loc="upper right",
+                        frameon=True,
+                        fontsize=9,
+                        title_fontsize=10,
+                    )
                     ax.grid(False)
                     plt.tight_layout()
                     plot_utils.save_multi("composition_stacked_comparison", fig_subdir, fig=fig)
@@ -1429,6 +1502,16 @@ def run_composition(cfg) -> ad.AnnData:
                     ax.set_yticklabels(cluster_order)
                     ax.set_xlabel("Mean proportion")
                     ax.set_title("Cell Type Composition Flow")
+                    ax.text(
+                        0.98,
+                        0.02,
+                        f"Left: {cond_levels[0]}   Right: {cond_levels[1]}",
+                        transform=ax.transAxes,
+                        ha="right",
+                        va="bottom",
+                        fontsize=9,
+                        color="#444444",
+                    )
                     ax.grid(False)
                     plt.tight_layout()
                     plot_utils.save_multi("composition_flow", fig_subdir, fig=fig)
@@ -1441,20 +1524,72 @@ def run_composition(cfg) -> ad.AnnData:
                     )
 
                 if len(cond_levels) == 2:
-                    fig, ax = plt.subplots(figsize=(8, max(4, 0.35 * len(cluster_order))))
+                    from matplotlib.patches import Polygon
+
+                    fig, ax = plt.subplots(figsize=(8, 5))
                     left = props_plot.loc[metadata[str(condition_key)].astype(str) == cond_levels[0]].mean()
                     right = props_plot.loc[metadata[str(condition_key)].astype(str) == cond_levels[1]].mean()
-                    left = left.reindex(cluster_order)
-                    right = right.reindex(cluster_order)
-                    y = np.arange(len(cluster_order))
+                    left = left.reindex(cluster_order).fillna(0.0)
+                    right = right.reindex(cluster_order).fillna(0.0)
+
+                    left_bottom = left.cumsum().shift(fill_value=0.0)
+                    right_bottom = right.cumsum().shift(fill_value=0.0)
+
+                    x_left = 0.0
+                    x_right = 1.0
+                    bar_width = 0.28
+                    left_edge = x_left + bar_width / 2
+                    right_edge = x_right - bar_width / 2
+
                     for idx, cl in enumerate(cluster_order):
-                        y0 = idx - 0.35
-                        y1 = idx + 0.35
-                        ax.plot([left[cl], right[cl]], [y0, y1], color=colors[idx], linewidth=6, alpha=0.35)
-                        ax.plot([left[cl], right[cl]], [y0, y1], color=colors[idx], linewidth=1.5, alpha=0.9)
-                    ax.set_yticks(y)
-                    ax.set_yticklabels(cluster_order)
-                    ax.set_xlabel("Mean proportion")
+                        y0_l = left_bottom[cl]
+                        y1_l = y0_l + left[cl]
+                        y0_r = right_bottom[cl]
+                        y1_r = y0_r + right[cl]
+                        poly = Polygon(
+                            [
+                                (left_edge, y0_l),
+                                (left_edge, y1_l),
+                                (right_edge, y1_r),
+                                (right_edge, y0_r),
+                            ],
+                            closed=True,
+                            facecolor=colors[idx],
+                            edgecolor="none",
+                            alpha=0.55,
+                        )
+                        ax.add_patch(poly)
+
+                    for idx, cl in enumerate(cluster_order):
+                        ax.bar(
+                            x_left,
+                            left[cl],
+                            bottom=left_bottom[cl],
+                            color=colors[idx],
+                            width=bar_width,
+                            edgecolor="white",
+                            linewidth=0.4,
+                        )
+                        ax.bar(
+                            x_right,
+                            right[cl],
+                            bottom=right_bottom[cl],
+                            color=colors[idx],
+                            width=bar_width,
+                            edgecolor="white",
+                            linewidth=0.4,
+                        )
+
+                    ax.set_xlim(-0.3, 1.3)
+                    ax.set_ylim(0, 1.0)
+                    ax.set_xticks([x_left, x_right])
+                    ax.set_xticklabels(
+                        [
+                            f"{cond_levels[0]}\n(n={(metadata[str(condition_key)].astype(str) == cond_levels[0]).sum()})",
+                            f"{cond_levels[1]}\n(n={(metadata[str(condition_key)].astype(str) == cond_levels[1]).sum()})",
+                        ]
+                    )
+                    ax.set_ylabel("Mean proportion")
                     ax.set_title("Cell Type Composition Alluvial")
                     ax.grid(False)
                     plt.tight_layout()
