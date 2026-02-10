@@ -950,6 +950,7 @@ def run_composition(cfg) -> ad.AnnData:
             graph_meta_global.to_csv(results_dir / "composition_graph_neighborhoods.tsv", sep="	", index=False)
             try:
                 import matplotlib.pyplot as plt
+                LOGGER.info("Entering GraphDA plot block")
                 fig, ax = plt.subplots(figsize=(6, 4))
                 ax.hist(graph_meta_global["neighborhood_size"].astype(int), bins=30, color="steelblue", edgecolor="white")
                 ax.set_xlabel("Neighborhood size")
@@ -1020,10 +1021,11 @@ def run_composition(cfg) -> ad.AnnData:
                     LOGGER.info("Saved plot: %s/%s", fig_subdir, "graphda_effects_by_cluster")
                     plt.close(fig)
             except Exception as e:
-                LOGGER.warning("composition: failed to plot GraphDA summary: %s", e)
+                LOGGER.warning("composition: failed to plot GraphDA summary (%s: %r)", type(e).__name__, e)
 
         if bool(getattr(cfg, "make_figures", True)):
             import matplotlib.pyplot as plt
+            LOGGER.info("Entering method plot block")
             for method in methods:
                 df = results_by_method.get(method, pd.DataFrame())
                 if df is None or df.empty:
@@ -1117,7 +1119,7 @@ def run_composition(cfg) -> ad.AnnData:
                         LOGGER.info("Saved plot: %s/%s", fig_subdir, "sccoda_effects_top")
                         plt.close(fig)
                 except Exception as e:
-                    LOGGER.debug("composition: method plot failed for %s (%r)", method, e)
+                    LOGGER.warning("composition: method plot failed for %s (%s: %r)", method, type(e).__name__, e)
 
         _write_settings(
             results_dir,
@@ -1146,6 +1148,7 @@ def run_composition(cfg) -> ad.AnnData:
         if bool(getattr(cfg, "make_figures", True)):
             try:
                 import matplotlib.pyplot as plt
+                LOGGER.info("Entering global effects plot block")
                 global_df = results_by_method.get(primary_method)
                 if isinstance(global_df, pd.DataFrame) and not global_df.empty:
                     fig, ax = plt.subplots(figsize=(7, 4))
@@ -1187,11 +1190,12 @@ def run_composition(cfg) -> ad.AnnData:
                     LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_effects_global")
                     plt.close(fig)
             except Exception as e:
-                LOGGER.debug("composition: failed to generate plots (%r)", e)
+                LOGGER.warning("composition: failed to generate plots (%s: %r)", type(e).__name__, e)
 
         if bool(getattr(cfg, "make_figures", True)):
             try:
                 import matplotlib.pyplot as plt
+                LOGGER.info("Entering composition stacks plot block")
                 tab20 = plt.colormaps["tab20"]
                 tab20b = plt.colormaps["tab20b"]
 
@@ -1344,7 +1348,7 @@ def run_composition(cfg) -> ad.AnnData:
                         len(cond_levels),
                     )
             except Exception as e:
-                LOGGER.debug("composition: failed to plot composition stacks (%r)", e)
+                LOGGER.warning("composition: failed to plot composition stacks (%s: %r)", type(e).__name__, e)
 
     out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.da")) + ".zarr")
     LOGGER.info("Saving dataset → %s", out_zarr)
