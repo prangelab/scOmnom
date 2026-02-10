@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -44,6 +45,73 @@ LOGGER = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 _MIN_TOTAL_SAMPLES_FOR_PSEUDOBULK = 6
 _MIN_SAMPLES_PER_LEVEL_COMPOSITION = 2
+
+
+def _match_cluster_color(label: str, color_map: dict[str, str]) -> Optional[str]:
+    lab = str(label)
+    if lab in color_map:
+        return color_map[lab]
+    token = plot_utils._extract_cnn_token(lab)
+    if token in color_map:
+        return color_map[token]
+    digits = re.sub(r"[^0-9]", "", lab)
+    if digits:
+        try:
+            num = int(digits)
+        except ValueError:
+            num = None
+        if num is not None:
+            candidates = [digits, str(num), f"C{num}", f"C{num:02d}"]
+            for cand in candidates:
+                if cand in color_map:
+                    return color_map[cand]
+    return None
+
+
+def _resolve_cluster_colors(
+    adata: ad.AnnData,
+    *,
+    cluster_key: str,
+    labels: Sequence[str],
+    round_id: Optional[str],
+) -> list:
+    keys = [str(cluster_key)]
+    if round_id:
+        pretty_key = f"cluster_label__{round_id}"
+        if pretty_key in adata.obs:
+            keys.append(pretty_key)
+    if "cluster_label" in adata.obs:
+        keys.append("cluster_label")
+
+    color_map: dict[str, str] = {}
+    for key in keys:
+        cm = plot_utils._cluster_color_map(adata, key)
+        if cm:
+            color_map = cm
+            break
+
+    labels = [str(l) for l in labels]
+    colors: list[Optional[str]] = []
+    if color_map:
+        for lab in labels:
+            colors.append(_match_cluster_color(lab, color_map))
+
+    if not colors or any(c is None for c in colors):
+        import matplotlib.pyplot as plt
+
+        tab20 = plt.colormaps["tab20"]
+        tab20b = plt.colormaps["tab20b"]
+        palette = [
+            tab20(i / 20) if i < 20 else tab20b((i - 20) / 20)
+            for i in range(len(labels))
+        ]
+        if not colors:
+            return palette
+        filled = []
+        for idx, col in enumerate(colors):
+            filled.append(col if col is not None else palette[idx])
+        return filled
+    return colors  # type: ignore[return-value]
 
 
 def _prune_uns_de(adata: ad.AnnData, store_key: str, *, top_n: int = 50, decoupler_top_n: int = 20) -> None:
@@ -950,12 +1018,12 @@ def run_composition(cfg) -> ad.AnnData:
             graph_meta_global.to_csv(results_dir / "composition_graph_neighborhoods.tsv", sep="	", index=False)
             try:
                 import matplotlib.pyplot as plt
-                LOGGER.info("Entering GraphDA plot block")
                 fig, ax = plt.subplots(figsize=(6, 4))
                 ax.hist(graph_meta_global["neighborhood_size"].astype(int), bins=30, color="steelblue", edgecolor="white")
                 ax.set_xlabel("Neighborhood size")
                 ax.set_ylabel("Count")
                 ax.set_title("GraphDA neighborhood sizes")
+                ax.grid(False)
                 plot_utils.save_multi("graphda_neighborhood_sizes", fig_subdir, fig=fig)
                 LOGGER.info("Saved plot: %s/%s", fig_subdir, "graphda_neighborhood_sizes")
                 plt.close(fig)
@@ -976,7 +1044,6 @@ def run_composition(cfg) -> ad.AnnData:
                         gdf = gdf.sort_values("pval") if "pval" in gdf.columns else gdf
                     top = gdf.head(25)
                     fig, ax = plt.subplots(figsize=(8, 4))
-                    color_map = plot_utils._cluster_color_map(adata, cluster_key)
                     if "cluster_label" in top.columns:
                         labels = top["cluster_label"].astype(str)
                     elif "cluster" in top.columns:
@@ -984,7 +1051,12 @@ def run_composition(cfg) -> ad.AnnData:
                     else:
                         labels = top.index.astype(str)
                     labels = pd.Index(labels).astype(str)
-                    colors = [color_map.get(lbl, "#7a7a7a") for lbl in labels]
+                    colors = _resolve_cluster_colors(
+                        adata,
+                        cluster_key=cluster_key,
+                        labels=labels,
+                        round_id=getattr(cfg, "round_id", None),
+                    )
                     x = np.arange(len(labels))
                     y = pd.to_numeric(top["effect"], errors="coerce").to_numpy()
                     ax.bar(x, y, color=colors)
@@ -993,6 +1065,7 @@ def run_composition(cfg) -> ad.AnnData:
                     ax.set_ylabel("Effect")
                     ax.set_title("GraphDA top neighborhoods")
                     ax.tick_params(axis="x", labelrotation=45)
+                    ax.grid(False)
                     plot_utils.save_multi("graphda_top_neighborhoods", fig_subdir, fig=fig)
                     LOGGER.info("Saved plot: %s/%s", fig_subdir, "graphda_top_neighborhoods")
                     plt.close(fig)
@@ -1012,8 +1085,12 @@ def run_composition(cfg) -> ad.AnnData:
                     else:
                         sig = pd.Series(False, index=gdf.index)
 
-                    color_map = plot_utils._cluster_color_map(adata, cluster_key)
-                    colors = [color_map.get(lbl, "#7a7a7a") for lbl in labels]
+                    colors = _resolve_cluster_colors(
+                        adata,
+                        cluster_key=cluster_key,
+                        labels=labels,
+                        round_id=getattr(cfg, "round_id", None),
+                    )
                     alphas = [0.35 if not s else 0.9 for s in sig]
 
                     fig, ax = plt.subplots(figsize=(8, max(4, 0.25 * len(order))))
@@ -1035,7 +1112,6 @@ def run_composition(cfg) -> ad.AnnData:
 
         if bool(getattr(cfg, "make_figures", True)):
             import matplotlib.pyplot as plt
-            LOGGER.info("Entering method plot block")
             for method in methods:
                 df = results_by_method.get(method, pd.DataFrame())
                 if df is None or df.empty:
@@ -1115,8 +1191,12 @@ def run_composition(cfg) -> ad.AnnData:
                             labels = top.index.astype(str)
                         order = pd.Index(labels)
                         y_pos = np.arange(len(order))
-                        color_map = plot_utils._cluster_color_map(adata, cluster_key)
-                        colors = [color_map.get(lbl, "#7a7a7a") for lbl in labels]
+                        colors = _resolve_cluster_colors(
+                            adata,
+                            cluster_key=cluster_key,
+                            labels=labels,
+                            round_id=getattr(cfg, "round_id", None),
+                        )
 
                         fig, ax = plt.subplots(figsize=(7, max(4, 0.3 * len(order))))
                         if ci_low is not None and ci_high is not None:
@@ -1161,11 +1241,9 @@ def run_composition(cfg) -> ad.AnnData:
         if bool(getattr(cfg, "make_figures", True)):
             try:
                 import matplotlib.pyplot as plt
-                LOGGER.info("Entering global effects plot block")
                 global_df = results_by_method.get(primary_method)
                 if isinstance(global_df, pd.DataFrame) and not global_df.empty:
                     fig, ax = plt.subplots(figsize=(7, 4))
-                    color_map = plot_utils._cluster_color_map(adata, cluster_key)
                     if "effect" in global_df.columns:
                         vals = pd.to_numeric(global_df["effect"], errors="coerce")
                         if "cluster" in global_df.columns:
@@ -1176,7 +1254,12 @@ def run_composition(cfg) -> ad.AnnData:
                             plt.close(fig)
                             continue
                         labels = pd.Index(labels).astype(str)
-                        colors = [color_map.get(lbl, "#7a7a7a") for lbl in labels]
+                        colors = _resolve_cluster_colors(
+                            adata,
+                            cluster_key=cluster_key,
+                            labels=labels,
+                            round_id=getattr(cfg, "round_id", None),
+                        )
                         x = np.arange(len(labels))
                         ax.bar(x, vals.to_numpy(), color=colors)
                         ax.set_xticks(x)
@@ -1189,7 +1272,12 @@ def run_composition(cfg) -> ad.AnnData:
                             plt.close(fig)
                             continue
                         labels = pd.Index(labels).astype(str)
-                        colors = [color_map.get(lbl, "#7a7a7a") for lbl in labels]
+                        colors = _resolve_cluster_colors(
+                            adata,
+                            cluster_key=cluster_key,
+                            labels=labels,
+                            round_id=getattr(cfg, "round_id", None),
+                        )
                         x = np.arange(len(labels))
                         ax.bar(x, vals.to_numpy(), color=colors)
                         ax.set_xticks(x)
@@ -1202,7 +1290,12 @@ def run_composition(cfg) -> ad.AnnData:
                             plt.close(fig)
                             continue
                         labels = pd.Index(labels).astype(str)
-                        colors = [color_map.get(lbl, "#7a7a7a") for lbl in labels]
+                        colors = _resolve_cluster_colors(
+                            adata,
+                            cluster_key=cluster_key,
+                            labels=labels,
+                            round_id=getattr(cfg, "round_id", None),
+                        )
                         x = np.arange(len(labels))
                         ax.bar(x, vals.values, color=colors)
                         ax.set_xticks(x)
@@ -1210,6 +1303,7 @@ def run_composition(cfg) -> ad.AnnData:
                         ax.set_ylabel("Effect")
                     ax.set_title("Composition effects (global)")
                     ax.tick_params(axis="x", labelrotation=45)
+                    ax.grid(False)
                     plot_utils.save_multi("composition_effects_global", fig_subdir, fig=fig)
                     LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_effects_global")
                     plt.close(fig)
@@ -1219,10 +1313,6 @@ def run_composition(cfg) -> ad.AnnData:
         if bool(getattr(cfg, "make_figures", True)):
             try:
                 import matplotlib.pyplot as plt
-                LOGGER.info("Entering composition stacks plot block")
-                tab20 = plt.colormaps["tab20"]
-                tab20b = plt.colormaps["tab20b"]
-
                 totals = counts.sum(axis=1).replace(0, np.nan)
                 props = counts.div(totals, axis=0)
                 if props.empty:
@@ -1231,14 +1321,12 @@ def run_composition(cfg) -> ad.AnnData:
                 props_plot = props.copy()
                 props_plot.columns = props_plot.columns.astype(str)
                 cluster_order = props_plot.mean(axis=0).sort_values(ascending=False).index.tolist()
-                color_map = plot_utils._cluster_color_map(adata, cluster_key)
-                if not color_map:
-                    colors = [
-                        tab20(i / 20) if i < 20 else tab20b((i - 20) / 20)
-                        for i in range(len(cluster_order))
-                    ]
-                else:
-                    colors = [color_map.get(str(c), "#7a7a7a") for c in cluster_order]
+                colors = _resolve_cluster_colors(
+                    adata,
+                    cluster_key=cluster_key,
+                    labels=cluster_order,
+                    round_id=getattr(cfg, "round_id", None),
+                )
 
                 cond_levels = sorted(metadata[str(condition_key)].astype(str).dropna().unique().tolist())
                 if not cond_levels:
@@ -1265,6 +1353,7 @@ def run_composition(cfg) -> ad.AnnData:
                 ax.set_xticklabels(labels)
                 ax.set_ylabel("Mean proportion")
                 ax.set_title("Cell Type Composition (100% stacked)")
+                ax.grid(False)
                 plt.tight_layout()
                 plot_utils.save_multi("composition_stacked_bar_100", fig_subdir, fig=fig)
                 LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_stacked_bar_100")
@@ -1287,6 +1376,7 @@ def run_composition(cfg) -> ad.AnnData:
                         n = int((metadata.loc[metadata.index, str(condition_key)].astype(str) == str(cond)).sum())
                         ax.set_title(f"{cond}\\n(n={n})")
                         ax.set_xticks([])
+                        ax.grid(False)
                     axes[0].set_ylabel("Mean proportion")
                     fig.suptitle("Cell Type Composition", fontsize=12)
                     plt.tight_layout()
@@ -1312,6 +1402,7 @@ def run_composition(cfg) -> ad.AnnData:
                     ax.set_yticklabels(cluster_order)
                     ax.set_xlabel("Mean proportion")
                     ax.set_title("Cell Type Composition (stacked comparison)")
+                    ax.grid(False)
                     plt.tight_layout()
                     plot_utils.save_multi("composition_stacked_comparison", fig_subdir, fig=fig)
                     LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_stacked_comparison")
@@ -1338,6 +1429,7 @@ def run_composition(cfg) -> ad.AnnData:
                     ax.set_yticklabels(cluster_order)
                     ax.set_xlabel("Mean proportion")
                     ax.set_title("Cell Type Composition Flow")
+                    ax.grid(False)
                     plt.tight_layout()
                     plot_utils.save_multi("composition_flow", fig_subdir, fig=fig)
                     LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_flow")
@@ -1364,6 +1456,7 @@ def run_composition(cfg) -> ad.AnnData:
                     ax.set_yticklabels(cluster_order)
                     ax.set_xlabel("Mean proportion")
                     ax.set_title("Cell Type Composition Alluvial")
+                    ax.grid(False)
                     plt.tight_layout()
                     plot_utils.save_multi("composition_alluvial", fig_subdir, fig=fig)
                     LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_alluvial")
