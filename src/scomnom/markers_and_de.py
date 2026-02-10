@@ -1448,6 +1448,15 @@ def run_composition(cfg) -> ad.AnnData:
                         len(cond_levels),
                     )
 
+                sig_clusters = set()
+                if isinstance(consensus, pd.DataFrame) and not consensus.empty:
+                    try:
+                        sig_clusters = set(
+                            consensus.loc[consensus["n_sig"] > 0, "cluster"].astype(str).tolist()
+                        )
+                    except Exception:
+                        sig_clusters = set()
+
                 if len(cond_levels) == 2:
                     from matplotlib.patches import Patch
 
@@ -1459,6 +1468,19 @@ def run_composition(cfg) -> ad.AnnData:
                     y = np.arange(len(cluster_order))
                     ax.barh(y, left.values, color=colors, edgecolor="white", linewidth=0.3)
                     ax.barh(y, right.values, left=left.values, color=colors, alpha=0.6, edgecolor="white", linewidth=0.3)
+                    totals = left.values + right.values
+                    if sig_clusters:
+                        for i, cl in enumerate(cluster_order):
+                            if str(cl) in sig_clusters:
+                                ax.text(
+                                    totals[i] + 0.01,
+                                    y[i],
+                                    "*",
+                                    va="center",
+                                    ha="left",
+                                    fontsize=12,
+                                    color="#111111",
+                                )
                     ax.set_yticks(y)
                     ax.set_yticklabels(cluster_order)
                     ax.set_xlabel("Mean proportion")
