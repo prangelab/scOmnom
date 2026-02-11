@@ -330,11 +330,10 @@ def _safe_combo_token(x: object) -> str:
 
 def _resolve_condition_key(adata: ad.AnnData, key: str) -> str:
     raw = str(key).strip()
-    if ":" not in raw and "|" not in raw:
+    if ":" not in raw:
         return raw
 
-    sep = ":" if ":" in raw else "|"
-    parts = [p.strip() for p in raw.split(sep) if p.strip()]
+    parts = [p.strip() for p in raw.split(":") if p.strip()]
     if len(parts) < 2:
         return raw
 
@@ -355,12 +354,12 @@ def _resolve_condition_key(adata: ad.AnnData, key: str) -> str:
 
 def _parse_condition_key_spec(adata: ad.AnnData, key: str) -> tuple[str, Optional[tuple[str, str]]]:
     raw = str(key).strip()
-    if "|" not in raw:
+    if "@" not in raw:
         return _resolve_condition_key(adata, raw), None
 
-    parts = [p.strip() for p in raw.split("|") if p.strip()]
+    parts = [p.strip() for p in raw.split("@") if p.strip()]
     if len(parts) != 2:
-        raise ValueError(f"Invalid within-B condition key {raw!r}. Use 'A|B'.")
+        raise ValueError(f"Invalid within-B condition key {raw!r}. Use 'A@B'.")
     composite = _resolve_condition_key(adata, f"{parts[0]}:{parts[1]}")
     return composite, (parts[0], parts[1])
 
