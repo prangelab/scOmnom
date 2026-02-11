@@ -87,13 +87,13 @@ class PseudobulkDEOptions:
     lfc_threshold: float = 0.0
     size_factors: str = "poscounts"
     shrink_lfc: bool = True
-    min_total_counts: int = 10
+    min_total_counts: int = 100
     min_pct: float = 0.0
     min_diff_pct: float = 0.0
     positive_only: bool = True
     max_genes: Optional[int] = None
     covariates: Tuple[str, ...] = ()
-    min_counts_per_lib: int = 0
+    min_counts_per_lib: int = 5
     min_lib_pct: float = 0.0
 
 
@@ -814,7 +814,7 @@ def de_cluster_vs_rest_pseudobulk(
     results: Dict[str, pd.DataFrame] = {}
     summary_rows: list[dict] = []
 
-    min_total = int(getattr(opts, "min_total_counts", 10))
+    min_total = int(getattr(opts, "min_total_counts", 100))
     max_genes = getattr(opts, "max_genes", None)
     min_pct = float(getattr(opts, "min_pct", 0.0))
     min_counts_per_lib = int(getattr(opts, "min_counts_per_lib", 0))
@@ -942,8 +942,25 @@ def de_cluster_vs_rest_pseudobulk(
                     metadata_tmp = pd.DataFrame(metadata_rows, index=pd.Index(pb_index, name="pb_id"))
                     counts_tmp = pd.DataFrame(out2, index=metadata_tmp.index, columns=genes2)
 
+                    # per-level library filter: >= min_counts_per_lib in >= min_samples_per_level libs per level
+                    if min_counts_per_lib > 0:
+                        vc_level = metadata_tmp["binary_cluster"].astype(str).value_counts()
+                        if (
+                            int(vc_level.get("target", 0)) >= int(opts.min_samples_per_level)
+                            and int(vc_level.get("rest", 0)) >= int(opts.min_samples_per_level)
+                        ):
+                            target_mask = metadata_tmp["binary_cluster"].astype(str).to_numpy() == "target"
+                            rest_mask = metadata_tmp["binary_cluster"].astype(str).to_numpy() == "rest"
+                            target_ct = (counts_tmp.loc[target_mask] >= int(min_counts_per_lib)).sum(axis=0)
+                            rest_ct = (counts_tmp.loc[rest_mask] >= int(min_counts_per_lib)).sum(axis=0)
+                            keep_level = (
+                                (target_ct >= int(opts.min_samples_per_level))
+                                & (rest_ct >= int(opts.min_samples_per_level))
+                            ).to_numpy()
+                            counts_tmp = counts_tmp.loc[:, keep_level].copy()
+
                     # aggregate-level library filter: >= min_counts_per_lib in >= min_lib_pct of libs
-                    if min_counts_per_lib > 0 and min_lib_pct > 0.0:
+                    if min_counts_per_lib > 0 and min_lib_pct > 0.0 and counts_tmp.shape[1] > 0:
                         lib_frac = (counts_tmp >= int(min_counts_per_lib)).sum(axis=0) / float(counts_tmp.shape[0])
                         keep_lib = (lib_frac >= float(min_lib_pct)).to_numpy()
                         counts_tmp = counts_tmp.loc[:, keep_lib].copy()
@@ -963,6 +980,14 @@ def de_cluster_vs_rest_pseudobulk(
                         )
                         n_skipped += 1
                     else:
+                        LOGGER.info(
+                            "Pseudobulk DE: cluster=%s genes kept=%d (min_total_counts=%d, min_counts_per_lib=%d, min_samples_per_level=%d).",
+                            str(cl_str),
+                            int(counts_tmp.shape[1]),
+                            int(min_total),
+                            int(min_counts_per_lib),
+                            int(opts.min_samples_per_level),
+                        )
                         vc = metadata_tmp["binary_cluster"].value_counts()
                         if int(vc.get("target", 0)) < int(opts.min_samples_per_level) or int(vc.get("rest", 0)) < int(opts.min_samples_per_level):
                             results[cl_str] = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
@@ -1233,7 +1258,9 @@ def de_cluster_vs_rest_pseudobulk(
             "min_samples_per_level": int(opts.min_samples_per_level),
             "alpha": float(opts.alpha),
             "shrink_lfc": bool(opts.shrink_lfc),
-            "min_total_counts": int(getattr(opts, "min_total_counts", 10)),
+            "min_total_counts": int(getattr(opts, "min_total_counts", 100)),
+            "min_counts_per_lib": int(getattr(opts, "min_counts_per_lib", 0)),
+            "min_lib_pct": float(getattr(opts, "min_lib_pct", 0.0)),
             "min_pct": float(getattr(opts, "min_pct", 0.0)),
             "min_diff_pct": float(getattr(opts, "min_diff_pct", 0.0)),
             "max_genes": (int(getattr(opts, "max_genes", 0)) if getattr(opts, "max_genes", None) else None),
@@ -1332,7 +1359,7 @@ def de_condition_within_group_pseudobulk(
     dense = counts_df.sparse.to_coo().toarray().astype(np.int64, copy=False)
     counts = pd.DataFrame(dense, index=counts_df.index, columns=counts_df.columns)
 
-    min_total = int(getattr(opts, "min_total_counts", 10))
+    min_total = int(getattr(opts, "min_total_counts", 100))
     max_genes = getattr(opts, "max_genes", None)
     keep = (counts.sum(axis=0) >= min_total)
     counts = counts.loc[:, keep]
@@ -1345,6 +1372,16 @@ def de_condition_within_group_pseudobulk(
             str(reference),
         )
         return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
+
+    LOGGER.info(
+        "Pseudobulk DE: group=%s condition_key=%s genes kept=%d (min_total_counts=%d, min_counts_per_lib=%d, min_samples_per_level=%d).",
+        str(group_value),
+        str(condition_key),
+        int(counts.shape[1]),
+        int(min_total),
+        int(min_counts_per_lib),
+        int(opts.min_samples_per_level),
+    )
 
     # Cell-level prevalence filter within this cluster (min_pct on either condition)
     min_pct = float(getattr(opts, "min_pct", 0.0))
@@ -1368,9 +1405,26 @@ def de_condition_within_group_pseudobulk(
         keep_series = pd.Series(keep, index=adata.var_names.astype(str))
         keep = keep_series.reindex(counts.columns.astype(str)).fillna(False).to_numpy()
         counts = counts.loc[:, keep]
-    # aggregate-level library filter: >= min_counts_per_lib in >= min_lib_pct of libs
+    # per-level library filter: >= min_counts_per_lib in >= min_samples_per_level libs per level
     min_counts_per_lib = int(getattr(opts, "min_counts_per_lib", 0))
     min_lib_pct = float(getattr(opts, "min_lib_pct", 0.0))
+    if min_counts_per_lib > 0 and counts.shape[1] > 0:
+        vc_before = metadata[condition_key].astype(str).value_counts()
+        if (
+            int(vc_before.get(str(reference), 0)) >= int(opts.min_samples_per_level)
+            and int(vc_before.get(str(test), 0)) >= int(opts.min_samples_per_level)
+        ):
+            mask_ref = metadata[condition_key].astype(str).to_numpy() == str(reference)
+            mask_test = metadata[condition_key].astype(str).to_numpy() == str(test)
+            ref_ct = (counts.loc[mask_ref] >= int(min_counts_per_lib)).sum(axis=0)
+            test_ct = (counts.loc[mask_test] >= int(min_counts_per_lib)).sum(axis=0)
+            keep_level = (
+                (ref_ct >= int(opts.min_samples_per_level))
+                & (test_ct >= int(opts.min_samples_per_level))
+            ).to_numpy()
+            counts = counts.loc[:, keep_level].copy()
+
+    # aggregate-level library filter: >= min_counts_per_lib in >= min_lib_pct of libs
     if min_counts_per_lib > 0 and min_lib_pct > 0.0 and counts.shape[1] > 0:
         lib_frac = (counts >= int(min_counts_per_lib)).sum(axis=0) / float(counts.shape[0])
         keep_lib = (lib_frac >= float(min_lib_pct)).to_numpy()
@@ -1459,7 +1513,9 @@ def de_condition_within_group_pseudobulk(
                     "min_samples_per_level": int(opts.min_samples_per_level),
                     "alpha": float(opts.alpha),
                     "shrink_lfc": bool(opts.shrink_lfc),
-                    "min_total_counts": int(getattr(opts, "min_total_counts", 10)),
+                    "min_total_counts": int(getattr(opts, "min_total_counts", 100)),
+                    "min_counts_per_lib": int(getattr(opts, "min_counts_per_lib", 0)),
+                    "min_lib_pct": float(getattr(opts, "min_lib_pct", 0.0)),
                     "min_pct": float(getattr(opts, "min_pct", 0.0)),
                     "min_diff_pct": float(getattr(opts, "min_diff_pct", 0.0)),
                     "max_genes": (int(getattr(opts, "max_genes", 0)) if getattr(opts, "max_genes", None) else None),
@@ -1853,6 +1909,41 @@ def _normalize_pair(s: str) -> tuple[str, str]:
     return a, b
 
 
+def _safe_combo_token(s: str) -> str:
+    return str(s).replace("/", "_").replace(":", "_")
+
+
+def _normalize_levels(series: pd.Series) -> pd.Series:
+    return series.astype(str).str.strip().str.replace(r"\s+", " ", regex=True)
+
+
+def _within_pairs_for_indices(
+    adata: ad.AnnData,
+    indices: np.ndarray,
+    *,
+    a_key: str,
+    b_key: str,
+) -> list[tuple[str, str]]:
+    if a_key not in adata.obs or b_key not in adata.obs:
+        raise KeyError(f"within-pairs: keys not in adata.obs: {a_key!r}, {b_key!r}")
+    if indices.size == 0:
+        return []
+
+    a_vals = _normalize_levels(adata.obs[a_key].iloc[indices])
+    b_vals = _normalize_levels(adata.obs[b_key].iloc[indices])
+
+    pairs: list[tuple[str, str]] = []
+    for b_level in sorted(pd.unique(b_vals).tolist()):
+        a_levels = sorted(pd.unique(a_vals.loc[b_vals == b_level]).tolist())
+        if len(a_levels) < 2:
+            continue
+        for A, B in _select_pairs(a_levels, None):
+            a_label = f"{_safe_combo_token(A)}.{_safe_combo_token(b_level)}"
+            b_label = f"{_safe_combo_token(B)}.{_safe_combo_token(b_level)}"
+            pairs.append((a_label, b_label))
+    return pairs
+
+
 def _select_pairs(levels: Sequence[str], requested: Sequence[str] | None) -> list[tuple[str, str]]:
     lv = [str(x) for x in levels]
     all_pairs = [(lv[i], lv[j]) for i in range(len(lv)) for j in range(i + 1, len(lv))]
@@ -1880,6 +1971,7 @@ class ContrastConditionalSpec:
     contrast_key: str  # e.g. batch_key / sample_id / group
     contrasts: Tuple[str, ...] = ()
     methods: Tuple[Literal["wilcoxon", "logreg"], ...] = ("wilcoxon", "logreg")
+    within_parts: Optional[tuple[str, str]] = None
 
     # guards
     min_cells_per_level_in_cluster: int = 50
@@ -2308,9 +2400,21 @@ def contrast_conditional_markers(
         return str(cl_val), pair_key, result, row
 
     tasks: list[tuple[str, str, str]] = []
-    for cl in cluster_cache:
-        for A, B in pairs:
+    tasks_by_cluster: dict[str, int] = {}
+    for cl, (global_idx, _) in cluster_cache.items():
+        if spec.within_parts:
+            a_key, b_key = spec.within_parts
+            pairs_local = _within_pairs_for_indices(
+                adata,
+                global_idx,
+                a_key=str(a_key),
+                b_key=str(b_key),
+            )
+        else:
+            pairs_local = pairs
+        for A, B in pairs_local:
             tasks.append((str(cl), str(A), str(B)))
+        tasks_by_cluster[str(cl)] = int(len(pairs_local))
     LOGGER.info(
         "cell-level contrasts: task build summary (clusters=%d, tasks=%d).",
         int(len(cluster_cache)),
@@ -2446,7 +2550,17 @@ def contrast_conditional_markers_multi(
             "contrast_norm": contrast_norm,
         }
         for cl in cluster_cache:
-            for A, B in pairs:
+            if spec.within_parts:
+                a_key, b_key = spec.within_parts
+                pairs_local = _within_pairs_for_indices(
+                    adata,
+                    cluster_cache[cl][0],
+                    a_key=str(a_key),
+                    b_key=str(b_key),
+                )
+            else:
+                pairs_local = pairs
+            for A, B in pairs_local:
                 tasks.append((ck, str(cl), str(A), str(B)))
                 tasks_by_key[str(ck)] = tasks_by_key.get(str(ck), 0) + 1
                 clusters_with_tasks_by_key.setdefault(str(ck), set()).add(str(cl))

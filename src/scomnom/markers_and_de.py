@@ -330,10 +330,11 @@ def _safe_combo_token(x: object) -> str:
 
 def _resolve_condition_key(adata: ad.AnnData, key: str) -> str:
     raw = str(key).strip()
-    if ":" not in raw:
+    if ":" not in raw and "|" not in raw:
         return raw
 
-    parts = [p.strip() for p in raw.split(":") if p.strip()]
+    sep = ":" if ":" in raw else "|"
+    parts = [p.strip() for p in raw.split(sep) if p.strip()]
     if len(parts) < 2:
         return raw
 
@@ -343,13 +344,59 @@ def _resolve_condition_key(adata: ad.AnnData, key: str) -> str:
 
     combo_key = ".".join(parts)
     if combo_key not in adata.obs:
-        comp = adata.obs[parts[0]].astype(str).map(_safe_combo_token)
+        comp = _normalize_levels(adata.obs[parts[0]]).map(_safe_combo_token)
         for p in parts[1:]:
-            comp = comp + "." + adata.obs[p].astype(str).map(_safe_combo_token)
+            comp = comp + "." + _normalize_levels(adata.obs[p]).map(_safe_combo_token)
         adata.obs[combo_key] = comp
         LOGGER.info("created composite condition_key=%r from %s", combo_key, parts)
 
     return combo_key
+
+
+def _parse_condition_key_spec(adata: ad.AnnData, key: str) -> tuple[str, Optional[tuple[str, str]]]:
+    raw = str(key).strip()
+    if "|" not in raw:
+        return _resolve_condition_key(adata, raw), None
+
+    parts = [p.strip() for p in raw.split("|") if p.strip()]
+    if len(parts) != 2:
+        raise ValueError(f"Invalid within-B condition key {raw!r}. Use 'A|B'.")
+    composite = _resolve_condition_key(adata, f"{parts[0]}:{parts[1]}")
+    return composite, (parts[0], parts[1])
+
+
+def _normalize_levels(series: pd.Series) -> pd.Series:
+    return series.astype(str).str.strip().str.replace(r"\s+", " ", regex=True)
+
+
+def _pairs_within_group(
+    adata: ad.AnnData,
+    *,
+    groupby: str,
+    group_value: str,
+    a_key: str,
+    b_key: str,
+) -> list[tuple[str, str]]:
+    if a_key not in adata.obs or b_key not in adata.obs:
+        raise RuntimeError(f"within-cluster: A|B keys not found in adata.obs: {a_key!r}, {b_key!r}")
+
+    g_mask = adata.obs[str(groupby)].astype(str).to_numpy() == str(group_value)
+    if not np.any(g_mask):
+        return []
+
+    a_vals = _normalize_levels(adata.obs[a_key].loc[g_mask])
+    b_vals = _normalize_levels(adata.obs[b_key].loc[g_mask])
+
+    pairs: list[tuple[str, str]] = []
+    for b_level in sorted(pd.unique(b_vals).tolist()):
+        a_levels = sorted(pd.unique(a_vals.loc[b_vals == b_level]).tolist())
+        if len(a_levels) < 2:
+            continue
+        for A, B in _select_pairs(a_levels, None):
+            a_label = f"{_safe_combo_token(A)}.{_safe_combo_token(b_level)}"
+            b_label = f"{_safe_combo_token(B)}.{_safe_combo_token(b_level)}"
+            pairs.append((a_label, b_label))
+    return pairs
 
 
 def _select_stat_col(df: pd.DataFrame, preferred: str, fallbacks: Sequence[str]) -> Optional[str]:
@@ -612,11 +659,12 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
                 min_samples_per_level=int(getattr(cfg, "min_samples_per_level", 2)),
                 alpha=float(getattr(cfg, "alpha", 0.05)),
                 shrink_lfc=bool(getattr(cfg, "shrink_lfc", True)),
+                min_total_counts=int(getattr(cfg, "pb_min_total_counts", 100)),
                 min_pct=float(getattr(cfg, "min_pct", 0.25)),
                 min_diff_pct=float(getattr(cfg, "min_diff_pct", 0.25)),
                 positive_only=bool(getattr(cfg, "positive_only", True)),
                 max_genes=getattr(cfg, "pb_max_genes", None),
-                min_counts_per_lib=int(getattr(cfg, "pb_min_counts_per_lib", 0)),
+                min_counts_per_lib=int(getattr(cfg, "pb_min_counts_per_lib", 5)),
                 min_lib_pct=float(getattr(cfg, "pb_min_lib_pct", 0.0)),
                 covariates=tuple(getattr(cfg, "pb_covariates", ())),
             )
@@ -1714,7 +1762,15 @@ def run_within_cluster(cfg) -> ad.AnnData:
     if not condition_keys:
         raise RuntimeError("within-cluster: condition_key or condition_keys is required.")
 
-    condition_keys = [_resolve_condition_key(adata, k) for k in condition_keys]
+    condition_specs: list[tuple[str, Optional[tuple[str, str]]]] = []
+    within_by_key: dict[str, Optional[tuple[str, str]]] = {}
+    for k in condition_keys:
+        ck, within = _parse_condition_key_spec(adata, k)
+        if ck in within_by_key and within_by_key[ck] != within:
+            raise RuntimeError(f"within-cluster: conflicting condition_key specs for {ck!r}")
+        within_by_key[ck] = within
+        condition_specs.append((ck, within))
+    condition_keys = [ck for ck, _ in condition_specs]
     for k in condition_keys:
         try:
             if k in adata.obs and not pd.api.types.is_categorical_dtype(adata.obs[k]):
@@ -1784,11 +1840,12 @@ def run_within_cluster(cfg) -> ad.AnnData:
                 min_samples_per_level=int(getattr(cfg, "min_samples_per_level", 2)),
                 alpha=float(getattr(cfg, "alpha", 0.05)),
                 shrink_lfc=bool(getattr(cfg, "shrink_lfc", True)),
+                min_total_counts=int(getattr(cfg, "pb_min_total_counts", 100)),
                 min_pct=float(getattr(cfg, "min_pct", 0.25)),
                 min_diff_pct=float(getattr(cfg, "min_diff_pct", 0.25)),
                 positive_only=bool(getattr(cfg, "positive_only", True)),
                 max_genes=getattr(cfg, "pb_max_genes", None),
-                min_counts_per_lib=int(getattr(cfg, "pb_min_counts_per_lib", 0)),
+                min_counts_per_lib=int(getattr(cfg, "pb_min_counts_per_lib", 5)),
                 min_lib_pct=float(getattr(cfg, "pb_min_lib_pct", 0.0)),
                 covariates=tuple(getattr(cfg, "pb_covariates", ())),
             )
@@ -1813,12 +1870,28 @@ def run_within_cluster(cfg) -> ad.AnnData:
                 )
 
                 cond_norm = adata.obs[str(cond_key)].astype(str).str.strip().str.replace(r"\s+", " ", regex=True)
+                within_parts = within_by_key.get(str(cond_key))
+                if within_parts and condition_contrasts:
+                    LOGGER.info(
+                        "within-cluster: condition_key=%r uses A|B shorthand; ignoring explicit contrasts.",
+                        str(cond_key),
+                    )
                 for g in groups:
                     g_mask = adata.obs[str(groupby)].astype(str).to_numpy() == str(g)
-                    levels = pd.Index(pd.unique(cond_norm.loc[g_mask])).sort_values().tolist()
-                    if len(levels) < 2:
-                        continue
-                    pairs = _select_pairs(levels, condition_contrasts if condition_contrasts else None)
+                    if within_parts:
+                        A_key, B_key = within_parts
+                        pairs = _pairs_within_group(
+                            adata,
+                            groupby=str(groupby),
+                            group_value=str(g),
+                            a_key=str(A_key),
+                            b_key=str(B_key),
+                        )
+                    else:
+                        levels = pd.Index(pd.unique(cond_norm.loc[g_mask])).sort_values().tolist()
+                        if len(levels) < 2:
+                            continue
+                        pairs = _select_pairs(levels, condition_contrasts if condition_contrasts else None)
                     for A, B in pairs:
                         tasks.append((str(cond_key), str(g), str(A), str(B)))
                         tasks_by_key[str(cond_key)] = tasks_by_key.get(str(cond_key), 0) + 1
@@ -1957,9 +2030,11 @@ def run_within_cluster(cfg) -> ad.AnnData:
             if str(condition_key) not in adata.obs:
                 raise RuntimeError(f"within-cluster: condition_key={condition_key!r} not found in adata.obs")
             contrast_key = getattr(cfg, "contrast_key", None) or str(condition_key)
+            within_parts = within_by_key.get(str(condition_key))
             specs.append(
                 ContrastConditionalSpec(
                     contrast_key=str(contrast_key),
+                    within_parts=within_parts,
                     methods=tuple(getattr(cfg, "contrast_methods", ("wilcoxon", "logreg"))),
                     min_cells_per_level_in_cluster=int(getattr(cfg, "contrast_min_cells_per_level", 50)),
                     max_cells_per_level_in_cluster=int(getattr(cfg, "contrast_max_cells_per_level", 2000)),
