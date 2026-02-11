@@ -1297,6 +1297,7 @@ def plot_condition_within_cluster(
 
     Saves under:
       DE/pseudobulk_DE/<condition_key>/<contrast_key>/{volcano,dotplot,violin,heatmap}/
+      (interaction: DE/pseudobulk_DE/<condition_key>__interaction/interaction/{volcano,dotplot,violin,heatmap}/)
     """
     from pathlib import Path
     from . import plot_utils
@@ -1305,7 +1306,7 @@ def plot_condition_within_cluster(
     if not isinstance(block, dict) or not block:
         return
 
-    base = Path("DE") / "pseudobulk_DE" / f"{condition_key}"
+    base_default = Path("DE") / "pseudobulk_DE" / f"{condition_key}"
 
     for k, payload in block.items():
         if not isinstance(payload, dict):
@@ -1331,10 +1332,16 @@ def plot_condition_within_cluster(
         # output folder per contrast key (no per-cluster folders)
         test = payload.get("test", None)
         ref = payload.get("reference", None)
-        if test and ref:
-            pair_dir = io_utils.sanitize_identifier(f"{test}_vs_{ref}")
+        is_interaction = bool(payload.get("interaction", False)) or ("^" in str(condition_key))
+        if is_interaction:
+            pair_dir = "interaction"
+            base = Path("DE") / "pseudobulk_DE" / f"{condition_key}__interaction"
         else:
-            pair_dir = io_utils.sanitize_identifier(str(k))
+            base = base_default
+            if test and ref:
+                pair_dir = io_utils.sanitize_identifier(f"{test}_vs_{ref}")
+            else:
+                pair_dir = io_utils.sanitize_identifier(str(k))
 
         out_volcano = base / pair_dir / "volcano"
         out_dot = base / pair_dir / "dotplot"

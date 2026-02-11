@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Mapping, Optional, Sequence
 
 import anndata as ad
 import numpy as np
@@ -352,16 +352,21 @@ def _resolve_condition_key(adata: ad.AnnData, key: str) -> str:
     return combo_key
 
 
-def _parse_condition_key_spec(adata: ad.AnnData, key: str) -> tuple[str, Optional[tuple[str, str]]]:
+def _parse_condition_key_spec(adata: ad.AnnData, key: str) -> tuple[str, Optional[tuple[str, str]], Optional[tuple[str, str]]]:
     raw = str(key).strip()
+    if "^" in raw:
+        parts = [p.strip() for p in raw.split("^") if p.strip()]
+        if len(parts) != 2:
+            raise ValueError(f"Invalid interaction condition key {raw!r}. Use 'A^B'.")
+        return f"{parts[0]}^{parts[1]}", None, (parts[0], parts[1])
     if "@" not in raw:
-        return _resolve_condition_key(adata, raw), None
+        return _resolve_condition_key(adata, raw), None, None
 
     parts = [p.strip() for p in raw.split("@") if p.strip()]
     if len(parts) != 2:
         raise ValueError(f"Invalid within-B condition key {raw!r}. Use 'A@B'.")
     composite = _resolve_condition_key(adata, f"{parts[0]}:{parts[1]}")
-    return composite, (parts[0], parts[1])
+    return composite, (parts[0], parts[1]), None
 
 
 def _normalize_levels(series: pd.Series) -> pd.Series:
@@ -375,6 +380,7 @@ def _pairs_within_group(
     group_value: str,
     a_key: str,
     b_key: str,
+    ref_a: Optional[str] = None,
 ) -> list[tuple[str, str]]:
     if a_key not in adata.obs or b_key not in adata.obs:
         raise RuntimeError(f"within-cluster: A|B keys not found in adata.obs: {a_key!r}, {b_key!r}")
@@ -388,14 +394,64 @@ def _pairs_within_group(
 
     pairs: list[tuple[str, str]] = []
     for b_level in sorted(pd.unique(b_vals).tolist()):
-        a_levels = sorted(pd.unique(a_vals.loc[b_vals == b_level]).tolist())
+        a_subset = a_vals.loc[b_vals == b_level]
+        a_levels = sorted(pd.unique(a_subset).tolist())
         if len(a_levels) < 2:
             continue
-        for A, B in _select_pairs(a_levels, None):
-            a_label = f"{_safe_combo_token(A)}.{_safe_combo_token(b_level)}"
-            b_label = f"{_safe_combo_token(B)}.{_safe_combo_token(b_level)}"
-            pairs.append((a_label, b_label))
+        a_counts = a_subset.astype(str).value_counts().to_dict()
+        effective_ref = str(ref_a) if ref_a and ref_a in a_levels else _pick_fallback_ref(a_levels, a_counts)
+        if effective_ref and effective_ref in a_levels:
+            for a_other in a_levels:
+                if a_other == effective_ref:
+                    continue
+                a_label = f"{_safe_combo_token(a_other)}.{_safe_combo_token(b_level)}"
+                b_label = f"{_safe_combo_token(effective_ref)}.{_safe_combo_token(b_level)}"
+                pairs.append((a_label, b_label))
+        else:
+            for A, B in _select_pairs(a_levels, None):
+                a_label = f"{_safe_combo_token(A)}.{_safe_combo_token(b_level)}"
+                b_label = f"{_safe_combo_token(B)}.{_safe_combo_token(b_level)}"
+                pairs.append((a_label, b_label))
     return pairs
+
+
+def _global_ref_level(adata: ad.AnnData, key: str) -> Optional[str]:
+    if key not in adata.obs:
+        return None
+    vc = adata.obs[str(key)].astype(str).value_counts()
+    if vc.empty:
+        return None
+    return str(vc.index[0])
+
+
+def _pick_fallback_ref(levels: Sequence[str], counts_by_level: Optional[Mapping[str, int]]) -> Optional[str]:
+    if not levels:
+        return None
+    if not counts_by_level:
+        return str(levels[0])
+    return str(
+        max(
+            levels,
+            key=lambda lv: (int(counts_by_level.get(str(lv), 0)), str(lv)),
+        )
+    )
+
+
+def _select_pairs_with_ref(
+    levels: list[str],
+    *,
+    ref_level: Optional[str],
+    requested: Optional[Sequence[str]],
+    counts_by_level: Optional[Mapping[str, int]] = None,
+) -> list[tuple[str, str]]:
+    if requested:
+        return _select_pairs(levels, requested)
+    if ref_level and ref_level in levels:
+        return [(str(lv), str(ref_level)) for lv in levels if str(lv) != str(ref_level)]
+    fallback = _pick_fallback_ref(levels, counts_by_level)
+    if fallback and fallback in levels:
+        return [(str(lv), str(fallback)) for lv in levels if str(lv) != str(fallback)]
+    return _select_pairs(levels, None)
 
 
 def _select_stat_col(df: pd.DataFrame, preferred: str, fallbacks: Sequence[str]) -> Optional[str]:
@@ -1761,16 +1817,33 @@ def run_within_cluster(cfg) -> ad.AnnData:
     if not condition_keys:
         raise RuntimeError("within-cluster: condition_key or condition_keys is required.")
 
-    condition_specs: list[tuple[str, Optional[tuple[str, str]]]] = []
+    condition_specs: list[tuple[str, Optional[tuple[str, str]], Optional[tuple[str, str]]]] = []
     within_by_key: dict[str, Optional[tuple[str, str]]] = {}
+    interaction_by_key: dict[str, Optional[tuple[str, str]]] = {}
+    ref_by_key: dict[str, Optional[str]] = {}
+    ref_by_factor: dict[str, Optional[str]] = {}
     for k in condition_keys:
-        ck, within = _parse_condition_key_spec(adata, k)
+        ck, within, interaction = _parse_condition_key_spec(adata, k)
         if ck in within_by_key and within_by_key[ck] != within:
             raise RuntimeError(f"within-cluster: conflicting condition_key specs for {ck!r}")
+        if ck in interaction_by_key and interaction_by_key[ck] != interaction:
+            raise RuntimeError(f"within-cluster: conflicting condition_key specs for {ck!r}")
         within_by_key[ck] = within
-        condition_specs.append((ck, within))
-    condition_keys = [ck for ck, _ in condition_specs]
+        interaction_by_key[ck] = interaction
+        condition_specs.append((ck, within, interaction))
+        if interaction:
+            a_key, b_key = interaction
+            ref_by_factor.setdefault(str(a_key), _global_ref_level(adata, str(a_key)))
+            ref_by_factor.setdefault(str(b_key), _global_ref_level(adata, str(b_key)))
+        elif within:
+            a_key, _ = within
+            ref_by_factor.setdefault(str(a_key), _global_ref_level(adata, str(a_key)))
+        else:
+            ref_by_key.setdefault(str(ck), _global_ref_level(adata, str(ck)))
+    condition_keys = [ck for ck, _, _ in condition_specs]
     for k in condition_keys:
+        if interaction_by_key.get(k):
+            continue
         try:
             if k in adata.obs and not pd.api.types.is_categorical_dtype(adata.obs[k]):
                 adata.obs[k] = adata.obs[k].astype("category")
@@ -1851,14 +1924,20 @@ def run_within_cluster(cfg) -> ad.AnnData:
 
             groups = pd.Index(pd.unique(adata.obs[str(groupby)].astype(str))).sort_values()
 
-            from .de_utils import de_condition_within_group_pseudobulk_multi, _normalize_pair, _select_pairs
+            from .de_utils import (
+                de_condition_within_group_pseudobulk_multi,
+                de_condition_within_group_pseudobulk_interaction,
+                _normalize_pair,
+                _select_pairs,
+            )
 
-            tasks: list[tuple[str, str, str, str]] = []
+            tasks: list[dict[str, str]] = []
             tasks_by_key: dict[str, int] = {}
             groups_with_tasks_by_key: dict[str, set[str]] = {}
 
             for cond_key in condition_keys:
-                if str(cond_key) not in adata.obs:
+                interaction_parts = interaction_by_key.get(str(cond_key))
+                if interaction_parts is None and str(cond_key) not in adata.obs:
                     raise RuntimeError(f"within-cluster: condition_key={cond_key!r} not found in adata.obs")
 
                 LOGGER.info(
@@ -1868,15 +1947,34 @@ def run_within_cluster(cfg) -> ad.AnnData:
                     str(cond_key),
                 )
 
-                cond_norm = adata.obs[str(cond_key)].astype(str).str.strip().str.replace(r"\s+", " ", regex=True)
+                cond_norm = None
+                if interaction_parts is None:
+                    cond_norm = adata.obs[str(cond_key)].astype(str).str.strip().str.replace(r"\s+", " ", regex=True)
                 within_parts = within_by_key.get(str(cond_key))
                 if within_parts and condition_contrasts:
                     LOGGER.info(
-                        "within-cluster: condition_key=%r uses A|B shorthand; ignoring explicit contrasts.",
+                        "within-cluster: condition_key=%r uses A@B shorthand; ignoring explicit contrasts.",
                         str(cond_key),
                     )
                 for g in groups:
                     g_mask = adata.obs[str(groupby)].astype(str).to_numpy() == str(g)
+                    if interaction_parts:
+                        ref_a = ref_by_factor.get(str(interaction_parts[0]))
+                        ref_b = ref_by_factor.get(str(interaction_parts[1]))
+                        tasks.append(
+                            {
+                                "kind": "interaction",
+                                "cond_key": str(cond_key),
+                                "group": str(g),
+                                "a_key": str(interaction_parts[0]),
+                                "b_key": str(interaction_parts[1]),
+                                "ref_a": str(ref_a) if ref_a is not None else "",
+                                "ref_b": str(ref_b) if ref_b is not None else "",
+                            }
+                        )
+                        tasks_by_key[str(cond_key)] = tasks_by_key.get(str(cond_key), 0) + 1
+                        groups_with_tasks_by_key.setdefault(str(cond_key), set()).add(str(g))
+                        continue
                     if within_parts:
                         A_key, B_key = within_parts
                         pairs = _pairs_within_group(
@@ -1885,14 +1983,29 @@ def run_within_cluster(cfg) -> ad.AnnData:
                             group_value=str(g),
                             a_key=str(A_key),
                             b_key=str(B_key),
+                            ref_a=ref_by_factor.get(str(A_key)),
                         )
                     else:
                         levels = pd.Index(pd.unique(cond_norm.loc[g_mask])).sort_values().tolist()
                         if len(levels) < 2:
                             continue
-                        pairs = _select_pairs(levels, condition_contrasts if condition_contrasts else None)
+                        counts_by_level = cond_norm.loc[g_mask].astype(str).value_counts().to_dict()
+                        pairs = _select_pairs_with_ref(
+                            levels,
+                            ref_level=ref_by_key.get(str(cond_key)),
+                            requested=condition_contrasts,
+                            counts_by_level=counts_by_level,
+                        )
                     for A, B in pairs:
-                        tasks.append((str(cond_key), str(g), str(A), str(B)))
+                        tasks.append(
+                            {
+                                "kind": "pair",
+                                "cond_key": str(cond_key),
+                                "group": str(g),
+                                "A": str(A),
+                                "B": str(B),
+                            }
+                        )
                         tasks_by_key[str(cond_key)] = tasks_by_key.get(str(cond_key), 0) + 1
                         groups_with_tasks_by_key.setdefault(str(cond_key), set()).add(str(g))
 
@@ -1918,21 +2031,38 @@ def run_within_cluster(cfg) -> ad.AnnData:
 
             entries: list[tuple[str, dict]] = []
 
-            def _run_task(cond_key: str, gval: str, A: str, B: str):
+            def _run_task(task: dict[str, str]):
+                if task["kind"] == "interaction":
+                    res, meta = de_condition_within_group_pseudobulk_interaction(
+                        adata,
+                        group_value=str(task["group"]),
+                        groupby=str(groupby),
+                        round_id=getattr(cfg, "round_id", None),
+                        factor_a=str(task["a_key"]),
+                        factor_b=str(task["b_key"]),
+                        ref_a=str(task.get("ref_a", "")) if task.get("ref_a") else None,
+                        ref_b=str(task.get("ref_b", "")) if task.get("ref_b") else None,
+                        spec=pb_spec,
+                        opts=pb_opts,
+                        store_key=None,
+                        store=False,
+                        n_cpus=1,
+                    )
+                    return "interaction", str(task["cond_key"]), str(task["group"]), res, meta
                 res = de_condition_within_group_pseudobulk_multi(
                     adata,
-                    group_value=str(gval),
+                    group_value=str(task["group"]),
                     groupby=str(groupby),
                     round_id=getattr(cfg, "round_id", None),
-                    condition_key=str(cond_key),
+                    condition_key=str(task["cond_key"]),
                     spec=pb_spec,
                     opts=pb_opts,
-                    contrasts=[f"{A}_vs_{B}"],
+                    contrasts=[f"{task['A']}_vs_{task['B']}"],
                     store_key=None,
                     store=False,
                     n_cpus=1,
                 )
-                return str(cond_key), str(gval), res
+                return "pair", str(task["cond_key"]), str(task["group"]), res, None
 
             done = 0
             t0 = time.perf_counter()
@@ -1940,12 +2070,98 @@ def run_within_cluster(cfg) -> ad.AnnData:
                 from concurrent.futures import ThreadPoolExecutor, as_completed
 
                 with ThreadPoolExecutor(max_workers=max_workers) as ex:
-                    futs = {
-                        ex.submit(_run_task, cond_key, gval, A, B): (cond_key, gval, A, B)
-                        for (cond_key, gval, A, B) in tasks
-                    }
+                    futs = {ex.submit(_run_task, task): task for task in tasks}
                     for fut in as_completed(futs):
-                        cond_key, gval, res = fut.result()
+                        kind, cond_key, gval, res, meta = fut.result()
+                        if kind == "interaction":
+                            key = f"{groupby}={gval}::{cond_key}::interaction"
+                            payload = {
+                                "group_key": str(groupby),
+                                "group_value": str(gval),
+                                "condition_key": str(cond_key),
+                                "test": None,
+                                "reference": None,
+                                "interaction": True,
+                                "factor_a": meta.get("factor_a") if meta else None,
+                                "factor_b": meta.get("factor_b") if meta else None,
+                                "ref_a": meta.get("ref_a") if meta else None,
+                                "ref_b": meta.get("ref_b") if meta else None,
+                                "level_a": meta.get("level_a") if meta else None,
+                                "level_b": meta.get("level_b") if meta else None,
+                                "coef_name": meta.get("coef_name") if meta else None,
+                                "results": res,
+                                "options": {
+                                    "min_cells_per_sample_group": int(pb_opts.min_cells_per_sample_group),
+                                    "min_samples_per_level": int(pb_opts.min_samples_per_level),
+                                    "alpha": float(pb_opts.alpha),
+                                    "shrink_lfc": bool(pb_opts.shrink_lfc),
+                                    "min_total_counts": int(getattr(pb_opts, "min_total_counts", 0)),
+                                    "min_counts_per_lib": int(getattr(pb_opts, "min_counts_per_lib", 0)),
+                                },
+                            }
+                            entries.append((key, payload))
+                        else:
+                            for contrast_key, df in res.items():
+                                A2, B2 = _normalize_pair(contrast_key)
+                                key = f"{groupby}={gval}::{cond_key}::{A2}_vs_{B2}"
+                                payload = {
+                                    "group_key": str(groupby),
+                                    "group_value": str(gval),
+                                    "condition_key": str(cond_key),
+                                    "test": str(A2),
+                                    "reference": str(B2),
+                                    "results": df,
+                                    "options": {
+                                        "min_cells_per_sample_group": int(pb_opts.min_cells_per_sample_group),
+                                        "min_samples_per_level": int(pb_opts.min_samples_per_level),
+                                        "alpha": float(pb_opts.alpha),
+                                        "shrink_lfc": bool(pb_opts.shrink_lfc),
+                                        "min_total_counts": int(getattr(pb_opts, "min_total_counts", 0)),
+                                        "min_counts_per_lib": int(getattr(pb_opts, "min_counts_per_lib", 0)),
+                                    },
+                                }
+                                entries.append((key, payload))
+                        done += 1
+                        elapsed = time.perf_counter() - t0
+                        eta_s = (elapsed / max(1, done)) * (total - done)
+                        LOGGER.info(
+                            "within-cluster: pseudobulk progress %d/%d (elapsed=%.1fs, eta=%.1fs).",
+                            int(done),
+                            int(total),
+                            elapsed,
+                            eta_s,
+                        )
+            else:
+                for task in tasks:
+                    kind, cond_key, gval, res, meta = _run_task(task)
+                    if kind == "interaction":
+                        key = f"{groupby}={gval}::{cond_key}::interaction"
+                        payload = {
+                            "group_key": str(groupby),
+                            "group_value": str(gval),
+                            "condition_key": str(cond_key),
+                            "test": None,
+                            "reference": None,
+                            "interaction": True,
+                            "factor_a": meta.get("factor_a") if meta else None,
+                            "factor_b": meta.get("factor_b") if meta else None,
+                            "ref_a": meta.get("ref_a") if meta else None,
+                            "ref_b": meta.get("ref_b") if meta else None,
+                            "level_a": meta.get("level_a") if meta else None,
+                            "level_b": meta.get("level_b") if meta else None,
+                            "coef_name": meta.get("coef_name") if meta else None,
+                            "results": res,
+                            "options": {
+                                "min_cells_per_sample_group": int(pb_opts.min_cells_per_sample_group),
+                                "min_samples_per_level": int(pb_opts.min_samples_per_level),
+                                "alpha": float(pb_opts.alpha),
+                                "shrink_lfc": bool(pb_opts.shrink_lfc),
+                                "min_total_counts": int(getattr(pb_opts, "min_total_counts", 0)),
+                                "min_counts_per_lib": int(getattr(pb_opts, "min_counts_per_lib", 0)),
+                            },
+                        }
+                        entries.append((key, payload))
+                    else:
                         for contrast_key, df in res.items():
                             A2, B2 = _normalize_pair(contrast_key)
                             key = f"{groupby}={gval}::{cond_key}::{A2}_vs_{B2}"
@@ -1961,50 +2177,21 @@ def run_within_cluster(cfg) -> ad.AnnData:
                                     "min_samples_per_level": int(pb_opts.min_samples_per_level),
                                     "alpha": float(pb_opts.alpha),
                                     "shrink_lfc": bool(pb_opts.shrink_lfc),
+                                    "min_total_counts": int(getattr(pb_opts, "min_total_counts", 0)),
+                                    "min_counts_per_lib": int(getattr(pb_opts, "min_counts_per_lib", 0)),
                                 },
                             }
                             entries.append((key, payload))
-                        done += 1
-                        elapsed = time.perf_counter() - t0
-                        eta_s = (elapsed / max(1, done)) * (total - done)
-                        LOGGER.info(
-                            "within-cluster: pseudobulk progress %d/%d (elapsed=%.1fs, eta=%.1fs).",
-                            int(done),
-                            int(total),
-                            elapsed,
-                            eta_s,
-                        )
-            else:
-                for cond_key, gval, A, B in tasks:
-                    _, _, res = _run_task(cond_key, gval, A, B)
-                    for contrast_key, df in res.items():
-                        A2, B2 = _normalize_pair(contrast_key)
-                        key = f"{groupby}={gval}::{cond_key}::{A2}_vs_{B2}"
-                        payload = {
-                            "group_key": str(groupby),
-                            "group_value": str(gval),
-                            "condition_key": str(cond_key),
-                            "test": str(A2),
-                            "reference": str(B2),
-                            "results": df,
-                            "options": {
-                                "min_cells_per_sample_group": int(pb_opts.min_cells_per_sample_group),
-                                "min_samples_per_level": int(pb_opts.min_samples_per_level),
-                                "alpha": float(pb_opts.alpha),
-                                "shrink_lfc": bool(pb_opts.shrink_lfc),
-                            },
-                        }
-                        entries.append((key, payload))
-                        done += 1
-                        elapsed = time.perf_counter() - t0
-                        eta_s = (elapsed / max(1, done)) * (total - done)
-                        LOGGER.info(
-                            "within-cluster: pseudobulk progress %d/%d (elapsed=%.1fs, eta=%.1fs).",
-                            int(done),
-                            int(total),
-                            elapsed,
-                            eta_s,
-                        )
+                    done += 1
+                    elapsed = time.perf_counter() - t0
+                    eta_s = (elapsed / max(1, done)) * (total - done)
+                    LOGGER.info(
+                        "within-cluster: pseudobulk progress %d/%d (elapsed=%.1fs, eta=%.1fs).",
+                        int(done),
+                        int(total),
+                        elapsed,
+                        eta_s,
+                    )
 
             if store_key:
                 adata.uns.setdefault(store_key, {})
@@ -2026,14 +2213,24 @@ def run_within_cluster(cfg) -> ad.AnnData:
         total_cpus = int(getattr(cfg, "n_jobs", 1))
         specs = []
         for condition_key in condition_keys:
+            if interaction_by_key.get(str(condition_key)):
+                LOGGER.info(
+                    "within-cluster: skipping cell-level contrasts for interaction condition_key=%r.",
+                    str(condition_key),
+                )
+                continue
             if str(condition_key) not in adata.obs:
                 raise RuntimeError(f"within-cluster: condition_key={condition_key!r} not found in adata.obs")
             contrast_key = getattr(cfg, "contrast_key", None) or str(condition_key)
             within_parts = within_by_key.get(str(condition_key))
+            ref_level = ref_by_key.get(str(condition_key))
+            if within_parts:
+                ref_level = ref_by_factor.get(str(within_parts[0]))
             specs.append(
                 ContrastConditionalSpec(
                     contrast_key=str(contrast_key),
                     within_parts=within_parts,
+                    ref_level=ref_level,
                     methods=tuple(getattr(cfg, "contrast_methods", ("wilcoxon", "logreg"))),
                     min_cells_per_level_in_cluster=int(getattr(cfg, "contrast_min_cells_per_level", 50)),
                     max_cells_per_level_in_cluster=int(getattr(cfg, "contrast_max_cells_per_level", 2000)),
@@ -2060,6 +2257,8 @@ def run_within_cluster(cfg) -> ad.AnnData:
         )
 
         for condition_key in condition_keys:
+            if interaction_by_key.get(str(condition_key)):
+                continue
             contrast_key = getattr(cfg, "contrast_key", None) or str(condition_key)
             out_local = results_by_key.get(str(contrast_key), {})
             summary_local = summaries_by_key.get(str(contrast_key), pd.DataFrame())
@@ -2299,6 +2498,9 @@ def run_within_cluster(cfg) -> ad.AnnData:
                 tables_root=de_pb_dir,
             )
             design_terms = ["sample", *covariates, str(condition_key)]
+            interaction_parts = interaction_by_key.get(str(condition_key))
+            if interaction_parts:
+                design_terms = ["sample", *covariates, str(interaction_parts[0]), str(interaction_parts[1]), f"{interaction_parts[0]}:{interaction_parts[1]}"]
 
             settings_name = "de_settings.txt"
             if len(condition_keys) > 1:

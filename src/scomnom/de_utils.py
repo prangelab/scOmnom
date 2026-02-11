@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Literal, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Literal, Mapping, Optional, Sequence, Tuple
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed, TimeoutError
 import os
@@ -709,6 +709,165 @@ def _run_pydeseq2(
     return res, meta
 
 
+def _pick_interaction_coef_name(
+    names: Sequence[str],
+    *,
+    factor_a: str,
+    level_a: str,
+    factor_b: str,
+    level_b: str,
+) -> Optional[str]:
+    if not names:
+        return None
+    fa = str(factor_a)
+    fb = str(factor_b)
+    la = str(level_a)
+    lb = str(level_b)
+    candidates = []
+    for n in names:
+        s = str(n)
+        if fa in s and fb in s and la in s and lb in s:
+            candidates.append(s)
+    if not candidates:
+        return None
+    for n in candidates:
+        if ":" in n:
+            return n
+    return candidates[0]
+
+
+def _run_pydeseq2_interaction(
+    counts: pd.DataFrame,
+    metadata: pd.DataFrame,
+    *,
+    factor_a: str,
+    level_a: str,
+    factor_b: str,
+    level_b: str,
+    covariates: Sequence[str],
+    alpha: float = 0.05,
+    shrink_lfc: bool = True,
+    n_cpus: int = 1,
+    size_factors: str = "poscounts",
+) -> tuple[pd.DataFrame, Dict[str, Any]]:
+    _require_pydeseq2()
+    import inspect
+    from pydeseq2.dds import DeseqDataSet
+    from pydeseq2.ds import DeseqStats
+
+    counts = counts.loc[metadata.index]
+    counts_i = counts.round().astype(np.int64)
+
+    design_factors = [*covariates, str(factor_a), str(factor_b), f"{factor_a}:{factor_b}"]
+    dds = DeseqDataSet(
+        counts=counts_i,
+        metadata=metadata.copy(),
+        design_factors=list(design_factors),
+        ref_level={str(factor_a): str(level_a), str(factor_b): str(level_b)},
+        n_cpus=int(n_cpus),
+    )
+
+    meta: Dict[str, Any] = {
+        "sf_policy": str(size_factors),
+        "sf_used": None,
+        "sf_forced": False,
+        "warn_iterative_size_factors": False,
+        "warn_low_df_dispersion": False,
+        "warnings": [],
+    }
+
+    with warnings.catch_warnings(record=True) as wrec, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        warnings.simplefilter("always")
+
+        def _try_fit_size_factors(mode: str) -> bool:
+            try:
+                fit_fn = getattr(dds, "fit_size_factors", None)
+                if callable(fit_fn):
+                    fit_fn(fit_type=str(mode))
+                    meta["sf_used"] = str(mode)
+                    meta["sf_forced"] = True
+                    return True
+                return False
+            except Exception:
+                return False
+
+        sf = str(size_factors).lower().strip()
+        if sf == "ratio_then_poscounts":
+            ok = _try_fit_size_factors("ratio")
+            if not ok:
+                ok2 = _try_fit_size_factors("poscounts")
+                if not ok2:
+                    meta["sf_used"] = None
+            else:
+                meta["sf_used"] = "ratio"
+        elif sf in ("poscounts", "ratio"):
+            ok = _try_fit_size_factors(sf)
+            if not ok:
+                meta["sf_used"] = None
+        else:
+            meta["sf_used"] = None
+
+        dds.deseq2()
+
+        names = None
+        try:
+            names = getattr(dds, "results_names", None)
+            if callable(names):
+                names = names()
+        except Exception:
+            names = None
+
+        coef_name = _pick_interaction_coef_name(
+            names or [],
+            factor_a=str(factor_a),
+            level_a=str(level_a),
+            factor_b=str(factor_b),
+            level_b=str(level_b),
+        )
+        if coef_name is None:
+            coef_name = f"{factor_a}[T.{level_a}]:{factor_b}[T.{level_b}]"
+
+        ds_sig = inspect.signature(DeseqStats)
+        if "name" in ds_sig.parameters:
+            stat = DeseqStats(
+                dds,
+                name=str(coef_name),
+                alpha=float(alpha),
+                n_cpus=int(n_cpus),
+            )
+        elif "results_name" in ds_sig.parameters:
+            stat = DeseqStats(
+                dds,
+                results_name=str(coef_name),
+                alpha=float(alpha),
+                n_cpus=int(n_cpus),
+            )
+        else:
+            raise RuntimeError("PyDESeq2 does not support interaction contrasts by name.")
+
+        stat.summary(print_result=False)
+        if shrink_lfc:
+            try:
+                stat.lfc_shrink()
+            except Exception:
+                pass
+
+    for ww in wrec:
+        msg = str(getattr(ww, "message", ww))
+        meta["warnings"].append(msg)
+        if "Iterative size factor fitting did not converge" in msg:
+            meta["warn_iterative_size_factors"] = True
+        if "residual degrees of freedom is less than 3" in msg:
+            meta["warn_low_df_dispersion"] = True
+
+    res = stat.results_df.copy()
+    if "gene" not in res.columns:
+        res["gene"] = res.index.astype(str)
+    cols = [c for c in ["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"] if c in res.columns]
+    res = res[cols].sort_values("padj", na_position="last")
+    meta["coef_name"] = str(coef_name)
+    return res, meta
+
 
 def de_cluster_vs_rest_pseudobulk(
     adata: ad.AnnData,
@@ -1322,7 +1481,17 @@ def de_condition_within_group_pseudobulk(
     cond = meta_df[condition_key].astype(str)
     vc = cond.value_counts()
     if str(reference) not in vc.index:
-        return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
+        if vc.empty:
+            return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
+        fallback_ref = str(vc.index[0])
+        LOGGER.info(
+            "Pseudobulk DE: reference %r not present in group=%r condition_key=%r; using fallback=%r.",
+            str(reference),
+            str(group_value),
+            str(condition_key),
+            str(fallback_ref),
+        )
+        reference = fallback_ref
 
     levels = list(vc.index.astype(str))
     other_levels = [x for x in levels if x != str(reference)]
@@ -1527,6 +1696,211 @@ def de_condition_within_group_pseudobulk(
 
     return res
 
+
+def de_condition_within_group_pseudobulk_interaction(
+    adata: ad.AnnData,
+    *,
+    group_value: str,
+    groupby: Optional[str] = None,
+    round_id: Optional[str] = None,
+    factor_a: str,
+    factor_b: str,
+    ref_a: Optional[str] = None,
+    ref_b: Optional[str] = None,
+    spec: PseudobulkSpec = PseudobulkSpec(),
+    opts: PseudobulkDEOptions = PseudobulkDEOptions(),
+    store_key: Optional[str] = "scomnom_de",
+    store: bool = True,
+    n_cpus: int = 1,
+) -> tuple[pd.DataFrame, dict]:
+    """
+    Interaction DE within a group: test A:B interaction term.
+    """
+    _set_blas_threads(1)
+    group_key = resolve_group_key(adata, groupby=groupby, round_id=round_id, prefer_pretty=True)
+    sample_key = spec.sample_key
+    counts_layer = spec.counts_layer
+
+    if factor_a not in adata.obs or factor_b not in adata.obs:
+        raise KeyError(f"interaction factors not in adata.obs: {factor_a!r}, {factor_b!r}")
+
+    mask = adata.obs[group_key].astype(str).to_numpy() == str(group_value)
+    if mask.sum() == 0:
+        return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]), {}
+
+    counts_df, meta_df = pseudobulk_aggregate(
+        adata,
+        sample_key=sample_key,
+        group_key=None,
+        counts_layer=counts_layer,
+        min_cells_per_sample_group=int(opts.min_cells_per_sample_group),
+        restrict_cells_mask=mask,
+    )
+    if meta_df.empty:
+        return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]), {}
+
+    obs_sub = adata.obs.loc[mask, [sample_key, factor_a, factor_b]].copy()
+    obs_sub[sample_key] = obs_sub[sample_key].astype(str)
+
+    a_map: dict[str, str] = {}
+    b_map: dict[str, str] = {}
+    for s, sub in obs_sub.groupby(sample_key, sort=False):
+        a_vals = sub[factor_a].dropna().astype(str).unique()
+        b_vals = sub[factor_b].dropna().astype(str).unique()
+        if a_vals.size == 0 or b_vals.size == 0:
+            continue
+        if a_vals.size > 1 or b_vals.size > 1:
+            LOGGER.warning(
+                "Interaction DE: sample %r has multiple levels for %s or %s; using first.",
+                str(s),
+                str(factor_a),
+                str(factor_b),
+            )
+        a_map[str(s)] = str(a_vals[0])
+        b_map[str(s)] = str(b_vals[0])
+
+    metadata = meta_df[[sample_key]].copy()
+    metadata[sample_key] = metadata[sample_key].astype(str)
+    metadata[factor_a] = metadata[sample_key].map(a_map)
+    metadata[factor_b] = metadata[sample_key].map(b_map)
+    metadata = metadata.dropna(subset=[factor_a, factor_b])
+    if metadata.empty:
+        return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]), {}
+
+    levels_a = metadata[factor_a].astype(str).value_counts()
+    levels_b = metadata[factor_b].astype(str).value_counts()
+    if len(levels_a) != 2 or len(levels_b) != 2:
+        LOGGER.info(
+            "Interaction DE: skipping group=%r (factor levels A=%s, B=%s).",
+            str(group_value),
+            list(levels_a.index.astype(str)),
+            list(levels_b.index.astype(str)),
+        )
+        return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]), {}
+
+    if ref_a is not None and str(ref_a) not in levels_a.index.astype(str).tolist():
+        fallback_a = str(levels_a.index[0])
+        LOGGER.info(
+            "Interaction DE: ref_a=%r not present in group=%r; using fallback=%r.",
+            str(ref_a),
+            str(group_value),
+            str(fallback_a),
+        )
+        ref_a = fallback_a
+    if ref_b is not None and str(ref_b) not in levels_b.index.astype(str).tolist():
+        fallback_b = str(levels_b.index[0])
+        LOGGER.info(
+            "Interaction DE: ref_b=%r not present in group=%r; using fallback=%r.",
+            str(ref_b),
+            str(group_value),
+            str(fallback_b),
+        )
+        ref_b = fallback_b
+
+    ref_a = str(ref_a) if ref_a is not None else str(levels_a.index[0])
+    ref_b = str(ref_b) if ref_b is not None else str(levels_b.index[0])
+    alt_a = str([x for x in levels_a.index.astype(str).tolist() if x != ref_a][0])
+    alt_b = str([x for x in levels_b.index.astype(str).tolist() if x != ref_b][0])
+
+    metadata[factor_a] = pd.Categorical(metadata[factor_a].astype(str), categories=[ref_a, alt_a])
+    metadata[factor_b] = pd.Categorical(metadata[factor_b].astype(str), categories=[ref_b, alt_b])
+    metadata[sample_key] = metadata[sample_key].astype("category")
+
+    raw_covariates = [
+        c for c in getattr(opts, "covariates", ()) if str(c) not in {str(sample_key), str(factor_a), str(factor_b), "sample"}
+    ]
+    sample_covs, covariates = _collect_sample_covariates(
+        adata,
+        sample_key=str(sample_key),
+        covariates=raw_covariates,
+    )
+    for c in covariates:
+        metadata[c] = metadata[sample_key].astype(str).map(
+            lambda s: sample_covs.get(str(s), {}).get(c, np.nan)
+        )
+        if metadata[c].dtype == object:
+            metadata[c] = metadata[c].astype("category")
+
+    counts = counts_df.sparse.to_coo().toarray().astype(np.int64, copy=False)
+    counts = pd.DataFrame(counts, index=counts_df.index, columns=counts_df.columns)
+    counts = counts.loc[metadata.index]
+
+    min_total = int(getattr(opts, "min_total_counts", 100))
+    keep = (counts.sum(axis=0) >= min_total)
+    counts = counts.loc[:, keep]
+    if counts.shape[1] == 0:
+        return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]), {}
+
+    min_pct = float(getattr(opts, "min_pct", 0.0))
+    if min_pct > 0.0:
+        mask_cluster = adata.obs[str(group_key)].astype(str).to_numpy() == str(group_value)
+        keep_cluster = _celllevel_pct_mask(
+            adata,
+            mask=mask_cluster,
+            counts_layer=counts_layer,
+            min_pct=min_pct,
+        )
+        keep_series = pd.Series(keep_cluster, index=adata.var_names.astype(str))
+        keep_cluster = keep_series.reindex(counts.columns.astype(str)).fillna(False).to_numpy()
+        counts = counts.loc[:, keep_cluster]
+
+    min_counts_per_lib = int(getattr(opts, "min_counts_per_lib", 0))
+    min_lib_pct = float(getattr(opts, "min_lib_pct", 0.0))
+    if min_counts_per_lib > 0 and counts.shape[1] > 0:
+        combo = metadata[factor_a].astype(str) + "||" + metadata[factor_b].astype(str)
+        combo_counts = combo.value_counts()
+        if (combo_counts < int(opts.min_samples_per_level)).any():
+            LOGGER.info(
+                "Interaction DE: skipping group=%r (insufficient combo libs).",
+                str(group_value),
+            )
+            return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]), {}
+        keep_mask = np.ones(counts.shape[1], dtype=bool)
+        for cmb in combo_counts.index.tolist():
+            cmb_mask = combo.to_numpy() == str(cmb)
+            cmb_ct = (counts.loc[cmb_mask] >= int(min_counts_per_lib)).sum(axis=0)
+            keep_mask &= (cmb_ct >= int(opts.min_samples_per_level)).to_numpy()
+        counts = counts.loc[:, keep_mask].copy()
+
+    if min_counts_per_lib > 0 and min_lib_pct > 0.0 and counts.shape[1] > 0:
+        lib_frac = (counts >= int(min_counts_per_lib)).sum(axis=0) / float(counts.shape[0])
+        keep_lib = (lib_frac >= float(min_lib_pct)).to_numpy()
+        counts = counts.loc[:, keep_lib].copy()
+
+    if counts.shape[1] == 0:
+        return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]), {}
+
+    meta = {}
+    try:
+        res, meta = _run_pydeseq2_interaction(
+            counts,
+            metadata.rename(columns={sample_key: "sample"}),
+            factor_a=str(factor_a),
+            level_a=str(alt_a),
+            factor_b=str(factor_b),
+            level_b=str(alt_b),
+            covariates=covariates,
+            alpha=opts.alpha,
+            shrink_lfc=opts.shrink_lfc,
+            n_cpus=n_cpus,
+            size_factors=str(getattr(opts, "size_factors", "poscounts")),
+        )
+    except Exception as e:
+        LOGGER.warning("PyDESeq2 failed for interaction within %s=%s: %s", group_key, group_value, e)
+        res = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
+        meta = {"warnings": [str(e)]}
+
+    meta.update(
+        {
+            "factor_a": str(factor_a),
+            "factor_b": str(factor_b),
+            "ref_a": str(ref_a),
+            "ref_b": str(ref_b),
+            "level_a": str(alt_a),
+            "level_b": str(alt_b),
+        }
+    )
+    return res, meta
 
 # -----------------------------------------------------------------------------
 # Cell-level markers (discovery; downsampled to be OOM-safe)
@@ -1924,6 +2298,7 @@ def _within_pairs_for_indices(
     *,
     a_key: str,
     b_key: str,
+    ref_a: Optional[str] = None,
 ) -> list[tuple[str, str]]:
     if a_key not in adata.obs or b_key not in adata.obs:
         raise KeyError(f"within-pairs: keys not in adata.obs: {a_key!r}, {b_key!r}")
@@ -1935,13 +2310,24 @@ def _within_pairs_for_indices(
 
     pairs: list[tuple[str, str]] = []
     for b_level in sorted(pd.unique(b_vals).tolist()):
-        a_levels = sorted(pd.unique(a_vals.loc[b_vals == b_level]).tolist())
+        a_subset = a_vals.loc[b_vals == b_level]
+        a_levels = sorted(pd.unique(a_subset).tolist())
         if len(a_levels) < 2:
             continue
-        for A, B in _select_pairs(a_levels, None):
-            a_label = f"{_safe_combo_token(A)}.{_safe_combo_token(b_level)}"
-            b_label = f"{_safe_combo_token(B)}.{_safe_combo_token(b_level)}"
-            pairs.append((a_label, b_label))
+        a_counts = a_subset.astype(str).value_counts().to_dict()
+        effective_ref = str(ref_a) if ref_a and ref_a in a_levels else _pick_fallback_ref(a_levels, a_counts)
+        if effective_ref and effective_ref in a_levels:
+            for a_other in a_levels:
+                if a_other == effective_ref:
+                    continue
+                a_label = f"{_safe_combo_token(a_other)}.{_safe_combo_token(b_level)}"
+                b_label = f"{_safe_combo_token(effective_ref)}.{_safe_combo_token(b_level)}"
+                pairs.append((a_label, b_label))
+        else:
+            for A, B in _select_pairs(a_levels, None):
+                a_label = f"{_safe_combo_token(A)}.{_safe_combo_token(b_level)}"
+                b_label = f"{_safe_combo_token(B)}.{_safe_combo_token(b_level)}"
+                pairs.append((a_label, b_label))
     return pairs
 
 
@@ -1964,6 +2350,35 @@ def _select_pairs(levels: Sequence[str], requested: Sequence[str] | None) -> lis
     return out
 
 
+def _pick_fallback_ref(levels: Sequence[str], counts_by_level: Optional[Mapping[str, int]]) -> Optional[str]:
+    if not levels:
+        return None
+    if not counts_by_level:
+        return str(levels[0])
+    return str(
+        max(
+            levels,
+            key=lambda lv: (int(counts_by_level.get(str(lv), 0)), str(lv)),
+        )
+    )
+
+
+def _select_pairs_with_ref(
+    levels: Sequence[str],
+    requested: Sequence[str] | None,
+    ref_level: Optional[str],
+    counts_by_level: Optional[Mapping[str, int]] = None,
+) -> list[tuple[str, str]]:
+    if requested:
+        return _select_pairs(levels, requested)
+    if ref_level and str(ref_level) in {str(lv) for lv in levels}:
+        return [(str(lv), str(ref_level)) for lv in levels if str(lv) != str(ref_level)]
+    fallback = _pick_fallback_ref(levels, counts_by_level)
+    if fallback and str(fallback) in {str(lv) for lv in levels}:
+        return [(str(lv), str(fallback)) for lv in levels if str(lv) != str(fallback)]
+    return _select_pairs(levels, None)
+
+
 @dataclass(frozen=True)
 class ContrastConditionalSpec:
     """
@@ -1973,6 +2388,7 @@ class ContrastConditionalSpec:
     contrasts: Tuple[str, ...] = ()
     methods: Tuple[Literal["wilcoxon", "logreg"], ...] = ("wilcoxon", "logreg")
     within_parts: Optional[tuple[str, str]] = None
+    ref_level: Optional[str] = None
 
     # guards
     min_cells_per_level_in_cluster: int = 50
@@ -2044,7 +2460,13 @@ def contrast_conditional_markers(
     cl_min_diff_pct = float(getattr(spec, "min_diff_pct", 0.0))
 
     # choose which pairs to run
-    pairs = _select_pairs(levels.tolist(), list(spec.contrasts) if spec.contrasts else None)
+    pairs: list[tuple[str, str]] = []
+    if spec.contrasts:
+        pairs = _select_pairs_with_ref(
+            levels.tolist(),
+            list(spec.contrasts) if spec.contrasts else None,
+            spec.ref_level,
+        )
 
     def _sgn(x: Any) -> int:
         try:
@@ -2413,9 +2835,23 @@ def contrast_conditional_markers(
                 global_idx,
                 a_key=str(a_key),
                 b_key=str(b_key),
+                ref_a=spec.ref_level,
             )
         else:
-            pairs_local = pairs
+            if spec.contrasts:
+                pairs_local = pairs
+            else:
+                counts_local = {str(lv): int(idx.size) for lv, idx in by_level_idx.items() if int(idx.size) > 0}
+                levels_local = sorted(counts_local.keys())
+                if len(levels_local) < 2:
+                    pairs_local = []
+                else:
+                    pairs_local = _select_pairs_with_ref(
+                        levels_local,
+                        None,
+                        spec.ref_level,
+                        counts_by_level=counts_local,
+                    )
         for A, B in pairs_local:
             tasks.append((str(cl), str(A), str(B)))
         tasks_by_cluster[str(cl)] = int(len(pairs_local))
@@ -2534,7 +2970,11 @@ def contrast_conditional_markers_multi(
         levels = pd.Index(pd.unique(contrast_norm)).sort_values()
         if len(levels) < 2:
             continue
-        pairs = _select_pairs(levels.tolist(), list(spec.contrasts) if spec.contrasts else None)
+        pairs = _select_pairs_with_ref(
+            levels.tolist(),
+            list(spec.contrasts) if spec.contrasts else None,
+            spec.ref_level,
+        )
         cluster_cache: dict[str, tuple[np.ndarray, dict[str, np.ndarray]]] = {}
         for cl in clusters:
             cl_mask = (adata.obs[group_key].astype(str).to_numpy() == str(cl))
@@ -2561,9 +3001,26 @@ def contrast_conditional_markers_multi(
                     cluster_cache[cl][0],
                     a_key=str(a_key),
                     b_key=str(b_key),
+                    ref_a=spec.ref_level,
                 )
             else:
-                pairs_local = pairs
+                if spec.contrasts:
+                    pairs_local = pairs
+                else:
+                    _, by_level_idx = cluster_cache[cl]
+                    counts_local = {
+                        str(lv): int(idx.size) for lv, idx in by_level_idx.items() if int(idx.size) > 0
+                    }
+                    levels_local = sorted(counts_local.keys())
+                    if len(levels_local) < 2:
+                        pairs_local = []
+                    else:
+                        pairs_local = _select_pairs_with_ref(
+                            levels_local,
+                            None,
+                            spec.ref_level,
+                            counts_by_level=counts_local,
+                        )
             for A, B in pairs_local:
                 tasks.append((ck, str(cl), str(A), str(B)))
                 tasks_by_key[str(ck)] = tasks_by_key.get(str(ck), 0) + 1

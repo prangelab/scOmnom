@@ -1983,6 +1983,7 @@ def export_pseudobulk_de_tables(
       - DE_tables/cluster_vs_rest/cluster_vs_rest__<cluster>.csv
       - DE_tables/cluster_vs_rest/__summary.csv (if present)
       - DE_tables/condition_within_cluster__<condition_key>/condition_within_cluster__<group>__<test>_vs_<ref>.csv
+        (interaction: condition_within_cluster__<group>__interaction.csv)
 
     Assumes storage schema from de_utils:
       adata.uns[store_key]["pseudobulk_cluster_vs_rest"]["results"] : dict[str, DataFrame]
@@ -2050,6 +2051,7 @@ def export_pseudobulk_de_tables(
                 group_value = payload.get("group_value", None)
                 test = payload.get("test", None)
                 ref = payload.get("reference", None)
+                is_interaction = bool(payload.get("interaction", False))
 
                 # fallback parse from key if payload missing
                 if group_value is None and groupby and isinstance(k, str) and k.startswith(f"{groupby}="):
@@ -2060,7 +2062,9 @@ def export_pseudobulk_de_tables(
                         group_value = str(k)
 
                 stem = f"condition_within_cluster__{_safe_filename(str(group_value) if group_value is not None else str(k))}"
-                if test is not None and ref is not None:
+                if is_interaction:
+                    stem += "__interaction"
+                elif test is not None and ref is not None:
                     stem += f"__{_safe_filename(str(test))}_vs_{_safe_filename(str(ref))}"
 
                 out_csv = out_cond / f"{stem}.csv"
@@ -2242,7 +2246,8 @@ def export_pseudobulk_condition_within_cluster_excel(
     output_dir = Path(output_dir)
     base = Path(tables_root) if tables_root is not None else (output_dir / "DE_tables")
     if filename is None:
-        filename = f"condition_within_cluster__{_safe_filename(condition_key)}.xlsx"
+        suffix = "__interaction" if "^" in str(condition_key) else ""
+        filename = f"condition_within_cluster__{_safe_filename(condition_key)}{suffix}.xlsx"
 
     out_xlsx = base / filename
     out_xlsx.parent.mkdir(parents=True, exist_ok=True)
