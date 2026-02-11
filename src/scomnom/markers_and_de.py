@@ -373,6 +373,23 @@ def _normalize_levels(series: pd.Series) -> pd.Series:
     return series.astype(str).str.strip().str.replace(r"\s+", " ", regex=True)
 
 
+def _normalize_pair(s: str) -> tuple[str, str]:
+    s = str(s).strip()
+    if "_vs_" in s:
+        a, b = s.split("_vs_", 1)
+    elif " vs " in s:
+        a, b = s.split(" vs ", 1)
+    else:
+        raise ValueError(f"Invalid contrast spec {s!r}. Use 'A_vs_B'.")
+    a = a.strip()
+    b = b.strip()
+    if not a or not b:
+        raise ValueError(f"Invalid contrast spec {s!r}. Use 'A_vs_B'.")
+    if a == b:
+        raise ValueError(f"Invalid contrast spec {s!r}: A and B must differ.")
+    return a, b
+
+
 def _pairs_within_group(
     adata: ad.AnnData,
     *,
@@ -435,6 +452,21 @@ def _pick_fallback_ref(levels: Sequence[str], counts_by_level: Optional[Mapping[
             key=lambda lv: (int(counts_by_level.get(str(lv), 0)), str(lv)),
         )
     )
+
+
+def _select_pairs(levels: Sequence[str], requested: Sequence[str] | None) -> list[tuple[str, str]]:
+    lv = [str(x) for x in levels]
+    all_pairs = [(lv[i], lv[j]) for i in range(len(lv)) for j in range(i + 1, len(lv))]
+    if not requested:
+        return all_pairs
+    req_pairs = [_normalize_pair(x) for x in requested]
+    lv_set = set(lv)
+    out = []
+    for a, b in req_pairs:
+        if a not in lv_set or b not in lv_set:
+            raise ValueError(f"Requested contrast {a}_vs_{b} not in levels={sorted(lv_set)}")
+        out.append((a, b))
+    return out
 
 
 def _select_pairs_with_ref(
