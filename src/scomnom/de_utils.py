@@ -15,6 +15,7 @@ import io
 import anndata as ad
 import numpy as np
 import pandas as pd
+from pandas.errors import SettingWithCopyWarning
 import scipy.sparse as sp
 
 LOGGER = logging.getLogger(__name__)
@@ -2112,21 +2113,22 @@ def contrast_conditional_markers(
         maskB = np.zeros(adata.n_obs, dtype=bool)
         maskB[idxB] = True
 
-        adata_sub, ds_meta = _downsample_two_level_subset(
-            adata,
-            maskA,
-            maskB,
-            max_per_level=int(spec.max_cells_per_level_in_cluster),
-            random_state=int(spec.random_state),
-        )
+        with _suppress_settingwithcopy_warning():
+            adata_sub, ds_meta = _downsample_two_level_subset(
+                adata,
+                maskA,
+                maskB,
+                max_per_level=int(spec.max_cells_per_level_in_cluster),
+                random_state=int(spec.random_state),
+            )
 
-        adata_sub = adata_sub[
-            adata_sub.obs[contrast_key]
-            .astype(str)
-            .str.strip()
-            .str.replace(r"\s+", " ", regex=True)
-            .isin([A, B])
-        ].copy()
+            adata_sub = adata_sub[
+                adata_sub.obs[contrast_key]
+                .astype(str)
+                .str.strip()
+                .str.replace(r"\s+", " ", regex=True)
+                .isin([A, B])
+            ].copy()
 
         cl_mask = np.zeros(adata.n_obs, dtype=bool)
         cl_mask[global_idx] = True
@@ -2161,18 +2163,19 @@ def contrast_conditional_markers(
 
         wilcoxon_df = pd.DataFrame()
         if "wilcoxon" in spec.methods:
-            sc.tl.rank_genes_groups(
-                adata_sub,
-                groupby=contrast_key,
-                groups=[A],
-                reference=B,
-                method="wilcoxon",
-                use_raw=False,
-                key_added="__tmp_wilcoxon",
-                n_genes=adata_sub.n_vars,
-                rankby_abs=False,
-                pts=True,
-            )
+            with _suppress_settingwithcopy_warning():
+                sc.tl.rank_genes_groups(
+                    adata_sub,
+                    groupby=contrast_key,
+                    groups=[A],
+                    reference=B,
+                    method="wilcoxon",
+                    use_raw=False,
+                    key_added="__tmp_wilcoxon",
+                    n_genes=adata_sub.n_vars,
+                    rankby_abs=False,
+                    pts=True,
+                )
             d = rank_genes_groups_df(adata_sub, group=A, key="__tmp_wilcoxon")
             d = _coerce_pts_columns(d)
 
@@ -2198,18 +2201,19 @@ def contrast_conditional_markers(
 
         logreg_df = pd.DataFrame()
         if "logreg" in spec.methods:
-            sc.tl.rank_genes_groups(
-                adata_sub,
-                groupby=contrast_key,
-                groups=[A],
-                reference=B,
-                method="logreg",
-                use_raw=False,
-                key_added="__tmp_logreg",
-                n_genes=adata_sub.n_vars,
-                rankby_abs=False,
-                pts=True,
-            )
+            with _suppress_settingwithcopy_warning():
+                sc.tl.rank_genes_groups(
+                    adata_sub,
+                    groupby=contrast_key,
+                    groups=[A],
+                    reference=B,
+                    method="logreg",
+                    use_raw=False,
+                    key_added="__tmp_logreg",
+                    n_genes=adata_sub.n_vars,
+                    rankby_abs=False,
+                    pts=True,
+                )
             d = rank_genes_groups_df(adata_sub, group=A, key="__tmp_logreg")
             d = _coerce_pts_columns(d)
 
@@ -2631,21 +2635,22 @@ def contrast_conditional_markers_multi(
         maskB = np.zeros(adata.n_obs, dtype=bool)
         maskB[idxB] = True
 
-        adata_sub, ds_meta = _downsample_two_level_subset(
-            adata,
-            maskA,
-            maskB,
-            max_per_level=int(spec.max_cells_per_level_in_cluster),
-            random_state=int(spec.random_state),
-        )
+        with _suppress_settingwithcopy_warning():
+            adata_sub, ds_meta = _downsample_two_level_subset(
+                adata,
+                maskA,
+                maskB,
+                max_per_level=int(spec.max_cells_per_level_in_cluster),
+                random_state=int(spec.random_state),
+            )
 
-        adata_sub = adata_sub[
-            adata_sub.obs[ck]
-            .astype(str)
-            .str.strip()
-            .str.replace(r"\s+", " ", regex=True)
-            .isin([A, B])
-        ].copy()
+            adata_sub = adata_sub[
+                adata_sub.obs[ck]
+                .astype(str)
+                .str.strip()
+                .str.replace(r"\s+", " ", regex=True)
+                .isin([A, B])
+            ].copy()
 
         cl_mask = np.zeros(adata.n_obs, dtype=bool)
         cl_mask[global_idx] = True
@@ -2680,18 +2685,19 @@ def contrast_conditional_markers_multi(
 
         wilcoxon_df = pd.DataFrame()
         if "wilcoxon" in spec.methods:
-            sc.tl.rank_genes_groups(
-                adata_sub,
-                groupby=ck,
-                groups=[A],
-                reference=B,
-                method="wilcoxon",
-                use_raw=False,
-                key_added="__tmp_wilcoxon",
-                n_genes=adata_sub.n_vars,
-                rankby_abs=False,
-                pts=True,
-            )
+            with _suppress_settingwithcopy_warning():
+                sc.tl.rank_genes_groups(
+                    adata_sub,
+                    groupby=ck,
+                    groups=[A],
+                    reference=B,
+                    method="wilcoxon",
+                    use_raw=False,
+                    key_added="__tmp_wilcoxon",
+                    n_genes=adata_sub.n_vars,
+                    rankby_abs=False,
+                    pts=True,
+                )
             d = rank_genes_groups_df(adata_sub, group=A, key="__tmp_wilcoxon")
             d = _coerce_pts_columns(d)
 
@@ -2717,18 +2723,19 @@ def contrast_conditional_markers_multi(
 
         logreg_df = pd.DataFrame()
         if "logreg" in spec.methods:
-            sc.tl.rank_genes_groups(
-                adata_sub,
-                groupby=ck,
-                groups=[A],
-                reference=B,
-                method="logreg",
-                use_raw=False,
-                key_added="__tmp_logreg",
-                n_genes=adata_sub.n_vars,
-                rankby_abs=False,
-                pts=True,
-            )
+            with _suppress_settingwithcopy_warning():
+                sc.tl.rank_genes_groups(
+                    adata_sub,
+                    groupby=ck,
+                    groups=[A],
+                    reference=B,
+                    method="logreg",
+                    use_raw=False,
+                    key_added="__tmp_logreg",
+                    n_genes=adata_sub.n_vars,
+                    rankby_abs=False,
+                    pts=True,
+                )
             d = rank_genes_groups_df(adata_sub, group=A, key="__tmp_logreg")
             d = _coerce_pts_columns(d)
 
@@ -3219,3 +3226,9 @@ def _compute_cl_prevalence(
         pct_B = np.asarray(pct_B).ravel()
 
     return pct_A, pct_B
+@contextlib.contextmanager
+def _suppress_settingwithcopy_warning():
+    import warnings
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=SettingWithCopyWarning)
+        yield
