@@ -1058,103 +1058,149 @@ def run_composition(cfg) -> ad.AnnData:
     n_warmup = int(getattr(cfg, "composition_n_warmup", max(1000, n_iterations // 10)) or max(1000, n_iterations // 10))
     run_round = plot_utils.get_run_round_tag("DA")
 
-    for condition_key, restrict_mask, condition_label in expanded_conditions:
-        counts, metadata = prepare_counts_and_metadata(
-            adata,
-            cluster_key=cluster_key,
-            sample_key=str(sample_key),
-            condition_key=str(condition_key),
-            covariates=covariates,
-            restrict_mask=restrict_mask,
-        )
+    from .de_utils import _set_blas_threads
+
+    total_cpus = int(getattr(cfg, "n_jobs", 1))
+    total_tasks = len(expanded_conditions)
+    max_workers = min(int(total_cpus), max(1, total_tasks))
+    LOGGER.info(
+        "composition: parallel run (tasks=%d, workers=%d, total_cpus=%d).",
+        int(total_tasks),
+        int(max_workers),
+        int(total_cpus),
+    )
+    _set_blas_threads(1, force=True)
+
+    def _run_condition(condition_key: str, restrict_mask: Optional[np.ndarray], condition_label: str) -> dict:
         try:
-            _validate_min_samples_per_level(
-                metadata,
+            counts, metadata = prepare_counts_and_metadata(
+                adata,
+                cluster_key=cluster_key,
+                sample_key=str(sample_key),
                 condition_key=str(condition_key),
-                min_samples=_MIN_SAMPLES_PER_LEVEL_COMPOSITION,
+                covariates=covariates,
+                restrict_mask=restrict_mask,
             )
+            try:
+                _validate_min_samples_per_level(
+                    metadata,
+                    condition_key=str(condition_key),
+                    min_samples=_MIN_SAMPLES_PER_LEVEL_COMPOSITION,
+                )
+            except Exception as e:
+                return {
+                    "status": "skip",
+                    "reason": str(e),
+                    "condition_key": str(condition_key),
+                    "condition_label": str(condition_label),
+                }
+
+            reference = str(getattr(cfg, "composition_reference", "most_stable"))
+            if reference.lower() == "most_stable":
+                reference = _choose_reference_most_stable(counts, min_mean_prop=min_mean_prop)
+
+            def _run_method(tag: str) -> tuple[pd.DataFrame, Optional[pd.DataFrame]]:
+                graph_meta = None
+                adata_sub = adata
+                if restrict_mask is not None:
+                    adata_sub = adata[restrict_mask].copy()
+                if tag == "sccoda":
+                    res = run_sccoda_model(
+                        adata_sub,
+                        cluster_key=cluster_key,
+                        sample_key=str(sample_key),
+                        condition_key=str(condition_key),
+                        covariates=covariates,
+                        reference_cell_type=reference,
+                        fdr=alpha,
+                        num_samples=n_iterations,
+                        num_warmup=n_warmup,
+                    )
+                elif tag == "glm":
+                    res = run_glm_composition(
+                        counts,
+                        metadata,
+                        condition_key=str(condition_key),
+                        covariates=covariates,
+                        reference_level=None,
+                    )
+                elif tag == "clr":
+                    res = run_clr_mannwhitney(
+                        counts,
+                        metadata,
+                        condition_key=str(condition_key),
+                    )
+                    if not res.empty:
+                        res = res.assign(effect=res["log2fc_test_vs_ref"])
+                elif tag == "graph":
+                    res, graph_meta = run_graph_da(
+                        adata_sub,
+                        cluster_key=cluster_key,
+                        sample_key=str(sample_key),
+                        condition_key=str(condition_key),
+                        covariates=covariates,
+                        embedding_key="X_integrated",
+                        n_seeds=int(getattr(cfg, "composition_graph_n_seeds", 1000)),
+                        k_ref=int(getattr(cfg, "composition_graph_k_ref", 50)),
+                        max_k=int(getattr(cfg, "composition_graph_max_k", 200)),
+                        min_size=int(getattr(cfg, "composition_graph_min_size", 20)),
+                        random_state=int(getattr(cfg, "composition_graph_random_state", 42)),
+                    )
+                    if graph_meta is not None and not graph_meta.empty and isinstance(res, pd.DataFrame) and not res.empty:
+                        if "cluster" in res.columns:
+                            graph_meta = graph_meta.set_index("neighborhood")
+                            res = res.merge(graph_meta, left_on="cluster", right_index=True, how="left")
+                else:
+                    raise RuntimeError(f"composition: unsupported method={tag!r}")
+
+                res = _standardize_composition_results(
+                    res,
+                    backend=tag,
+                    condition_key=str(condition_key),
+                )
+                return res, graph_meta
+
+            results_by_method: dict[str, pd.DataFrame] = {}
+            graph_meta_global: Optional[pd.DataFrame] = None
+            for method in methods:
+                res_df, meta_df = _run_method(method)
+                results_by_method[method] = res_df
+                if method == "graph" and meta_df is not None and not meta_df.empty:
+                    graph_meta_global = meta_df
+
+            consensus = _build_composition_consensus_summary(
+                results_by_method,
+                alpha=alpha,
+                condition_key=str(condition_key),
+            )
+            return {
+                "status": "ok",
+                "condition_key": str(condition_key),
+                "condition_label": str(condition_label),
+                "counts": counts,
+                "metadata": metadata,
+                "results_by_method": results_by_method,
+                "consensus": consensus,
+                "graph_meta_global": graph_meta_global,
+                "reference": reference,
+            }
         except Exception as e:
-            LOGGER.warning("composition: skipping condition_key=%r (%s)", condition_key, e)
-            continue
+            return {
+                "status": "error",
+                "reason": str(e),
+                "condition_key": str(condition_key),
+                "condition_label": str(condition_label),
+            }
 
-        reference = str(getattr(cfg, "composition_reference", "most_stable"))
-        if reference.lower() == "most_stable":
-            reference = _choose_reference_most_stable(counts, min_mean_prop=min_mean_prop)
-
-        def _run_method(tag: str) -> tuple[pd.DataFrame, Optional[pd.DataFrame]]:
-            graph_meta = None
-            adata_sub = adata
-            if restrict_mask is not None:
-                adata_sub = adata[restrict_mask].copy()
-            if tag == "sccoda":
-                res = run_sccoda_model(
-                    adata_sub,
-                    cluster_key=cluster_key,
-                    sample_key=str(sample_key),
-                    condition_key=str(condition_key),
-                    covariates=covariates,
-                    reference_cell_type=reference,
-                    fdr=alpha,
-                    num_samples=n_iterations,
-                    num_warmup=n_warmup,
-                )
-            elif tag == "glm":
-                res = run_glm_composition(
-                    counts,
-                    metadata,
-                    condition_key=str(condition_key),
-                    covariates=covariates,
-                    reference_level=None,
-                )
-            elif tag == "clr":
-                res = run_clr_mannwhitney(
-                    counts,
-                    metadata,
-                    condition_key=str(condition_key),
-                )
-                if not res.empty:
-                    res = res.assign(effect=res["log2fc_test_vs_ref"])
-            elif tag == "graph":
-                res, graph_meta = run_graph_da(
-                    adata_sub,
-                    cluster_key=cluster_key,
-                    sample_key=str(sample_key),
-                    condition_key=str(condition_key),
-                    covariates=covariates,
-                    embedding_key="X_integrated",
-                    n_seeds=int(getattr(cfg, "composition_graph_n_seeds", 1000)),
-                    k_ref=int(getattr(cfg, "composition_graph_k_ref", 50)),
-                    max_k=int(getattr(cfg, "composition_graph_max_k", 200)),
-                    min_size=int(getattr(cfg, "composition_graph_min_size", 20)),
-                    random_state=int(getattr(cfg, "composition_graph_random_state", 42)),
-                )
-                if graph_meta is not None and not graph_meta.empty and isinstance(res, pd.DataFrame) and not res.empty:
-                    if "cluster" in res.columns:
-                        graph_meta = graph_meta.set_index("neighborhood")
-                        res = res.merge(graph_meta, left_on="cluster", right_index=True, how="left")
-            else:
-                raise RuntimeError(f"composition: unsupported method={tag!r}")
-
-            res = _standardize_composition_results(
-                res,
-                backend=tag,
-                condition_key=str(condition_key),
-            )
-            return res, graph_meta
-
-        results_by_method: dict[str, pd.DataFrame] = {}
-        graph_meta_global: Optional[pd.DataFrame] = None
-        for method in methods:
-            res_df, meta_df = _run_method(method)
-            results_by_method[method] = res_df
-            if method == "graph" and meta_df is not None and not meta_df.empty:
-                graph_meta_global = meta_df
-
-        consensus = _build_composition_consensus_summary(
-            results_by_method,
-            alpha=alpha,
-            condition_key=str(condition_key),
-        )
+    def _write_outputs(payload: dict) -> None:
+        condition_key = str(payload["condition_key"])
+        condition_label = str(payload["condition_label"])
+        counts = payload["counts"]
+        metadata = payload["metadata"]
+        results_by_method = payload["results_by_method"]
+        consensus = payload["consensus"]
+        graph_meta_global = payload.get("graph_meta_global")
+        reference = str(payload["reference"])
 
         adata.uns.setdefault("markers_and_de", {})
         comp_block = adata.uns["markers_and_de"].setdefault("composition", {})
@@ -1463,6 +1509,7 @@ def run_composition(cfg) -> ad.AnnData:
                 global_df = results_by_method.get(primary_method)
                 if isinstance(global_df, pd.DataFrame) and not global_df.empty:
                     fig, ax = plt.subplots(figsize=(7, 4))
+                    plotted = False
                     if "effect" in global_df.columns:
                         vals = pd.to_numeric(global_df["effect"], errors="coerce")
                         if "cluster" in global_df.columns:
@@ -1471,72 +1518,79 @@ def run_composition(cfg) -> ad.AnnData:
                             labels = global_df.index.astype(str)
                         if vals.isna().all():
                             plt.close(fig)
-                            continue
-                        labels = pd.Index(labels).astype(str)
-                        colors = _resolve_cluster_colors(
-                            adata,
-                            cluster_key=cluster_key,
-                            labels=labels,
-                            round_id=getattr(cfg, "round_id", None),
-                        )
-                        x = np.arange(len(labels))
-                        vals_np = vals.to_numpy()
-                        ax.bar(x, vals_np, color=colors)
-                        if np.nanmax(np.abs(vals_np)) == 0:
-                            ax.scatter(x, vals_np, color=colors, s=30, zorder=3)
-                            ax.set_ylim(-0.05, 0.05)
-                        ax.set_xticks(x)
-                        ax.set_xticklabels(labels, rotation=45, ha="right")
-                        ax.set_ylabel("Effect")
+                            plotted = False
+                        else:
+                            labels = pd.Index(labels).astype(str)
+                            colors = _resolve_cluster_colors(
+                                adata,
+                                cluster_key=cluster_key,
+                                labels=labels,
+                                round_id=getattr(cfg, "round_id", None),
+                            )
+                            x = np.arange(len(labels))
+                            vals_np = vals.to_numpy()
+                            ax.bar(x, vals_np, color=colors)
+                            if np.nanmax(np.abs(vals_np)) == 0:
+                                ax.scatter(x, vals_np, color=colors, s=30, zorder=3)
+                                ax.set_ylim(-0.05, 0.05)
+                            ax.set_xticks(x)
+                            ax.set_xticklabels(labels, rotation=45, ha="right")
+                            ax.set_ylabel("Effect")
+                            plotted = True
                     elif primary_method == "sccoda" and "Final Parameter" in global_df.columns:
                         vals = pd.to_numeric(global_df["Final Parameter"], errors="coerce")
                         labels = global_df.index.astype(str)
                         if vals.isna().all():
                             plt.close(fig)
-                            continue
-                        labels = pd.Index(labels).astype(str)
-                        colors = _resolve_cluster_colors(
-                            adata,
-                            cluster_key=cluster_key,
-                            labels=labels,
-                            round_id=getattr(cfg, "round_id", None),
-                        )
-                        x = np.arange(len(labels))
-                        vals_np = vals.to_numpy()
-                        ax.bar(x, vals_np, color=colors)
-                        if np.nanmax(np.abs(vals_np)) == 0:
-                            ax.scatter(x, vals_np, color=colors, s=30, zorder=3)
-                            ax.set_ylim(-0.05, 0.05)
-                        ax.set_xticks(x)
-                        ax.set_xticklabels(labels, rotation=45, ha="right")
-                        ax.set_ylabel("Effect")
+                            plotted = False
+                        else:
+                            labels = pd.Index(labels).astype(str)
+                            colors = _resolve_cluster_colors(
+                                adata,
+                                cluster_key=cluster_key,
+                                labels=labels,
+                                round_id=getattr(cfg, "round_id", None),
+                            )
+                            x = np.arange(len(labels))
+                            vals_np = vals.to_numpy()
+                            ax.bar(x, vals_np, color=colors)
+                            if np.nanmax(np.abs(vals_np)) == 0:
+                                ax.scatter(x, vals_np, color=colors, s=30, zorder=3)
+                                ax.set_ylim(-0.05, 0.05)
+                            ax.set_xticks(x)
+                            ax.set_xticklabels(labels, rotation=45, ha="right")
+                            ax.set_ylabel("Effect")
+                            plotted = True
                     elif primary_method == "glm" and "coef" in global_df.columns:
                         vals = global_df.groupby("cluster")["coef"].mean()
                         labels = vals.index.astype(str)
                         if vals.isna().all():
                             plt.close(fig)
-                            continue
-                        labels = pd.Index(labels).astype(str)
-                        colors = _resolve_cluster_colors(
-                            adata,
-                            cluster_key=cluster_key,
-                            labels=labels,
-                            round_id=getattr(cfg, "round_id", None),
-                        )
-                        x = np.arange(len(labels))
-                        vals_np = vals.values
-                        ax.bar(x, vals_np, color=colors)
-                        if np.nanmax(np.abs(vals_np)) == 0:
-                            ax.scatter(x, vals_np, color=colors, s=30, zorder=3)
-                            ax.set_ylim(-0.05, 0.05)
-                        ax.set_xticks(x)
-                        ax.set_xticklabels(labels, rotation=45, ha="right")
-                        ax.set_ylabel("Effect")
-                    ax.set_title("Composition effects (global)")
-                    ax.tick_params(axis="x", labelrotation=45)
-                    ax.grid(False)
-                    plot_utils.save_multi("composition_effects_global", fig_subdir, fig=fig)
-                    LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_effects_global")
+                            plotted = False
+                        else:
+                            labels = pd.Index(labels).astype(str)
+                            colors = _resolve_cluster_colors(
+                                adata,
+                                cluster_key=cluster_key,
+                                labels=labels,
+                                round_id=getattr(cfg, "round_id", None),
+                            )
+                            x = np.arange(len(labels))
+                            vals_np = vals.values
+                            ax.bar(x, vals_np, color=colors)
+                            if np.nanmax(np.abs(vals_np)) == 0:
+                                ax.scatter(x, vals_np, color=colors, s=30, zorder=3)
+                                ax.set_ylim(-0.05, 0.05)
+                            ax.set_xticks(x)
+                            ax.set_xticklabels(labels, rotation=45, ha="right")
+                            ax.set_ylabel("Effect")
+                            plotted = True
+                    if plotted:
+                        ax.set_title("Composition effects (global)")
+                        ax.tick_params(axis="x", labelrotation=45)
+                        ax.grid(False)
+                        plot_utils.save_multi("composition_effects_global", fig_subdir, fig=fig)
+                        LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_effects_global")
                     plt.close(fig)
             except Exception:
                 LOGGER.exception("composition: failed to generate plots")
@@ -1548,7 +1602,7 @@ def run_composition(cfg) -> ad.AnnData:
                 props = counts.div(totals, axis=0)
                 if props.empty:
                     LOGGER.warning("composition: no proportions available for plotting")
-                    continue
+                    return
                 props_plot = props.copy()
                 props_plot.columns = props_plot.columns.astype(str)
                 cluster_order = props_plot.mean(axis=0).sort_values(ascending=False).index.tolist()
@@ -1562,7 +1616,7 @@ def run_composition(cfg) -> ad.AnnData:
                 cond_levels = sorted(metadata[str(condition_key)].astype(str).dropna().unique().tolist())
                 if not cond_levels:
                     LOGGER.warning("composition: no condition levels available for plotting")
-                    continue
+                    return
 
                 fig, ax = plt.subplots(figsize=(max(4, 1.4 * len(cond_levels)), 4))
                 for j, cond in enumerate(cond_levels):
@@ -1797,6 +1851,94 @@ def run_composition(cfg) -> ad.AnnData:
                     )
             except Exception:
                 LOGGER.exception("composition: failed to plot composition stacks")
+
+    done = 0
+    t0 = time.perf_counter()
+    if expanded_conditions and max_workers > 1:
+        from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+
+        heartbeat_s = 60.0
+        next_heartbeat = time.perf_counter() + heartbeat_s
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futs = {
+                ex.submit(_run_condition, ck, mask, label): (ck, label)
+                for ck, mask, label in expanded_conditions
+            }
+            pending = set(futs.keys())
+            start_by_fut = {f: time.perf_counter() for f in pending}
+            while pending:
+                now = time.perf_counter()
+                done_set, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
+                if not done_set:
+                    if now >= next_heartbeat:
+                        LOGGER.info(
+                            "composition: heartbeat (done=%d/%d, pending=%d).",
+                            int(done),
+                            int(total_tasks),
+                            int(len(pending)),
+                        )
+                        next_heartbeat = now + heartbeat_s
+                    continue
+                for fut in done_set:
+                    ck, label = futs.get(fut, ("", ""))
+                    t_elapsed = now - start_by_fut.get(fut, now)
+                    try:
+                        payload = fut.result()
+                    except Exception:
+                        LOGGER.exception("composition: task failed (condition_label=%s).", str(label))
+                        done += 1
+                        continue
+                    status = payload.get("status")
+                    if status == "skip":
+                        LOGGER.warning(
+                            "composition: skipping condition_key=%r (%s)",
+                            payload.get("condition_key"),
+                            payload.get("reason"),
+                        )
+                        done += 1
+                    elif status == "error":
+                        LOGGER.error(
+                            "composition: failed condition_key=%r (%s)",
+                            payload.get("condition_key"),
+                            payload.get("reason"),
+                        )
+                        done += 1
+                    else:
+                        _write_outputs(payload)
+                        done += 1
+                    elapsed = time.perf_counter() - t0
+                    eta_s = (elapsed / max(1, done)) * (total_tasks - done)
+                    LOGGER.info(
+                        "composition: progress %d/%d (elapsed=%.1fs, eta=%.1fs).",
+                        int(done),
+                        int(total_tasks),
+                        elapsed,
+                        eta_s,
+                    )
+                    LOGGER.info(
+                        "composition: task finished (condition_key=%s, condition_label=%s, task_s=%.1f).",
+                        str(ck),
+                        str(label),
+                        float(t_elapsed),
+                    )
+    else:
+        for ck, mask, label in expanded_conditions:
+            payload = _run_condition(ck, mask, label)
+            if payload.get("status") == "skip":
+                LOGGER.warning(
+                    "composition: skipping condition_key=%r (%s)",
+                    payload.get("condition_key"),
+                    payload.get("reason"),
+                )
+                continue
+            if payload.get("status") == "error":
+                LOGGER.error(
+                    "composition: failed condition_key=%r (%s)",
+                    payload.get("condition_key"),
+                    payload.get("reason"),
+                )
+                continue
+            _write_outputs(payload)
 
     out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.da")) + ".zarr")
     LOGGER.info("Saving dataset → %s", out_zarr)
