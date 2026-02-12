@@ -22,6 +22,7 @@ from .de_utils import (
     PseudobulkDEOptions,
     compute_markers_celllevel,
     de_cluster_vs_rest_pseudobulk,
+    pydeseq2_supports_interaction_by_name,
     resolve_group_key,
 )
 from .composition_utils import (
@@ -639,6 +640,8 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
     # ----------------------------
     output_dir = Path(getattr(cfg, "output_dir"))
     output_dir.mkdir(parents=True, exist_ok=True)
+    LOGGER.info("within-cluster: output_dir=%s", str(output_dir))
+    LOGGER.info("within-cluster: input_path=%s", str(getattr(cfg, "input_path")))
 
     figdir = output_dir / str(getattr(cfg, "figdir_name", "figures"))
     plot_utils.setup_scanpy_figs(figdir, getattr(cfg, "figure_formats", ["png", "pdf"]))
@@ -1967,10 +1970,21 @@ def run_within_cluster(cfg) -> ad.AnnData:
             tasks_by_key: dict[str, int] = {}
             groups_with_tasks_by_key: dict[str, set[str]] = {}
 
+            interaction_supported = pydeseq2_supports_interaction_by_name()
+            interaction_warned = False
             for cond_key in condition_keys:
                 interaction_parts = interaction_by_key.get(str(cond_key))
                 if interaction_parts is None and str(cond_key) not in adata.obs:
                     raise RuntimeError(f"within-cluster: condition_key={cond_key!r} not found in adata.obs")
+
+                if interaction_parts and not interaction_supported:
+                    if not interaction_warned:
+                        LOGGER.warning(
+                            "within-cluster: interaction requested but PyDESeq2 does not support interaction "
+                            "contrasts by name in this environment; skipping interaction tasks."
+                        )
+                        interaction_warned = True
+                    continue
 
                 LOGGER.info(
                     "within-cluster: pseudobulk DE across %d groups (groupby=%r) for condition_key=%r",
@@ -2598,95 +2612,98 @@ def run_within_cluster(cfg) -> ad.AnnData:
         use_raw = bool(getattr(cfg, "plot_use_raw", False))
         layer = getattr(cfg, "plot_layer", None)
 
-        # Condition plots only if pseudobulk ran
-        if ran_pseudobulk:
-            LOGGER.info("within-cluster: plotting pseudobulk condition figures...")
-            for condition_key in condition_keys:
-                de_plot_utils.plot_condition_within_cluster_all(
-                    adata,
-                    cluster_key=str(groupby),
-                    condition_key=str(condition_key),
-                    store_key=store_key,
-                    alpha=alpha,
-                    lfc_thresh=lfc_thresh,
-                    top_label_n=top_label_n,
-                    dotplot_top_n=dotplot_top_n_genes,
-                    violin_top_n=top_n_genes,
-                    heatmap_top_n=dotplot_top_n_genes,
-                    use_raw=use_raw,
-                    layer=layer,
-                )
-        else:
-            LOGGER.info("within-cluster: skipping condition plots (pseudobulk not run).")
-
-        if ran_cell_contrast:
-            LOGGER.info("within-cluster: plotting cell-level contrast figures...")
-            for condition_key in condition_keys:
-                de_plot_utils.plot_contrast_conditional_markers_multi(
-                    adata,
-                    groupby=str(groupby),
-                    contrast_key=str(getattr(cfg, "contrast_key", None) or condition_key),
-                    store_key=store_key,
-                    alpha=alpha,
-                    lfc_thresh=lfc_thresh,
-                    top_label_n=top_label_n,
-                    top_n_genes=top_n_genes,
-                    dotplot_top_n_genes=dotplot_top_n_genes,
-                    use_raw=use_raw,
-                    layer=layer,
-                )
-
-        # DE-based decoupler plots (if available)
-        if de_source != "none":
-            de_block = adata.uns.get(store_key, {}).get("de_decoupler", {})
-            if isinstance(de_block, dict) and de_block:
-                LOGGER.info("within-cluster: plotting DE-decoupler figures...")
-                for condition_key, per_contrast in de_block.items():
-                    if not isinstance(per_contrast, dict):
-                        continue
-                    for contrast, payload_by_source in per_contrast.items():
-                        if not isinstance(payload_by_source, dict):
-                            continue
-                        for source, payload in payload_by_source.items():
-                            if not isinstance(payload, dict):
-                                continue
-                            nets = payload.get("nets", {})
-                            if not isinstance(nets, dict) or not nets:
-                                continue
-
-                            base = Path("DE")
-                            if str(source) == "cell":
-                                base = base / "cell_level_DE" / str(condition_key) / str(contrast)
-                            else:
-                                base = base / "pseudobulk_DE" / str(condition_key) / str(contrast)
-
-                            for net_name, net_payload in nets.items():
-                                de_plot_utils.plot_de_decoupler_payload(
-                                    net_payload,
-                                    net_name=str(net_name),
-                                    figdir=base,
-                                    heatmap_top_k=int(getattr(cfg, "plot_max_genes_total", 80)),
-                                    bar_top_n=int(top_n_genes),
-                                    bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
-                                    bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
-                                    bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
-                                    dotplot_top_k=int(dotplot_top_n_genes),
-                                    title_prefix=f"{condition_key} {contrast}",
-                                )
-
         try:
-            LOGGER.info("within-cluster: generating DE report...")
-            for fmt in getattr(cfg, "figure_formats", ["png", "pdf"]):
-                reporting.generate_de_report(
-                    fig_root=figdir,
-                    fmt=fmt,
-                    cfg=cfg,
-                    version=__version__,
-                    adata=adata,
-                )
-            LOGGER.info("Wrote DE report.")
+            # Condition plots only if pseudobulk ran
+            if ran_pseudobulk:
+                LOGGER.info("within-cluster: plotting pseudobulk condition figures...")
+                for condition_key in condition_keys:
+                    de_plot_utils.plot_condition_within_cluster_all(
+                        adata,
+                        cluster_key=str(groupby),
+                        condition_key=str(condition_key),
+                        store_key=store_key,
+                        alpha=alpha,
+                        lfc_thresh=lfc_thresh,
+                        top_label_n=top_label_n,
+                        dotplot_top_n=dotplot_top_n_genes,
+                        violin_top_n=top_n_genes,
+                        heatmap_top_n=dotplot_top_n_genes,
+                        use_raw=use_raw,
+                        layer=layer,
+                    )
+            else:
+                LOGGER.info("within-cluster: skipping condition plots (pseudobulk not run).")
+
+            if ran_cell_contrast:
+                LOGGER.info("within-cluster: plotting cell-level contrast figures...")
+                for condition_key in condition_keys:
+                    de_plot_utils.plot_contrast_conditional_markers_multi(
+                        adata,
+                        groupby=str(groupby),
+                        contrast_key=str(getattr(cfg, "contrast_key", None) or condition_key),
+                        store_key=store_key,
+                        alpha=alpha,
+                        lfc_thresh=lfc_thresh,
+                        top_label_n=top_label_n,
+                        top_n_genes=top_n_genes,
+                        dotplot_top_n_genes=dotplot_top_n_genes,
+                        use_raw=use_raw,
+                        layer=layer,
+                    )
+
+            # DE-based decoupler plots (if available)
+            if de_source != "none":
+                de_block = adata.uns.get(store_key, {}).get("de_decoupler", {})
+                if isinstance(de_block, dict) and de_block:
+                    LOGGER.info("within-cluster: plotting DE-decoupler figures...")
+                    for condition_key, per_contrast in de_block.items():
+                        if not isinstance(per_contrast, dict):
+                            continue
+                        for contrast, payload_by_source in per_contrast.items():
+                            if not isinstance(payload_by_source, dict):
+                                continue
+                            for source, payload in payload_by_source.items():
+                                if not isinstance(payload, dict):
+                                    continue
+                                nets = payload.get("nets", {})
+                                if not isinstance(nets, dict) or not nets:
+                                    continue
+
+                                base = Path("DE")
+                                if str(source) == "cell":
+                                    base = base / "cell_level_DE" / str(condition_key) / str(contrast)
+                                else:
+                                    base = base / "pseudobulk_DE" / str(condition_key) / str(contrast)
+
+                                for net_name, net_payload in nets.items():
+                                    de_plot_utils.plot_de_decoupler_payload(
+                                        net_payload,
+                                        net_name=str(net_name),
+                                        figdir=base,
+                                        heatmap_top_k=int(getattr(cfg, "plot_max_genes_total", 80)),
+                                        bar_top_n=int(top_n_genes),
+                                        bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
+                                        bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
+                                        bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
+                                        dotplot_top_k=int(dotplot_top_n_genes),
+                                        title_prefix=f"{condition_key} {contrast}",
+                                    )
+
+            try:
+                LOGGER.info("within-cluster: generating DE report...")
+                for fmt in getattr(cfg, "figure_formats", ["png", "pdf"]):
+                    reporting.generate_de_report(
+                        fig_root=figdir,
+                        fmt=fmt,
+                        cfg=cfg,
+                        version=__version__,
+                        adata=adata,
+                    )
+                LOGGER.info("Wrote DE report.")
+            except Exception as e:
+                LOGGER.warning("Failed to generate DE report: %s", e)
         except Exception as e:
-            LOGGER.warning("Failed to generate DE report: %s", e)
+            LOGGER.exception("within-cluster: plotting failed; continuing to save outputs. (%s)", e)
 
     # ----------------------------
     # Save dataset
