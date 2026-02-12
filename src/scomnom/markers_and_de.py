@@ -1014,10 +1014,35 @@ def run_composition(cfg) -> ad.AnnData:
     if not condition_keys:
         raise RuntimeError("composition: condition_keys is required.")
 
-    condition_keys = [_resolve_condition_key(adata, k) for k in condition_keys]
-    missing_conditions = [k for k in condition_keys if str(k) not in adata.obs]
-    if missing_conditions:
-        raise RuntimeError(f"composition: condition_keys not found in adata.obs: {missing_conditions}")
+    expanded_conditions: list[tuple[str, Optional[np.ndarray], str]] = []
+    for raw_key in condition_keys:
+        raw = str(raw_key).strip()
+        if "@" in raw:
+            parts = [p.strip() for p in raw.split("@") if p.strip()]
+            if len(parts) != 2:
+                raise RuntimeError(f"composition: invalid within-B condition key {raw!r}. Use 'A@B'.")
+            a_key = _resolve_condition_key(adata, parts[0])
+            b_key = _resolve_condition_key(adata, parts[1])
+            if str(a_key) not in adata.obs or str(b_key) not in adata.obs:
+                raise RuntimeError(f"composition: condition_keys not found in adata.obs: {[a_key, b_key]}")
+            b_vals = _normalize_levels(adata.obs[str(b_key)])
+            for b_level in sorted(pd.unique(b_vals).tolist()):
+                mask = b_vals.astype(str).to_numpy() == str(b_level)
+                label = f"{a_key}@{b_key}={b_level}"
+                expanded_conditions.append((str(a_key), mask, str(label)))
+                LOGGER.info(
+                    "composition: expanded %r -> condition_key=%r within %s=%r (n_cells=%d).",
+                    raw,
+                    str(a_key),
+                    str(b_key),
+                    str(b_level),
+                    int(mask.sum()),
+                )
+            continue
+        ck = _resolve_condition_key(adata, raw)
+        if str(ck) not in adata.obs:
+            raise RuntimeError(f"composition: condition_keys not found in adata.obs: {ck!r}")
+        expanded_conditions.append((str(ck), None, str(ck)))
 
     cluster_key = _resolve_active_cluster_key(adata, round_id=getattr(cfg, "round_id", None))
     covariates = tuple(getattr(cfg, "composition_covariates", ()) or ())
@@ -1033,13 +1058,14 @@ def run_composition(cfg) -> ad.AnnData:
     n_warmup = int(getattr(cfg, "composition_n_warmup", max(1000, n_iterations // 10)) or max(1000, n_iterations // 10))
     run_round = plot_utils.get_run_round_tag("DA")
 
-    for condition_key in condition_keys:
+    for condition_key, restrict_mask, condition_label in expanded_conditions:
         counts, metadata = prepare_counts_and_metadata(
             adata,
             cluster_key=cluster_key,
             sample_key=str(sample_key),
             condition_key=str(condition_key),
             covariates=covariates,
+            restrict_mask=restrict_mask,
         )
         try:
             _validate_min_samples_per_level(
@@ -1057,9 +1083,12 @@ def run_composition(cfg) -> ad.AnnData:
 
         def _run_method(tag: str) -> tuple[pd.DataFrame, Optional[pd.DataFrame]]:
             graph_meta = None
+            adata_sub = adata
+            if restrict_mask is not None:
+                adata_sub = adata[restrict_mask].copy()
             if tag == "sccoda":
                 res = run_sccoda_model(
-                    adata,
+                    adata_sub,
                     cluster_key=cluster_key,
                     sample_key=str(sample_key),
                     condition_key=str(condition_key),
@@ -1087,7 +1116,7 @@ def run_composition(cfg) -> ad.AnnData:
                     res = res.assign(effect=res["log2fc_test_vs_ref"])
             elif tag == "graph":
                 res, graph_meta = run_graph_da(
-                    adata,
+                    adata_sub,
                     cluster_key=cluster_key,
                     sample_key=str(sample_key),
                     condition_key=str(condition_key),
@@ -1131,7 +1160,7 @@ def run_composition(cfg) -> ad.AnnData:
         comp_block = adata.uns["markers_and_de"].setdefault("composition", {})
         comp_block.setdefault("schema", "multi")
         runs = comp_block.setdefault("runs", {})
-        runs[str(condition_key)] = {
+        runs[str(condition_label)] = {
             "version": __version__,
             "timestamp_utc": datetime.utcnow().isoformat(),
             "methods": list(methods),
@@ -1141,6 +1170,7 @@ def run_composition(cfg) -> ad.AnnData:
             "cluster_key": cluster_key,
             "sample_key": str(sample_key),
             "condition_key": str(condition_key),
+            "condition_label": str(condition_label),
             "covariates": list(covariates),
             "alpha": alpha,
             "min_mean_prop": min_mean_prop,
@@ -1148,7 +1178,7 @@ def run_composition(cfg) -> ad.AnnData:
             "n_clusters": int(counts.shape[1]),
         }
 
-        cond_tag = _safe_combo_token(str(condition_key))
+        cond_tag = _safe_combo_token(str(condition_label))
         results_dir = output_dir / "tables" / f"DA_tables_{run_round}" / cond_tag
         results_dir.mkdir(parents=True, exist_ok=True)
         fig_subdir = Path("DA") / cond_tag
@@ -2117,16 +2147,41 @@ def run_within_cluster(cfg) -> ad.AnnData:
                 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
                 heartbeat_s = 60.0
+                slow_task_warn_s = 30 * 60.0
                 next_heartbeat = time.perf_counter() + heartbeat_s
 
                 with ThreadPoolExecutor(max_workers=max_workers) as ex:
                     futs = {ex.submit(_run_task, task): task for task in tasks}
                     pending = set(futs.keys())
+                    start_by_fut = {f: time.perf_counter() for f in pending}
                     while pending:
                         now = time.perf_counter()
                         done_set, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
                         if not done_set:
                             if now >= next_heartbeat:
+                                if pending:
+                                    longest_fut = max(pending, key=lambda f: now - start_by_fut.get(f, now))
+                                    longest_age = now - start_by_fut.get(longest_fut, now)
+                                    longest_task = futs.get(longest_fut, {})
+                                    LOGGER.info(
+                                        "within-cluster: pseudobulk longest-running task (age=%.1fs, kind=%s, group=%s, condition_key=%s, A=%s, B=%s).",
+                                        float(longest_age),
+                                        str(longest_task.get("kind")),
+                                        str(longest_task.get("group")),
+                                        str(longest_task.get("cond_key")),
+                                        str(longest_task.get("A", "")),
+                                        str(longest_task.get("B", "")),
+                                    )
+                                    if float(longest_age) >= float(slow_task_warn_s):
+                                        LOGGER.warning(
+                                            "within-cluster: pseudobulk slow task (age=%.1fs, kind=%s, group=%s, condition_key=%s, A=%s, B=%s).",
+                                            float(longest_age),
+                                            str(longest_task.get("kind")),
+                                            str(longest_task.get("group")),
+                                            str(longest_task.get("cond_key")),
+                                            str(longest_task.get("A", "")),
+                                            str(longest_task.get("B", "")),
+                                        )
                                 LOGGER.info(
                                     "within-cluster: pseudobulk heartbeat (done=%d/%d, pending=%d).",
                                     int(done),
@@ -2137,44 +2192,25 @@ def run_within_cluster(cfg) -> ad.AnnData:
                             continue
                         for fut in done_set:
                             kind, cond_key, gval, res, meta = fut.result()
-                        if kind == "interaction":
-                            key = f"{groupby}={gval}::{cond_key}::interaction"
-                            payload = {
-                                "group_key": str(groupby),
-                                "group_value": str(gval),
-                                "condition_key": str(cond_key),
-                                "test": None,
-                                "reference": None,
-                                "interaction": True,
-                                "factor_a": meta.get("factor_a") if meta else None,
-                                "factor_b": meta.get("factor_b") if meta else None,
-                                "ref_a": meta.get("ref_a") if meta else None,
-                                "ref_b": meta.get("ref_b") if meta else None,
-                                "level_a": meta.get("level_a") if meta else None,
-                                "level_b": meta.get("level_b") if meta else None,
-                                "coef_name": meta.get("coef_name") if meta else None,
-                                "results": res,
-                                "options": {
-                                    "min_cells_per_sample_group": int(pb_opts.min_cells_per_sample_group),
-                                    "min_samples_per_level": int(pb_opts.min_samples_per_level),
-                                    "alpha": float(pb_opts.alpha),
-                                    "shrink_lfc": bool(pb_opts.shrink_lfc),
-                                    "min_total_counts": int(getattr(pb_opts, "min_total_counts", 0)),
-                                    "min_counts_per_lib": int(getattr(pb_opts, "min_counts_per_lib", 0)),
-                                },
-                            }
-                            entries.append((key, payload))
-                        else:
-                            for contrast_key, df in res.items():
-                                A2, B2 = _normalize_pair(contrast_key)
-                                key = f"{groupby}={gval}::{cond_key}::{A2}_vs_{B2}"
+                            task_info = futs.get(fut, {})
+                            t_elapsed = now - start_by_fut.get(fut, now)
+                            if kind == "interaction":
+                                key = f"{groupby}={gval}::{cond_key}::interaction"
                                 payload = {
                                     "group_key": str(groupby),
                                     "group_value": str(gval),
                                     "condition_key": str(cond_key),
-                                    "test": str(A2),
-                                    "reference": str(B2),
-                                    "results": df,
+                                    "test": None,
+                                    "reference": None,
+                                    "interaction": True,
+                                    "factor_a": meta.get("factor_a") if meta else None,
+                                    "factor_b": meta.get("factor_b") if meta else None,
+                                    "ref_a": meta.get("ref_a") if meta else None,
+                                    "ref_b": meta.get("ref_b") if meta else None,
+                                    "level_a": meta.get("level_a") if meta else None,
+                                    "level_b": meta.get("level_b") if meta else None,
+                                    "coef_name": meta.get("coef_name") if meta else None,
+                                    "results": res,
                                     "options": {
                                         "min_cells_per_sample_group": int(pb_opts.min_cells_per_sample_group),
                                         "min_samples_per_level": int(pb_opts.min_samples_per_level),
@@ -2185,6 +2221,27 @@ def run_within_cluster(cfg) -> ad.AnnData:
                                     },
                                 }
                                 entries.append((key, payload))
+                            else:
+                                for contrast_key, df in res.items():
+                                    A2, B2 = _normalize_pair(contrast_key)
+                                    key = f"{groupby}={gval}::{cond_key}::{A2}_vs_{B2}"
+                                    payload = {
+                                        "group_key": str(groupby),
+                                        "group_value": str(gval),
+                                        "condition_key": str(cond_key),
+                                        "test": str(A2),
+                                        "reference": str(B2),
+                                        "results": df,
+                                        "options": {
+                                            "min_cells_per_sample_group": int(pb_opts.min_cells_per_sample_group),
+                                            "min_samples_per_level": int(pb_opts.min_samples_per_level),
+                                            "alpha": float(pb_opts.alpha),
+                                            "shrink_lfc": bool(pb_opts.shrink_lfc),
+                                            "min_total_counts": int(getattr(pb_opts, "min_total_counts", 0)),
+                                            "min_counts_per_lib": int(getattr(pb_opts, "min_counts_per_lib", 0)),
+                                        },
+                                    }
+                                    entries.append((key, payload))
                             done += 1
                             elapsed = time.perf_counter() - t0
                             eta_s = (elapsed / max(1, done)) * (total - done)
@@ -2194,6 +2251,15 @@ def run_within_cluster(cfg) -> ad.AnnData:
                                 int(total),
                                 elapsed,
                                 eta_s,
+                            )
+                            LOGGER.info(
+                                "within-cluster: pseudobulk task finished (kind=%s, group=%s, condition_key=%s, A=%s, B=%s, task_s=%.1f).",
+                                str(task_info.get("kind")),
+                                str(task_info.get("group")),
+                                str(task_info.get("cond_key")),
+                                str(task_info.get("A", "")),
+                                str(task_info.get("B", "")),
+                                float(t_elapsed),
                             )
             else:
                 for task in tasks:

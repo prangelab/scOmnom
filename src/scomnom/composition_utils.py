@@ -37,18 +37,24 @@ def prepare_counts_and_metadata(
     sample_key: str,
     condition_key: str,
     covariates: Sequence[str],
+    restrict_mask: Optional[np.ndarray] = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    obs = adata.obs
+    if restrict_mask is not None:
+        if len(restrict_mask) != adata.n_obs:
+            raise RuntimeError("composition: restrict_mask length does not match adata.n_obs")
+        obs = obs.loc[np.asarray(restrict_mask)]
     counts = pd.crosstab(
-        adata.obs[str(sample_key)],
-        adata.obs[str(cluster_key)],
+        obs[str(sample_key)],
+        obs[str(cluster_key)],
         dropna=False,
     )
     meta_cols = [str(sample_key), str(condition_key), *[str(c) for c in covariates]]
-    missing = [c for c in meta_cols if c not in adata.obs]
+    missing = [c for c in meta_cols if c not in obs]
     if missing:
         raise RuntimeError(f"composition: missing covariate columns in adata.obs: {missing}")
     metadata = (
-        adata.obs.loc[:, meta_cols]
+        obs.loc[:, meta_cols]
         .drop_duplicates(subset=[str(sample_key)])
         .set_index(str(sample_key))
     )
