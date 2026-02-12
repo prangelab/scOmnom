@@ -972,6 +972,7 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
         _prune_uns_de(adata, store_key=str(getattr(cfg, "store_key", "scomnom_de")))
 
     out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.markers_and_de")) + ".zarr")
+    LOGGER.info("within-cluster: saving outputs...")
     LOGGER.info("Saving dataset → %s", out_zarr)
     io_utils.save_dataset(adata, out_zarr, fmt="zarr")
 
@@ -2113,12 +2114,29 @@ def run_within_cluster(cfg) -> ad.AnnData:
             done = 0
             t0 = time.perf_counter()
             if tasks and max_workers > 1:
-                from concurrent.futures import ThreadPoolExecutor, as_completed
+                from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+
+                heartbeat_s = 60.0
+                next_heartbeat = time.perf_counter() + heartbeat_s
 
                 with ThreadPoolExecutor(max_workers=max_workers) as ex:
                     futs = {ex.submit(_run_task, task): task for task in tasks}
-                    for fut in as_completed(futs):
-                        kind, cond_key, gval, res, meta = fut.result()
+                    pending = set(futs.keys())
+                    while pending:
+                        now = time.perf_counter()
+                        done_set, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
+                        if not done_set:
+                            if now >= next_heartbeat:
+                                LOGGER.info(
+                                    "within-cluster: pseudobulk heartbeat (done=%d/%d, pending=%d).",
+                                    int(done),
+                                    int(total),
+                                    int(len(pending)),
+                                )
+                                next_heartbeat = now + heartbeat_s
+                            continue
+                        for fut in done_set:
+                            kind, cond_key, gval, res, meta = fut.result()
                         if kind == "interaction":
                             key = f"{groupby}={gval}::{cond_key}::interaction"
                             payload = {
@@ -2167,16 +2185,16 @@ def run_within_cluster(cfg) -> ad.AnnData:
                                     },
                                 }
                                 entries.append((key, payload))
-                        done += 1
-                        elapsed = time.perf_counter() - t0
-                        eta_s = (elapsed / max(1, done)) * (total - done)
-                        LOGGER.info(
-                            "within-cluster: pseudobulk progress %d/%d (elapsed=%.1fs, eta=%.1fs).",
-                            int(done),
-                            int(total),
-                            elapsed,
-                            eta_s,
-                        )
+                            done += 1
+                            elapsed = time.perf_counter() - t0
+                            eta_s = (elapsed / max(1, done)) * (total - done)
+                            LOGGER.info(
+                                "within-cluster: pseudobulk progress %d/%d (elapsed=%.1fs, eta=%.1fs).",
+                                int(done),
+                                int(total),
+                                elapsed,
+                                eta_s,
+                            )
             else:
                 for task in tasks:
                     kind, cond_key, gval, res, meta = _run_task(task)
@@ -2238,6 +2256,12 @@ def run_within_cluster(cfg) -> ad.AnnData:
                         elapsed,
                         eta_s,
                     )
+
+            LOGGER.info(
+                "within-cluster: pseudobulk tasks complete (done=%d/%d).",
+                int(done),
+                int(total),
+            )
 
             if store_key:
                 adata.uns.setdefault(store_key, {})

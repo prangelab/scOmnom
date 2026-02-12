@@ -1543,6 +1543,7 @@ def de_condition_within_group_pseudobulk(
     counts = pd.DataFrame(dense, index=counts_df.index, columns=counts_df.columns)
 
     min_total = int(getattr(opts, "min_total_counts", 100))
+    min_counts_per_lib = int(getattr(opts, "min_counts_per_lib", 0))
     max_genes = getattr(opts, "max_genes", None)
     keep = (counts.sum(axis=0) >= min_total)
     counts = counts.loc[:, keep]
@@ -1589,7 +1590,6 @@ def de_condition_within_group_pseudobulk(
         keep = keep_series.reindex(counts.columns.astype(str)).fillna(False).to_numpy()
         counts = counts.loc[:, keep]
     # per-level library filter: >= min_counts_per_lib in >= min_samples_per_level libs per level
-    min_counts_per_lib = int(getattr(opts, "min_counts_per_lib", 0))
     min_lib_pct = float(getattr(opts, "min_lib_pct", 0.0))
     if min_counts_per_lib > 0 and counts.shape[1] > 0:
         vc_before = metadata[condition_key].astype(str).value_counts()
