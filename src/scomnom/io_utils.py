@@ -1967,6 +1967,24 @@ def _safe_filename(s: str, max_len: int = 180) -> str:
     return sanitize_identifier(s, max_len=max_len, allow_spaces=False)
 
 
+def _condition_key_label(condition_key: str) -> str:
+    raw = str(condition_key).strip()
+    if "^" in raw:
+        parts = [p.strip() for p in raw.split("^") if p.strip()]
+        if len(parts) == 2:
+            return f"{parts[0]}.{parts[1]}__interaction"
+        return f"{raw}__interaction"
+    return raw
+
+
+def _short_cluster_sheet_name(group_value: str) -> str:
+    s = str(group_value)
+    m = re.match(r"^(C\d+)\b", s)
+    if m:
+        return m.group(1)
+    return sanitize_identifier(s, max_len=28, allow_spaces=False)
+
+
 def export_pseudobulk_de_tables(
     adata: ad.AnnData,
     *,
@@ -2036,7 +2054,8 @@ def export_pseudobulk_de_tables(
         if not cond:
             cond = block.get("pseudobulk_condition_within_group", {})
         if isinstance(cond, dict) and cond:
-            out_cond = base / f"condition_within_cluster__{_safe_filename(condition_key)}"
+            cond_label = _condition_key_label(str(condition_key))
+            out_cond = base / f"condition_within_cluster__{_safe_filename(cond_label)}"
             out_cond.mkdir(parents=True, exist_ok=True)
 
             # keys look like: "{group_key}={group_value}::{condition_key}::{test}_vs_{reference}"
@@ -2237,20 +2256,14 @@ def export_pseudobulk_condition_within_cluster_excel(
     tables_root: Optional[Path] = None,
 ) -> None:
     """
-    One Excel file per condition_key.
-    One sheet per cluster.
+    One Excel file per contrast within condition_key.
+    One sheet per cluster (Cnn).
     """
     if not condition_key:
         return
 
     output_dir = Path(output_dir)
     base = Path(tables_root) if tables_root is not None else (output_dir / "DE_tables")
-    if filename is None:
-        suffix = "__interaction" if "^" in str(condition_key) else ""
-        filename = f"condition_within_cluster__{_safe_filename(condition_key)}{suffix}.xlsx"
-
-    out_xlsx = base / filename
-    out_xlsx.parent.mkdir(parents=True, exist_ok=True)
 
     block = adata.uns.get(store_key, {})
     cond = block.get("pseudobulk_condition_within_group_multi", {})
@@ -2260,36 +2273,57 @@ def export_pseudobulk_condition_within_cluster_excel(
     if not isinstance(cond, dict) or not cond:
         return
 
-    with pd.ExcelWriter(out_xlsx, engine="xlsxwriter") as writer:
-        for key, payload in cond.items():
-            if not isinstance(payload, dict):
-                continue
+    cond_label = _condition_key_label(str(condition_key))
 
-            df = payload.get("results", None)
-            if df is None:
-                continue
-
-            group_value = payload.get("group_value", key)
+    by_contrast: dict[str, list[dict]] = {}
+    for key, payload in cond.items():
+        if not isinstance(payload, dict):
+            continue
+        df = payload.get("results", None)
+        if df is None:
+            continue
+        is_interaction = bool(payload.get("interaction", False))
+        if is_interaction:
+            contrast_key = "interaction"
+        else:
             test = payload.get("test", None)
             ref = payload.get("reference", None)
-
-            sheet = str(group_value)
             if test and ref:
-                sheet = f"{sheet} ({test} vs {ref})"
-
-            sheet = _safe_excel_sheet_name(sheet)
-
-            if getattr(df, "empty", True):
-                pd.DataFrame(
-                    columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]
-                ).to_excel(writer, sheet_name=sheet, index=False)
+                contrast_key = f"{test}_vs_{ref}"
             else:
-                df2 = df.copy()
-                if "gene" not in df2.columns:
-                    df2["gene"] = df2.index.astype(str)
-                df2 = _add_gene_type_column(adata, df2, gene_col="gene")
-                df2 = _drop_redundant_group_cols(df2)
-                df2.to_excel(writer, sheet_name=sheet, index=False)
+                contrast_key = "contrast"
+        by_contrast.setdefault(str(contrast_key), []).append(payload)
+
+    for contrast_key, payloads in by_contrast.items():
+        if filename is None:
+            if contrast_key == "interaction":
+                fname = f"condition_within_cluster__{_safe_filename(cond_label)}.xlsx"
+            else:
+                fname = f"condition_within_cluster__{_safe_filename(cond_label)}__{_safe_filename(contrast_key)}.xlsx"
+        else:
+            fname = filename
+
+        out_xlsx = base / fname
+        out_xlsx.parent.mkdir(parents=True, exist_ok=True)
+
+        with pd.ExcelWriter(out_xlsx, engine="xlsxwriter") as writer:
+            for payload in payloads:
+                df = payload.get("results", None)
+                if df is None:
+                    continue
+                group_value = payload.get("group_value", "")
+                sheet = _safe_excel_sheet_name(_short_cluster_sheet_name(str(group_value)))
+                if getattr(df, "empty", True):
+                    pd.DataFrame(
+                        columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]
+                    ).to_excel(writer, sheet_name=sheet, index=False)
+                else:
+                    df2 = df.copy()
+                    if "gene" not in df2.columns:
+                        df2["gene"] = df2.index.astype(str)
+                    df2 = _add_gene_type_column(adata, df2, gene_col="gene")
+                    df2 = _drop_redundant_group_cols(df2)
+                    df2.to_excel(writer, sheet_name=sheet, index=False)
 
 
 def export_rank_genes_groups_excel(
@@ -2490,7 +2524,7 @@ def export_contrast_conditional_markers_tables(
                 if df is None:
                     continue
 
-                sheet = _safe_excel_sheet_name(str(cl2))
+                sheet = _safe_excel_sheet_name(_short_cluster_sheet_name(str(cl2)))
                 if getattr(df, "empty", True):
                     pd.DataFrame().to_excel(writer, sheet_name=sheet, index=False)
                 else:

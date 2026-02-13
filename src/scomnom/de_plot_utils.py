@@ -156,6 +156,106 @@ def _select_top_genes(
     return out
 
 
+def _select_top_genes_with_fallback(
+    df: pd.DataFrame,
+    *,
+    gene_col: str = "gene",
+    padj_col: str = "padj",
+    lfc_col: str = "log2FoldChange",
+    padj_thresh: float = 0.05,
+    top_n: int = 50,
+) -> list[str]:
+    genes = _select_top_genes(
+        df,
+        gene_col=gene_col,
+        padj_col=padj_col,
+        lfc_col=lfc_col,
+        padj_thresh=padj_thresh,
+        top_n=top_n,
+        require_sig=True,
+    )
+    if len(genes) >= int(top_n):
+        return genes[: int(top_n)]
+    extra = _select_top_genes(
+        df,
+        gene_col=gene_col,
+        padj_col=padj_col,
+        lfc_col=lfc_col,
+        padj_thresh=padj_thresh,
+        top_n=top_n,
+        require_sig=False,
+    )
+    for g in extra:
+        if g not in genes:
+            genes.append(g)
+        if len(genes) >= int(top_n):
+            break
+    return genes[: int(top_n)]
+
+
+def heatmap_top_genes_by_sample(
+    adata,
+    *,
+    genes: Sequence[str],
+    sample_key: str,
+    use_raw: bool = False,
+    layer: Optional[str] = None,
+    z_clip: float | None = 3.0,
+    cmap: str = "vlag",
+    show: bool = False,
+):
+    import numpy as np
+    import pandas as pd
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+
+    if not genes or sample_key not in adata.obs:
+        return None
+
+    genes = [str(g) for g in genes if g in adata.var_names]
+    if not genes:
+        return None
+
+    sub = adata[:, genes]
+    X = sub.layers[layer] if layer else (sub.raw.X if use_raw and sub.raw is not None else sub.X)
+    X = X.toarray() if hasattr(X, "toarray") else np.asarray(X)
+
+    df_x = pd.DataFrame(X, columns=genes)
+    df_x[sample_key] = adata.obs[sample_key].astype(str).values
+    mean = df_x.groupby(sample_key, observed=True)[genes].mean()
+
+    M = mean.to_numpy(dtype=float)
+    mu = np.nanmean(M, axis=0)
+    sd = np.nanstd(M, axis=0)
+    sd[sd == 0] = 1.0
+    Z = (M - mu) / sd
+    if z_clip is not None:
+        Z = np.clip(Z, -float(z_clip), float(z_clip))
+
+    data = pd.DataFrame(Z, index=mean.index.astype(str), columns=genes).T
+
+    n_samples = data.shape[1]
+    n_genes = data.shape[0]
+    fig_w = max(8.0, 0.35 * n_samples + 4.0)
+    fig_h = max(8.0, 0.20 * n_genes + 4.0)
+
+    g = sns.clustermap(
+        data,
+        cmap=cmap,
+        center=0.0,
+        row_cluster=True,
+        col_cluster=True,
+        figsize=(fig_w, fig_h),
+        yticklabels=True,
+        xticklabels=True,
+        cbar_kws={"label": "Z-score"},
+    )
+    g.ax_heatmap.tick_params(axis="y", labelsize=8)
+    g.ax_heatmap.tick_params(axis="x", labelsize=7, rotation=45)
+    if show:
+        plt.show()
+    return g.fig
+
 def _filter_protein_coding(
     adata,
     df: pd.DataFrame,
@@ -1287,6 +1387,7 @@ def plot_condition_within_cluster(
     heatmap_top_n: int = 25,
     use_raw: bool = False,
     layer: str | None = None,
+    sample_key: str | None = None,
 ) -> None:
     """
     For each stored conditional DE result (per cluster, per contrast):
@@ -1302,7 +1403,15 @@ def plot_condition_within_cluster(
     from pathlib import Path
     from . import plot_utils
 
+    if sample_key is None:
+        try:
+            sample_key = io_utils.infer_batch_key(adata, None)
+        except Exception:
+            sample_key = None
+
     block = adata.uns.get(store_key, {}).get("pseudobulk_condition_within_group", {})
+    if not isinstance(block, dict) or not block:
+        block = adata.uns.get(store_key, {}).get("pseudobulk_condition_within_group_multi", {})
     if not isinstance(block, dict) or not block:
         return
 
@@ -1347,6 +1456,7 @@ def plot_condition_within_cluster(
         out_dot = base / pair_dir / "dotplot"
         out_violin = base / pair_dir / "violin"
         out_heat = base / pair_dir / "heatmap"
+        out_heat_sample = base / pair_dir / "heatmap_sample"
 
         df_pc = _filter_protein_coding(adata, df_de, gene_col="gene")
         label_genes = _select_top_genes(
@@ -1490,6 +1600,32 @@ def plot_condition_within_cluster(
                 fig=fig,
             )
 
+        # sample-aggregated heatmap: top 50 DE genes per contrast
+        if sample_key is not None and sample_key in sub.obs:
+            top50 = _select_top_genes_with_fallback(
+                df_pc,
+                gene_col="gene",
+                padj_col="padj",
+                lfc_col="log2FoldChange",
+                padj_thresh=float(alpha),
+                top_n=50,
+            )
+            fig = heatmap_top_genes_by_sample(
+                sub,
+                genes=top50,
+                sample_key=str(sample_key),
+                use_raw=bool(use_raw),
+                layer=layer,
+                z_clip=3.0,
+                show=False,
+            )
+            if fig is not None:
+                plot_utils.save_multi(
+                    stem=f"heatmap_samples__top50__{group_value}__{pair_dir}",
+                    figdir=out_heat_sample,
+                    fig=fig,
+                )
+
 
 def plot_condition_within_cluster_all(
     adata,
@@ -1505,6 +1641,7 @@ def plot_condition_within_cluster_all(
     heatmap_top_n: int = 25,
     use_raw: bool = False,
     layer: str | None = None,
+    sample_key: str | None = None,
 ) -> None:
     """
     Full conditional-DE plotting suite:
@@ -1540,6 +1677,7 @@ def plot_condition_within_cluster_all(
         heatmap_top_n=int(heatmap_top_n),
         use_raw=bool(use_raw),
         layer=layer,
+        sample_key=sample_key,
     )
 
 
@@ -1556,6 +1694,7 @@ def plot_contrast_conditional_markers(
     dotplot_top_n_genes: int | None = None,
     use_raw: bool = False,
     layer: str | None = None,
+    sample_key: str | None = None,
 ) -> None:
     """
     Cell-level within-cluster contrast plots (from contrast_conditional results).
@@ -1574,6 +1713,11 @@ def plot_contrast_conditional_markers(
         return
 
     figroot = Path("DE") / "cell_level_DE" / str(contrast_key)
+    if sample_key is None:
+        try:
+            sample_key = io_utils.infer_batch_key(adata, None)
+        except Exception:
+            sample_key = None
 
     # Global UMAP colored by contrast key (colorblind-friendly palette)
     colors = None
@@ -1605,6 +1749,7 @@ def plot_contrast_conditional_markers(
             d_dot = pair_root / "dotplot"
             d_violin = pair_root / "violin"
             d_umap = pair_root / "umap"
+            d_heat_sample = pair_root / "heatmap_sample"
 
             # Global and per-cluster UMAPs live alongside other plots
             if contrast_key in adata.obs and pair_dir not in done_pairs:
@@ -1757,6 +1902,35 @@ def plot_contrast_conditional_markers(
                 )
                 plot_utils.save_multi(stem=f"violin__{cl}__{pair_key}", figdir=d_violin, fig=fig)
 
+            # sample-aggregated heatmap (top 50 DE genes)
+            if sample_key is not None:
+                m = adata.obs[str(groupby)].astype(str).to_numpy() == str(cl)
+                adata_sub = adata[m].copy()
+                if sample_key in adata_sub.obs:
+                    top50 = _select_top_genes_with_fallback(
+                        df_sel,
+                        gene_col="gene",
+                        padj_col="padj",
+                        lfc_col="log2FoldChange",
+                        padj_thresh=float(alpha),
+                        top_n=50,
+                    )
+                    fig = heatmap_top_genes_by_sample(
+                        adata_sub,
+                        genes=top50,
+                        sample_key=str(sample_key),
+                        use_raw=bool(use_raw),
+                        layer=layer,
+                        z_clip=3.0,
+                        show=False,
+                    )
+                    if fig is not None:
+                        plot_utils.save_multi(
+                            stem=f"heatmap_samples__top50__{cl}__{pair_key}",
+                            figdir=d_heat_sample,
+                            fig=fig,
+                        )
+
 
 def plot_contrast_conditional_markers_multi(
     adata,
@@ -1771,6 +1945,7 @@ def plot_contrast_conditional_markers_multi(
     dotplot_top_n_genes: int | None = None,
     use_raw: bool = False,
     layer: str | None = None,
+    sample_key: str | None = None,
 ) -> None:
     """
     Plot contrast-conditional markers for a specific contrast_key from
@@ -1800,6 +1975,7 @@ def plot_contrast_conditional_markers_multi(
             dotplot_top_n_genes=dotplot_top_n_genes,
             use_raw=bool(use_raw),
             layer=layer,
+            sample_key=sample_key,
         )
     finally:
         if orig is None:
