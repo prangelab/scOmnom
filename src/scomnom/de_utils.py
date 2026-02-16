@@ -779,6 +779,16 @@ def _run_pydeseq2_interaction(
         ref_level={str(factor_a): str(level_a), str(factor_b): str(level_b)},
         n_cpus=int(n_cpus),
     )
+    try:
+        design_cols = list(getattr(dds, "design_matrix").columns)
+        LOGGER.info(
+            "PyDESeq2 interaction design columns (factor_a=%r factor_b=%r): %s",
+            str(factor_a),
+            str(factor_b),
+            design_cols,
+        )
+    except Exception as e:
+        LOGGER.info("PyDESeq2 interaction design columns unavailable: %s", e)
 
     meta: Dict[str, Any] = {
         "sf_policy": str(size_factors),

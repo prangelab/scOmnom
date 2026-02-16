@@ -1907,6 +1907,14 @@ def run_within_cluster(cfg) -> ad.AnnData:
                                             "min_counts_per_lib": int(getattr(pb_opts, "min_counts_per_lib", 0)),
                                         },
                                     }
+                                    LOGGER.info(
+                                        "within-cluster: pseudobulk stored contrast=%r test=%r reference=%r group=%r condition_key=%r",
+                                        str(contrast_key),
+                                        str(A2),
+                                        str(B2),
+                                        str(gval),
+                                        str(cond_key),
+                                    )
                                     entries.append((key, payload))
                             done += 1
                             elapsed = time.perf_counter() - t0
@@ -1977,6 +1985,14 @@ def run_within_cluster(cfg) -> ad.AnnData:
                                     "min_counts_per_lib": int(getattr(pb_opts, "min_counts_per_lib", 0)),
                                 },
                             }
+                            LOGGER.info(
+                                "within-cluster: pseudobulk stored contrast=%r test=%r reference=%r group=%r condition_key=%r",
+                                str(contrast_key),
+                                str(A2),
+                                str(B2),
+                                str(gval),
+                                str(cond_key),
+                            )
                             entries.append((key, payload))
                     done += 1
                     elapsed = time.perf_counter() - t0

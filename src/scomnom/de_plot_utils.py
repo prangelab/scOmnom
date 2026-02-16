@@ -198,10 +198,11 @@ def heatmap_top_genes_by_sample(
     *,
     genes: Sequence[str],
     sample_key: str,
+    condition_key: Optional[str] = None,
     use_raw: bool = False,
     layer: Optional[str] = None,
     z_clip: float | None = 3.0,
-    cmap: str = "vlag",
+    cmap: str = "icefire",
     show: bool = False,
 ):
     import numpy as np
@@ -239,6 +240,31 @@ def heatmap_top_genes_by_sample(
     fig_w = max(8.0, 0.35 * n_samples + 4.0)
     fig_h = max(8.0, 0.20 * n_genes + 4.0)
 
+    col_colors = None
+    legend_handles = []
+    if condition_key and condition_key in adata.obs:
+        obs = adata.obs[[sample_key, condition_key]].copy()
+        obs[sample_key] = obs[sample_key].astype(str)
+        obs[condition_key] = obs[condition_key].astype(str)
+        cond_by_sample: dict[str, str] = {}
+        for s, sub in obs.groupby(sample_key, sort=False):
+            vals = sub[condition_key].dropna().astype(str).unique()
+            if vals.size == 0:
+                continue
+            cond_by_sample[str(s)] = str(vals[0])
+        levels = [str(x) for x in pd.unique(pd.Series(list(cond_by_sample.values()))).tolist()]
+        if levels:
+            palette = sns.color_palette("colorblind", n_colors=len(levels))
+            color_map = dict(zip(levels, palette))
+            col_colors = pd.Series(
+                [color_map.get(cond_by_sample.get(str(s), ""), (0.85, 0.85, 0.85)) for s in data.columns],
+                index=data.columns,
+            )
+            legend_handles = [
+                plt.matplotlib.patches.Patch(facecolor=color_map[lv], edgecolor="none", label=str(lv))
+                for lv in levels
+            ]
+
     g = sns.clustermap(
         data,
         cmap=cmap,
@@ -249,9 +275,26 @@ def heatmap_top_genes_by_sample(
         yticklabels=True,
         xticklabels=True,
         cbar_kws={"label": "Z-score"},
+        col_colors=col_colors,
+        linewidths=0.4,
+        linecolor="#b0b0b0",
     )
     g.ax_heatmap.tick_params(axis="y", labelsize=8)
     g.ax_heatmap.tick_params(axis="x", labelsize=7, rotation=45)
+    g.ax_heatmap.grid(False)
+    g.ax_heatmap.tick_params(which="minor", bottom=False, left=False)
+    if legend_handles:
+        ncol = min(4, len(legend_handles))
+        g.ax_col_dendrogram.legend(
+            handles=legend_handles,
+            title=str(condition_key),
+            loc="upper center",
+            bbox_to_anchor=(0.5, 1.20),
+            ncol=ncol,
+            frameon=False,
+            fontsize=8,
+            title_fontsize=9,
+        )
     if show:
         plt.show()
     return g.fig
@@ -1420,6 +1463,9 @@ def plot_condition_within_cluster(
     for k, payload in block.items():
         if not isinstance(payload, dict):
             continue
+        payload_ck = payload.get("condition_key", None)
+        if payload_ck is not None and str(payload_ck) != str(condition_key):
+            continue
         df_de = payload.get("results", None)
         if df_de is None or getattr(df_de, "empty", True):
             continue
@@ -1614,6 +1660,7 @@ def plot_condition_within_cluster(
                 sub,
                 genes=top50,
                 sample_key=str(sample_key),
+                condition_key=str(condition_key),
                 use_raw=bool(use_raw),
                 layer=layer,
                 z_clip=3.0,
@@ -1919,6 +1966,7 @@ def plot_contrast_conditional_markers(
                         adata_sub,
                         genes=top50,
                         sample_key=str(sample_key),
+                        condition_key=str(contrast_key),
                         use_raw=bool(use_raw),
                         layer=layer,
                         z_clip=3.0,

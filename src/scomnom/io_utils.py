@@ -2019,32 +2019,33 @@ def export_pseudobulk_de_tables(
     # -------------------------
     # Cluster vs rest
     # -------------------------
-    pb = block.get("pseudobulk_cluster_vs_rest", {})
-    if isinstance(pb, dict):
-        out_cluster = base / "cluster_vs_rest"
-        out_cluster.mkdir(parents=True, exist_ok=True)
+    if condition_key is None:
+        pb = block.get("pseudobulk_cluster_vs_rest", {})
+        if isinstance(pb, dict):
+            out_cluster = base / "cluster_vs_rest"
+            out_cluster.mkdir(parents=True, exist_ok=True)
 
-        results_by_cluster = pb.get("results", {})
-        if isinstance(results_by_cluster, dict):
-            for cl, df in results_by_cluster.items():
-                cl_safe = _safe_filename(cl)
-                out_csv = out_cluster / f"cluster_vs_rest__{cl_safe}.csv"
+            results_by_cluster = pb.get("results", {})
+            if isinstance(results_by_cluster, dict):
+                for cl, df in results_by_cluster.items():
+                    cl_safe = _safe_filename(cl)
+                    out_csv = out_cluster / f"cluster_vs_rest__{cl_safe}.csv"
 
-                if df is None or getattr(df, "empty", True):
-                    pd.DataFrame(
-                        columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]
-                    ).to_csv(out_csv, index=False)
-                else:
-                    df2 = df.copy()
-                    if "gene" not in df2.columns:
-                        df2["gene"] = df2.index.astype(str)
-                    df2 = _add_gene_type_column(adata, df2, gene_col="gene")
-                    df2 = _drop_redundant_group_cols(df2)
-                    df2.to_csv(out_csv, index=False)
+                    if df is None or getattr(df, "empty", True):
+                        pd.DataFrame(
+                            columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]
+                        ).to_csv(out_csv, index=False)
+                    else:
+                        df2 = df.copy()
+                        if "gene" not in df2.columns:
+                            df2["gene"] = df2.index.astype(str)
+                        df2 = _add_gene_type_column(adata, df2, gene_col="gene")
+                        df2 = _drop_redundant_group_cols(df2)
+                        df2.to_csv(out_csv, index=False)
 
-        summ = pb.get("summary", None)
-        if isinstance(summ, pd.DataFrame) and not summ.empty:
-            summ.to_csv(out_cluster / "__summary.csv", index=False)
+            summ = pb.get("summary", None)
+            if isinstance(summ, pd.DataFrame) and not summ.empty:
+                summ.to_csv(out_cluster / "__summary.csv", index=False)
 
     # -------------------------
     # Condition within group
