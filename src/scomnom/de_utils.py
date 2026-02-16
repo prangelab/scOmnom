@@ -791,12 +791,28 @@ def _run_pydeseq2_interaction(
                 dm2 = obsm.get("design_matrix")
                 if hasattr(dm2, "columns"):
                     design_cols = list(dm2.columns)
+                else:
+                    LOGGER.info(
+                        "PyDESeq2 interaction design matrix in obsm without columns (type=%s shape=%s)",
+                        type(dm2).__name__,
+                        getattr(dm2, "shape", None),
+                    )
         if design_cols is None:
             res_names = getattr(dds, "results_names", None)
             if callable(res_names):
                 design_cols = list(res_names())
         if design_cols is None:
             design_cols = list(getattr(dds, "design_factors", []))
+        if not design_cols:
+            obsm_keys = list(getattr(getattr(dds, "obsm", {}), "keys", lambda: [])())
+            uns_keys = list(getattr(getattr(dds, "uns", {}), "keys", lambda: [])())
+            varm_keys = list(getattr(getattr(dds, "varm", {}), "keys", lambda: [])())
+            LOGGER.info(
+                "PyDESeq2 design metadata keys: obsm=%s uns=%s varm=%s",
+                obsm_keys,
+                uns_keys,
+                varm_keys,
+            )
         LOGGER.info(
             "PyDESeq2 interaction design columns (factor_a=%r factor_b=%r): %s",
             str(factor_a),
