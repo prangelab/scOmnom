@@ -787,12 +787,21 @@ def _run_pydeseq2_interaction(
             design_cols = list(dm.columns)
         if not design_cols:
             obsm = getattr(dds, "obsm", None)
-            if isinstance(obsm, dict) and "design_matrix" in obsm:
-                dm2 = obsm.get("design_matrix")
+            obsm_keys = []
+            try:
+                obsm_keys = list(getattr(obsm, "keys", lambda: [])())
+            except Exception:
+                obsm_keys = []
+            if "design_matrix" in obsm_keys:
+                try:
+                    dm2 = obsm["design_matrix"]
+                except Exception:
+                    dm2 = None
                 if hasattr(dm2, "columns"):
                     design_cols = list(dm2.columns)
                 LOGGER.info(
-                    "PyDESeq2 interaction design matrix in obsm: type=%s shape=%s",
+                    "PyDESeq2 interaction design matrix in obsm: obsm_type=%s dm_type=%s shape=%s",
+                    type(obsm).__name__,
                     type(dm2).__name__,
                     getattr(dm2, "shape", None),
                 )
