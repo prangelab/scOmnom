@@ -762,6 +762,7 @@ def _run_pydeseq2_interaction(
     shrink_lfc: bool = True,
     n_cpus: int = 1,
     size_factors: str = "poscounts",
+    dry_run: bool = False,
 ) -> tuple[pd.DataFrame, Dict[str, Any]]:
     _require_pydeseq2()
     import inspect
@@ -831,6 +832,11 @@ def _run_pydeseq2_interaction(
             meta["sf_used"] = None
 
         dds.deseq2()
+
+        if bool(dry_run):
+            meta["dry_run"] = True
+            empty = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
+            return empty, meta
 
         names = None
         try:
@@ -1735,6 +1741,7 @@ def de_condition_within_group_pseudobulk_interaction(
     store_key: Optional[str] = "scomnom_de",
     store: bool = True,
     n_cpus: int = 1,
+    dry_run: bool = False,
 ) -> tuple[pd.DataFrame, dict]:
     """
     Interaction DE within a group: test A:B interaction term.
@@ -1908,6 +1915,7 @@ def de_condition_within_group_pseudobulk_interaction(
             shrink_lfc=opts.shrink_lfc,
             n_cpus=n_cpus,
             size_factors=str(getattr(opts, "size_factors", "poscounts")),
+            dry_run=bool(dry_run),
         )
     except Exception as e:
         if not supports_name:
