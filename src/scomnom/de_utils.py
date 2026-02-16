@@ -781,7 +781,22 @@ def _run_pydeseq2_interaction(
         n_cpus=int(n_cpus),
     )
     try:
-        design_cols = list(getattr(dds, "design_matrix").columns)
+        design_cols = None
+        dm = getattr(dds, "design_matrix", None)
+        if dm is not None and hasattr(dm, "columns"):
+            design_cols = list(dm.columns)
+        if design_cols is None:
+            obsm = getattr(dds, "obsm", None)
+            if isinstance(obsm, dict) and "design_matrix" in obsm:
+                dm2 = obsm.get("design_matrix")
+                if hasattr(dm2, "columns"):
+                    design_cols = list(dm2.columns)
+        if design_cols is None:
+            res_names = getattr(dds, "results_names", None)
+            if callable(res_names):
+                design_cols = list(res_names())
+        if design_cols is None:
+            design_cols = list(getattr(dds, "design_factors", []))
         LOGGER.info(
             "PyDESeq2 interaction design columns (factor_a=%r factor_b=%r): %s",
             str(factor_a),
