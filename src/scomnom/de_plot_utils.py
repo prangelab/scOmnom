@@ -7,12 +7,17 @@ from typing import Iterable, Mapping, Optional, Sequence
 import numpy as np
 import pandas as pd
 import scanpy as sc
+import logging
+import re
+import anndata as ad
 
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
 from . import io_utils
+
+LOGGER = logging.getLogger(__name__)
 
 
 
@@ -28,6 +33,79 @@ def _unique_keep_order(xs: Sequence[str]) -> list[str]:
             out.append(x)
             seen.add(x)
     return out
+
+
+def _parse_plot_gene_filter_entry(raw: str) -> tuple[Optional[str], Optional[str]]:
+    s = str(raw).strip()
+    if not s:
+        return None, None
+    parts = [p.strip() for p in s.split(";") if p.strip()]
+    cond = None
+    expr = None
+    for p in parts:
+        low = p.lower()
+        if low.startswith("condition_key="):
+            cond = p.split("=", 1)[1].strip()
+        elif low.startswith("condition="):
+            cond = p.split("=", 1)[1].strip()
+        elif low.startswith("cond="):
+            cond = p.split("=", 1)[1].strip()
+        elif low.startswith("expr="):
+            expr = p.split("=", 1)[1].strip()
+        elif expr is None:
+            expr = p
+    return cond, expr
+
+
+def _filter_df_for_plot_genes(
+    adata: ad.AnnData,
+    df: pd.DataFrame,
+    *,
+    gene_col: str,
+    plot_gene_filter: Optional[Sequence[str]],
+    condition_key: Optional[str],
+) -> pd.DataFrame:
+    if df is None or getattr(df, "empty", True):
+        return df
+    if not plot_gene_filter:
+        return df
+    if gene_col not in df.columns:
+        return df
+
+    parsed: list[tuple[Optional[str], str]] = []
+    for raw in plot_gene_filter:
+        cond, expr = _parse_plot_gene_filter_entry(raw)
+        if not expr:
+            continue
+        parsed.append((cond, expr))
+    if not parsed:
+        return df
+
+    exprs = [expr for cond, expr in parsed if cond is None or str(cond) == str(condition_key)]
+    if not exprs:
+        return df
+
+    genes = df[gene_col].astype(str).tolist()
+    meta = adata.var.copy()
+    meta["gene"] = meta.index.astype(str)
+    meta = meta.set_index("gene", drop=False)
+    meta = meta.reindex(genes)
+
+    df_idx = df.set_index(gene_col, drop=False)
+    for c in df_idx.columns:
+        if c not in meta.columns:
+            meta[c] = df_idx[c]
+
+    keep = pd.Series(True, index=meta.index)
+    for expr in exprs:
+        expr_norm = re.sub(r"\bnot_in\b", "not in", str(expr))
+        try:
+            matched = meta.query(expr_norm, engine="python")
+            keep &= meta.index.isin(matched.index)
+        except Exception as e:
+            LOGGER.warning("plot_gene_filter failed for expr=%r: %s", str(expr), e)
+    df_out = df_idx.loc[keep[keep].index].copy()
+    return df_out.reset_index(drop=True)
 
 
 def _select_top_signed(
@@ -1070,6 +1148,7 @@ def plot_marker_genes_pseudobulk(
     use_raw: bool = False,
     layer: str | None = None,
     umap_ncols: int = 3,
+    plot_gene_filter: Optional[Sequence[str]] = None,
 ) -> None:
     """
     Pseudobulk cluster-vs-rest plots.
@@ -1097,8 +1176,15 @@ def plot_marker_genes_pseudobulk(
 
     for cl, df_de in pb_results.items():
         df_pc = _filter_protein_coding(adata, df_de, gene_col="gene")
-        label_genes = _select_top_genes(
+        df_plot = _filter_df_for_plot_genes(
+            adata,
             df_pc,
+            gene_col="gene",
+            plot_gene_filter=plot_gene_filter,
+            condition_key=None,
+        )
+        label_genes = _select_top_genes(
+            df_plot,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
@@ -1118,7 +1204,7 @@ def plot_marker_genes_pseudobulk(
         plot_utils.save_multi(stem=f"volcano__{cl}", figdir=d_volcano, fig=fig)
 
         topg = _select_top_genes(
-            df_pc,
+            df_plot,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
@@ -1127,7 +1213,7 @@ def plot_marker_genes_pseudobulk(
             require_sig=True,
         )
         topg_dot = _select_top_genes(
-            df_pc,
+            df_plot,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
@@ -1200,6 +1286,7 @@ def plot_marker_genes_ranksum(
     use_raw: bool = False,
     layer: str | None = None,
     umap_ncols: int = 3,
+    plot_gene_filter: Optional[Sequence[str]] = None,
 ) -> None:
     """
     Cell-level rank_genes_groups plots.
@@ -1318,8 +1405,15 @@ def plot_marker_genes_ranksum(
 
         df_v = _normalize_df_for_volcano(df)
         df_pc = _filter_protein_coding(adata, df_v, gene_col="gene")
-        label_genes = _select_top_genes(
+        df_plot = _filter_df_for_plot_genes(
+            adata,
             df_pc,
+            gene_col="gene",
+            plot_gene_filter=plot_gene_filter,
+            condition_key=None,
+        )
+        label_genes = _select_top_genes(
+            df_plot,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
@@ -1345,7 +1439,7 @@ def plot_marker_genes_ranksum(
 
         # top genes for expression plots
         topg = _select_top_genes(
-            df_pc,
+            df_plot,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
@@ -1356,7 +1450,7 @@ def plot_marker_genes_ranksum(
         genes_by_cluster[str(cl)] = topg
 
         topg_dot = _select_top_genes(
-            df_pc,
+            df_plot,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
@@ -1431,6 +1525,7 @@ def plot_condition_within_cluster(
     use_raw: bool = False,
     layer: str | None = None,
     sample_key: str | None = None,
+    plot_gene_filter: Optional[Sequence[str]] = None,
 ) -> None:
     """
     For each stored conditional DE result (per cluster, per contrast):
@@ -1505,8 +1600,15 @@ def plot_condition_within_cluster(
         out_heat_sample = base / pair_dir / "heatmap_sample"
 
         df_pc = _filter_protein_coding(adata, df_de, gene_col="gene")
-        label_genes = _select_top_genes(
+        df_plot = _filter_df_for_plot_genes(
+            adata,
             df_pc,
+            gene_col="gene",
+            plot_gene_filter=plot_gene_filter,
+            condition_key=str(condition_key),
+        )
+        label_genes = _select_top_genes(
+            df_plot,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
@@ -1534,7 +1636,7 @@ def plot_condition_within_cluster(
 
         # top up/down for dotplot
         up_dot = _select_top_signed(
-            df_pc,
+            df_plot,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
@@ -1543,7 +1645,7 @@ def plot_condition_within_cluster(
             direction="up",
         )
         down_dot = _select_top_signed(
-            df_pc,
+            df_plot,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
@@ -1555,7 +1657,7 @@ def plot_condition_within_cluster(
 
         # top up/down for violin
         up_vio = _select_top_signed(
-            df_pc,
+            df_plot,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
@@ -1564,7 +1666,7 @@ def plot_condition_within_cluster(
             direction="up",
         )
         down_vio = _select_top_signed(
-            df_pc,
+            df_plot,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
@@ -1609,7 +1711,7 @@ def plot_condition_within_cluster(
 
         # heatmap: top 25 up + top 25 down
         up25 = _select_top_signed(
-            df_pc,
+            df_plot,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
@@ -1618,7 +1720,7 @@ def plot_condition_within_cluster(
             direction="up",
         )
         down25 = _select_top_signed(
-            df_pc,
+            df_plot,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
@@ -1649,7 +1751,7 @@ def plot_condition_within_cluster(
         # sample-aggregated heatmap: top 50 DE genes per contrast
         if sample_key is not None and sample_key in sub.obs:
             top50 = _select_top_genes_with_fallback(
-                df_pc,
+                df_plot,
                 gene_col="gene",
                 padj_col="padj",
                 lfc_col="log2FoldChange",
@@ -1689,6 +1791,7 @@ def plot_condition_within_cluster_all(
     use_raw: bool = False,
     layer: str | None = None,
     sample_key: str | None = None,
+    plot_gene_filter: Optional[Sequence[str]] = None,
 ) -> None:
     """
     Full conditional-DE plotting suite:
@@ -1725,6 +1828,7 @@ def plot_condition_within_cluster_all(
         use_raw=bool(use_raw),
         layer=layer,
         sample_key=sample_key,
+        plot_gene_filter=plot_gene_filter,
     )
 
 
@@ -1742,6 +1846,7 @@ def plot_contrast_conditional_markers(
     use_raw: bool = False,
     layer: str | None = None,
     sample_key: str | None = None,
+    plot_gene_filter: Optional[Sequence[str]] = None,
 ) -> None:
     """
     Cell-level within-cluster contrast plots (from contrast_conditional results).
@@ -1849,11 +1954,19 @@ def plot_contrast_conditional_markers(
                 )
 
             df_pc = None
+            df_plot = None
             label_genes = None
             if df_volc is not None and not df_volc.empty:
                 df_pc = _filter_protein_coding(adata, df_volc, gene_col="gene")
-                label_genes = _select_top_genes(
+                df_plot = _filter_df_for_plot_genes(
+                    adata,
                     df_pc,
+                    gene_col="gene",
+                    plot_gene_filter=plot_gene_filter,
+                    condition_key=str(contrast_key),
+                )
+                label_genes = _select_top_genes(
+                    df_plot,
                     gene_col="gene",
                     padj_col="padj",
                     lfc_col="log2FoldChange",
@@ -1878,7 +1991,9 @@ def plot_contrast_conditional_markers(
             dot_remainder = int(dot_n) - dot_half
             vio_half = max(1, int(top_n_genes) // 2)
             vio_remainder = int(top_n_genes) - vio_half
-            df_sel = df_pc if df_pc is not None else pd.DataFrame()
+            if df_plot is None and df_pc is not None:
+                df_plot = df_pc
+            df_sel = df_plot if df_plot is not None else pd.DataFrame()
 
             up_dot = _select_top_signed(
                 df_sel,
@@ -1994,6 +2109,7 @@ def plot_contrast_conditional_markers_multi(
     use_raw: bool = False,
     layer: str | None = None,
     sample_key: str | None = None,
+    plot_gene_filter: Optional[Sequence[str]] = None,
 ) -> None:
     """
     Plot contrast-conditional markers for a specific contrast_key from
@@ -2024,6 +2140,7 @@ def plot_contrast_conditional_markers_multi(
             use_raw=bool(use_raw),
             layer=layer,
             sample_key=sample_key,
+            plot_gene_filter=plot_gene_filter,
         )
     finally:
         if orig is None:

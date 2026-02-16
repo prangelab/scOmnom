@@ -932,6 +932,7 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
                 use_raw=use_raw,
                 layer=layer,
                 umap_ncols=ncols,
+                plot_gene_filter=getattr(cfg, "plot_gene_filter", ()),
             )
         else:
             LOGGER.info("cluster-vs-rest: skipping cell-level marker plots (no markers computed).")
@@ -949,6 +950,7 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
                 use_raw=use_raw,
                 layer=layer,
                 umap_ncols=ncols,
+                plot_gene_filter=getattr(cfg, "plot_gene_filter", ()),
             )
         else:
             LOGGER.info("cluster-vs-rest: skipping pseudobulk plots (pseudobulk disabled or not requested).")
@@ -2403,6 +2405,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                         use_raw=use_raw,
                         layer=layer,
                         sample_key=sample_key,
+                        plot_gene_filter=getattr(cfg, "plot_gene_filter", ()),
                     )
             else:
                 LOGGER.info("within-cluster: skipping condition plots (pseudobulk not run).")
@@ -2423,6 +2426,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                         use_raw=use_raw,
                         layer=layer,
                         sample_key=sample_key,
+                        plot_gene_filter=getattr(cfg, "plot_gene_filter", ()),
                     )
 
             # DE-based decoupler plots (if available)

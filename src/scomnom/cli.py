@@ -1210,6 +1210,7 @@ def _build_cfg(
     plot_use_raw: bool,
     plot_layer: Optional[str],
     plot_umap_ncols: int,
+    plot_gene_filter: Optional[List[str]],
 ) -> MarkersAndDEConfig:
     out_dir = output_dir or input_path.parent
     log_dir = out_dir / "logs"
@@ -1220,6 +1221,7 @@ def _build_cfg(
     layers = _parse_csv_repeat(pb_counts_layer) or ["counts_cb", "counts_raw"]
     covariates = tuple(_parse_csv_repeat(pb_covariates) or ())
     cond_keys = tuple(_parse_csv_repeat(condition_keys) or ())
+    plot_filters = tuple(plot_gene_filter or ())
     msigdb_sets = list(msigdb_gene_sets) if msigdb_gene_sets else None
     doro_conf = list(dorothea_confidence) if dorothea_confidence else None
 
@@ -1234,6 +1236,7 @@ def _build_cfg(
         make_figures=make_figures,
         figdir_name=figdir_name,
         figure_formats=figure_formats,
+        plot_gene_filter=plot_filters,
         # grouping
         groupby=group_key,
         label_source=label_source,
@@ -1472,6 +1475,11 @@ def cluster_vs_rest(
     plot_use_raw: bool = typer.Option(False, "--plot-use-raw/--no-plot-use-raw"),
     plot_layer: Optional[str] = typer.Option(None, "--plot-layer"),
     plot_umap_ncols: int = typer.Option(3, "--plot-umap-ncols"),
+    plot_gene_filter: List[str] = typer.Option(
+        [],
+        "--plot-gene-filter",
+        help="Filter expression for plot gene selection (e.g. \"gene_chrom not in ['X','Y']\").",
+    ),
 ):
     if output_name is None:
         output_name = _default_output_name(input_path, "markers")
@@ -1542,6 +1550,7 @@ def cluster_vs_rest(
         plot_use_raw=plot_use_raw,
         plot_layer=plot_layer,
         plot_umap_ncols=plot_umap_ncols,
+        plot_gene_filter=plot_gene_filter,
     )
 
     # enforce mode semantics
@@ -1724,6 +1733,11 @@ def within_cluster(
     plot_use_raw: bool = typer.Option(False, "--plot-use-raw/--no-plot-use-raw"),
     plot_layer: Optional[str] = typer.Option(None, "--plot-layer"),
     plot_umap_ncols: int = typer.Option(3, "--plot-umap-ncols"),
+    plot_gene_filter: List[str] = typer.Option(
+        [],
+        "--plot-gene-filter",
+        help="Filter expression for plot gene selection (e.g. \"gene_chrom not in ['X','Y']\").",
+    ),
 ):
     # fix typo from signature (keep CLI option stable)
     group_key = None if group_key is None else str(group_key)
@@ -1802,6 +1816,7 @@ def within_cluster(
         plot_use_raw=plot_use_raw,
         plot_layer=plot_layer,
         plot_umap_ncols=plot_umap_ncols,
+        plot_gene_filter=plot_gene_filter,
     )
 
     parsed = _parse_csv_repeat(contrasts)

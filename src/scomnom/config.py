@@ -641,6 +641,7 @@ class MarkersAndDEConfig(BaseModel):
     figdir_name: str = "figures"
     figure_formats: Sequence[str] = Field(default_factory=lambda: ["png", "pdf"])
     make_figures: bool = True
+    plot_gene_filter: Tuple[str, ...] = ()
 
     # outputs
     save_h5ad: bool = False
