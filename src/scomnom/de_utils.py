@@ -791,21 +791,20 @@ def _run_pydeseq2_interaction(
                 dm2 = obsm.get("design_matrix")
                 if hasattr(dm2, "columns"):
                     design_cols = list(dm2.columns)
-                else:
-                    LOGGER.info(
-                        "PyDESeq2 interaction design matrix in obsm without columns (type=%s shape=%s)",
-                        type(dm2).__name__,
-                        getattr(dm2, "shape", None),
-                    )
-                    try:
-                        dm2_arr = np.asarray(dm2)
-                        if dm2_arr.ndim == 2 and dm2_arr.size:
-                            LOGGER.info(
-                                "PyDESeq2 interaction design matrix preview: first_row=%s",
-                                dm2_arr[0, :].tolist(),
-                            )
-                    except Exception:
-                        pass
+                LOGGER.info(
+                    "PyDESeq2 interaction design matrix in obsm: type=%s shape=%s",
+                    type(dm2).__name__,
+                    getattr(dm2, "shape", None),
+                )
+                try:
+                    dm2_arr = np.asarray(dm2)
+                    if dm2_arr.ndim == 2 and dm2_arr.size:
+                        LOGGER.info(
+                            "PyDESeq2 interaction design matrix preview: first_row=%s",
+                            dm2_arr[0, :].tolist(),
+                        )
+                except Exception:
+                    pass
         if design_cols is None:
             res_names = getattr(dds, "results_names", None)
             if callable(res_names):
