@@ -145,6 +145,54 @@ def _select_top_signed(
     return _unique_keep_order(tmp[gene_col].head(int(top_n)).astype(str).tolist())
 
 
+def _select_top_signed_with_fallback(
+    df: pd.DataFrame,
+    *,
+    gene_col: str = "gene",
+    padj_col: str = "padj",
+    lfc_col: str = "log2FoldChange",
+    padj_thresh: float = 0.05,
+    top_n: int = 10,
+    direction: str = "up",
+) -> list[str]:
+    genes = _select_top_signed(
+        df,
+        gene_col=gene_col,
+        padj_col=padj_col,
+        lfc_col=lfc_col,
+        padj_thresh=padj_thresh,
+        top_n=top_n,
+        direction=direction,
+    )
+    if len(genes) >= int(top_n):
+        return genes[: int(top_n)]
+    if df is None or df.empty:
+        return genes[: int(top_n)]
+    g = _safe_series(df, gene_col).astype(str)
+    padj = pd.to_numeric(_safe_series(df, padj_col), errors="coerce")
+    lfc = pd.to_numeric(_safe_series(df, lfc_col), errors="coerce")
+    tmp = pd.DataFrame({gene_col: g, padj_col: padj, lfc_col: lfc}).dropna(
+        subset=[gene_col, padj_col, lfc_col]
+    )
+    if tmp.empty:
+        return genes[: int(top_n)]
+    if direction == "down":
+        tmp = tmp[tmp[lfc_col] < 0]
+    else:
+        tmp = tmp[tmp[lfc_col] > 0]
+    if tmp.empty:
+        return genes[: int(top_n)]
+    tmp["__rank"] = tmp[lfc_col].abs()
+    tmp = tmp.sort_values([padj_col, "__rank"], ascending=[True, False])
+    extra = _unique_keep_order(tmp[gene_col].astype(str).tolist())
+    for gname in extra:
+        if gname not in genes:
+            genes.append(gname)
+        if len(genes) >= int(top_n):
+            break
+    return genes[: int(top_n)]
+
+
 def _as_list(x: Optional[Iterable[str]]) -> list[str]:
     if x is None:
         return []
@@ -361,6 +409,13 @@ def heatmap_top_genes_by_sample(
     g.ax_heatmap.tick_params(axis="x", labelsize=7, rotation=45)
     g.ax_heatmap.grid(False)
     g.ax_heatmap.tick_params(which="minor", bottom=False, left=False)
+    if col_colors is not None and hasattr(g, "ax_col_colors") and g.ax_col_colors is not None:
+        for coll in g.ax_col_colors.collections:
+            try:
+                coll.set_edgecolor("none")
+                coll.set_linewidth(0.0)
+            except Exception:
+                pass
     if legend_handles:
         ncol = min(4, len(legend_handles))
         g.ax_col_dendrogram.legend(
@@ -1183,14 +1238,13 @@ def plot_marker_genes_pseudobulk(
             plot_gene_filter=plot_gene_filter,
             condition_key=None,
         )
-        label_genes = _select_top_genes(
+        label_genes = _select_top_genes_with_fallback(
             df_plot,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
             padj_thresh=float(alpha),
             top_n=int(top_label_n),
-            require_sig=True,
         )
         fig = volcano(
             df_de,
@@ -1203,23 +1257,21 @@ def plot_marker_genes_pseudobulk(
         )
         plot_utils.save_multi(stem=f"volcano__{cl}", figdir=d_volcano, fig=fig)
 
-        topg = _select_top_genes(
+        topg = _select_top_genes_with_fallback(
             df_plot,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
             padj_thresh=float(alpha),
             top_n=int(top_n_genes),
-            require_sig=True,
         )
-        topg_dot = _select_top_genes(
+        topg_dot = _select_top_genes_with_fallback(
             df_plot,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
             padj_thresh=float(alpha),
             top_n=int(dot_n),
-            require_sig=True,
         )
         genes_by_cluster[str(cl)] = topg
 
@@ -1412,14 +1464,13 @@ def plot_marker_genes_ranksum(
             plot_gene_filter=plot_gene_filter,
             condition_key=None,
         )
-        label_genes = _select_top_genes(
+        label_genes = _select_top_genes_with_fallback(
             df_plot,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
             padj_thresh=float(alpha),
             top_n=int(top_label_n),
-            require_sig=True,
         )
 
         # If df_v has no valid numeric rows, still save a placeholder volcano
@@ -1438,25 +1489,23 @@ def plot_marker_genes_ranksum(
         plot_utils.save_multi(stem=f"volcano__{cl}", figdir=d_volcano, fig=fig)
 
         # top genes for expression plots
-        topg = _select_top_genes(
+        topg = _select_top_genes_with_fallback(
             df_plot,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
             padj_thresh=float(alpha),
             top_n=int(top_n_genes),
-            require_sig=True,
         )
         genes_by_cluster[str(cl)] = topg
 
-        topg_dot = _select_top_genes(
+        topg_dot = _select_top_genes_with_fallback(
             df_plot,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
             padj_thresh=float(alpha),
             top_n=int(dot_n),
-            require_sig=True,
         )
 
         if topg_dot:
@@ -1635,7 +1684,7 @@ def plot_condition_within_cluster(
         vio_remainder = int(violin_top_n) - vio_half
 
         # top up/down for dotplot
-        up_dot = _select_top_signed(
+        up_dot = _select_top_signed_with_fallback(
             df_plot,
             gene_col="gene",
             padj_col="padj",
@@ -1644,7 +1693,7 @@ def plot_condition_within_cluster(
             top_n=int(dot_half),
             direction="up",
         )
-        down_dot = _select_top_signed(
+        down_dot = _select_top_signed_with_fallback(
             df_plot,
             gene_col="gene",
             padj_col="padj",
@@ -1656,7 +1705,7 @@ def plot_condition_within_cluster(
         genes_dot = _unique_keep_order(list(up_dot) + list(down_dot))
 
         # top up/down for violin
-        up_vio = _select_top_signed(
+        up_vio = _select_top_signed_with_fallback(
             df_plot,
             gene_col="gene",
             padj_col="padj",
@@ -1665,7 +1714,7 @@ def plot_condition_within_cluster(
             top_n=int(vio_half),
             direction="up",
         )
-        down_vio = _select_top_signed(
+        down_vio = _select_top_signed_with_fallback(
             df_plot,
             gene_col="gene",
             padj_col="padj",
@@ -1710,7 +1759,7 @@ def plot_condition_within_cluster(
             )
 
         # heatmap: top 25 up + top 25 down
-        up25 = _select_top_signed(
+        up25 = _select_top_signed_with_fallback(
             df_plot,
             gene_col="gene",
             padj_col="padj",
@@ -1719,7 +1768,7 @@ def plot_condition_within_cluster(
             top_n=int(heatmap_top_n),
             direction="up",
         )
-        down25 = _select_top_signed(
+        down25 = _select_top_signed_with_fallback(
             df_plot,
             gene_col="gene",
             padj_col="padj",
@@ -1965,14 +2014,13 @@ def plot_contrast_conditional_markers(
                     plot_gene_filter=plot_gene_filter,
                     condition_key=str(contrast_key),
                 )
-                label_genes = _select_top_genes(
+                label_genes = _select_top_genes_with_fallback(
                     df_plot,
                     gene_col="gene",
                     padj_col="padj",
                     lfc_col="log2FoldChange",
                     padj_thresh=float(alpha),
                     top_n=int(top_label_n),
-                    require_sig=True,
                 )
                 fig = volcano(
                     df_volc,
@@ -1995,7 +2043,7 @@ def plot_contrast_conditional_markers(
                 df_plot = df_pc
             df_sel = df_plot if df_plot is not None else pd.DataFrame()
 
-            up_dot = _select_top_signed(
+            up_dot = _select_top_signed_with_fallback(
                 df_sel,
                 gene_col="gene",
                 padj_col="padj",
@@ -2004,7 +2052,7 @@ def plot_contrast_conditional_markers(
                 top_n=int(dot_half),
                 direction="up",
             )
-            down_dot = _select_top_signed(
+            down_dot = _select_top_signed_with_fallback(
                 df_sel,
                 gene_col="gene",
                 padj_col="padj",
@@ -2015,7 +2063,7 @@ def plot_contrast_conditional_markers(
             )
             topg_dot = _unique_keep_order(list(up_dot) + list(down_dot))
 
-            up_vio = _select_top_signed(
+            up_vio = _select_top_signed_with_fallback(
                 df_sel,
                 gene_col="gene",
                 padj_col="padj",
@@ -2024,7 +2072,7 @@ def plot_contrast_conditional_markers(
                 top_n=int(vio_half),
                 direction="up",
             )
-            down_vio = _select_top_signed(
+            down_vio = _select_top_signed_with_fallback(
                 df_sel,
                 gene_col="gene",
                 padj_col="padj",

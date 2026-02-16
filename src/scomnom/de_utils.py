@@ -1740,11 +1740,6 @@ def de_condition_within_group_pseudobulk_interaction(
     Interaction DE within a group: test A:B interaction term.
     """
     _set_blas_threads(1)
-    if not pydeseq2_supports_interaction_by_name():
-        LOGGER.warning(
-            "Interaction DE requested but PyDESeq2 does not support interaction contrasts by name in this environment; skipping."
-        )
-        return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]), {}
     group_key = resolve_group_key(adata, groupby=groupby, round_id=round_id, prefer_pretty=True)
     sample_key = spec.sample_key
     counts_layer = spec.counts_layer
@@ -1899,6 +1894,7 @@ def de_condition_within_group_pseudobulk_interaction(
         return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]), {}
 
     meta = {}
+    supports_name = pydeseq2_supports_interaction_by_name()
     try:
         res, meta = _run_pydeseq2_interaction(
             counts,
@@ -1914,7 +1910,12 @@ def de_condition_within_group_pseudobulk_interaction(
             size_factors=str(getattr(opts, "size_factors", "poscounts")),
         )
     except Exception as e:
-        LOGGER.warning("PyDESeq2 failed for interaction within %s=%s: %s", group_key, group_value, e)
+        if not supports_name:
+            LOGGER.warning(
+                "Interaction DE requested but PyDESeq2 does not support interaction contrasts by name in this environment; skipping."
+            )
+        else:
+            LOGGER.warning("PyDESeq2 failed for interaction within %s=%s: %s", group_key, group_value, e)
         res = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
         meta = {"warnings": [str(e)]}
 
