@@ -1671,7 +1671,6 @@ def run_within_cluster(cfg) -> ad.AnnData:
 
             interaction_supported = pydeseq2_supports_interaction_by_name()
             interaction_warned = False
-            interaction_dry_run_done: set[str] = set()
             for cond_key in condition_keys:
                 interaction_parts = interaction_by_key.get(str(cond_key))
                 if interaction_parts is None and str(cond_key) not in adata.obs:
@@ -1681,32 +1680,9 @@ def run_within_cluster(cfg) -> ad.AnnData:
                     if not interaction_warned:
                         LOGGER.warning(
                             "within-cluster: interaction requested but PyDESeq2 does not support interaction "
-                            "contrasts by name in this environment; skipping interaction tasks."
+                            "contrasts by name in this environment; using contrast-vector fallback."
                         )
                         interaction_warned = True
-                    # dry-run once per condition_key to log design columns
-                    if str(cond_key) not in interaction_dry_run_done:
-                        for g in groups:
-                            res, meta = de_condition_within_group_pseudobulk_interaction(
-                                adata,
-                                group_value=str(g),
-                                groupby=str(groupby),
-                                round_id=getattr(cfg, "round_id", None),
-                                factor_a=str(interaction_parts[0]),
-                                factor_b=str(interaction_parts[1]),
-                                ref_a=ref_by_factor.get(str(interaction_parts[0])),
-                                ref_b=ref_by_factor.get(str(interaction_parts[1])),
-                                spec=pb_spec,
-                                opts=pb_opts,
-                                store_key=None,
-                                store=False,
-                                n_cpus=1,
-                                dry_run=True,
-                            )
-                            if meta:
-                                interaction_dry_run_done.add(str(cond_key))
-                                break
-                    continue
 
                 LOGGER.info(
                     "within-cluster: pseudobulk DE across %d groups (groupby=%r) for condition_key=%r",

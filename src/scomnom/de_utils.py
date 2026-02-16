@@ -886,41 +886,109 @@ def _run_pydeseq2_interaction(
             empty = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
             return empty, meta
 
+    names = None
+    try:
+        names = getattr(dds, "results_names", None)
+        if callable(names):
+            names = names()
+    except Exception:
         names = None
-        try:
-            names = getattr(dds, "results_names", None)
-            if callable(names):
-                names = names()
-        except Exception:
-            names = None
 
-        coef_name = _pick_interaction_coef_name(
-            names or [],
-            factor_a=str(factor_a),
-            level_a=str(level_a),
-            factor_b=str(factor_b),
-            level_b=str(level_b),
+    coef_name = _pick_interaction_coef_name(
+        names or [],
+        factor_a=str(factor_a),
+        level_a=str(level_a),
+        factor_b=str(factor_b),
+        level_b=str(level_b),
+    )
+    if coef_name is None:
+        coef_name = f"{factor_a}[T.{level_a}]:{factor_b}[T.{level_b}]"
+
+    def _get_design_cols_local() -> list[str]:
+        cols: list[str] = []
+        dm = getattr(dds, "design_matrix", None)
+        if dm is not None and hasattr(dm, "columns"):
+            cols = list(dm.columns)
+        if not cols:
+            obsm = getattr(dds, "obsm", None)
+            try:
+                obsm_keys = list(getattr(obsm, "keys", lambda: [])())
+            except Exception:
+                obsm_keys = []
+            if "design_matrix" in obsm_keys:
+                try:
+                    dm2 = obsm["design_matrix"]
+                except Exception:
+                    dm2 = None
+                if hasattr(dm2, "columns"):
+                    cols = list(dm2.columns)
+        if not cols and isinstance(names, (list, tuple)):
+            cols = [str(x) for x in names]
+        return [str(c) for c in cols]
+
+    def _find_interaction_col(cols: list[str]) -> Optional[str]:
+        if not cols:
+            return None
+        a = str(factor_a)
+        b = str(factor_b)
+        la = str(level_a)
+        lb = str(level_b)
+        cand1 = f"{a}[T.{la}]:{b}[T.{lb}]"
+        cand2 = f"{b}[T.{lb}]:{a}[T.{la}]"
+        if cand1 in cols:
+            return cand1
+        if cand2 in cols:
+            return cand2
+        hits = []
+        for c in cols:
+            if ":" not in c:
+                continue
+            if a in c and b in c and la in c and lb in c:
+                hits.append(c)
+        if len(hits) == 1:
+            return hits[0]
+        return None
+
+    ds_sig = inspect.signature(DeseqStats)
+    stat = None
+    if "name" in ds_sig.parameters:
+        stat = DeseqStats(
+            dds,
+            name=str(coef_name),
+            alpha=float(alpha),
+            n_cpus=int(n_cpus),
         )
-        if coef_name is None:
-            coef_name = f"{factor_a}[T.{level_a}]:{factor_b}[T.{level_b}]"
-
-        ds_sig = inspect.signature(DeseqStats)
-        if "name" in ds_sig.parameters:
-            stat = DeseqStats(
-                dds,
-                name=str(coef_name),
-                alpha=float(alpha),
-                n_cpus=int(n_cpus),
-            )
-        elif "results_name" in ds_sig.parameters:
-            stat = DeseqStats(
-                dds,
-                results_name=str(coef_name),
-                alpha=float(alpha),
-                n_cpus=int(n_cpus),
-            )
-        else:
-            raise RuntimeError("PyDESeq2 does not support interaction contrasts by name.")
+    elif "results_name" in ds_sig.parameters:
+        stat = DeseqStats(
+            dds,
+            results_name=str(coef_name),
+            alpha=float(alpha),
+            n_cpus=int(n_cpus),
+        )
+    else:
+        if "contrast" not in ds_sig.parameters:
+            raise RuntimeError("PyDESeq2 does not support interaction contrasts by name or contrast vectors.")
+        design_cols = _get_design_cols_local()
+        interaction_col = _find_interaction_col(design_cols)
+        if interaction_col is None:
+            raise RuntimeError("Could not resolve interaction column for contrast vector.")
+        contrast_vec = np.zeros(len(design_cols), dtype=float)
+        idx = design_cols.index(interaction_col)
+        contrast_vec[idx] = 1.0
+        LOGGER.info(
+            "PyDESeq2 interaction contrast vector: col=%r index=%d vector=%s",
+            str(interaction_col),
+            int(idx),
+            contrast_vec.tolist(),
+        )
+        stat = DeseqStats(
+            dds,
+            contrast=contrast_vec,
+            alpha=float(alpha),
+            n_cpus=int(n_cpus),
+        )
+        meta["contrast_vector"] = contrast_vec.tolist()
+        meta["contrast_col"] = str(interaction_col)
 
         stat.summary(print_result=False)
         if shrink_lfc:
@@ -942,7 +1010,7 @@ def _run_pydeseq2_interaction(
         res["gene"] = res.index.astype(str)
     cols = [c for c in ["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"] if c in res.columns]
     res = res[cols].sort_values("padj", na_position="last")
-    meta["coef_name"] = str(coef_name)
+    meta["coef_name"] = str(meta.get("contrast_col") or coef_name)
     return res, meta
 
 
@@ -1968,7 +2036,10 @@ def de_condition_within_group_pseudobulk_interaction(
     except Exception as e:
         if not supports_name:
             LOGGER.warning(
-                "Interaction DE requested but PyDESeq2 does not support interaction contrasts by name in this environment; skipping."
+                "Interaction DE failed using contrast-vector fallback within %s=%s: %s",
+                group_key,
+                group_value,
+                e,
             )
         else:
             LOGGER.warning("PyDESeq2 failed for interaction within %s=%s: %s", group_key, group_value, e)
