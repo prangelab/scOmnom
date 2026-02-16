@@ -785,7 +785,7 @@ def _run_pydeseq2_interaction(
         dm = getattr(dds, "design_matrix", None)
         if dm is not None and hasattr(dm, "columns"):
             design_cols = list(dm.columns)
-        if design_cols is None:
+        if not design_cols:
             obsm = getattr(dds, "obsm", None)
             if isinstance(obsm, dict) and "design_matrix" in obsm:
                 dm2 = obsm.get("design_matrix")
@@ -805,11 +805,11 @@ def _run_pydeseq2_interaction(
                         )
                 except Exception:
                     pass
-        if design_cols is None:
+        if not design_cols:
             res_names = getattr(dds, "results_names", None)
             if callable(res_names):
                 design_cols = list(res_names())
-        if design_cols is None:
+        if not design_cols:
             design_cols = list(getattr(dds, "design_factors", []))
         if not design_cols:
             obsm_keys = list(getattr(getattr(dds, "obsm", {}), "keys", lambda: [])())
