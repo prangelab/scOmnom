@@ -35,6 +35,21 @@ def _unique_keep_order(xs: Sequence[str]) -> list[str]:
     return out
 
 
+def _normalize_levels_for_combo(series: pd.Series) -> pd.Series:
+    s = series.astype(str)
+    s = s.str.strip()
+    s = s.str.replace(r"\s+", " ", regex=True)
+    return s
+
+
+def _safe_combo_token(value: str) -> str:
+    s = str(value).strip()
+    s = s.replace("/", "_").replace(":", "_")
+    s = re.sub(r"\s+", "_", s)
+    s = re.sub(r"[^0-9A-Za-z_.-]+", "_", s)
+    return s
+
+
 def _parse_plot_gene_filter_entry(raw: str) -> tuple[Optional[str], Optional[str]]:
     s = str(raw).strip()
     if not s:
@@ -325,6 +340,7 @@ def heatmap_top_genes_by_sample(
     genes: Sequence[str],
     sample_key: str,
     condition_key: Optional[str] = None,
+    annotation_keys: Optional[Sequence[str]] = None,
     use_raw: bool = False,
     layer: Optional[str] = None,
     z_clip: float | None = 3.0,
@@ -368,28 +384,53 @@ def heatmap_top_genes_by_sample(
 
     col_colors = None
     legend_handles = []
-    if condition_key and condition_key in adata.obs:
-        obs = adata.obs[[sample_key, condition_key]].copy()
+    keys = [str(k) for k in (annotation_keys or []) if k]
+    if not keys and condition_key:
+        keys = [str(condition_key)]
+    keys = [k for k in keys if k in adata.obs]
+
+    if keys:
+        cols = [sample_key] + keys
+        obs = adata.obs[cols].copy()
         obs[sample_key] = obs[sample_key].astype(str)
-        obs[condition_key] = obs[condition_key].astype(str)
-        cond_by_sample: dict[str, str] = {}
+        for k in keys:
+            obs[k] = obs[k].astype(str)
+        cond_by_sample: dict[str, dict[str, str]] = {}
         for s, sub in obs.groupby(sample_key, sort=False):
-            vals = sub[condition_key].dropna().astype(str).unique()
-            if vals.size == 0:
-                continue
-            cond_by_sample[str(s)] = str(vals[0])
-        levels = [str(x) for x in pd.unique(pd.Series(list(cond_by_sample.values()))).tolist()]
-        if levels:
-            palette = sns.color_palette("colorblind", n_colors=len(levels))
-            color_map = dict(zip(levels, palette))
-            col_colors = pd.Series(
-                [color_map.get(cond_by_sample.get(str(s), ""), (0.85, 0.85, 0.85)) for s in data.columns],
-                index=data.columns,
-            )
-            legend_handles = [
-                plt.matplotlib.patches.Patch(facecolor=color_map[lv], edgecolor="none", label=str(lv))
-                for lv in levels
-            ]
+            per = {}
+            for k in keys:
+                vals = sub[k].dropna().astype(str).unique()
+                if vals.size == 0:
+                    continue
+                per[k] = str(vals[0])
+            if per:
+                cond_by_sample[str(s)] = per
+        color_rows = []
+        for k in keys:
+            levels = [str(x) for x in pd.unique(pd.Series([v.get(k, "") for v in cond_by_sample.values()])).tolist() if str(x)]
+            if levels:
+                palette = sns.color_palette("colorblind", n_colors=len(levels))
+                color_map = dict(zip(levels, palette))
+                row = [
+                    color_map.get(cond_by_sample.get(str(s), {}).get(k, ""), (0.85, 0.85, 0.85))
+                    for s in data.columns
+                ]
+                color_rows.append(pd.Series(row, index=data.columns, name=str(k)))
+                legend_handles.extend(
+                    [
+                        plt.matplotlib.patches.Patch(facecolor=color_map[lv], edgecolor="none", label=f"{k}={lv}")
+                        for lv in levels
+                    ]
+                )
+        if color_rows:
+            col_colors = pd.DataFrame(color_rows)
+
+    col_ratio = 0.02
+    if col_colors is not None:
+        try:
+            col_ratio = 0.02 * max(1, int(col_colors.shape[0]))
+        except Exception:
+            col_ratio = 0.02
 
     g = sns.clustermap(
         data,
@@ -404,6 +445,7 @@ def heatmap_top_genes_by_sample(
         col_colors=col_colors,
         linewidths=0.4,
         linecolor="#b0b0b0",
+        colors_ratio=(0.02, col_ratio),
     )
     g.ax_heatmap.tick_params(axis="y", labelsize=8)
     g.ax_heatmap.tick_params(axis="x", labelsize=7, rotation=45)
@@ -417,10 +459,17 @@ def heatmap_top_genes_by_sample(
             except Exception:
                 pass
     if legend_handles:
-        ncol = min(4, len(legend_handles))
+        uniq = {}
+        for h in legend_handles:
+            lbl = h.get_label()
+            if lbl not in uniq:
+                uniq[lbl] = h
+        handles = list(uniq.values())
+        ncol = min(4, len(handles))
+        title = str(condition_key) if (keys and len(keys) == 1) else "sample annotations"
         g.ax_col_dendrogram.legend(
-            handles=legend_handles,
-            title=str(condition_key),
+            handles=handles,
+            title=title,
             loc="upper center",
             bbox_to_anchor=(0.5, 1.20),
             ncol=ncol,
@@ -572,14 +621,13 @@ def volcano(
     # labels
     if int(top_label_n) > 0:
         if label_genes is None:
-            label_genes = _select_top_genes(
+            label_genes = _select_top_genes_with_fallback(
                 tmp,
                 gene_col=gene_col,
                 padj_col=padj_col,
                 lfc_col=lfc_col,
                 padj_thresh=padj_thresh,
                 top_n=int(top_label_n),
-                require_sig=True,
             )
         if label_genes:
             # annotate those rows (pick first occurrence per gene)
@@ -1575,6 +1623,7 @@ def plot_condition_within_cluster(
     layer: str | None = None,
     sample_key: str | None = None,
     plot_gene_filter: Optional[Sequence[str]] = None,
+    annotation_keys: Optional[Sequence[str]] = None,
 ) -> None:
     """
     For each stored conditional DE result (per cluster, per contrast):
@@ -1656,14 +1705,13 @@ def plot_condition_within_cluster(
             plot_gene_filter=plot_gene_filter,
             condition_key=str(condition_key),
         )
-        label_genes = _select_top_genes(
+        label_genes = _select_top_genes_with_fallback(
             df_plot,
             gene_col="gene",
             padj_col="padj",
             lfc_col="log2FoldChange",
             padj_thresh=float(alpha),
             top_n=int(top_label_n),
-            require_sig=True,
         )
 
         # volcano
@@ -1725,11 +1773,28 @@ def plot_condition_within_cluster(
         )
         genes_vio = _unique_keep_order(list(up_vio) + list(down_vio))
 
-        if genes_dot and condition_key in sub.obs:
+        plot_key = str(condition_key)
+        if plot_key not in sub.obs and is_interaction:
+            factor_a = payload.get("factor_a") if isinstance(payload, dict) else None
+            factor_b = payload.get("factor_b") if isinstance(payload, dict) else None
+            if factor_a is None or factor_b is None:
+                if "^" in str(condition_key):
+                    parts = str(condition_key).split("^", 1)
+                    if len(parts) == 2:
+                        factor_a, factor_b = parts[0], parts[1]
+            if factor_a in sub.obs and factor_b in sub.obs:
+                combo_key = f"{_safe_combo_token(factor_a)}.{_safe_combo_token(factor_b)}"
+                if combo_key not in sub.obs:
+                    a_vals = _normalize_levels_for_combo(sub.obs[str(factor_a)])
+                    b_vals = _normalize_levels_for_combo(sub.obs[str(factor_b)])
+                    sub.obs[combo_key] = a_vals + "." + b_vals
+                plot_key = combo_key
+
+        if genes_dot and plot_key in sub.obs:
             fig = dotplot_top_genes(
                 sub,
                 genes=genes_dot,
-                groupby=str(condition_key),
+                groupby=str(plot_key),
                 use_raw=bool(use_raw),
                 layer=layer,
                 dendrogram=False,
@@ -1741,11 +1806,11 @@ def plot_condition_within_cluster(
                 fig=fig,
             )
 
-        if genes_vio and condition_key in sub.obs:
+        if genes_vio and plot_key in sub.obs:
             fig = violin_grid_genes(
                 sub,
                 genes=genes_vio,
-                groupby=str(condition_key),
+                groupby=str(plot_key),
                 use_raw=bool(use_raw),
                 layer=layer,
                 ncols=3,
@@ -1779,11 +1844,11 @@ def plot_condition_within_cluster(
         )
         genes_25_25 = _unique_keep_order(list(up25) + list(down25))
 
-        if genes_25_25 and condition_key in sub.obs:
+        if genes_25_25 and plot_key in sub.obs:
             fig = heatmap_top_genes(
                 sub,
                 genes=genes_25_25,
-                groupby=str(condition_key),
+                groupby=str(plot_key),
                 use_raw=bool(use_raw),
                 layer=layer,
                 cmap="bwr",
@@ -1798,7 +1863,7 @@ def plot_condition_within_cluster(
             )
 
         # sample-aggregated heatmap: top 50 DE genes per contrast
-        if sample_key is not None and sample_key in sub.obs:
+        if sample_key is not None and sample_key in sub.obs and plot_key in sub.obs:
             top50 = _select_top_genes_with_fallback(
                 df_plot,
                 gene_col="gene",
@@ -1811,7 +1876,8 @@ def plot_condition_within_cluster(
                 sub,
                 genes=top50,
                 sample_key=str(sample_key),
-                condition_key=str(condition_key),
+                condition_key=str(plot_key),
+                annotation_keys=annotation_keys,
                 use_raw=bool(use_raw),
                 layer=layer,
                 z_clip=3.0,
@@ -1841,28 +1907,16 @@ def plot_condition_within_cluster_all(
     layer: str | None = None,
     sample_key: str | None = None,
     plot_gene_filter: Optional[Sequence[str]] = None,
+    annotation_keys: Optional[Sequence[str]] = None,
 ) -> None:
     """
     Full conditional-DE plotting suite:
-      1) global UMAP colored by condition_key (once)
-      2) per-cluster/per-contrast plots via plot_condition_within_cluster()
-
-    Saves UMAP under:
-      DE/pseudobulk_DE/<condition_key>/umap/
+      - per-cluster/per-contrast plots via plot_condition_within_cluster()
     """
     from pathlib import Path
     from . import plot_utils
 
-    # 1) global condition UMAP (ONCE)
-    if condition_key in adata.obs:
-        plot_utils.umap_by(
-            adata,
-            keys=str(condition_key),
-            figdir=Path("DE") / "pseudobulk_DE" / f"{condition_key}" / "umap",
-            stem=f"umap__{condition_key}",
-        )
-
-    # 2) per-cluster/per-contrast plots
+    # per-cluster/per-contrast plots
     plot_condition_within_cluster(
         adata,
         cluster_key=str(cluster_key),
@@ -1878,7 +1932,77 @@ def plot_condition_within_cluster_all(
         layer=layer,
         sample_key=sample_key,
         plot_gene_filter=plot_gene_filter,
+        annotation_keys=annotation_keys,
     )
+
+
+def plot_condition_umaps(
+    adata,
+    *,
+    groupby: str,
+    condition_keys: Sequence[str],
+) -> None:
+    """
+    UMAPs colored by condition_key labels (global + per-cluster).
+
+    Saves under:
+      DE/UMAP/<condition_key>/umap__<condition_key>.*
+      DE/UMAP/<condition_key>/umap__<condition_key>__<cluster>.*
+    """
+    from pathlib import Path
+    import matplotlib.colors as mcolors
+    import seaborn as sns
+    from . import plot_utils
+
+    outroot = Path("DE") / "UMAP"
+    for ck in [str(k) for k in condition_keys]:
+        plot_key = ck
+        if plot_key not in adata.obs and "^" in ck:
+            parts = ck.split("^", 1)
+            if len(parts) == 2:
+                factor_a, factor_b = parts[0], parts[1]
+                if factor_a in adata.obs and factor_b in adata.obs:
+                    plot_key = f"{_safe_combo_token(factor_a)}.{_safe_combo_token(factor_b)}"
+                    if plot_key not in adata.obs:
+                        a_vals = _normalize_levels_for_combo(adata.obs[str(factor_a)])
+                        b_vals = _normalize_levels_for_combo(adata.obs[str(factor_b)])
+                        adata.obs[plot_key] = a_vals + "." + b_vals
+        if plot_key not in adata.obs:
+            continue
+        outdir = outroot / str(ck)
+        try:
+            cats = adata.obs[plot_key].astype("category").cat.categories
+            n_cats = int(len(cats))
+            palette = sns.color_palette("colorblind", n_colors=n_cats)
+            colors = [mcolors.to_hex(c) for c in palette]
+            adata.uns[f"{plot_key}_colors"] = list(colors)
+        except Exception:
+            pass
+
+        plot_utils.umap_by(
+            adata,
+            keys=[plot_key],
+            figdir=outdir,
+            stem=f"umap__{ck}",
+        )
+
+        if groupby in adata.obs and "X_umap" in adata.obsm:
+            clusters = pd.Index(pd.unique(adata.obs[str(groupby)].astype(str))).sort_values().tolist()
+            for cl in clusters:
+                m = adata.obs[str(groupby)].astype(str).to_numpy() == str(cl)
+                if not m.any():
+                    continue
+                adata_umap = ad.AnnData(X=np.zeros((int(m.sum()), 0)))
+                adata_umap.obs = adata.obs.loc[m, [plot_key]].copy()
+                adata_umap.obsm["X_umap"] = adata.obsm["X_umap"][m]
+                if f"{plot_key}_colors" in adata.uns:
+                    adata_umap.uns[f"{plot_key}_colors"] = list(adata.uns[f"{plot_key}_colors"])
+                plot_utils.umap_by(
+                    adata_umap,
+                    keys=[plot_key],
+                    figdir=outdir,
+                    stem=f"umap__{ck}__{cl}",
+                )
 
 
 def plot_contrast_conditional_markers(
@@ -1896,16 +2020,13 @@ def plot_contrast_conditional_markers(
     layer: str | None = None,
     sample_key: str | None = None,
     plot_gene_filter: Optional[Sequence[str]] = None,
+    annotation_keys: Optional[Sequence[str]] = None,
 ) -> None:
     """
     Cell-level within-cluster contrast plots (from contrast_conditional results).
-    Generates volcano/dotplot/violin per cluster+contrast, plus a global UMAP
-    colored by the contrast_key and per-cluster UMAPs that reuse the global
-    embedding (no recompute).
+    Generates volcano/dotplot/violin per cluster+contrast.
     """
     from pathlib import Path
-    import matplotlib.colors as mcolors
-    import seaborn as sns
     from . import plot_utils, io_utils
 
     block = adata.uns.get(store_key, {}).get("contrast_conditional", {})
@@ -1920,21 +2041,7 @@ def plot_contrast_conditional_markers(
         except Exception:
             sample_key = None
 
-    # Global UMAP colored by contrast key (colorblind-friendly palette)
-    colors = None
-    if contrast_key in adata.obs:
-        try:
-            cats = adata.obs[contrast_key].astype("category").cat.categories
-            n_cats = int(len(cats))
-            palette = sns.color_palette("colorblind", n_colors=n_cats)
-            colors = [mcolors.to_hex(c) for c in palette]
-            adata.uns[f"{contrast_key}_colors"] = list(colors)
-        except Exception:
-            pass
-
     dot_n = int(dotplot_top_n_genes) if dotplot_top_n_genes is not None else int(top_n_genes)
-
-    done_pairs: set[str] = set()
 
     for cl, per_contrast in results.items():
         if not isinstance(per_contrast, dict):
@@ -1951,34 +2058,6 @@ def plot_contrast_conditional_markers(
             d_violin = pair_root / "violin"
             d_umap = pair_root / "umap"
             d_heat_sample = pair_root / "heatmap_sample"
-
-            # Global and per-cluster UMAPs live alongside other plots
-            if contrast_key in adata.obs and pair_dir not in done_pairs:
-                plot_utils.umap_by(
-                    adata,
-                    keys=[contrast_key],
-                    figdir=d_umap,
-                    stem=f"umap__{contrast_key}",
-                )
-                done_pairs.add(pair_dir)
-
-            if contrast_key in adata.obs and "X_umap" in adata.obsm:
-                import numpy as np
-                import anndata as ad
-
-                m = adata.obs[str(groupby)].astype(str).to_numpy() == str(cl)
-                if m.any():
-                    adata_umap = ad.AnnData(X=np.zeros((int(m.sum()), 0)))
-                    adata_umap.obs = adata.obs.loc[m, [contrast_key]].copy()
-                    adata_umap.obsm["X_umap"] = adata.obsm["X_umap"][m]
-                    if colors is not None:
-                        adata_umap.uns[f"{contrast_key}_colors"] = list(colors)
-                    plot_utils.umap_by(
-                        adata_umap,
-                        keys=[contrast_key],
-                        figdir=d_umap,
-                        stem=f"umap__{contrast_key}__{cl}",
-                    )
 
             wilcoxon_df = tables.get("wilcoxon", pd.DataFrame())
             combined_df = tables.get("combined", pd.DataFrame())
@@ -2130,6 +2209,7 @@ def plot_contrast_conditional_markers(
                         genes=top50,
                         sample_key=str(sample_key),
                         condition_key=str(contrast_key),
+                        annotation_keys=annotation_keys,
                         use_raw=bool(use_raw),
                         layer=layer,
                         z_clip=3.0,
@@ -2158,6 +2238,7 @@ def plot_contrast_conditional_markers_multi(
     layer: str | None = None,
     sample_key: str | None = None,
     plot_gene_filter: Optional[Sequence[str]] = None,
+    annotation_keys: Optional[Sequence[str]] = None,
 ) -> None:
     """
     Plot contrast-conditional markers for a specific contrast_key from
@@ -2189,6 +2270,7 @@ def plot_contrast_conditional_markers_multi(
             layer=layer,
             sample_key=sample_key,
             plot_gene_filter=plot_gene_filter,
+            annotation_keys=annotation_keys,
         )
     finally:
         if orig is None:
@@ -2221,6 +2303,22 @@ def plot_de_decoupler_payload(
     if activity is None or not isinstance(activity, pd.DataFrame) or activity.empty:
         return
 
+    def _split_activity_signed(
+        activity_df: pd.DataFrame,
+        *,
+        n_up: int,
+        n_down: int,
+    ) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+        if activity_df is None or activity_df.empty:
+            return None, None
+        A = activity_df.copy().apply(pd.to_numeric, errors="coerce").fillna(0.0)
+        scores = A.mean(axis=0)
+        up = scores[scores > 0].sort_values(ascending=False).head(int(n_up))
+        down = scores[scores < 0].sort_values(ascending=True).head(int(n_down))
+        up_df = A.loc[:, up.index].copy() if not up.empty else None
+        down_df = A.loc[:, down.index].copy() if not down.empty else None
+        return up_df, down_df
+
     if str(net_name).lower().strip() == "msigdb":
         splits = payload.get("activity_by_gmt", None)
         if isinstance(splits, dict) and splits:
@@ -2241,17 +2339,6 @@ def plot_de_decoupler_payload(
             if sub is None or not isinstance(sub, pd.DataFrame) or sub.empty:
                 continue
             tprefix = f"{str(pfx).upper()}" if title_prefix is None else f"{str(pfx).upper()} [{title_prefix}]"
-            plot_utils.plot_decoupler_activity_heatmap(
-                sub,
-                net_name=str(net_name),
-                figdir=figdir,
-                top_k=int(heatmap_top_k),
-                rank_mode="var",
-                use_zscore=True,
-                wrap_labels=True,
-                stem=f"heatmap_top_{str(pfx).lower()}_",
-                title_prefix=tprefix,
-            )
             plot_utils.plot_decoupler_cluster_topn_barplots(
                 sub,
                 net_name=str(net_name),
@@ -2264,31 +2351,61 @@ def plot_de_decoupler_payload(
                 stem_prefix=f"cluster_{str(pfx).lower()}",
                 title_prefix=tprefix,
             )
-            plot_utils.plot_decoupler_dotplot(
+            up_df, down_df = _split_activity_signed(
                 sub,
-                net_name=str(net_name),
-                figdir=figdir,
-                top_k=int(dotplot_top_k),
-                rank_mode="var",
-                color_by="z",
-                size_by="abs_raw",
-                wrap_labels=True,
-                stem=f"dotplot_top_{str(pfx).lower()}_",
-                title_prefix=tprefix,
+                n_up=int(heatmap_top_k),
+                n_down=int(heatmap_top_k),
             )
+            if up_df is not None and not up_df.empty:
+                plot_utils.plot_decoupler_activity_heatmap(
+                    up_df,
+                    net_name=str(net_name),
+                    figdir=figdir,
+                    top_k=int(heatmap_top_k),
+                    rank_mode="var",
+                    use_zscore=True,
+                    wrap_labels=True,
+                    stem=f"heatmap_top_{str(pfx).lower()}_up_",
+                    title_prefix=f"{tprefix} (up)",
+                )
+                plot_utils.plot_decoupler_dotplot(
+                    up_df,
+                    net_name=str(net_name),
+                    figdir=figdir,
+                    top_k=int(dotplot_top_k),
+                    rank_mode="var",
+                    color_by="z",
+                    size_by="abs_raw",
+                    wrap_labels=True,
+                    stem=f"dotplot_top_{str(pfx).lower()}_up_",
+                    title_prefix=f"{tprefix} (up)",
+                )
+            if down_df is not None and not down_df.empty:
+                plot_utils.plot_decoupler_activity_heatmap(
+                    down_df,
+                    net_name=str(net_name),
+                    figdir=figdir,
+                    top_k=int(heatmap_top_k),
+                    rank_mode="var",
+                    use_zscore=True,
+                    wrap_labels=True,
+                    stem=f"heatmap_top_{str(pfx).lower()}_down_",
+                    title_prefix=f"{tprefix} (down)",
+                )
+                plot_utils.plot_decoupler_dotplot(
+                    down_df,
+                    net_name=str(net_name),
+                    figdir=figdir,
+                    top_k=int(dotplot_top_k),
+                    rank_mode="var",
+                    color_by="z",
+                    size_by="abs_raw",
+                    wrap_labels=True,
+                    stem=f"dotplot_top_{str(pfx).lower()}_down_",
+                    title_prefix=f"{tprefix} (down)",
+                )
         return
 
-    plot_utils.plot_decoupler_activity_heatmap(
-        activity,
-        net_name=str(net_name),
-        figdir=figdir,
-        top_k=int(heatmap_top_k),
-        rank_mode="var",
-        use_zscore=True,
-        wrap_labels=True,
-        stem="heatmap_top_",
-        title_prefix=title_prefix,
-    )
     plot_utils.plot_decoupler_cluster_topn_barplots(
         activity,
         net_name=str(net_name),
@@ -2301,15 +2418,56 @@ def plot_de_decoupler_payload(
         stem_prefix="cluster",
         title_prefix=title_prefix,
     )
-    plot_utils.plot_decoupler_dotplot(
+    up_df, down_df = _split_activity_signed(
         activity,
-        net_name=str(net_name),
-        figdir=figdir,
-        top_k=int(dotplot_top_k),
-        rank_mode="var",
-        color_by="z",
-        size_by="abs_raw",
-        wrap_labels=True,
-        stem="dotplot_top_",
-        title_prefix=title_prefix,
+        n_up=int(heatmap_top_k),
+        n_down=int(heatmap_top_k),
     )
+    if up_df is not None and not up_df.empty:
+        plot_utils.plot_decoupler_activity_heatmap(
+            up_df,
+            net_name=str(net_name),
+            figdir=figdir,
+            top_k=int(heatmap_top_k),
+            rank_mode="var",
+            use_zscore=True,
+            wrap_labels=True,
+            stem="heatmap_top_up_",
+            title_prefix=f"{title_prefix} (up)" if title_prefix else "up",
+        )
+        plot_utils.plot_decoupler_dotplot(
+            up_df,
+            net_name=str(net_name),
+            figdir=figdir,
+            top_k=int(dotplot_top_k),
+            rank_mode="var",
+            color_by="z",
+            size_by="abs_raw",
+            wrap_labels=True,
+            stem="dotplot_top_up_",
+            title_prefix=f"{title_prefix} (up)" if title_prefix else "up",
+        )
+    if down_df is not None and not down_df.empty:
+        plot_utils.plot_decoupler_activity_heatmap(
+            down_df,
+            net_name=str(net_name),
+            figdir=figdir,
+            top_k=int(heatmap_top_k),
+            rank_mode="var",
+            use_zscore=True,
+            wrap_labels=True,
+            stem="heatmap_top_down_",
+            title_prefix=f"{title_prefix} (down)" if title_prefix else "down",
+        )
+        plot_utils.plot_decoupler_dotplot(
+            down_df,
+            net_name=str(net_name),
+            figdir=figdir,
+            top_k=int(dotplot_top_k),
+            rank_mode="var",
+            color_by="z",
+            size_by="abs_raw",
+            wrap_labels=True,
+            stem="dotplot_top_down_",
+            title_prefix=f"{title_prefix} (down)" if title_prefix else "down",
+        )

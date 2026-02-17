@@ -2386,9 +2386,18 @@ def run_within_cluster(cfg) -> ad.AnnData:
         layer = getattr(cfg, "plot_layer", None)
 
         try:
+            if condition_keys:
+                LOGGER.info("within-cluster: plotting UMAPs for condition keys...")
+                de_plot_utils.plot_condition_umaps(
+                    adata,
+                    groupby=str(groupby),
+                    condition_keys=condition_keys,
+                )
+
             # Condition plots only if pseudobulk ran
             if ran_pseudobulk:
                 LOGGER.info("within-cluster: plotting pseudobulk condition figures...")
+                plot_ann_keys = list(getattr(cfg, "plot_sample_annotation_keys", ()) or condition_keys)
                 for condition_key in condition_keys:
                     de_plot_utils.plot_condition_within_cluster_all(
                         adata,
@@ -2405,12 +2414,14 @@ def run_within_cluster(cfg) -> ad.AnnData:
                         layer=layer,
                         sample_key=sample_key,
                         plot_gene_filter=getattr(cfg, "plot_gene_filter", ()),
+                        annotation_keys=plot_ann_keys,
                     )
             else:
                 LOGGER.info("within-cluster: skipping condition plots (pseudobulk not run).")
 
             if ran_cell_contrast:
                 LOGGER.info("within-cluster: plotting cell-level contrast figures...")
+                plot_ann_keys = list(getattr(cfg, "plot_sample_annotation_keys", ()) or condition_keys)
                 for condition_key in condition_keys:
                     de_plot_utils.plot_contrast_conditional_markers_multi(
                         adata,
@@ -2426,6 +2437,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                         layer=layer,
                         sample_key=sample_key,
                         plot_gene_filter=getattr(cfg, "plot_gene_filter", ()),
+                        annotation_keys=plot_ann_keys,
                     )
 
             # DE-based decoupler plots (if available)

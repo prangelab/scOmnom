@@ -1211,6 +1211,7 @@ def _build_cfg(
     plot_layer: Optional[str],
     plot_umap_ncols: int,
     plot_gene_filter: Optional[List[str]],
+    plot_sample_annotation_keys: Optional[List[str]],
 ) -> MarkersAndDEConfig:
     out_dir = output_dir or input_path.parent
     log_dir = out_dir / "logs"
@@ -1222,6 +1223,7 @@ def _build_cfg(
     covariates = tuple(_parse_csv_repeat(pb_covariates) or ())
     cond_keys = tuple(_parse_csv_repeat(condition_keys) or ())
     plot_filters = tuple(plot_gene_filter or ())
+    plot_annot_keys = tuple(plot_sample_annotation_keys or ())
     msigdb_sets = list(msigdb_gene_sets) if msigdb_gene_sets else None
     doro_conf = list(dorothea_confidence) if dorothea_confidence else None
 
@@ -1237,6 +1239,7 @@ def _build_cfg(
         figdir_name=figdir_name,
         figure_formats=figure_formats,
         plot_gene_filter=plot_filters,
+        plot_sample_annotation_keys=plot_annot_keys,
         # grouping
         groupby=group_key,
         label_source=label_source,
@@ -1480,6 +1483,11 @@ def cluster_vs_rest(
         "--plot-gene-filter",
         help="Filter expression for plot gene selection (e.g. \"gene_chrom not in ['X','Y']\").",
     ),
+    plot_sample_annotation_keys: List[str] = typer.Option(
+        [],
+        "--plot-sample-annotation-keys",
+        help="Obs keys for sample heatmap category bars (repeatable). Defaults to condition_keys.",
+    ),
 ):
     if output_name is None:
         output_name = _default_output_name(input_path, "markers")
@@ -1551,6 +1559,7 @@ def cluster_vs_rest(
         plot_layer=plot_layer,
         plot_umap_ncols=plot_umap_ncols,
         plot_gene_filter=plot_gene_filter,
+        plot_sample_annotation_keys=plot_sample_annotation_keys,
     )
 
     # enforce mode semantics
@@ -1738,6 +1747,11 @@ def within_cluster(
         "--plot-gene-filter",
         help="Filter expression for plot gene selection (e.g. \"gene_chrom not in ['X','Y']\").",
     ),
+    plot_sample_annotation_keys: List[str] = typer.Option(
+        [],
+        "--plot-sample-annotation-keys",
+        help="Obs keys for sample heatmap category bars (repeatable). Defaults to condition_keys.",
+    ),
 ):
     # fix typo from signature (keep CLI option stable)
     group_key = None if group_key is None else str(group_key)
@@ -1817,6 +1831,7 @@ def within_cluster(
         plot_layer=plot_layer,
         plot_umap_ncols=plot_umap_ncols,
         plot_gene_filter=plot_gene_filter,
+        plot_sample_annotation_keys=plot_sample_annotation_keys,
     )
 
     parsed = _parse_csv_repeat(contrasts)
