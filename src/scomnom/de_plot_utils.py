@@ -386,7 +386,7 @@ def heatmap_top_genes_by_sample(
 
     col_colors = None
     legend_handles = []
-    keys = [str(k) for k in (annotation_keys or []) if k]
+    keys = [str(k).strip() for k in (annotation_keys or []) if k]
     if not keys and condition_key:
         keys = [str(condition_key)]
     keys = [k for k in keys if k in adata.obs]
@@ -408,6 +408,8 @@ def heatmap_top_genes_by_sample(
                 per[k] = str(vals[0])
             if per:
                 cond_by_sample[str(s)] = per
+        from . import plot_utils
+
         color_rows = []
         palette_names = ["colorblind", "Set2", "Dark2", "Paired", "tab10", "tab20"]
         for idx, k in enumerate(keys):
@@ -421,40 +423,40 @@ def heatmap_top_genes_by_sample(
                 levels_cat = None
             if levels_cat:
                 levels = [lv for lv in levels_cat if lv in levels]
-            color_list = None
-            uns_key = f"{k}_colors"
-            if uns_key in adata.uns:
-                try:
-                    cand = list(adata.uns.get(uns_key, []))
-                    if len(cand) >= len(levels):
-                        color_list = [plt.matplotlib.colors.to_hex(c) for c in cand[: len(levels)]]
-                except Exception:
-                    color_list = None
-            if color_list is None:
+
+            color_map = {}
+            try:
+                plot_utils._sanitize_uns_colors(adata, str(k))
+                color_map = plot_utils._cluster_color_map(adata, str(k))
+            except Exception:
+                color_map = {}
+
+            if not color_map:
                 pal_name = palette_names[idx % len(palette_names)]
                 color_list = [plt.matplotlib.colors.to_hex(c) for c in sns.color_palette(pal_name, n_colors=len(levels))]
-            color_map = dict(zip(levels, color_list))
+                color_map = dict(zip(levels, color_list))
+
             row = [
                 color_map.get(cond_by_sample.get(str(s), {}).get(k, ""), (0.85, 0.85, 0.85))
                 for s in data.columns
             ]
-            color_rows.append((str(k), row))
+            color_rows.append(pd.Series(row, index=data.columns, name=str(k)))
             legend_handles.extend(
                 [
-                    plt.matplotlib.patches.Patch(facecolor=color_map[lv], edgecolor="none", label=f"{k}={lv}")
+                    plt.matplotlib.patches.Patch(facecolor=color_map.get(lv, "#BBBBBB"), edgecolor="none", label=f"{k}={lv}")
                     for lv in levels
                 ]
             )
         if color_rows:
-            col_colors = pd.DataFrame(
-                {k: v for k, v in color_rows},
-                index=data.columns,
-            )
+            col_colors = color_rows
 
     col_ratio = 0.02
     if col_colors is not None:
         try:
-            col_ratio = 0.02 * max(1, int(col_colors.shape[1]))
+            if isinstance(col_colors, list):
+                col_ratio = 0.02 * max(1, int(len(col_colors)))
+            else:
+                col_ratio = 0.02 * max(1, int(col_colors.shape[1]))
         except Exception:
             col_ratio = 0.02
 
