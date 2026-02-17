@@ -2455,6 +2455,8 @@ def run_within_cluster(cfg) -> ad.AnnData:
                 de_block = adata.uns.get(store_key, {}).get("de_decoupler", {})
                 if isinstance(de_block, dict) and de_block:
                     LOGGER.info("within-cluster: plotting DE-decoupler figures...")
+                    pb_cond = adata.uns.get(store_key, {}).get("pseudobulk_condition_within_group", {})
+                    pb_cond_multi = adata.uns.get(store_key, {}).get("pseudobulk_condition_within_group_multi", {})
                     for condition_key, per_contrast in de_block.items():
                         if not isinstance(per_contrast, dict):
                             continue
@@ -2472,7 +2474,43 @@ def run_within_cluster(cfg) -> ad.AnnData:
                                 if str(source) == "cell":
                                     base = base / "cell_level_DE" / str(condition_key) / str(contrast)
                                 else:
-                                    base = base / "pseudobulk_DE" / str(condition_key) / str(contrast)
+                                    if str(contrast) == "interaction" or "^" in str(condition_key):
+                                        base = (
+                                            base
+                                            / "pseudobulk_DE"
+                                            / f"{condition_key}__interaction"
+                                            / "interaction"
+                                        )
+                                    else:
+                                        base = base / "pseudobulk_DE" / str(condition_key) / str(contrast)
+
+                                pos_label = None
+                                neg_label = None
+                                if "_vs_" in str(contrast):
+                                    parts = str(contrast).split("_vs_", 1)
+                                    if len(parts) == 2:
+                                        pos_label, neg_label = parts[0], parts[1]
+                                elif str(contrast) == "interaction":
+                                    payloads = []
+                                    if isinstance(pb_cond, dict) and pb_cond:
+                                        payloads.extend(list(pb_cond.values()))
+                                    if isinstance(pb_cond_multi, dict) and pb_cond_multi:
+                                        payloads.extend(list(pb_cond_multi.values()))
+                                    for pb in payloads:
+                                        if not isinstance(pb, dict):
+                                            continue
+                                        if str(pb.get("condition_key", "")) != str(condition_key):
+                                            continue
+                                        if not bool(pb.get("interaction", False)):
+                                            continue
+                                        level_a = pb.get("level_a", None)
+                                        level_b = pb.get("level_b", None)
+                                        ref_a = pb.get("ref_a", None)
+                                        ref_b = pb.get("ref_b", None)
+                                        if level_a and level_b and ref_a and ref_b:
+                                            pos_label = f"{level_a}.{level_b}"
+                                            neg_label = f"{ref_a}.{ref_b}"
+                                            break
 
                                 for net_name, net_payload in nets.items():
                                     de_plot_utils.plot_de_decoupler_payload(
@@ -2486,6 +2524,8 @@ def run_within_cluster(cfg) -> ad.AnnData:
                                         bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
                                         dotplot_top_k=int(dotplot_top_n_genes),
                                         title_prefix=f"{condition_key} {contrast}",
+                                        pos_label=pos_label,
+                                        neg_label=neg_label,
                                     )
 
             try:

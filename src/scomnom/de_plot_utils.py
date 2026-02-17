@@ -341,6 +341,8 @@ def heatmap_top_genes_by_sample(
     sample_key: str,
     condition_key: Optional[str] = None,
     annotation_keys: Optional[Sequence[str]] = None,
+    legend_figdir: "Path | None" = None,
+    legend_stem: str = "legend",
     use_raw: bool = False,
     layer: Optional[str] = None,
     z_clip: float | None = 3.0,
@@ -388,6 +390,7 @@ def heatmap_top_genes_by_sample(
     if not keys and condition_key:
         keys = [str(condition_key)]
     keys = [k for k in keys if k in adata.obs]
+    keys = _unique_keep_order(keys)
 
     if keys:
         cols = [sample_key] + keys
@@ -406,22 +409,42 @@ def heatmap_top_genes_by_sample(
             if per:
                 cond_by_sample[str(s)] = per
         color_rows = []
-        for k in keys:
+        palette_names = ["colorblind", "Set2", "Dark2", "Paired", "tab10", "tab20"]
+        for idx, k in enumerate(keys):
             levels = [str(x) for x in pd.unique(pd.Series([v.get(k, "") for v in cond_by_sample.values()])).tolist() if str(x)]
-            if levels:
-                palette = sns.color_palette("colorblind", n_colors=len(levels))
-                color_map = dict(zip(levels, palette))
-                row = [
-                    color_map.get(cond_by_sample.get(str(s), {}).get(k, ""), (0.85, 0.85, 0.85))
-                    for s in data.columns
+            if not levels:
+                continue
+            levels_cat = None
+            try:
+                levels_cat = adata.obs[str(k)].astype("category").cat.categories.astype(str).tolist()
+            except Exception:
+                levels_cat = None
+            if levels_cat:
+                levels = [lv for lv in levels_cat if lv in levels]
+            color_list = None
+            uns_key = f"{k}_colors"
+            if uns_key in adata.uns:
+                try:
+                    cand = list(adata.uns.get(uns_key, []))
+                    if len(cand) >= len(levels):
+                        color_list = [plt.matplotlib.colors.to_hex(c) for c in cand[: len(levels)]]
+                except Exception:
+                    color_list = None
+            if color_list is None:
+                pal_name = palette_names[idx % len(palette_names)]
+                color_list = [plt.matplotlib.colors.to_hex(c) for c in sns.color_palette(pal_name, n_colors=len(levels))]
+            color_map = dict(zip(levels, color_list))
+            row = [
+                color_map.get(cond_by_sample.get(str(s), {}).get(k, ""), (0.85, 0.85, 0.85))
+                for s in data.columns
+            ]
+            color_rows.append((str(k), row))
+            legend_handles.extend(
+                [
+                    plt.matplotlib.patches.Patch(facecolor=color_map[lv], edgecolor="none", label=f"{k}={lv}")
+                    for lv in levels
                 ]
-                color_rows.append((str(k), row))
-                legend_handles.extend(
-                    [
-                        plt.matplotlib.patches.Patch(facecolor=color_map[lv], edgecolor="none", label=f"{k}={lv}")
-                        for lv in levels
-                    ]
-                )
+            )
         if color_rows:
             col_colors = pd.DataFrame(
                 {k: v for k, v in color_rows},
@@ -480,6 +503,23 @@ def heatmap_top_genes_by_sample(
             fontsize=8,
             title_fontsize=9,
         )
+        if legend_figdir is not None:
+            from . import plot_utils
+            fig_leg_w = max(4.0, 1.6 * min(4, ncol))
+            fig_leg_h = max(2.0, 0.25 * (len(handles) / max(1, ncol)) + 1.2)
+            fig_leg, ax_leg = plt.subplots(figsize=(fig_leg_w, fig_leg_h))
+            ax_leg.axis("off")
+            ax_leg.legend(
+                handles=handles,
+                title=title,
+                loc="center",
+                ncol=ncol,
+                frameon=False,
+                fontsize=9,
+                title_fontsize=10,
+            )
+            plot_utils.save_multi(stem=str(legend_stem), figdir=legend_figdir, fig=fig_leg)
+            plt.close(fig_leg)
     if show:
         plt.show()
     return g.fig
@@ -1881,6 +1921,8 @@ def plot_condition_within_cluster(
                 sample_key=str(sample_key),
                 condition_key=str(plot_key),
                 annotation_keys=annotation_keys,
+                legend_figdir=out_heat_sample,
+                legend_stem="legend",
                 use_raw=bool(use_raw),
                 layer=layer,
                 z_clip=3.0,
@@ -2213,6 +2255,8 @@ def plot_contrast_conditional_markers(
                         sample_key=str(sample_key),
                         condition_key=str(contrast_key),
                         annotation_keys=annotation_keys,
+                        legend_figdir=d_heat_sample,
+                        legend_stem="legend",
                         use_raw=bool(use_raw),
                         layer=layer,
                         z_clip=3.0,
@@ -2294,6 +2338,8 @@ def plot_de_decoupler_payload(
     bar_split_signed: bool = True,
     dotplot_top_k: int = 30,
     title_prefix: str | None = None,
+    pos_label: str | None = None,
+    neg_label: str | None = None,
 ) -> None:
     """
     Plot decoupler activity payload produced from DE stats.
@@ -2321,6 +2367,11 @@ def plot_de_decoupler_payload(
         up_df = A.loc[:, up.index].copy() if not up.empty else None
         down_df = A.loc[:, down.index].copy() if not down.empty else None
         return up_df, down_df
+
+    pos_text = str(pos_label) if pos_label else "up"
+    neg_text = str(neg_label) if neg_label else "down"
+    pos_stem = io_utils.sanitize_identifier(pos_text)
+    neg_stem = io_utils.sanitize_identifier(neg_text)
 
     if str(net_name).lower().strip() == "msigdb":
         splits = payload.get("activity_by_gmt", None)
@@ -2368,8 +2419,8 @@ def plot_de_decoupler_payload(
                     rank_mode="var",
                     use_zscore=True,
                     wrap_labels=True,
-                    stem=f"heatmap_top_{str(pfx).lower()}_up_",
-                    title_prefix=f"{tprefix} (up)",
+                    stem=f"heatmap_top_{str(pfx).lower()}_{pos_stem}_",
+                    title_prefix=f"{tprefix} ({pos_text})",
                 )
                 plot_utils.plot_decoupler_dotplot(
                     up_df,
@@ -2380,8 +2431,8 @@ def plot_de_decoupler_payload(
                     color_by="z",
                     size_by="abs_raw",
                     wrap_labels=True,
-                    stem=f"dotplot_top_{str(pfx).lower()}_up_",
-                    title_prefix=f"{tprefix} (up)",
+                    stem=f"dotplot_top_{str(pfx).lower()}_{pos_stem}_",
+                    title_prefix=f"{tprefix} ({pos_text})",
                 )
             if down_df is not None and not down_df.empty:
                 plot_utils.plot_decoupler_activity_heatmap(
@@ -2392,8 +2443,8 @@ def plot_de_decoupler_payload(
                     rank_mode="var",
                     use_zscore=True,
                     wrap_labels=True,
-                    stem=f"heatmap_top_{str(pfx).lower()}_down_",
-                    title_prefix=f"{tprefix} (down)",
+                    stem=f"heatmap_top_{str(pfx).lower()}_{neg_stem}_",
+                    title_prefix=f"{tprefix} ({neg_text})",
                 )
                 plot_utils.plot_decoupler_dotplot(
                     down_df,
@@ -2404,8 +2455,8 @@ def plot_de_decoupler_payload(
                     color_by="z",
                     size_by="abs_raw",
                     wrap_labels=True,
-                    stem=f"dotplot_top_{str(pfx).lower()}_down_",
-                    title_prefix=f"{tprefix} (down)",
+                    stem=f"dotplot_top_{str(pfx).lower()}_{neg_stem}_",
+                    title_prefix=f"{tprefix} ({neg_text})",
                 )
         return
 
@@ -2435,8 +2486,8 @@ def plot_de_decoupler_payload(
             rank_mode="var",
             use_zscore=True,
             wrap_labels=True,
-            stem="heatmap_top_up_",
-            title_prefix=f"{title_prefix} (up)" if title_prefix else "up",
+            stem=f"heatmap_top_{pos_stem}_",
+            title_prefix=f"{title_prefix} ({pos_text})" if title_prefix else pos_text,
         )
         plot_utils.plot_decoupler_dotplot(
             up_df,
@@ -2447,8 +2498,8 @@ def plot_de_decoupler_payload(
             color_by="z",
             size_by="abs_raw",
             wrap_labels=True,
-            stem="dotplot_top_up_",
-            title_prefix=f"{title_prefix} (up)" if title_prefix else "up",
+            stem=f"dotplot_top_{pos_stem}_",
+            title_prefix=f"{title_prefix} ({pos_text})" if title_prefix else pos_text,
         )
     if down_df is not None and not down_df.empty:
         plot_utils.plot_decoupler_activity_heatmap(
@@ -2459,8 +2510,8 @@ def plot_de_decoupler_payload(
             rank_mode="var",
             use_zscore=True,
             wrap_labels=True,
-            stem="heatmap_top_down_",
-            title_prefix=f"{title_prefix} (down)" if title_prefix else "down",
+            stem=f"heatmap_top_{neg_stem}_",
+            title_prefix=f"{title_prefix} ({neg_text})" if title_prefix else neg_text,
         )
         plot_utils.plot_decoupler_dotplot(
             down_df,
@@ -2471,6 +2522,6 @@ def plot_de_decoupler_payload(
             color_by="z",
             size_by="abs_raw",
             wrap_labels=True,
-            stem="dotplot_top_down_",
-            title_prefix=f"{title_prefix} (down)" if title_prefix else "down",
+            stem=f"dotplot_top_{neg_stem}_",
+            title_prefix=f"{title_prefix} ({neg_text})" if title_prefix else neg_text,
         )
