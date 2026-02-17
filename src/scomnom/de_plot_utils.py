@@ -412,6 +412,7 @@ def heatmap_top_genes_by_sample(
 
         color_rows = []
         palette_names = ["colorblind", "Set2", "Dark2", "Paired", "tab10", "tab20"]
+        palette_offset = 0
         for idx, k in enumerate(keys):
             levels = [str(x) for x in pd.unique(pd.Series([v.get(k, "") for v in cond_by_sample.values()])).tolist() if str(x)]
             if not levels:
@@ -427,14 +428,29 @@ def heatmap_top_genes_by_sample(
             color_map = {}
             try:
                 plot_utils._sanitize_uns_colors(adata, str(k))
-                color_map = plot_utils._cluster_color_map(adata, str(k))
+                palette = adata.uns.get(f"{k}_colors", None)
+                if palette is not None:
+                    palette = list(palette)
+                    cats = []
+                    try:
+                        cats = adata.obs[str(k)].astype("category").cat.categories.astype(str).tolist()
+                    except Exception:
+                        cats = levels
+                    if cats and len(palette) >= len(cats):
+                        color_map = {str(cat): str(palette[i]) for i, cat in enumerate(cats)}
             except Exception:
                 color_map = {}
 
             if not color_map:
                 pal_name = palette_names[idx % len(palette_names)]
-                color_list = [plt.matplotlib.colors.to_hex(c) for c in sns.color_palette(pal_name, n_colors=len(levels))]
+                base = [plt.matplotlib.colors.to_hex(c) for c in sns.color_palette(pal_name, n_colors=max(3, len(levels) + palette_offset))]
+                if palette_offset >= len(base):
+                    palette_offset = 0
+                color_list = base[palette_offset: palette_offset + len(levels)]
+                if len(color_list) < len(levels):
+                    color_list = (color_list * (1 + len(levels) // max(1, len(color_list))))[: len(levels)]
                 color_map = dict(zip(levels, color_list))
+                palette_offset += len(levels)
 
             row = [
                 color_map.get(cond_by_sample.get(str(s), {}).get(k, ""), (0.85, 0.85, 0.85))
@@ -453,10 +469,11 @@ def heatmap_top_genes_by_sample(
     col_ratio = 0.02
     if col_colors is not None:
         try:
-            if isinstance(col_colors, list):
-                col_ratio = 0.02 * max(1, int(len(col_colors)))
+            n_keys = len(col_colors) if isinstance(col_colors, list) else int(col_colors.shape[1])
+            if n_genes > 0:
+                col_ratio = max(0.005, float(n_keys) / float(n_genes))
             else:
-                col_ratio = 0.02 * max(1, int(col_colors.shape[1]))
+                col_ratio = 0.02 * max(1, int(n_keys))
         except Exception:
             col_ratio = 0.02
 
