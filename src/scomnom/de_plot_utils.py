@@ -415,7 +415,7 @@ def heatmap_top_genes_by_sample(
                     color_map.get(cond_by_sample.get(str(s), {}).get(k, ""), (0.85, 0.85, 0.85))
                     for s in data.columns
                 ]
-                color_rows.append(pd.Series(row, index=data.columns, name=str(k)))
+                color_rows.append((str(k), row))
                 legend_handles.extend(
                     [
                         plt.matplotlib.patches.Patch(facecolor=color_map[lv], edgecolor="none", label=f"{k}={lv}")
@@ -423,12 +423,15 @@ def heatmap_top_genes_by_sample(
                     ]
                 )
         if color_rows:
-            col_colors = pd.DataFrame(color_rows)
+            col_colors = pd.DataFrame(
+                {k: v for k, v in color_rows},
+                index=data.columns,
+            )
 
     col_ratio = 0.02
     if col_colors is not None:
         try:
-            col_ratio = 0.02 * max(1, int(col_colors.shape[0]))
+            col_ratio = 0.02 * max(1, int(col_colors.shape[1]))
         except Exception:
             col_ratio = 0.02
 

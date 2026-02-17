@@ -537,26 +537,36 @@ def _collect_pseudobulk_de_tables(
     condition_key: str,
 ) -> dict[str, dict[str, pd.DataFrame]]:
     block = adata.uns.get(store_key, {})
-    cond = block.get("pseudobulk_condition_within_group_multi", {})
-    if not isinstance(cond, dict) or not cond:
+    cond_multi = block.get("pseudobulk_condition_within_group_multi", {})
+    cond_single = block.get("pseudobulk_condition_within_group", {})
+    candidates = []
+    if isinstance(cond_multi, dict) and cond_multi:
+        candidates.append(cond_multi)
+    if isinstance(cond_single, dict) and cond_single:
+        candidates.append(cond_single)
+    if not candidates:
         return {}
 
     out: dict[str, dict[str, pd.DataFrame]] = {}
-    for _, payload in cond.items():
-        if not isinstance(payload, dict):
-            continue
-        if str(payload.get("condition_key", "")) != str(condition_key):
-            continue
-        test = payload.get("test", None)
-        ref = payload.get("reference", None)
-        if test is None or ref is None:
-            continue
-        contrast = f"{test}_vs_{ref}"
-        cl = str(payload.get("group_value", "")) or "cluster"
-        df = payload.get("results", None)
-        if df is None:
-            continue
-        out.setdefault(str(contrast), {})[str(cl)] = df
+    for cond in candidates:
+        for _, payload in cond.items():
+            if not isinstance(payload, dict):
+                continue
+            if str(payload.get("condition_key", "")) != str(condition_key):
+                continue
+            df = payload.get("results", None)
+            if df is None:
+                continue
+            cl = str(payload.get("group_value", "")) or "cluster"
+            if bool(payload.get("interaction", False)):
+                contrast = "interaction"
+            else:
+                test = payload.get("test", None)
+                ref = payload.get("reference", None)
+                if test is None or ref is None:
+                    continue
+                contrast = f"{test}_vs_{ref}"
+            out.setdefault(str(contrast), {})[str(cl)] = df
     return out
 
 
