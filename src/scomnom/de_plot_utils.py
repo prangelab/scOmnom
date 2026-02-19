@@ -414,11 +414,20 @@ def heatmap_top_genes_by_sample(
         palette_names = ["colorblind", "Set2", "Dark2", "Paired", "tab10", "tab20"]
         palette_offset = 0
         shared_palette = None
-        if condition_key and f"{condition_key}_colors" in adata.uns:
-            try:
-                shared_palette = [str(c) for c in list(adata.uns.get(f"{condition_key}_colors", []))]
-            except Exception:
-                shared_palette = None
+        composite_keys = set()
+        if condition_key and ("." in str(condition_key) or "^" in str(condition_key)):
+            composite_keys.add(str(condition_key))
+        composite_keys.update([k for k in keys if ("." in k or "^" in k)])
+        if composite_keys:
+            for ck in composite_keys:
+                colors_key = f"{ck}_colors"
+                if colors_key in adata.uns:
+                    try:
+                        shared_palette = [str(c) for c in list(adata.uns.get(colors_key, []))]
+                        if shared_palette:
+                            break
+                    except Exception:
+                        shared_palette = None
         for idx, k in enumerate(keys):
             levels = [str(x) for x in pd.unique(pd.Series([v.get(k, "") for v in cond_by_sample.values()])).tolist() if str(x)]
             if not levels:
