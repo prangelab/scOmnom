@@ -409,6 +409,39 @@ def heatmap_top_genes_by_sample(
             if per:
                 cond_by_sample[str(s)] = per
         from . import plot_utils
+        import matplotlib.colors as mcolors
+
+        def _coerce_palette(raw, n_expected: int) -> list[str] | None:
+            if raw is None:
+                return None
+            colors = None
+            if isinstance(raw, dict):
+                items: list[tuple[int, str]] = []
+                for k0, v0 in raw.items():
+                    if str(k0).startswith("__"):
+                        continue
+                    try:
+                        idx = int(k0)
+                    except Exception:
+                        continue
+                    items.append((idx, str(v0)))
+                if items:
+                    items.sort(key=lambda t: t[0])
+                    colors = [v for _, v in items]
+            else:
+                try:
+                    colors = [str(c) for c in list(raw)]
+                except Exception:
+                    colors = None
+            if not colors:
+                return None
+            out = []
+            for c in colors:
+                if mcolors.is_color_like(c):
+                    out.append(c)
+            if len(out) >= int(n_expected):
+                return out
+            return None
 
         color_rows = []
         palette_names = ["colorblind", "Set2", "Dark2", "Paired", "tab10", "tab20"]
@@ -442,7 +475,6 @@ def heatmap_top_genes_by_sample(
 
             color_map = {}
             try:
-                plot_utils._sanitize_uns_colors(adata, str(k))
                 palette = None
                 cats = []
                 try:
@@ -455,11 +487,10 @@ def heatmap_top_genes_by_sample(
                         palette = shared_palette[palette_offset: palette_offset + need]
                         palette_offset += need
                 if palette is None:
-                    palette = adata.uns.get(f"{k}_colors", None)
+                    raw = adata.uns.get(f"{k}_colors", None)
+                    palette = _coerce_palette(raw, len(cats))
                 if palette is not None and cats:
-                    palette = list(palette)
-                    if len(palette) >= len(cats):
-                        color_map = {str(cat): str(palette[i]) for i, cat in enumerate(cats)}
+                    color_map = {str(cat): str(palette[i]) for i, cat in enumerate(cats)}
             except Exception:
                 color_map = {}
 

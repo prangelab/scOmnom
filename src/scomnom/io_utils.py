@@ -2283,6 +2283,9 @@ def export_pseudobulk_condition_within_cluster_excel(
     for key, payload in cond.items():
         if not isinstance(payload, dict):
             continue
+        payload_ck = payload.get("condition_key", None)
+        if payload_ck is not None and str(payload_ck) != str(condition_key):
+            continue
         df = payload.get("results", None)
         if df is None:
             continue
