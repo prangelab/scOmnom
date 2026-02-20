@@ -446,6 +446,12 @@ def heatmap_top_genes_by_sample(
         color_rows = []
         palette_names = ["colorblind", "Set2", "Dark2", "Paired", "tab10", "tab20"]
         palette_offset = 0
+        used_colors: set[str] = set()
+        try:
+            from scanpy.plotting.palettes import default_102
+            palette_pool = [str(c) for c in list(default_102)]
+        except Exception:
+            palette_pool = [plt.matplotlib.colors.to_hex(c) for c in sns.color_palette("tab20", n_colors=20)]
         shared_palette = None
         composite_keys = set()
         if condition_key and ("." in str(condition_key) or "^" in str(condition_key)):
@@ -481,16 +487,41 @@ def heatmap_top_genes_by_sample(
                     cats = adata.obs[str(k)].astype("category").cat.categories.astype(str).tolist()
                 except Exception:
                     cats = levels
+                used_shared = False
                 if shared_palette and cats:
                     need = len(cats)
                     if len(shared_palette) >= palette_offset + need:
                         palette = shared_palette[palette_offset: palette_offset + need]
                         palette_offset += need
+                        used_shared = True
                 if palette is None:
                     raw = adata.uns.get(f"{k}_colors", None)
                     palette = _coerce_palette(raw, len(cats))
                 if palette is not None and cats:
+                    if not used_shared:
+                        # If palette overlaps with used colors, pick a distinct slice
+                        overlap = any(str(c) in used_colors for c in palette[: len(cats)])
+                        if overlap and palette_pool:
+                            need = len(cats)
+                            tries = 0
+                            while tries < max(1, len(palette_pool)):
+                                start = int(palette_offset) % max(1, len(palette_pool))
+                                cand = []
+                                for i in range(need):
+                                    cand.append(palette_pool[(start + i) % len(palette_pool)])
+                                if not any(c in used_colors for c in cand):
+                                    palette = cand
+                                    break
+                                palette_offset += need
+                                tries += 1
+                        if palette_offset > 0:
+                            shift = int(palette_offset) % max(1, len(palette))
+                            if shift:
+                                palette = list(palette[shift:]) + list(palette[:shift])
                     color_map = {str(cat): str(palette[i]) for i, cat in enumerate(cats)}
+                    if not used_shared:
+                        palette_offset += len(cats)
+                        used_colors.update([str(palette[i]) for i in range(min(len(palette), len(cats)))])
             except Exception:
                 color_map = {}
 
