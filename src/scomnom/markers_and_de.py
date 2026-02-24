@@ -1387,14 +1387,32 @@ def run_composition(cfg) -> ad.AnnData:
         results_dir.mkdir(parents=True, exist_ok=True)
         fig_subdir = Path("DA") / cond_tag
 
+        def _cnnize_df(df: pd.DataFrame) -> pd.DataFrame:
+            if df is None or getattr(df, "empty", False):
+                return df
+            df2 = df.copy()
+            if "cluster" in df2.columns:
+                df2["cluster"] = df2["cluster"].astype(str).map(
+                    lambda x: io_utils._cnn_label_for_group(x, None)
+                )
+            if df2.index.name == "cluster":
+                df2.index = pd.Index(
+                    [io_utils._cnn_label_for_group(str(x), None) for x in df2.index],
+                    name="cluster",
+                )
+            return df2
+
         if write_tables:
             for method, df in results_by_method.items():
                 if isinstance(df, pd.DataFrame):
-                    df.to_csv(results_dir / f"composition_global_{method}.tsv", sep="	")
+                    df_out = _cnnize_df(df)
+                    df_out.to_csv(results_dir / f"composition_global_{method}.tsv", sep="	")
             if isinstance(consensus, pd.DataFrame) and not consensus.empty:
-                consensus.to_csv(results_dir / "composition_consensus.tsv", sep="	", index=False)
+                consensus_out = _cnnize_df(consensus)
+                consensus_out.to_csv(results_dir / "composition_consensus.tsv", sep="	", index=False)
             if graph_meta_global is not None and not graph_meta_global.empty:
-                graph_meta_global.to_csv(results_dir / "composition_graph_neighborhoods.tsv", sep="\t", index=False)
+                graph_out = _cnnize_df(graph_meta_global)
+                graph_out.to_csv(results_dir / "composition_graph_neighborhoods.tsv", sep="\t", index=False)
 
         if write_figures and bool(getattr(cfg, "make_figures", True)):
             if graph_meta_global is not None and not graph_meta_global.empty:
