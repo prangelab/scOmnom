@@ -1105,6 +1105,7 @@ def violin_grid_genes(
     *,
     genes: Sequence[str],
     groupby: str,
+    display_groupby: str | None = None,
     use_raw: bool = False,
     layer: str | None = None,
     ncols: int = 3,
@@ -1144,7 +1145,7 @@ def violin_grid_genes(
 
     # heuristic sizing if not given
     if figsize is None:
-        n_groups = int(adata.obs[str(groupby)].astype(str).nunique())
+        n_groups = int(adata.obs[str(display_groupby or groupby)].astype(str).nunique())
         per_plot_w = max(3.2, min(0.25 * n_groups, 8.0))
         figsize = (max(8.0, per_plot_w * min(ncols, n)), max(4.0, 3.2 * nrows))
 
@@ -1502,6 +1503,7 @@ def plot_marker_genes_pseudobulk(
                 adata,
                 genes=topg,
                 groupby=str(display_groupby or groupby),
+                display_groupby=str(display_groupby or groupby),
                 use_raw=bool(use_raw),
                 layer=layer,
                 ncols=int(max(1, umap_ncols)),
@@ -1750,6 +1752,7 @@ def plot_marker_genes_ranksum(
                 adata,
                 genes=topg,
                 groupby=str(display_groupby or groupby),
+                display_groupby=str(display_groupby or groupby),
                 use_raw=bool(use_raw),
                 layer=layer,
                 ncols=int(max(1, umap_ncols)),
