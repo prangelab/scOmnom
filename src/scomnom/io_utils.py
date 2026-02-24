@@ -2211,7 +2211,8 @@ def _safe_excel_sheet_name(name: str) -> str:
     """
     s = str(name)
     s = re.sub(r"[:\\/?*\[\]]+", "_", s)
-    s = s.strip()
+    s = re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"_\s+|\s+_", "_", s)
     if not s:
         s = "Sheet"
     return s[:31]

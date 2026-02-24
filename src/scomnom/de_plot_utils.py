@@ -1484,7 +1484,8 @@ def plot_marker_genes_pseudobulk(
             padj_thresh=float(alpha),
             top_n=int(dot_n),
         )
-        genes_by_cluster[str(cl)] = topg
+        key_name = cl_disp if display_groupby else str(cl)
+        genes_by_cluster[str(key_name)] = topg
 
         if topg_dot:
             fig = dotplot_top_genes(
@@ -1724,7 +1725,8 @@ def plot_marker_genes_ranksum(
             padj_thresh=float(alpha),
             top_n=int(top_n_genes),
         )
-        genes_by_cluster[str(cl)] = topg
+        key_name = cl_disp if display_groupby else str(cl)
+        genes_by_cluster[str(key_name)] = topg
 
         topg_dot = _select_top_genes_with_fallback(
             df_plot,
