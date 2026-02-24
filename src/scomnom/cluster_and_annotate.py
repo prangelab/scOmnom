@@ -355,6 +355,16 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                         )
 
                 figdir_cluster = Path("cluster_and_annotate") / str(new_round_id) / "clustering"
+                cats = None
+                try:
+                    cats = list(adata.obs[pretty_key].astype(str).unique())
+                except Exception:
+                    cats = None
+                max_len = max([len(str(x)) for x in cats], default=0) if cats else 0
+                base_w = 6.0
+                base_h = 6.0
+                extra_w = max(0.0, (max_len - 30) * 0.12)
+                extra_w = min(extra_w, 8.0)
                 fig_full = sc.pl.umap(
                     adata,
                     color=pretty_key,
@@ -362,6 +372,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                     show=False,
                     return_fig=True,
                     legend_loc="right margin",
+                    figsize=(base_w + extra_w, base_h),
                 )
                 plot_utils.save_umap_multi("umap_pretty_cluster_label__fulllegend", figdir_cluster, fig_full)
 
@@ -371,7 +382,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                     title=pretty_key,
                     show=False,
                     return_fig=True,
-                    legend_loc="right margin",
+                    legend_loc="none",
                 )
                 ax = fig_overlay.axes[0] if getattr(fig_overlay, "axes", None) else plt.gca()
                 _annotate_cnn(ax, np.asarray(adata.obsm["X_umap"]), adata.obs[pretty_key].astype(str).to_numpy())

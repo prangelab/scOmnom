@@ -1292,6 +1292,15 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr") -> None:
     # Prepare output path
     # ------------------------------------------------------------
     out_path = Path(out_path)
+    if fmt in ("zarr", "h5ad"):
+        desired = f".{fmt}"
+        dup = desired + desired
+        name = out_path.name
+        if name.endswith(dup):
+            while name.endswith(dup):
+                name = name[: -len(desired)]
+            out_path = out_path.with_name(name)
+            LOGGER.warning("save_dataset: normalized duplicate extension for %s", out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------

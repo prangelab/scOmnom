@@ -613,7 +613,7 @@ cluster code (`Cnn`), the second column is the new label.
 ```bash
 scomnom cluster-and-annotate \
   --input-path results/adata.clustered.annotated.projected.markers.zarr \
-  --output-name adata.clustered.annotated.projected.markers.renamed.zarr \
+  --output-name adata.clustered.annotated.projected.markers.renamed \
   --rename-idents-only \
   --rename-idents-file rename.tsv
 ```
