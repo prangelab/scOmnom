@@ -791,16 +791,21 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
     pb_opts: Optional[PseudobulkDEOptions] = None
 
     if regenerate_figures:
-        if run_cell_requested:
-            mk = str(getattr(cfg, "markers_key", "cluster_markers_wilcoxon"))
-            if mk not in adata.uns or not isinstance(adata.uns.get(mk), dict):
-                raise RuntimeError(f"regenerate_figures: markers_key={mk!r} not found in adata.uns.")
-        if run_pb_requested:
-            sk = str(getattr(cfg, "store_key", "scomnom_de"))
-            pb = adata.uns.get(sk, {}).get("pseudobulk_cluster_vs_rest", {})
-            res = pb.get("results", {}) if isinstance(pb, dict) else {}
-            if not isinstance(res, dict) or not res:
-                raise RuntimeError(f"regenerate_figures: no pseudobulk results in adata.uns[{sk!r}].")
+        mk = str(getattr(cfg, "markers_key", "cluster_markers_wilcoxon"))
+        has_cell = mk in adata.uns and isinstance(adata.uns.get(mk), dict)
+        sk = str(getattr(cfg, "store_key", "scomnom_de"))
+        pb = adata.uns.get(sk, {}).get("pseudobulk_cluster_vs_rest", {})
+        res = pb.get("results", {}) if isinstance(pb, dict) else {}
+        has_pb = isinstance(res, dict) and bool(res)
+
+        if not has_cell and not has_pb:
+            raise RuntimeError("regenerate_figures: no cell-level or pseudobulk results found in adata.uns.")
+        if run_cell_requested and not has_cell:
+            LOGGER.warning("regenerate_figures: no cell-level results found; skipping cell-level plots.")
+            run_cell_requested = False
+        if run_pb_requested and not has_pb:
+            LOGGER.warning("regenerate_figures: no pseudobulk results found; skipping pseudobulk plots.")
+            run_pb_requested = False
 
     run_cell = run_cell_requested and not regenerate_figures
 
