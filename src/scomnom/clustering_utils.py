@@ -40,6 +40,8 @@ def _ensure_cluster_rounds(adata: ad.AnnData) -> None:
     adata.uns.setdefault("cluster_rounds", {})
     adata.uns.setdefault("cluster_round_order", [])
     adata.uns.setdefault("active_cluster_round", None)
+    if not isinstance(adata.uns.get("cluster_round_order", None), list):
+        adata.uns["cluster_round_order"] = []
 
 
 def _next_round_index(adata: ad.AnnData) -> int:
@@ -148,6 +150,8 @@ def _register_round(
 
     adata.uns["cluster_rounds"][round_id] = payload
 
+    if not isinstance(adata.uns.get("cluster_round_order", None), list):
+        adata.uns["cluster_round_order"] = []
     if round_id not in adata.uns["cluster_round_order"]:
         adata.uns["cluster_round_order"].append(round_id)
 
