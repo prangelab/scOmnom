@@ -1108,18 +1108,21 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
     # ----------------------------
     # Save dataset
     # ----------------------------
-    if bool(getattr(cfg, "prune_uns_de", True)):
-        _prune_uns_de(adata, store_key=str(getattr(cfg, "store_key", "scomnom_de")))
+    if regenerate_figures:
+        LOGGER.info("cluster-vs-rest: regenerate_figures=True; skipping dataset save.")
+    else:
+        if bool(getattr(cfg, "prune_uns_de", True)):
+            _prune_uns_de(adata, store_key=str(getattr(cfg, "store_key", "scomnom_de")))
 
-    out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.markers_and_de")) + ".zarr")
-    LOGGER.info("within-cluster: saving outputs...")
-    LOGGER.info("Saving dataset → %s", out_zarr)
-    io_utils.save_dataset(adata, out_zarr, fmt="zarr")
+        out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.markers_and_de")) + ".zarr")
+        LOGGER.info("within-cluster: saving outputs...")
+        LOGGER.info("Saving dataset → %s", out_zarr)
+        io_utils.save_dataset(adata, out_zarr, fmt="zarr")
 
-    if bool(getattr(cfg, "save_h5ad", False)):
-        out_h5ad = output_dir / (str(getattr(cfg, "output_name", "adata.markers_and_de")) + ".h5ad")
-        LOGGER.warning("Writing additional H5AD output (loads full matrix into RAM): %s", out_h5ad)
-        io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
+        if bool(getattr(cfg, "save_h5ad", False)):
+            out_h5ad = output_dir / (str(getattr(cfg, "output_name", "adata.markers_and_de")) + ".h5ad")
+            LOGGER.warning("Writing additional H5AD output (loads full matrix into RAM): %s", out_h5ad)
+            io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
 
     LOGGER.info("Finished markers-and-de (cluster-vs-rest).")
     return adata
@@ -1680,14 +1683,17 @@ def run_composition(cfg) -> ad.AnnData:
                     continue
                 _write_outputs(payload)
 
-    out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.da")) + ".zarr")
-    LOGGER.info("Saving dataset → %s", out_zarr)
-    io_utils.save_dataset(adata, out_zarr, fmt="zarr")
+    if regenerate_figures:
+        LOGGER.info("composition: regenerate_figures=True; skipping dataset save.")
+    else:
+        out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.da")) + ".zarr")
+        LOGGER.info("Saving dataset → %s", out_zarr)
+        io_utils.save_dataset(adata, out_zarr, fmt="zarr")
 
-    if bool(getattr(cfg, "save_h5ad", False)):
-        out_h5ad = output_dir / (str(getattr(cfg, "output_name", "adata.da")) + ".h5ad")
-        LOGGER.warning("Writing additional H5AD output (loads full matrix into RAM): %s", out_h5ad)
-        io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
+        if bool(getattr(cfg, "save_h5ad", False)):
+            out_h5ad = output_dir / (str(getattr(cfg, "output_name", "adata.da")) + ".h5ad")
+            LOGGER.warning("Writing additional H5AD output (loads full matrix into RAM): %s", out_h5ad)
+            io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
 
     LOGGER.info("Finished markers-and-de (composition).")
     return adata
@@ -2805,17 +2811,20 @@ def run_within_cluster(cfg) -> ad.AnnData:
     # ----------------------------
     # Save dataset
     # ----------------------------
-    if bool(getattr(cfg, "prune_uns_de", True)):
-        _prune_uns_de(adata, store_key=str(getattr(cfg, "store_key", "scomnom_de")))
+    if regenerate_figures:
+        LOGGER.info("within-cluster: regenerate_figures=True; skipping dataset save.")
+    else:
+        if bool(getattr(cfg, "prune_uns_de", True)):
+            _prune_uns_de(adata, store_key=str(getattr(cfg, "store_key", "scomnom_de")))
 
-    out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.markers_and_de")) + ".zarr")
-    LOGGER.info("Saving dataset → %s", out_zarr)
-    io_utils.save_dataset(adata, out_zarr, fmt="zarr")
+        out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.markers_and_de")) + ".zarr")
+        LOGGER.info("Saving dataset → %s", out_zarr)
+        io_utils.save_dataset(adata, out_zarr, fmt="zarr")
 
-    if bool(getattr(cfg, "save_h5ad", False)):
-        out_h5ad = output_dir / (str(getattr(cfg, "output_name", "adata.markers_and_de")) + ".h5ad")
-        LOGGER.warning("Writing additional H5AD output (loads full matrix into RAM): %s", out_h5ad)
-        io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
+        if bool(getattr(cfg, "save_h5ad", False)):
+            out_h5ad = output_dir / (str(getattr(cfg, "output_name", "adata.markers_and_de")) + ".h5ad")
+            LOGGER.warning("Writing additional H5AD output (loads full matrix into RAM): %s", out_h5ad)
+            io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
 
     LOGGER.info("Finished markers-and-de (within-cluster).")
     return adata
