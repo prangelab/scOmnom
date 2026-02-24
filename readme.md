@@ -612,10 +612,10 @@ cluster code (`Cnn`), the second column is the new label.
 
 ```bash
 scomnom cluster-and-annotate \
-  --input-path results/integrate/adata.integrated.zarr \
-  --output-name adata.clustered.renamed \
+  --input-path results/adata.clustered.annotated.projected.markers.zarr \
+  --output-name adata.clustered.annotated.projected.markers.renamed.zarr \
   --rename-idents-only \
-  --rename-idents-file results/cluster_and_annotate/rename.tsv
+  --rename-idents-file rename.tsv
 ```
 
 Example mapping file (`rename.tsv`):
