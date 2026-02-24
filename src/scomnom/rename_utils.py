@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Dict
 
@@ -8,6 +9,7 @@ import pandas as pd
 
 from .clustering_utils import create_manual_rename_round
 
+LOGGER = logging.getLogger(__name__)
 
 def load_rename_mapping(path: Path) -> Dict[str, str]:
     df = pd.read_csv(path, sep="\t", header=None, dtype=str)
@@ -28,6 +30,8 @@ def rename_idents(
     set_active: bool = True,
     notes: str | None = "Manual rename of pretty labels.",
 ) -> str:
+    for k in sorted(mapping.keys(), key=lambda x: str(x)):
+        LOGGER.info("rename_idents: %s -> %s", str(k), str(mapping[k]))
     return create_manual_rename_round(
         adata,
         mapping=mapping,
