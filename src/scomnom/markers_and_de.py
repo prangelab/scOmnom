@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 import traceback
 from dataclasses import dataclass
@@ -41,6 +42,7 @@ from .composition_utils import (
 )
 
 LOGGER = logging.getLogger(__name__)
+_SCCODA_LOCK = threading.Lock()
 
 # -----------------------------------------------------------------------------
 # Internal policy guard
@@ -1119,17 +1121,18 @@ def run_composition(cfg) -> ad.AnnData:
                 if restrict_mask is not None:
                     adata_sub = adata[restrict_mask].copy()
                 if tag == "sccoda":
-                    res = run_sccoda_model(
-                        adata_sub,
-                        cluster_key=cluster_key,
-                        sample_key=str(sample_key),
-                        condition_key=str(condition_key),
-                        covariates=covariates,
-                        reference_cell_type=reference,
-                        fdr=alpha,
-                        num_samples=n_iterations,
-                        num_warmup=n_warmup,
-                    )
+                    with _SCCODA_LOCK:
+                        res = run_sccoda_model(
+                            adata_sub,
+                            cluster_key=cluster_key,
+                            sample_key=str(sample_key),
+                            condition_key=str(condition_key),
+                            covariates=covariates,
+                            reference_cell_type=reference,
+                            fdr=alpha,
+                            num_samples=n_iterations,
+                            num_warmup=n_warmup,
+                        )
                 elif tag == "glm":
                     res = run_glm_composition(
                         counts,

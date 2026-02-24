@@ -1418,3 +1418,187 @@ def run_BISC(
         cfg.label_key,
     )
     return adata
+
+
+def create_manual_rename_round(
+    adata: ad.AnnData,
+    *,
+    mapping: dict[str, str],
+    parent_round_id: str | None = None,
+    new_round_id: str | None = None,
+    round_suffix: str = "manual_rename",
+    notes: str | None = None,
+    set_active: bool = True,
+) -> str:
+    _ensure_cluster_rounds(adata)
+
+    if not isinstance(mapping, dict) or not mapping:
+        raise ValueError("mapping must be a non-empty dict of Cnn -> new label strings.")
+
+    mapping_norm: dict[str, str] = {}
+    for k, v in mapping.items():
+        if k is None or v is None:
+            raise ValueError("mapping contains None keys or values.")
+        kk = str(k).strip()
+        vv = str(v).strip()
+        if not kk or not vv:
+            raise ValueError("mapping contains empty keys or values.")
+        mapping_norm[kk] = vv
+
+    import re
+    bad_keys = [k for k in mapping_norm.keys() if re.fullmatch(r"C\d+", k) is None]
+    if bad_keys:
+        raise ValueError(f"mapping keys must be strict 'Cnn' format (e.g., C03). Bad keys: {bad_keys}")
+
+    if parent_round_id is None:
+        rid0 = adata.uns.get("active_cluster_round", None)
+        parent_round_id = str(rid0) if rid0 else None
+    if parent_round_id is None:
+        raise KeyError("No parent_round_id provided and adata.uns['active_cluster_round'] is None.")
+
+    rounds = adata.uns.get("cluster_rounds", {})
+    if not isinstance(rounds, dict) or parent_round_id not in rounds:
+        raise KeyError(f"Parent round {parent_round_id!r} not found in adata.uns['cluster_rounds'].")
+
+    parent = rounds[parent_round_id]
+    labels_obs_key = parent.get("labels_obs_key", None)
+    if not labels_obs_key or str(labels_obs_key) not in adata.obs:
+        raise KeyError("Parent round missing labels_obs_key or it is not present in adata.obs.")
+    labels_obs_key = str(labels_obs_key)
+
+    parent_pretty_key = None
+    ann = parent.get("annotation", {}) if isinstance(parent.get("annotation", {}), dict) else {}
+    if isinstance(ann, dict):
+        parent_pretty_key = ann.get("pretty_cluster_key", None)
+    if parent_pretty_key and str(parent_pretty_key) in adata.obs:
+        parent_pretty_key = str(parent_pretty_key)
+    else:
+        fallback = f"{CLUSTER_LABEL_KEY}__{parent_round_id}"
+        if fallback in adata.obs:
+            parent_pretty_key = fallback
+        elif CLUSTER_LABEL_KEY in adata.obs:
+            parent_pretty_key = CLUSTER_LABEL_KEY
+        else:
+            parent_pretty_key = None
+
+    def _cluster_order_by_size(labels: pd.Series) -> list[str]:
+        s = labels.astype(str)
+        vc = s.value_counts(dropna=False)
+        df = pd.DataFrame({"cluster": vc.index.astype(str), "n": vc.values.astype(int)})
+        df["cluster_sort"] = df["cluster"].astype(str)
+        df = df.sort_values(["n", "cluster_sort"], ascending=[False, True], kind="mergesort")
+        return df["cluster"].astype(str).tolist()
+
+    clust_vals = adata.obs[labels_obs_key].astype(str)
+
+    cluster_order = parent.get("cluster_order", None)
+    if not isinstance(cluster_order, list) or not cluster_order:
+        cluster_order = _cluster_order_by_size(clust_vals)
+    cluster_order = [str(c) for c in cluster_order]
+
+    ord_map = {c: f"C{i:02d}" for i, c in enumerate(cluster_order)}
+
+    parent_label_part: dict[str, str] = {}
+    if parent_pretty_key and parent_pretty_key in adata.obs:
+        tmp = pd.DataFrame(
+            {
+                "cluster": clust_vals.to_numpy(),
+                "pretty": adata.obs[parent_pretty_key].astype(str).to_numpy(),
+            },
+            index=adata.obs_names,
+        )
+        for c, g in tmp.groupby("cluster", sort=False):
+            val = str(g["pretty"].iloc[0])
+            if ": " in val:
+                _, lbl = val.split(": ", 1)
+                parent_label_part[str(c)] = lbl
+            else:
+                parent_label_part[str(c)] = val
+
+    parent_display_labels: dict[str, str] = {}
+    for c in cluster_order:
+        ccode = ord_map.get(str(c), "C??")
+        base = parent_label_part.get(str(c), "Unknown")
+        parent_display_labels[str(c)] = f"{ccode}: {base}"
+
+    display_label_by_ccode = {v.split(": ", 1)[0]: v for v in parent_display_labels.values() if ": " in v}
+    missing_ccodes = [k for k in mapping_norm.keys() if k not in display_label_by_ccode]
+    if missing_ccodes:
+        raise ValueError(f"mapping keys not found in parent round: {missing_ccodes}")
+
+    label_part_by_ccode = {cc: lab for cc, lab in mapping_norm.items()}
+
+    def _pretty_for_cluster(c: str) -> str:
+        ccode = ord_map.get(str(c), "C??")
+        base = parent_label_part.get(str(c), "Unknown")
+        if ccode in label_part_by_ccode:
+            base = label_part_by_ccode[ccode]
+        return f"{ccode}: {base}"
+
+    if new_round_id is None:
+        idx = _next_round_index(adata)
+        new_round_id = _make_round_id(idx, round_suffix)
+
+    pretty_key = f"{CLUSTER_LABEL_KEY}__{new_round_id}"
+    if pretty_key in adata.obs:
+        raise ValueError(f"pretty_key '{pretty_key}' already exists in adata.obs.")
+
+    pretty_series = clust_vals.map(lambda c: _pretty_for_cluster(str(c)))
+    pretty_categories = [_pretty_for_cluster(str(c)) for c in cluster_order]
+    adata.obs[pretty_key] = pd.Categorical(pretty_series.astype(str), categories=pretty_categories, ordered=False)
+    adata.obs[CLUSTER_LABEL_KEY] = adata.obs[pretty_key]
+
+    try:
+        from scanpy.plotting.palettes import default_102
+        cats_pretty = list(adata.obs[pretty_key].cat.categories)
+        adata.uns[f"{pretty_key}_colors"] = list(default_102[: len(cats_pretty)])
+        adata.uns[f"{CLUSTER_LABEL_KEY}_colors"] = adata.uns[f"{pretty_key}_colors"]
+    except Exception as e:
+        LOGGER.warning("Could not set pretty-label palette for manual rename: %s", e)
+
+    identity_map = {str(c): str(c) for c in pd.unique(clust_vals.astype(str))}
+
+    _register_round(
+        adata,
+        round_id=str(new_round_id),
+        parent_round_id=str(parent_round_id),
+        cluster_key=str(parent.get("cluster_key", CLUSTER_LABEL_KEY)),
+        labels_obs_key=labels_obs_key,
+        kind="MANUAL_RENAME",
+        best_resolution=None,
+        sweep=None,
+        cfg_snapshot=None,
+        notes=notes,
+        cluster_id_map=identity_map,
+        cluster_renumbering={str(c): str(c) for c in sorted(set(identity_map.values()))},
+        compacting=None,
+        cache_labels=False,
+    )
+
+    rounds = adata.uns.get("cluster_rounds", {})
+    if isinstance(rounds, dict) and new_round_id in rounds and isinstance(rounds[new_round_id], dict):
+        rounds[new_round_id].setdefault("annotation", {})
+        rounds[new_round_id]["annotation"].update(
+            {
+                "pretty_cluster_key": pretty_key,
+                "cluster_key_used": str(labels_obs_key),
+            }
+        )
+        if isinstance(ann, dict):
+            for k in ("celltypist_cell_key", "celltypist_cluster_key"):
+                if k in ann:
+                    rounds[new_round_id]["annotation"][k] = ann[k]
+        rounds[new_round_id]["cluster_order"] = list(map(str, cluster_order))
+        rounds[new_round_id]["cluster_display_map"] = {
+            str(c): _pretty_for_cluster(str(c)) for c in cluster_order
+        }
+        rounds[new_round_id]["manual_rename"] = {
+            "parent_round_id": str(parent_round_id),
+            "mapping": dict(mapping_norm),
+        }
+        adata.uns["cluster_rounds"] = rounds
+
+    if set_active:
+        set_active_round(adata, str(new_round_id), publish_decoupler=False)
+
+    return str(new_round_id)
