@@ -688,6 +688,30 @@ def cluster_and_annotate(
     ),
 
     # -----------------------------
+    # Manual rename (pretty labels only)
+    # -----------------------------
+    rename_idents_file: Optional[Path] = typer.Option(
+        None,
+        "--rename-idents-file",
+        help="[Rename] Two-column, tab-delimited file (no header): Cnn<tab>New Label.",
+    ),
+    rename_idents_only: bool = typer.Option(
+        False,
+        "--rename-idents-only",
+        help="[Rename] If set, only rename pretty labels and exit.",
+    ),
+    rename_idents_round: Optional[str] = typer.Option(
+        None,
+        "--rename-idents-round",
+        help="[Rename] Parent cluster round id (default: active_cluster_round).",
+    ),
+    rename_idents_round_name: str = typer.Option(
+        "manual_rename",
+        "--rename-idents-round-name",
+        help="[Rename] Name for the new manual rename round id.",
+    ),
+
+    # -----------------------------
     # Bio-guided clustering weights
     # -----------------------------
     bio_guided_clustering: bool = typer.Option(
@@ -1010,6 +1034,11 @@ def cluster_and_annotate(
         embedding_key=embedding_key,
         batch_key=batch_key,
         label_key=label_key,
+
+        rename_idents_file=rename_idents_file,
+        rename_idents_only=rename_idents_only,
+        rename_idents_round=rename_idents_round,
+        rename_idents_round_name=rename_idents_round_name,
 
         bio_guided_clustering=bio_guided_clustering,
         w_hom=w_hom,

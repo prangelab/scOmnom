@@ -513,6 +513,14 @@ class ClusterAnnotateConfig(BaseModel):
     logfile: Optional[Path] = None
 
     # ------------------------------------------------------------------
+    # Manual rename (pretty labels only)
+    # ------------------------------------------------------------------
+    rename_idents_file: Optional[Path] = None
+    rename_idents_only: bool = False
+    rename_idents_round: Optional[str] = None
+    rename_idents_round_name: str = "manual_rename"
+
+    # ------------------------------------------------------------------
     # Derived paths (same pattern as IntegrateConfig)
     # ------------------------------------------------------------------
     @property

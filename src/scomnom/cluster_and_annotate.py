@@ -12,7 +12,7 @@ import scanpy as sc
 
 from .config import ClusterAnnotateConfig
 from .logging_utils import init_logging
-from . import io_utils, plot_utils, reporting, ct_utils
+from . import io_utils, plot_utils, reporting, ct_utils, rename_utils
 from .plot_utils import _extract_series
 
 
@@ -273,6 +273,121 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
     """
     init_logging(cfg.logfile)
     LOGGER.info("Starting cluster_and_annotate")
+
+    if getattr(cfg, "rename_idents_only", False):
+        if cfg.rename_idents_file is None:
+            raise ValueError("rename_idents_only=True requires rename_idents_file.")
+        plot_utils.setup_scanpy_figs(cfg.figdir, cfg.figure_formats)
+        adata = io_utils.load_dataset(cfg.input_path)
+        mapping = rename_utils.load_rename_mapping(cfg.rename_idents_file)
+        new_round_id = rename_utils.rename_idents(
+            adata,
+            mapping=mapping,
+            parent_round_id=getattr(cfg, "rename_idents_round", None),
+            round_name=str(getattr(cfg, "rename_idents_round_name", "manual_rename")),
+            set_active=True,
+            notes="Manual rename of pretty labels.",
+        )
+        try:
+            embedding_key = _ensure_embedding(adata, cfg.embedding_key)
+            if "X_umap" not in adata.obsm:
+                sc.pp.neighbors(adata, use_rep=embedding_key)
+                sc.tl.umap(adata)
+        except Exception as e:
+            LOGGER.warning("Rename-only: failed to ensure UMAP; skipping UMAP plots. (%s)", e)
+        else:
+            rounds = adata.uns.get("cluster_rounds", {})
+            pretty_key = f"{CLUSTER_LABEL_KEY}__{new_round_id}"
+            try:
+                if isinstance(rounds, dict) and new_round_id in rounds:
+                    ann = rounds[new_round_id].get("annotation", {})
+                    if isinstance(ann, dict):
+                        pk = ann.get("pretty_cluster_key", None)
+                        if pk and str(pk) in adata.obs:
+                            pretty_key = str(pk)
+            except Exception:
+                pass
+
+            if pretty_key in adata.obs:
+                import numpy as np
+                import re
+                import matplotlib.pyplot as plt
+
+                def _extract_cnn(x: str) -> str:
+                    s = str(x or "")
+                    m = re.search(r"\b(C\d+)\b", s)
+                    if m:
+                        return m.group(1)
+                    m2 = re.search(r"(C\d+)", s)
+                    if m2:
+                        return m2.group(1)
+                    return s.split()[0][:8] if s.strip() else "C?"
+
+                def _unique_stable(arr: np.ndarray) -> list[str]:
+                    seen = set()
+                    out: list[str] = []
+                    for v in arr.tolist():
+                        if v not in seen:
+                            seen.add(v)
+                            out.append(v)
+                    return out
+
+                def _annotate_cnn(ax, X, labels) -> None:
+                    if X.ndim != 2 or X.shape[1] != 2:
+                        return
+                    for lab in _unique_stable(labels):
+                        m = labels == lab
+                        if not np.any(m):
+                            continue
+                        cx = float(np.median(X[m, 0]))
+                        cy = float(np.median(X[m, 1]))
+                        ax.text(
+                            cx,
+                            cy,
+                            _extract_cnn(lab),
+                            ha="center",
+                            va="center",
+                            fontsize=9,
+                            fontweight="bold",
+                            color="black",
+                            bbox=dict(boxstyle="round,pad=0.18", fc="white", ec="none", alpha=0.65),
+                            zorder=10,
+                        )
+
+                figdir_cluster = Path("cluster_and_annotate") / str(new_round_id) / "clustering"
+                fig_full = sc.pl.umap(
+                    adata,
+                    color=pretty_key,
+                    title=pretty_key,
+                    show=False,
+                    return_fig=True,
+                    legend_loc="right margin",
+                )
+                plot_utils.save_umap_multi("umap_pretty_cluster_label__fulllegend", figdir_cluster, fig_full)
+
+                fig_overlay = sc.pl.umap(
+                    adata,
+                    color=pretty_key,
+                    title=pretty_key,
+                    show=False,
+                    return_fig=True,
+                    legend_loc="right margin",
+                )
+                ax = fig_overlay.axes[0] if getattr(fig_overlay, "axes", None) else plt.gca()
+                _annotate_cnn(ax, np.asarray(adata.obsm["X_umap"]), adata.obs[pretty_key].astype(str).to_numpy())
+                plot_utils.save_umap_multi("umap_pretty_cluster_label__overlay_cnn", figdir_cluster, fig_overlay)
+            else:
+                LOGGER.warning("Rename-only: pretty label key '%s' not found; skipping UMAP plots.", pretty_key)
+        out_zarr = cfg.resolved_output_dir / (cfg.output_name + ".zarr")
+        LOGGER.info("Saving renamed dataset as Zarr → %s", out_zarr)
+        io_utils.save_dataset(adata, out_zarr, fmt="zarr")
+        if getattr(cfg, "save_h5ad", False):
+            out_h5ad = cfg.resolved_output_dir / (cfg.output_name + ".h5ad")
+            LOGGER.warning("Writing additional H5AD output (loads full matrix into RAM): %s", out_h5ad)
+            io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
+            LOGGER.info("Saved renamed H5AD → %s", out_h5ad)
+        LOGGER.info("Finished rename-only cluster_and_annotate (new_round_id=%s)", new_round_id)
+        return adata
 
     plot_utils.setup_scanpy_figs(cfg.figdir, cfg.figure_formats)
     adata = io_utils.load_dataset(cfg.input_path)
