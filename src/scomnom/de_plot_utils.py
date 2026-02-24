@@ -769,7 +769,7 @@ def volcano(
     ax.set_ylabel("-log10 adjusted p-value")
 
     if title:
-        ax.set_title(str(title))
+        ax.set_title(str(_wrap_title(title)))
 
     # labels
     if int(top_label_n) > 0:
@@ -801,7 +801,7 @@ def volcano(
 
     ax.grid(True, linestyle=":", linewidth=0.8, alpha=0.6)
 
-    fig.subplots_adjust(left=0.12, right=0.96, top=0.90)
+    fig.subplots_adjust(left=0.12, right=0.98, top=0.90)
     fig.tight_layout()
 
     if show:
@@ -880,14 +880,14 @@ def dotplot_top_genes(
             fig = plt.gcf()
 
     # ---- cosmetics -------------------------------------------------
-    left = 0.25
+    left = 0.32
     try:
         grp = adata.obs[str(groupby)].astype(str)
         max_len = max([len(s) for s in pd.unique(grp)], default=0)
         if max_len > 0:
-            left = min(0.45, 0.20 + max(0.0, (max_len - 20) * 0.005))
+            left = min(0.60, 0.28 + max(0.0, (max_len - 16) * 0.008))
     except Exception:
-        left = 0.25
+        left = 0.32
     fig.subplots_adjust(
         left=left,
         bottom=0.30
@@ -1009,25 +1009,82 @@ def _build_cnn_groupby(
     return key, cnn_to_full
 
 
-def _save_cluster_label_legend(figdir, mapping: Mapping[str, str], *, stem: str = "legend_cluster_labels") -> None:
+def _save_cluster_label_legend(
+    figdir,
+    mapping: Mapping[str, str],
+    *,
+    stem: str = "legend_cluster_labels",
+    color_map: Mapping[str, str] | None = None,
+) -> None:
     if not mapping:
         return
     try:
         from . import plot_utils
+        import matplotlib.patches as mpatches
         items = [(str(k), str(v)) for k, v in mapping.items()]
         items.sort(key=lambda x: x[0])
-        labels = [f"{k}: {v}" for k, v in items]
+        labels = []
+        for k, v in items:
+            if str(v).startswith(f"{k}:") or str(v).startswith(f"{k} "):
+                labels.append(str(v))
+            else:
+                labels.append(f"{k}: {v}")
         n = len(labels)
         max_len = max([len(l) for l in labels], default=0)
         fig_w = max(6.0, min(12.0, 0.16 * float(max_len)))
         fig_h = max(2.5, 0.35 * float(n) + 0.8)
         fig, ax = plt.subplots(figsize=(fig_w, fig_h))
         ax.axis("off")
-        ax.text(0.0, 1.0, "\n".join(labels), ha="left", va="top", fontsize=9)
+        if color_map:
+            handles = []
+            for (k, _), label in zip(items, labels):
+                color = color_map.get(str(k), "#BBBBBB")
+                handles.append(mpatches.Patch(facecolor=color, edgecolor="none", label=label))
+            ax.legend(
+                handles=handles,
+                loc="upper left",
+                frameon=False,
+                fontsize=9,
+                title=None,
+            )
+        else:
+            ax.text(0.0, 1.0, "\n".join(labels), ha="left", va="top", fontsize=9)
         plot_utils.save_multi(stem=str(stem), figdir=figdir, fig=fig)
         plt.close(fig)
     except Exception:
         return
+
+
+def _cnn_color_map(adata, key: str) -> dict[str, str]:
+    try:
+        cats = list(adata.obs[str(key)].astype("category").cat.categories.astype(str))
+        colors = adata.uns.get(f"{key}_colors", None)
+        if isinstance(colors, dict) and "data" in colors:
+            colors = colors["data"]
+        if colors is None:
+            return {}
+        colors = list(np.asarray(colors).astype(str))
+        return {str(cats[i]): str(colors[i]) for i in range(min(len(cats), len(colors)))}
+    except Exception:
+        return {}
+
+
+def _wrap_title(title: str | None, max_len: int = 70) -> str | None:
+    if title is None:
+        return None
+    s = str(title)
+    if len(s) <= max_len:
+        return s
+    if " vs " in s:
+        parts = s.split(" vs ", 1)
+        return f"{parts[0]} vs\n{parts[1]}"
+    mid = len(s) // 2
+    split = s.rfind(" ", 0, mid)
+    if split <= 0:
+        split = s.find(" ", mid)
+    if split <= 0:
+        return s
+    return s[:split].rstrip() + "\n" + s[split + 1 :].lstrip()
 
 
 def heatmap_top_genes(
@@ -1202,7 +1259,7 @@ def heatmap_top_genes(
             )
             ax_top.text(
                 x_centers[i], 1.2, groups[i],
-                ha='left', va='bottom',
+                ha='center', va='bottom',
                 rotation=45,
                 fontsize=11, fontweight='bold',
                 transform=ax_top.get_xaxis_transform(),
@@ -1213,7 +1270,7 @@ def heatmap_top_genes(
         ax_top.axis("off")
 
     # Final margin adjustment to catch the right-most labels
-    fig.subplots_adjust(right=0.85, top=0.85)
+    fig.subplots_adjust(right=0.96, top=0.92)
 
     if show:
         plt.show()
@@ -1682,7 +1739,12 @@ def plot_marker_genes_pseudobulk(
         )
         plot_utils.save_multi(stem="heatmap__marker_genes__all_clusters", figdir=d_heat, fig=fig)
         if cnn_legend_map:
-            _save_cluster_label_legend(d_heat, cnn_legend_map, stem="legend_cluster_labels")
+            _save_cluster_label_legend(
+                d_heat,
+                cnn_legend_map,
+                stem="legend_cluster_labels",
+                color_map=_cnn_color_map(adata, str(cnn_groupby)),
+            )
 
     if cnn_groupby is not None:
         adata.obs.drop(columns=[cnn_groupby], inplace=True, errors="ignore")
@@ -1951,7 +2013,12 @@ def plot_marker_genes_ranksum(
         )
         plot_utils.save_multi(stem="heatmap__marker_genes__all_clusters", figdir=d_heat, fig=fig)
         if cnn_legend_map:
-            _save_cluster_label_legend(d_heat, cnn_legend_map, stem="legend_cluster_labels")
+            _save_cluster_label_legend(
+                d_heat,
+                cnn_legend_map,
+                stem="legend_cluster_labels",
+                color_map=_cnn_color_map(adata, str(cnn_groupby)),
+            )
 
     if cnn_groupby is not None:
         adata.obs.drop(columns=[cnn_groupby], inplace=True, errors="ignore")
