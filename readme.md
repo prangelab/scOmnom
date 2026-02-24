@@ -599,6 +599,47 @@ This design ensures that clustering results are fully reproducible, auditable, a
 
 ---
 
+### Manual renaming of cluster labels
+
+If you want to override the automatic cluster labels with curated names, use the rename-only mode.
+
+This creates a new clustering round that reuses the existing cluster ids, but replaces the labels
+with your manual names. The original labels remain intact and you can switch between rounds by setting
+`active_cluster_round`.
+
+The mapping file must be a two-column, tab-delimited text file with no header. The first column is the
+cluster code (`Cnn`), the second column is the new label.
+
+```bash
+scomnom cluster-and-annotate \
+  --input-path results/integrate/adata.integrated.zarr \
+  --output-name adata.clustered.renamed \
+  --rename-idents-only \
+  --rename-idents-file results/cluster_and_annotate/rename.tsv
+```
+
+Example mapping file (`rename.tsv`):
+
+```
+C03	SOX10+ PMP22+ Schwann cells
+C07	TREM1hi PLIN2hi iLAMs
+```
+
+You can control the new manual label round name with:
+
+```
+--rename-idents-round-name refined_idents
+```
+
+This will create a new round id like `r5_refined_idents`. Default suffix is `manual_rename`
+
+Two UMAPs are emitted for the renamed labels:
+
+* one with a right-side legend only
+* one with a right-side legend plus `Cnn` overlaid on clusters
+
+---
+
 ### BISC: Biology-Informed Structural Clustering
 
 BISC automates Leiden resolution selection by combining structural, stability, and biological signals.
