@@ -768,15 +768,19 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
     # Mode decoding
     # ----------------------------
     mode = str(getattr(cfg, "run", "both")).lower()
-    run_cell = mode in ("cell", "both")
+    run_cell_requested = mode in ("cell", "both")
     run_pb_requested = mode in ("pseudobulk", "both")
+
+    regenerate_figures = bool(getattr(cfg, "regenerate_figures", False))
+    if regenerate_figures and not bool(getattr(cfg, "make_figures", True)):
+        raise RuntimeError("regenerate_figures=True requires make_figures=True.")
 
     # ----------------------------
     # Predefine locals (avoid NameErrors)
     # ----------------------------
     positive_only = bool(getattr(cfg, "positive_only", True))
 
-    markers_key: Optional[str] = None
+    markers_key: Optional[str] = str(getattr(cfg, "markers_key", "cluster_markers_wilcoxon"))
     layer_candidates = list(getattr(cfg, "counts_layers", ("counts_cb", "counts_raw")))
     counts_layer_used: Optional[str] = None
 
@@ -785,6 +789,20 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
 
     pb_spec: Optional[PseudobulkSpec] = None
     pb_opts: Optional[PseudobulkDEOptions] = None
+
+    if regenerate_figures:
+        if run_cell_requested:
+            mk = str(getattr(cfg, "markers_key", "cluster_markers_wilcoxon"))
+            if mk not in adata.uns or not isinstance(adata.uns.get(mk), dict):
+                raise RuntimeError(f"regenerate_figures: markers_key={mk!r} not found in adata.uns.")
+        if run_pb_requested:
+            sk = str(getattr(cfg, "store_key", "scomnom_de"))
+            pb = adata.uns.get(sk, {}).get("pseudobulk_cluster_vs_rest", {})
+            res = pb.get("results", {}) if isinstance(pb, dict) else {}
+            if not isinstance(res, dict) or not res:
+                raise RuntimeError(f"regenerate_figures: no pseudobulk results in adata.uns[{sk!r}].")
+
+    run_cell = run_cell_requested and not regenerate_figures
 
     # ----------------------------
     # 1) Cell-level markers (cluster-vs-rest)
@@ -812,12 +830,15 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
             store=True,
         )
     else:
-        LOGGER.info("cluster-vs-rest: skipping cell-level markers (run=%r).", mode)
+        if regenerate_figures and run_cell_requested:
+            LOGGER.info("cluster-vs-rest: regenerate_figures=True; skipping cell-level computation.")
+        else:
+            LOGGER.info("cluster-vs-rest: skipping cell-level markers (run=%r).", mode)
 
     # ----------------------------
     # 2) Pseudobulk cluster-vs-rest DE (guarded)
     # ----------------------------
-    if run_pb_requested:
+    if run_pb_requested and not regenerate_figures:
         run_pseudobulk = n_samples_total >= _MIN_TOTAL_SAMPLES_FOR_PSEUDOBULK
         if not run_pseudobulk:
             LOGGER.warning(
@@ -871,7 +892,10 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
                 n_jobs=int(getattr(cfg, "n_jobs", 1)),
             )
     else:
-        LOGGER.info("cluster-vs-rest: skipping pseudobulk (run=%r).", mode)
+        if regenerate_figures and run_pb_requested:
+            LOGGER.info("cluster-vs-rest: regenerate_figures=True; skipping pseudobulk computation.")
+        else:
+            LOGGER.info("cluster-vs-rest: skipping pseudobulk (run=%r).", mode)
 
     # ----------------------------
     # Provenance (safe)
@@ -907,7 +931,7 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
     marker_cell_dir = results_dir / "tables" / f"marker_tables_{run_round}" / "cell_based"
     marker_pb_dir = results_dir / "tables" / f"marker_tables_{run_round}" / "pseudobulk_based"
 
-    if run_cell and markers_key:
+    if run_cell and markers_key and not regenerate_figures:
         io_utils.export_rank_genes_groups_tables(
             adata,
             key_added=str(markers_key),
@@ -952,11 +976,12 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
 
     store_key = str(getattr(cfg, "store_key", "scomnom_de"))
 
-    if run_pseudobulk:
+    if run_pseudobulk and not regenerate_figures:
         io_utils.export_pseudobulk_de_tables(
             adata,
             output_dir=output_dir,
             store_key=store_key,
+            display_map=display_map,
             groupby=str(groupby),
             condition_key=None,
             tables_root=marker_pb_dir,
@@ -1002,7 +1027,7 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
     # Plotting (only what ran)
     # ----------------------------
     if bool(getattr(cfg, "make_figures", True)):
-        LOGGER.info("within-cluster: constructing figures...")
+        LOGGER.info("cluster-vs-rest: constructing figures...")
         from . import de_plot_utils
         display_key = None
         display_colors_key = None
@@ -1020,11 +1045,9 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
             dotplot_top_n_genes = int(getattr(cfg, "plot_dotplot_top_n_genes", 15))
             use_raw = bool(getattr(cfg, "plot_use_raw", False))
             layer = getattr(cfg, "plot_layer", None)
-            sample_key = getattr(cfg, "batch_key", None)
-            de_source = str(getattr(cfg, "de_decoupler_source", "auto") or "auto").lower()
             ncols = int(getattr(cfg, "plot_umap_ncols", 3))
 
-            if run_cell and markers_key:
+            if run_cell_requested and markers_key:
                 de_plot_utils.plot_marker_genes_ranksum(
                     adata,
                     groupby=str(groupby),
@@ -1044,7 +1067,7 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
             else:
                 LOGGER.info("cluster-vs-rest: skipping cell-level marker plots (no markers computed).")
 
-            if run_pseudobulk:
+            if run_pb_requested:
                 de_plot_utils.plot_marker_genes_pseudobulk(
                     adata,
                     groupby=str(groupby),
@@ -1130,6 +1153,10 @@ def run_composition(cfg) -> ad.AnnData:
             condition_keys = [str(fallback)]
     if not condition_keys:
         raise RuntimeError("composition: condition_keys is required.")
+
+    regenerate_figures = bool(getattr(cfg, "regenerate_figures", False))
+    if regenerate_figures and not bool(getattr(cfg, "make_figures", True)):
+        raise RuntimeError("regenerate_figures=True requires make_figures=True.")
 
     expanded_conditions: list[tuple[str, Optional[np.ndarray], str]] = []
     for raw_key in condition_keys:
@@ -1312,7 +1339,13 @@ def run_composition(cfg) -> ad.AnnData:
                 "condition_label": str(condition_label),
             }
 
-    def _write_outputs(payload: dict) -> None:
+    def _write_outputs(
+        payload: dict,
+        *,
+        write_tables: bool = True,
+        write_settings: bool = True,
+        write_figures: bool = True,
+    ) -> None:
         condition_key = str(payload["condition_key"])
         condition_label = str(payload["condition_label"])
         counts = payload["counts"]
@@ -1342,6 +1375,11 @@ def run_composition(cfg) -> ad.AnnData:
             "min_mean_prop": min_mean_prop,
             "n_samples": int(counts.shape[0]),
             "n_clusters": int(counts.shape[1]),
+            "results_by_method": results_by_method,
+            "consensus": consensus,
+            "graph_meta_global": graph_meta_global,
+            "counts": counts,
+            "metadata": metadata,
         }
 
         cond_tag = _safe_combo_token(str(condition_label))
@@ -1349,24 +1387,28 @@ def run_composition(cfg) -> ad.AnnData:
         results_dir.mkdir(parents=True, exist_ok=True)
         fig_subdir = Path("DA") / cond_tag
 
-        for method, df in results_by_method.items():
-            if isinstance(df, pd.DataFrame):
-                df.to_csv(results_dir / f"composition_global_{method}.tsv", sep="	")
-        if isinstance(consensus, pd.DataFrame) and not consensus.empty:
-            consensus.to_csv(results_dir / "composition_consensus.tsv", sep="	", index=False)
-        if graph_meta_global is not None and not graph_meta_global.empty:
-            graph_meta_global.to_csv(results_dir / "composition_graph_neighborhoods.tsv", sep="\t", index=False)
-            try:
-                plot_utils.plot_graphda_summaries(
-                    results_by_method.get("graph", pd.DataFrame()),
-                    graph_meta_global,
-                    fig_subdir,
-                    alpha=alpha,
-                )
-            except Exception:
-                LOGGER.exception("composition: failed to plot GraphDA summary")
+        if write_tables:
+            for method, df in results_by_method.items():
+                if isinstance(df, pd.DataFrame):
+                    df.to_csv(results_dir / f"composition_global_{method}.tsv", sep="	")
+            if isinstance(consensus, pd.DataFrame) and not consensus.empty:
+                consensus.to_csv(results_dir / "composition_consensus.tsv", sep="	", index=False)
+            if graph_meta_global is not None and not graph_meta_global.empty:
+                graph_meta_global.to_csv(results_dir / "composition_graph_neighborhoods.tsv", sep="\t", index=False)
 
-        if bool(getattr(cfg, "make_figures", True)):
+        if write_figures and bool(getattr(cfg, "make_figures", True)):
+            if graph_meta_global is not None and not graph_meta_global.empty:
+                try:
+                    plot_utils.plot_graphda_summaries(
+                        results_by_method.get("graph", pd.DataFrame()),
+                        graph_meta_global,
+                        fig_subdir,
+                        alpha=alpha,
+                    )
+                except Exception:
+                    LOGGER.exception("composition: failed to plot GraphDA summary")
+
+        if write_figures and bool(getattr(cfg, "make_figures", True)):
             for method in methods:
                 df = results_by_method.get(method, pd.DataFrame())
                 if df is None or df.empty:
@@ -1390,31 +1432,32 @@ def run_composition(cfg) -> ad.AnnData:
                 except Exception:
                     LOGGER.exception("composition: method plot failed for %s", method)
 
-        _write_settings(
-            results_dir,
-            "composition_settings.txt",
-            [
-                f"methods={list(methods)}",
-                f"primary_method={primary_method}",
-                f"reference={reference}",
-                f"round_id={getattr(cfg, 'round_id', None)}",
-                f"cluster_key={cluster_key}",
-                f"sample_key={sample_key}",
-                f"condition_key={condition_key}",
-                f"covariates={list(covariates)}",
-                f"alpha={alpha}",
-                f"min_mean_prop={min_mean_prop}",
-                f"graph_n_seeds={getattr(cfg, 'composition_graph_n_seeds', None)}",
-                f"graph_k_ref={getattr(cfg, 'composition_graph_k_ref', None)}",
-                f"graph_max_k={getattr(cfg, 'composition_graph_max_k', None)}",
-                f"graph_min_size={getattr(cfg, 'composition_graph_min_size', None)}",
-                f"graph_random_state={getattr(cfg, 'composition_graph_random_state', None)}",
-                f"glm_min_samples_per_level={_MIN_GLM_SAMPLES_PER_LEVEL}",
-                f"glm_min_levels=3",
-            ],
-        )
+        if write_settings:
+            _write_settings(
+                results_dir,
+                "composition_settings.txt",
+                [
+                    f"methods={list(methods)}",
+                    f"primary_method={primary_method}",
+                    f"reference={reference}",
+                    f"round_id={getattr(cfg, 'round_id', None)}",
+                    f"cluster_key={cluster_key}",
+                    f"sample_key={sample_key}",
+                    f"condition_key={condition_key}",
+                    f"covariates={list(covariates)}",
+                    f"alpha={alpha}",
+                    f"min_mean_prop={min_mean_prop}",
+                    f"graph_n_seeds={getattr(cfg, 'composition_graph_n_seeds', None)}",
+                    f"graph_k_ref={getattr(cfg, 'composition_graph_k_ref', None)}",
+                    f"graph_max_k={getattr(cfg, 'composition_graph_max_k', None)}",
+                    f"graph_min_size={getattr(cfg, 'composition_graph_min_size', None)}",
+                    f"graph_random_state={getattr(cfg, 'composition_graph_random_state', None)}",
+                    f"glm_min_samples_per_level={_MIN_GLM_SAMPLES_PER_LEVEL}",
+                    f"glm_min_levels=3",
+                ],
+            )
 
-        if bool(getattr(cfg, "make_figures", True)):
+        if write_figures and bool(getattr(cfg, "make_figures", True)):
             try:
                 global_df = results_by_method.get(primary_method)
                 if isinstance(global_df, pd.DataFrame) and not global_df.empty:
@@ -1466,7 +1509,7 @@ def run_composition(cfg) -> ad.AnnData:
             except Exception:
                 LOGGER.exception("composition: failed to generate plots")
 
-        if bool(getattr(cfg, "make_figures", True)):
+        if write_figures and bool(getattr(cfg, "make_figures", True)):
             try:
                 totals = counts.sum(axis=1).replace(0, np.nan)
                 props = counts.div(totals, axis=0)
@@ -1495,99 +1538,129 @@ def run_composition(cfg) -> ad.AnnData:
             except Exception:
                 LOGGER.exception("composition: failed to plot composition stacks")
 
-    done = 0
-    t0 = time.perf_counter()
-    if expanded_conditions and max_workers > 1:
-        from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+    def _load_payload_from_store(condition_label: str) -> dict:
+        comp_block = adata.uns.get("markers_and_de", {}).get("composition", {})
+        runs = comp_block.get("runs", {})
+        payload = runs.get(str(condition_label))
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"regenerate_figures: missing composition run for {condition_label!r}.")
+        required = ("results_by_method", "consensus", "counts", "metadata")
+        for key in required:
+            if payload.get(key, None) is None:
+                raise RuntimeError(
+                    "regenerate_figures: missing %r for condition_label=%r in adata.uns['markers_and_de']['composition']."
+                    % (str(key), str(condition_label))
+                )
+        return {
+            "status": "ok",
+            "condition_key": payload.get("condition_key", ""),
+            "condition_label": condition_label,
+            "counts": payload.get("counts"),
+            "metadata": payload.get("metadata"),
+            "results_by_method": payload.get("results_by_method", {}),
+            "consensus": payload.get("consensus"),
+            "graph_meta_global": payload.get("graph_meta_global"),
+            "reference": payload.get("reference", ""),
+        }
 
-        heartbeat_s = 60.0
-        next_heartbeat = time.perf_counter() + heartbeat_s
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futs = {
-                ex.submit(_run_condition, ck, mask, label): (ck, label)
-                for ck, mask, label in expanded_conditions
-            }
-            pending = set(futs.keys())
-            start_by_fut = {f: time.perf_counter() for f in pending}
-            while pending:
-                now = time.perf_counter()
-                done_set, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
-                if not done_set:
-                    if now >= next_heartbeat:
+    if regenerate_figures:
+        for _, _, label in expanded_conditions:
+            payload = _load_payload_from_store(label)
+            _write_outputs(payload, write_tables=False, write_settings=False, write_figures=True)
+    else:
+        done = 0
+        t0 = time.perf_counter()
+        if expanded_conditions and max_workers > 1:
+            from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+
+            heartbeat_s = 60.0
+            next_heartbeat = time.perf_counter() + heartbeat_s
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futs = {
+                    ex.submit(_run_condition, ck, mask, label): (ck, label)
+                    for ck, mask, label in expanded_conditions
+                }
+                pending = set(futs.keys())
+                start_by_fut = {f: time.perf_counter() for f in pending}
+                while pending:
+                    now = time.perf_counter()
+                    done_set, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
+                    if not done_set:
+                        if now >= next_heartbeat:
+                            LOGGER.info(
+                                "composition: heartbeat (done=%d/%d, pending=%d).",
+                                int(done),
+                                int(total_tasks),
+                                int(len(pending)),
+                            )
+                            next_heartbeat = now + heartbeat_s
+                        continue
+                    for fut in done_set:
+                        ck, label = futs.get(fut, ("", ""))
+                        t_elapsed = now - start_by_fut.get(fut, now)
+                        try:
+                            payload = fut.result()
+                        except Exception:
+                            LOGGER.exception("composition: task failed (condition_label=%s).", str(label))
+                            done += 1
+                            continue
+                        status = payload.get("status")
+                        if status == "skip":
+                            LOGGER.warning(
+                                "composition: skipping condition_key=%r (%s)",
+                                payload.get("condition_key"),
+                                payload.get("reason"),
+                            )
+                            done += 1
+                        elif status == "error":
+                            LOGGER.error(
+                                "composition: failed condition_key=%r (%s)",
+                                payload.get("condition_key"),
+                                payload.get("reason"),
+                            )
+                            tb = payload.get("traceback")
+                            if tb:
+                                LOGGER.error("composition: traceback\n%s", tb)
+                            done += 1
+                        else:
+                            _write_outputs(payload)
+                            done += 1
+                        elapsed = time.perf_counter() - t0
+                        eta_s = (elapsed / max(1, done)) * (total_tasks - done)
                         LOGGER.info(
-                            "composition: heartbeat (done=%d/%d, pending=%d).",
+                            "composition: progress %d/%d (elapsed=%.1fs, eta=%.1fs).",
                             int(done),
                             int(total_tasks),
-                            int(len(pending)),
+                            elapsed,
+                            eta_s,
                         )
-                        next_heartbeat = now + heartbeat_s
+                        LOGGER.info(
+                            "composition: task finished (condition_key=%s, condition_label=%s, task_s=%.1f).",
+                            str(ck),
+                            str(label),
+                            float(t_elapsed),
+                        )
+        else:
+            for ck, mask, label in expanded_conditions:
+                payload = _run_condition(ck, mask, label)
+                if payload.get("status") == "skip":
+                    LOGGER.warning(
+                        "composition: skipping condition_key=%r (%s)",
+                        payload.get("condition_key"),
+                        payload.get("reason"),
+                    )
                     continue
-                for fut in done_set:
-                    ck, label = futs.get(fut, ("", ""))
-                    t_elapsed = now - start_by_fut.get(fut, now)
-                    try:
-                        payload = fut.result()
-                    except Exception:
-                        LOGGER.exception("composition: task failed (condition_label=%s).", str(label))
-                        done += 1
-                        continue
-                    status = payload.get("status")
-                    if status == "skip":
-                        LOGGER.warning(
-                            "composition: skipping condition_key=%r (%s)",
-                            payload.get("condition_key"),
-                            payload.get("reason"),
-                        )
-                        done += 1
-                    elif status == "error":
-                        LOGGER.error(
-                            "composition: failed condition_key=%r (%s)",
-                            payload.get("condition_key"),
-                            payload.get("reason"),
-                        )
-                        tb = payload.get("traceback")
-                        if tb:
-                            LOGGER.error("composition: traceback\n%s", tb)
-                        done += 1
-                    else:
-                        _write_outputs(payload)
-                        done += 1
-                    elapsed = time.perf_counter() - t0
-                    eta_s = (elapsed / max(1, done)) * (total_tasks - done)
-                    LOGGER.info(
-                        "composition: progress %d/%d (elapsed=%.1fs, eta=%.1fs).",
-                        int(done),
-                        int(total_tasks),
-                        elapsed,
-                        eta_s,
+                if payload.get("status") == "error":
+                    LOGGER.error(
+                        "composition: failed condition_key=%r (%s)",
+                        payload.get("condition_key"),
+                        payload.get("reason"),
                     )
-                    LOGGER.info(
-                        "composition: task finished (condition_key=%s, condition_label=%s, task_s=%.1f).",
-                        str(ck),
-                        str(label),
-                        float(t_elapsed),
-                    )
-    else:
-        for ck, mask, label in expanded_conditions:
-            payload = _run_condition(ck, mask, label)
-            if payload.get("status") == "skip":
-                LOGGER.warning(
-                    "composition: skipping condition_key=%r (%s)",
-                    payload.get("condition_key"),
-                    payload.get("reason"),
-                )
-                continue
-            if payload.get("status") == "error":
-                LOGGER.error(
-                    "composition: failed condition_key=%r (%s)",
-                    payload.get("condition_key"),
-                    payload.get("reason"),
-                )
-                tb = payload.get("traceback")
-                if tb:
-                    LOGGER.error("composition: traceback\n%s", tb)
-                continue
-            _write_outputs(payload)
+                    tb = payload.get("traceback")
+                    if tb:
+                        LOGGER.error("composition: traceback\n%s", tb)
+                    continue
+                _write_outputs(payload)
 
     out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.da")) + ".zarr")
     LOGGER.info("Saving dataset → %s", out_zarr)
@@ -1718,6 +1791,10 @@ def run_within_cluster(cfg) -> ad.AnnData:
         condition_contrasts,
     )
 
+    regenerate_figures = bool(getattr(cfg, "regenerate_figures", False))
+    if regenerate_figures and not bool(getattr(cfg, "make_figures", True)):
+        raise RuntimeError("regenerate_figures=True requires make_figures=True.")
+
     # ----------------------------
     # Mode decoding
     # ----------------------------
@@ -1740,11 +1817,46 @@ def run_within_cluster(cfg) -> ad.AnnData:
 
     store_key = str(getattr(cfg, "store_key", "scomnom_de"))
 
+    if regenerate_figures:
+        block = adata.uns.get(store_key, {})
+        if run_cell_requested:
+            cc_multi = block.get("contrast_conditional_multi", {})
+            if not isinstance(cc_multi, dict) or not cc_multi:
+                raise RuntimeError(f"regenerate_figures: contrast_conditional_multi missing in adata.uns[{store_key!r}].")
+            for condition_key in condition_keys:
+                contrast_key = str(getattr(cfg, "contrast_key", None) or condition_key)
+                if str(contrast_key) not in cc_multi:
+                    raise RuntimeError(
+                        "regenerate_figures: contrast_key=%r missing in adata.uns[%r]['contrast_conditional_multi']."
+                        % (str(contrast_key), str(store_key))
+                    )
+        if run_pb_requested:
+            pb_block = block.get("pseudobulk_condition_within_group_multi", {})
+            if not pb_block:
+                pb_block = block.get("pseudobulk_condition_within_group", {})
+            if not isinstance(pb_block, dict) or not pb_block:
+                raise RuntimeError(
+                    f"regenerate_figures: pseudobulk_condition_within_group missing in adata.uns[{store_key!r}]."
+                )
+            for condition_key in condition_keys:
+                has_key = False
+                for payload in pb_block.values():
+                    if not isinstance(payload, dict):
+                        continue
+                    if str(payload.get("condition_key", "")) == str(condition_key):
+                        has_key = True
+                        break
+                if not has_key:
+                    raise RuntimeError(
+                        "regenerate_figures: no pseudobulk entries for condition_key=%r in adata.uns[%r]."
+                        % (str(condition_key), str(store_key))
+                    )
+
     # ----------------------------
     # 1) Pseudobulk within-cluster DE (guarded)
     # ----------------------------
     ran_pseudobulk = False
-    if run_pb_requested:
+    if run_pb_requested and not regenerate_figures:
         if not pseudobulk_enabled:
             LOGGER.warning(
                 "within-cluster: pseudobulk requested but disabled: only %d unique samples in %r (< %d).",
@@ -2143,13 +2255,15 @@ def run_within_cluster(cfg) -> ad.AnnData:
 
             ran_pseudobulk = True
     else:
+        if regenerate_figures and run_pb_requested:
+            LOGGER.info("within-cluster: regenerate_figures=True; skipping pseudobulk computation.")
         LOGGER.info("within-cluster: skipping pseudobulk (run=%r).", mode)
 
     # ----------------------------
     # 2) Cell-level within-cluster contrasts (NO pseudobulk guard)
     # ----------------------------
     ran_cell_contrast = False
-    if run_cell_requested:
+    if run_cell_requested and not regenerate_figures:
         from .de_utils import ContrastConditionalSpec
 
         total_cpus = int(getattr(cfg, "n_jobs", 1))
@@ -2281,6 +2395,8 @@ def run_within_cluster(cfg) -> ad.AnnData:
             )
         ran_cell_contrast = True
     else:
+        if regenerate_figures and run_cell_requested:
+            LOGGER.info("within-cluster: regenerate_figures=True; skipping cell-level contrast computation.")
         LOGGER.info("within-cluster: skipping cell-level within-cluster contrasts (run=%r).", mode)
 
     # ----------------------------
@@ -2291,7 +2407,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
     if de_source not in ("auto", "all", "pseudobulk", "cell", "none"):
         raise RuntimeError(f"within-cluster: invalid de_decoupler_source={de_source!r}")
 
-    if de_source != "none":
+    if de_source != "none" and not regenerate_figures:
         from .annotation_utils import (
             _run_msigdb_from_stats,
             _run_progeny_from_stats,
@@ -2386,7 +2502,10 @@ def run_within_cluster(cfg) -> ad.AnnData:
 
                     de_decoupler_ran = True
     else:
-        LOGGER.info("within-cluster: skipping DE-decoupler (disabled).")
+        if regenerate_figures and de_source != "none":
+            LOGGER.info("within-cluster: regenerate_figures=True; skipping DE-decoupler computation.")
+        else:
+            LOGGER.info("within-cluster: skipping DE-decoupler (disabled).")
 
     # ----------------------------
     # Provenance (safe)
@@ -2421,7 +2540,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
     # ----------------------------
     # Pseudobulk exports (only if actually ran)
     # ----------------------------
-    if ran_pseudobulk:
+    if ran_pseudobulk and not regenerate_figures:
         covariates = tuple(getattr(cfg, "pb_covariates", ()))
 
         for condition_key in condition_keys:
@@ -2429,6 +2548,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                 adata,
                 output_dir=output_dir,
                 store_key=store_key,
+                display_map=display_map,
                 groupby=str(groupby),
                 condition_key=str(condition_key),
                 tables_root=de_pb_dir,
@@ -2495,6 +2615,10 @@ def run_within_cluster(cfg) -> ad.AnnData:
             )
     else:
         LOGGER.info("within-cluster: skipping pseudobulk exports (not run).")
+
+    if regenerate_figures:
+        ran_pseudobulk = bool(run_pb_requested)
+        ran_cell_contrast = bool(run_cell_requested)
 
     # ----------------------------
     # Plotting (only what ran)

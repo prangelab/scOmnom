@@ -1241,6 +1241,7 @@ def _build_cfg(
     plot_umap_ncols: int,
     plot_gene_filter: Optional[List[str]],
     plot_sample_annotation_keys: Optional[List[str]],
+    regenerate_figures: bool,
 ) -> MarkersAndDEConfig:
     out_dir = output_dir or input_path.parent
     log_dir = out_dir / "logs"
@@ -1265,6 +1266,7 @@ def _build_cfg(
         n_jobs=n_jobs,
         logfile=log_path,
         make_figures=make_figures,
+        regenerate_figures=regenerate_figures,
         figdir_name=figdir_name,
         figure_formats=figure_formats,
         plot_gene_filter=plot_filters,
@@ -1341,6 +1343,7 @@ def _build_cfg_composition(
     save_h5ad: bool,
     n_jobs: int,
     make_figures: bool,
+    regenerate_figures: bool,
     figdir_name: str,
     figure_formats: Sequence[str],
     round_id: Optional[str],
@@ -1382,6 +1385,7 @@ def _build_cfg_composition(
         n_jobs=n_jobs,
         logfile=log_path,
         make_figures=make_figures,
+        regenerate_figures=regenerate_figures,
         figdir_name=figdir_name,
         figure_formats=figure_formats,
         groupby=None,
@@ -1427,6 +1431,11 @@ def cluster_vs_rest(
     n_jobs: int = typer.Option(1, "--n-jobs"),
 
     make_figures: bool = typer.Option(True, "--make-figures/--no-make-figures"),
+    regenerate_figures: bool = typer.Option(
+        False,
+        "--regenerate-figures",
+        help="[Plots] Regenerate figures from stored results only (no recomputation).",
+    ),
     figdir_name: str = typer.Option("figures", "--figdir-name"),
     figure_formats: List[str] = typer.Option(["png", "pdf"], "--figure-formats", "-F"),
 
@@ -1532,6 +1541,7 @@ def cluster_vs_rest(
         n_jobs=n_jobs,
         run=run,
         make_figures=make_figures,
+        regenerate_figures=regenerate_figures,
         figdir_name=figdir_name,
         figure_formats=figure_formats,
         group_key=group_key,
@@ -1613,6 +1623,11 @@ def composition(
     n_jobs: int = typer.Option(1, "--n-jobs"),
 
     make_figures: bool = typer.Option(True, "--make-figures/--no-make-figures"),
+    regenerate_figures: bool = typer.Option(
+        False,
+        "--regenerate-figures",
+        help="[Plots] Regenerate figures from stored results only (no recomputation).",
+    ),
     figdir_name: str = typer.Option("figures", "--figdir-name"),
     figure_formats: List[str] = typer.Option(["png", "pdf"], "--figure-formats", "-F"),
 
@@ -1653,6 +1668,7 @@ def composition(
         save_h5ad=save_h5ad,
         n_jobs=n_jobs,
         make_figures=make_figures,
+        regenerate_figures=regenerate_figures,
         figdir_name=figdir_name,
         figure_formats=figure_formats,
         round_id=round_id,
@@ -1686,6 +1702,11 @@ def within_cluster(
     n_jobs: int = typer.Option(1, "--n-jobs"),
 
     make_figures: bool = typer.Option(True, "--make-figures/--no-make-figures"),
+    regenerate_figures: bool = typer.Option(
+        False,
+        "--regenerate-figures",
+        help="[Plots] Regenerate figures from stored results only (no recomputation).",
+    ),
     figdir_name: str = typer.Option("figures", "--figdir-name"),
     figure_formats: List[str] = typer.Option(["png", "pdf"], "--figure-formats", "-F"),
 
@@ -1861,6 +1882,7 @@ def within_cluster(
         plot_umap_ncols=plot_umap_ncols,
         plot_gene_filter=plot_gene_filter,
         plot_sample_annotation_keys=plot_sample_annotation_keys,
+        regenerate_figures=regenerate_figures,
     )
 
     parsed = _parse_csv_repeat(contrasts)

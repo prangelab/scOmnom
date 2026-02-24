@@ -1990,6 +1990,7 @@ def export_pseudobulk_de_tables(
     *,
     output_dir: Path,
     store_key: str = "scomnom_de",
+    display_map: Optional[dict[str, str]] = None,
     groupby: Optional[str] = None,
     condition_key: Optional[str] = None,
     tables_root: Optional[Path] = None,
@@ -2028,7 +2029,7 @@ def export_pseudobulk_de_tables(
             results_by_cluster = pb.get("results", {})
             if isinstance(results_by_cluster, dict):
                 for cl, df in results_by_cluster.items():
-                    cl_safe = _safe_filename(cl)
+                    cl_safe = _safe_filename(_cnn_label_for_group(str(cl), display_map))
                     out_csv = out_cluster / f"cluster_vs_rest__{cl_safe}.csv"
 
                     if df is None or getattr(df, "empty", True):
@@ -2084,7 +2085,8 @@ def export_pseudobulk_de_tables(
                     except Exception:
                         group_value = str(k)
 
-                stem = f"condition_within_cluster__{_safe_filename(str(group_value) if group_value is not None else str(k))}"
+                group_label = _cnn_label_for_group(str(group_value) if group_value is not None else str(k), display_map)
+                stem = f"condition_within_cluster__{_safe_filename(str(group_label))}"
                 if is_interaction:
                     stem += "__interaction"
                 elif test is not None and ref is not None:
@@ -2189,12 +2191,8 @@ def export_rank_genes_groups_tables(
         df_all.insert(1, "groupby", str(groupby))
     df_all.insert(2, "key_added", str(key_added))
 
-    if "group" in df_all.columns and display_map:
-        disp = df_all["group"].astype(str).map(lambda x: _display_label_for_group(x, display_map))
-        if "group_display" not in df_all.columns:
-            df_all.insert(1, "group_display", disp)
-        else:
-            df_all["group_display"] = disp
+    if "group" in df_all.columns:
+        df_all["group"] = df_all["group"].astype(str).map(lambda x: _cnn_label_for_group(x, display_map))
 
     if "gene" in df_all.columns:
         df_all = _add_gene_type_column(adata, df_all, gene_col="gene")
@@ -2224,6 +2222,17 @@ def _display_label_for_group(group: str, display_map: Optional[dict[str, str]]) 
     return str(group)
 
 
+def _cnn_label_for_group(group: str, display_map: Optional[dict[str, str]]) -> str:
+    label = _display_label_for_group(group, display_map)
+    m = re.search(r"\b(C\d+)\b", str(label))
+    if m:
+        return m.group(1)
+    m2 = re.search(r"(C\d+)", str(label))
+    if m2:
+        return m2.group(1)
+    return str(group)
+
+
 def _sheet_name_for_group(
     group: str,
     *,
@@ -2231,7 +2240,7 @@ def _sheet_name_for_group(
     used: Optional[set[str]] = None,
 ) -> str:
     used = used if used is not None else set()
-    label = _display_label_for_group(group, display_map)
+    label = _cnn_label_for_group(group, display_map)
     sheet = _safe_excel_sheet_name(label)
     if sheet in used:
         sheet = _safe_excel_sheet_name(f"{label}_{group}")
@@ -2465,12 +2474,8 @@ def export_rank_genes_groups_excel(
         df_all.insert(1, "groupby", str(groupby))
     if "key_added" not in df_all.columns:
         df_all.insert(2, "key_added", str(key_added))
-    if "group" in df_all.columns and display_map:
-        disp = df_all["group"].astype(str).map(lambda x: _display_label_for_group(x, display_map))
-        if "group_display" not in df_all.columns:
-            df_all.insert(1, "group_display", disp)
-        else:
-            df_all["group_display"] = disp
+    if "group" in df_all.columns:
+        df_all["group"] = df_all["group"].astype(str).map(lambda x: _cnn_label_for_group(x, display_map))
     if "gene" in df_all.columns:
         df_all = _add_gene_type_column(adata, df_all, gene_col="gene")
 
@@ -2553,7 +2558,8 @@ def export_contrast_conditional_markers_tables(
             if not isinstance(payload, dict):
                 continue
 
-            stem = f"cluster__{_safe_filename(cluster)}__{_safe_filename(pair_key)}"
+            cluster_label = _cnn_label_for_group(str(cluster), display_map)
+            stem = f"cluster__{_safe_filename(cluster_label)}__{_safe_filename(pair_key)}"
             subdir = out_dir / stem
             subdir.mkdir(parents=True, exist_ok=True)
 
