@@ -365,6 +365,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                 base_h = 6.0
                 extra_w = max(0.0, (max_len - 30) * 0.12)
                 extra_w = min(extra_w, 8.0)
+                fig_full, ax_full = plt.subplots(figsize=(base_w + extra_w, base_h))
                 fig_full = sc.pl.umap(
                     adata,
                     color=pretty_key,
@@ -372,10 +373,11 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                     show=False,
                     return_fig=True,
                     legend_loc="right margin",
-                    figsize=(base_w + extra_w, base_h),
+                    ax=ax_full,
                 )
                 plot_utils.save_umap_multi("umap_pretty_cluster_label__fulllegend", figdir_cluster, fig_full)
 
+                fig_overlay, ax_overlay = plt.subplots(figsize=(base_w, base_h))
                 fig_overlay = sc.pl.umap(
                     adata,
                     color=pretty_key,
@@ -383,9 +385,9 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                     show=False,
                     return_fig=True,
                     legend_loc="none",
+                    ax=ax_overlay,
                 )
-                ax = fig_overlay.axes[0] if getattr(fig_overlay, "axes", None) else plt.gca()
-                _annotate_cnn(ax, np.asarray(adata.obsm["X_umap"]), adata.obs[pretty_key].astype(str).to_numpy())
+                _annotate_cnn(ax_overlay, np.asarray(adata.obsm["X_umap"]), adata.obs[pretty_key].astype(str).to_numpy())
                 plot_utils.save_umap_multi("umap_pretty_cluster_label__overlay_cnn", figdir_cluster, fig_overlay)
             else:
                 LOGGER.warning("Rename-only: pretty label key '%s' not found; skipping UMAP plots.", pretty_key)
