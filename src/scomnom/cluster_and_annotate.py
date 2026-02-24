@@ -366,24 +366,22 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                 extra_w = max(0.0, (max_len - 30) * 0.12)
                 extra_w = min(extra_w, 8.0)
                 fig_full, ax_full = plt.subplots(figsize=(base_w + extra_w, base_h))
-                fig_full = sc.pl.umap(
+                sc.pl.umap(
                     adata,
                     color=pretty_key,
                     title=pretty_key,
                     show=False,
-                    return_fig=True,
                     legend_loc="right margin",
                     ax=ax_full,
                 )
                 plot_utils.save_umap_multi("umap_pretty_cluster_label__fulllegend", figdir_cluster, fig_full)
 
                 fig_overlay, ax_overlay = plt.subplots(figsize=(base_w, base_h))
-                fig_overlay = sc.pl.umap(
+                sc.pl.umap(
                     adata,
                     color=pretty_key,
                     title=pretty_key,
                     show=False,
-                    return_fig=True,
                     legend_loc="none",
                     ax=ax_overlay,
                 )
