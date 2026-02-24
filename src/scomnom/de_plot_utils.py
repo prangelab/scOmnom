@@ -809,6 +809,7 @@ def dotplot_top_genes(
     *,
     genes: Sequence[str],
     groupby: str,
+    display_groupby: str | None = None,
     use_raw: bool = False,
     layer: Optional[str] = None,
     standard_scale: Optional[str] = "var",
