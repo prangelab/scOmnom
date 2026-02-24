@@ -2111,6 +2111,7 @@ def export_rank_genes_groups_tables(
     key_added: str,
     output_dir: Path,
     groupby: Optional[str] = None,
+    display_map: Optional[dict[str, str]] = None,
     prefix: str = "celllevel_markers",
     tables_root: Optional[Path] = None,
 ) -> None:
@@ -2188,6 +2189,13 @@ def export_rank_genes_groups_tables(
         df_all.insert(1, "groupby", str(groupby))
     df_all.insert(2, "key_added", str(key_added))
 
+    if "group" in df_all.columns and display_map:
+        disp = df_all["group"].astype(str).map(lambda x: _display_label_for_group(x, display_map))
+        if "group_display" not in df_all.columns:
+            df_all.insert(1, "group_display", disp)
+        else:
+            df_all["group_display"] = disp
+
     if "gene" in df_all.columns:
         df_all = _add_gene_type_column(adata, df_all, gene_col="gene")
 
@@ -2209,11 +2217,35 @@ def _safe_excel_sheet_name(name: str) -> str:
     return s[:31]
 
 
+def _display_label_for_group(group: str, display_map: Optional[dict[str, str]]) -> str:
+    if isinstance(display_map, dict):
+        return str(display_map.get(str(group), str(group)))
+    return str(group)
+
+
+def _sheet_name_for_group(
+    group: str,
+    *,
+    display_map: Optional[dict[str, str]] = None,
+    used: Optional[set[str]] = None,
+) -> str:
+    used = used if used is not None else set()
+    label = _display_label_for_group(group, display_map)
+    sheet = _safe_excel_sheet_name(label)
+    if sheet in used:
+        sheet = _safe_excel_sheet_name(f"{label}_{group}")
+    if sheet in used:
+        sheet = _safe_excel_sheet_name(str(group))
+    used.add(sheet)
+    return sheet
+
+
 def export_pseudobulk_cluster_vs_rest_excel(
     adata: ad.AnnData,
     *,
     output_dir: Path,
     store_key: str = "scomnom_de",
+    display_map: Optional[dict[str, str]] = None,
     filename: str = "cluster_vs_rest.xlsx",
     tables_root: Optional[Path] = None,
 ) -> None:
@@ -2234,8 +2266,9 @@ def export_pseudobulk_cluster_vs_rest_excel(
         return
 
     with pd.ExcelWriter(out_xlsx, engine="xlsxwriter") as writer:
+        used: set[str] = set()
         for cluster, df in results.items():
-            sheet = _safe_excel_sheet_name(cluster)
+            sheet = _sheet_name_for_group(str(cluster), display_map=display_map, used=used)
 
             if df is None or getattr(df, "empty", True):
                 pd.DataFrame(
@@ -2256,6 +2289,7 @@ def export_pseudobulk_condition_within_cluster_excel(
     output_dir: Path,
     store_key: str = "scomnom_de",
     condition_key: str,
+    display_map: Optional[dict[str, str]] = None,
     filename: Optional[str] = None,
     tables_root: Optional[Path] = None,
 ) -> None:
@@ -2314,12 +2348,17 @@ def export_pseudobulk_condition_within_cluster_excel(
         out_xlsx.parent.mkdir(parents=True, exist_ok=True)
 
         with pd.ExcelWriter(out_xlsx, engine="xlsxwriter") as writer:
+            used: set[str] = set()
             for payload in payloads:
                 df = payload.get("results", None)
                 if df is None:
                     continue
                 group_value = payload.get("group_value", "")
-                sheet = _safe_excel_sheet_name(_short_cluster_sheet_name(str(group_value)))
+                sheet = _sheet_name_for_group(
+                    str(group_value),
+                    display_map=display_map,
+                    used=used,
+                )
                 if getattr(df, "empty", True):
                     pd.DataFrame(
                         columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]
@@ -2339,6 +2378,7 @@ def export_rank_genes_groups_excel(
     key_added: str,
     output_dir: Path,
     groupby: Optional[str] = None,
+    display_map: Optional[dict[str, str]] = None,
     filename: Optional[str] = None,
     prefix: str = "celllevel_markers",
     max_genes: Optional[int] = None,
@@ -2424,6 +2464,12 @@ def export_rank_genes_groups_excel(
         df_all.insert(1, "groupby", str(groupby))
     if "key_added" not in df_all.columns:
         df_all.insert(2, "key_added", str(key_added))
+    if "group" in df_all.columns and display_map:
+        disp = df_all["group"].astype(str).map(lambda x: _display_label_for_group(x, display_map))
+        if "group_display" not in df_all.columns:
+            df_all.insert(1, "group_display", disp)
+        else:
+            df_all["group_display"] = disp
     if "gene" in df_all.columns:
         df_all = _add_gene_type_column(adata, df_all, gene_col="gene")
 
@@ -2442,6 +2488,7 @@ def export_rank_genes_groups_excel(
 
     with pd.ExcelWriter(out_xlsx, engine="xlsxwriter") as writer:
         groups = list(pd.unique(df_all["group"].astype(str)))
+        used: set[str] = set()
         for g in groups:
             dfg = df_all[df_all["group"].astype(str) == str(g)].copy()
             if max_genes is not None and max_genes > 0:
@@ -2449,7 +2496,7 @@ def export_rank_genes_groups_excel(
                     dfg = dfg[dfg["gene_type"] == "protein_coding"]
                 dfg = dfg.head(int(max_genes))
             dfg = _drop_redundant_group_cols(dfg)
-            sheet = _safe_excel_sheet_name(str(g))
+            sheet = _sheet_name_for_group(str(g), display_map=display_map, used=used)
             dfg.to_excel(writer, sheet_name=sheet, index=False)
 
 
@@ -2460,6 +2507,7 @@ def export_contrast_conditional_markers_tables(
     *,
     output_dir: Path,
     store_key: str = "scomnom_de",
+    display_map: Optional[dict[str, str]] = None,
     filename: Optional[str] = None,
     tables_root: Optional[Path] = None,
     contrast_key: Optional[str] = None,
@@ -2521,6 +2569,7 @@ def export_contrast_conditional_markers_tables(
 
         out_xlsx = out_dir / (filename or f"{_safe_filename(condition)}_{_safe_filename(pair_key)}_DE.xlsx")
         with pd.ExcelWriter(out_xlsx, engine="xlsxwriter") as writer:
+            used: set[str] = set()
             for cl2, pairs2 in results.items():
                 if not isinstance(pairs2, dict):
                     continue
@@ -2531,7 +2580,7 @@ def export_contrast_conditional_markers_tables(
                 if df is None:
                     continue
 
-                sheet = _safe_excel_sheet_name(_short_cluster_sheet_name(str(cl2)))
+                sheet = _sheet_name_for_group(str(cl2), display_map=display_map, used=used)
                 if getattr(df, "empty", True):
                     pd.DataFrame().to_excel(writer, sheet_name=sheet, index=False)
                 else:
@@ -2547,6 +2596,7 @@ def export_contrast_conditional_markers_tables_multi(
     *,
     output_dir: Path,
     store_key: str = "scomnom_de",
+    display_map: Optional[dict[str, str]] = None,
     filename: Optional[str] = None,
     tables_root: Optional[Path] = None,
     contrast_key: Optional[str] = None,
@@ -2571,6 +2621,7 @@ def export_contrast_conditional_markers_tables_multi(
             adata,
             output_dir=output_dir,
             store_key=store_key,
+            display_map=display_map,
             filename=filename,
             tables_root=tables_root,
             contrast_key=key,

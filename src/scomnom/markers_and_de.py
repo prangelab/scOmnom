@@ -25,7 +25,6 @@ from .de_utils import (
     compute_markers_celllevel,
     de_cluster_vs_rest_pseudobulk,
     pydeseq2_supports_interaction_by_name,
-    resolve_group_key,
 )
 from .composition_utils import (
     _resolve_active_cluster_key,
@@ -617,6 +616,88 @@ def _write_settings(out_dir: Path, name: str, lines: list[str]) -> None:
         f.write("\n".join(lines).rstrip() + "\n")
 
 
+def _resolve_stable_groupby_and_display_map(
+    adata: ad.AnnData,
+    *,
+    groupby: Optional[str],
+    round_id: Optional[str],
+    label_source: str,
+) -> tuple[str, dict[str, str]]:
+    if groupby:
+        if groupby not in adata.obs:
+            raise KeyError(f"groupby={groupby!r} not in adata.obs")
+        return str(groupby), {}
+
+    rid = round_id
+    if rid is None:
+        rid0 = adata.uns.get("active_cluster_round", None)
+        rid = str(rid0) if rid0 else None
+
+    rounds = adata.uns.get("cluster_rounds", {})
+    if not rid or not isinstance(rounds, dict) or rid not in rounds:
+        raise RuntimeError(
+            "markers-and-de: active cluster round not resolved. "
+            f"Resolved round_id={rid!r}, active_round={adata.uns.get('active_cluster_round', None)!r}."
+        )
+
+    rinfo = rounds[rid]
+    labels_obs_key = rinfo.get("labels_obs_key", None)
+    if not labels_obs_key or str(labels_obs_key) not in adata.obs:
+        raise RuntimeError(
+            f"markers-and-de: labels_obs_key not found in adata.obs for round_id={rid!r}."
+        )
+
+    label_source_l = str(label_source or "").lower().strip()
+    display_map = {}
+    if label_source_l == "pretty":
+        disp = rinfo.get("cluster_display_map", None)
+        if isinstance(disp, dict):
+            display_map = {str(k): str(v) for k, v in disp.items()}
+
+    return str(labels_obs_key), display_map
+
+
+def _prepare_display_groupby(
+    adata: ad.AnnData,
+    *,
+    stable_key: str,
+    display_map: dict[str, str],
+) -> tuple[Optional[str], Optional[str]]:
+    if not display_map:
+        return None, None
+
+    labels = adata.obs[stable_key].astype(str)
+    display = labels.map(lambda x: display_map.get(str(x), str(x)))
+
+    if display.nunique(dropna=False) != labels.nunique(dropna=False):
+        LOGGER.warning(
+            "Display labels are not unique; skipping display groupby for plotting."
+        )
+        return None, None
+
+    base = f"{stable_key}__display"
+    key = base
+    i = 1
+    while key in adata.obs:
+        key = f"{base}_{i}"
+        i += 1
+
+    adata.obs[key] = pd.Categorical(display.astype(str))
+
+    color_map = plot_utils._cluster_color_map(adata, stable_key)
+    if color_map:
+        reverse = {}
+        for k, v in display_map.items():
+            reverse[str(v)] = str(k)
+        cats = list(adata.obs[key].cat.categories)
+        colors = []
+        for c in cats:
+            stable = reverse.get(str(c), str(c))
+            colors.append(color_map.get(stable, "#333333"))
+        adata.uns[f"{key}_colors"] = list(colors)
+        return key, f"{key}_colors"
+
+    return key, None
 
 
 # -----------------------------------------------------------------------------
@@ -662,13 +743,13 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
     adata = io_utils.load_dataset(getattr(cfg, "input_path"))
 
     # ----------------------------
-    # Resolve groupby + sample_key
+    # Resolve stable groupby + display labels
     # ----------------------------
-    groupby = resolve_group_key(
+    groupby, display_map = _resolve_stable_groupby_and_display_map(
         adata,
         groupby=getattr(cfg, "groupby", None),
         round_id=getattr(cfg, "round_id", None),
-        prefer_pretty=(str(getattr(cfg, "label_source", "pretty")).lower() == "pretty"),
+        label_source=str(getattr(cfg, "label_source", "pretty")),
     )
 
     sample_key = (
@@ -832,6 +913,7 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
             key_added=str(markers_key),
             output_dir=output_dir,
             groupby=str(groupby),
+            display_map=display_map,
             prefix="celllevel_markers",
             tables_root=marker_cell_dir,
         )
@@ -840,6 +922,7 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
             key_added=str(markers_key),
             output_dir=output_dir,
             groupby=str(groupby),
+            display_map=display_map,
             filename="celllevel_markers.xlsx",
             max_genes=int(getattr(cfg, "markers_n_genes", 100)),
             tables_root=marker_cell_dir,
@@ -882,6 +965,7 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
             adata,
             output_dir=output_dir,
             store_key=store_key,
+            display_map=display_map,
             tables_root=marker_pb_dir,
         )
         covariates = tuple(getattr(cfg, "pb_covariates", ()))
@@ -920,66 +1004,83 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
     if bool(getattr(cfg, "make_figures", True)):
         LOGGER.info("within-cluster: constructing figures...")
         from . import de_plot_utils
-
-        alpha = float(getattr(cfg, "alpha", 0.05))
-        lfc_thresh = float(getattr(cfg, "plot_lfc_thresh", 1.0))
-        top_label_n = int(getattr(cfg, "plot_volcano_top_label_n", 15))
-        top_n_genes = int(getattr(cfg, "plot_top_n_per_cluster", 9))
-        dotplot_top_n_genes = int(getattr(cfg, "plot_dotplot_top_n_genes", 15))
-        use_raw = bool(getattr(cfg, "plot_use_raw", False))
-        layer = getattr(cfg, "plot_layer", None)
-        sample_key = getattr(cfg, "batch_key", None)
-        de_source = str(getattr(cfg, "de_decoupler_source", "auto") or "auto").lower()
-        ncols = int(getattr(cfg, "plot_umap_ncols", 3))
-
-        if run_cell and markers_key:
-            de_plot_utils.plot_marker_genes_ranksum(
-                adata,
-                groupby=str(groupby),
-                markers_key=str(markers_key),
-                alpha=alpha,
-                lfc_thresh=lfc_thresh,
-                top_label_n=top_label_n,
-                top_n_genes=top_n_genes,
-                dotplot_top_n_genes=dotplot_top_n_genes,
-                use_raw=use_raw,
-                layer=layer,
-                umap_ncols=ncols,
-                plot_gene_filter=getattr(cfg, "plot_gene_filter", ()),
-            )
-        else:
-            LOGGER.info("cluster-vs-rest: skipping cell-level marker plots (no markers computed).")
-
-        if run_pseudobulk:
-            de_plot_utils.plot_marker_genes_pseudobulk(
-                adata,
-                groupby=str(groupby),
-                store_key=store_key,
-                alpha=alpha,
-                lfc_thresh=lfc_thresh,
-                top_label_n=top_label_n,
-                top_n_genes=top_n_genes,
-                dotplot_top_n_genes=dotplot_top_n_genes,
-                use_raw=use_raw,
-                layer=layer,
-                umap_ncols=ncols,
-                plot_gene_filter=getattr(cfg, "plot_gene_filter", ()),
-            )
-        else:
-            LOGGER.info("cluster-vs-rest: skipping pseudobulk plots (pseudobulk disabled or not requested).")
-
+        display_key = None
+        display_colors_key = None
         try:
-            for fmt in getattr(cfg, "figure_formats", ["png", "pdf"]):
-                reporting.generate_markers_report(
-                    fig_root=figdir,
-                    fmt=fmt,
-                    cfg=cfg,
-                    version=__version__,
-                    adata=adata,
+            display_key, display_colors_key = _prepare_display_groupby(
+                adata,
+                stable_key=str(groupby),
+                display_map=display_map,
+            )
+
+            alpha = float(getattr(cfg, "alpha", 0.05))
+            lfc_thresh = float(getattr(cfg, "plot_lfc_thresh", 1.0))
+            top_label_n = int(getattr(cfg, "plot_volcano_top_label_n", 15))
+            top_n_genes = int(getattr(cfg, "plot_top_n_per_cluster", 9))
+            dotplot_top_n_genes = int(getattr(cfg, "plot_dotplot_top_n_genes", 15))
+            use_raw = bool(getattr(cfg, "plot_use_raw", False))
+            layer = getattr(cfg, "plot_layer", None)
+            sample_key = getattr(cfg, "batch_key", None)
+            de_source = str(getattr(cfg, "de_decoupler_source", "auto") or "auto").lower()
+            ncols = int(getattr(cfg, "plot_umap_ncols", 3))
+
+            if run_cell and markers_key:
+                de_plot_utils.plot_marker_genes_ranksum(
+                    adata,
+                    groupby=str(groupby),
+                    display_groupby=str(display_key) if display_key else None,
+                    display_map=display_map,
+                    markers_key=str(markers_key),
+                    alpha=alpha,
+                    lfc_thresh=lfc_thresh,
+                    top_label_n=top_label_n,
+                    top_n_genes=top_n_genes,
+                    dotplot_top_n_genes=dotplot_top_n_genes,
+                    use_raw=use_raw,
+                    layer=layer,
+                    umap_ncols=ncols,
+                    plot_gene_filter=getattr(cfg, "plot_gene_filter", ()),
                 )
-            LOGGER.info("Wrote markers report.")
-        except Exception as e:
-            LOGGER.warning("Failed to generate markers report: %s", e)
+            else:
+                LOGGER.info("cluster-vs-rest: skipping cell-level marker plots (no markers computed).")
+
+            if run_pseudobulk:
+                de_plot_utils.plot_marker_genes_pseudobulk(
+                    adata,
+                    groupby=str(groupby),
+                    display_groupby=str(display_key) if display_key else None,
+                    display_map=display_map,
+                    store_key=store_key,
+                    alpha=alpha,
+                    lfc_thresh=lfc_thresh,
+                    top_label_n=top_label_n,
+                    top_n_genes=top_n_genes,
+                    dotplot_top_n_genes=dotplot_top_n_genes,
+                    use_raw=use_raw,
+                    layer=layer,
+                    umap_ncols=ncols,
+                    plot_gene_filter=getattr(cfg, "plot_gene_filter", ()),
+                )
+            else:
+                LOGGER.info("cluster-vs-rest: skipping pseudobulk plots (pseudobulk disabled or not requested).")
+
+            try:
+                for fmt in getattr(cfg, "figure_formats", ["png", "pdf"]):
+                    reporting.generate_markers_report(
+                        fig_root=figdir,
+                        fmt=fmt,
+                        cfg=cfg,
+                        version=__version__,
+                        adata=adata,
+                    )
+                LOGGER.info("Wrote markers report.")
+            except Exception as e:
+                LOGGER.warning("Failed to generate markers report: %s", e)
+        finally:
+            if display_key is not None:
+                adata.obs.drop(columns=[display_key], inplace=True, errors="ignore")
+            if display_colors_key is not None:
+                adata.uns.pop(display_colors_key, None)
 
     # ----------------------------
     # Save dataset
@@ -1543,13 +1644,13 @@ def run_within_cluster(cfg) -> ad.AnnData:
     de_pb_dir = results_dir / "tables" / f"DE_tables_{run_round}" / "pseudobulk_based"
 
     # ----------------------------
-    # Resolve groupby + sample_key
+    # Resolve stable groupby + display labels
     # ----------------------------
-    groupby = resolve_group_key(
+    groupby, display_map = _resolve_stable_groupby_and_display_map(
         adata,
         groupby=getattr(cfg, "groupby", None),
         round_id=getattr(cfg, "round_id", None),
-        prefer_pretty=(str(getattr(cfg, "label_source", "pretty")).lower() == "pretty"),
+        label_source=str(getattr(cfg, "label_source", "pretty")),
     )
 
     sample_key = (
@@ -2128,6 +2229,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                 adata,
                 output_dir=output_dir,
                 store_key=store_key,
+                display_map=display_map,
                 tables_root=de_cell_dir,
                 filename=None,
                 contrast_key=str(contrast_key),
@@ -2336,6 +2438,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                 output_dir=output_dir,
                 store_key=store_key,
                 condition_key=str(condition_key),
+                display_map=display_map,
                 tables_root=de_pb_dir,
             )
             design_terms = ["sample", *covariates, str(condition_key)]
@@ -2448,6 +2551,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                     de_plot_utils.plot_contrast_conditional_markers_multi(
                         adata,
                         groupby=str(groupby),
+                        display_map=display_map,
                         contrast_key=str(getattr(cfg, "contrast_key", None) or condition_key),
                         store_key=store_key,
                         alpha=alpha,
