@@ -1426,7 +1426,7 @@ def create_manual_rename_round(
     mapping: dict[str, str],
     parent_round_id: str | None = None,
     new_round_id: str | None = None,
-    round_suffix: str = "manual_rename",
+    round_name: str = "manual_rename",
     notes: str | None = None,
     set_active: bool = True,
 ) -> str:
@@ -1537,7 +1537,7 @@ def create_manual_rename_round(
 
     if new_round_id is None:
         idx = _next_round_index(adata)
-        new_round_id = _make_round_id(idx, round_suffix)
+        new_round_id = _make_round_id(idx, round_name)
 
     pretty_key = f"{CLUSTER_LABEL_KEY}__{new_round_id}"
     if pretty_key in adata.obs:
