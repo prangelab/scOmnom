@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+import traceback
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -1198,9 +1199,11 @@ def run_composition(cfg) -> ad.AnnData:
                 "reference": reference,
             }
         except Exception as e:
+            tb = traceback.format_exc()
             return {
                 "status": "error",
                 "reason": str(e),
+                "traceback": tb,
                 "condition_key": str(condition_key),
                 "condition_label": str(condition_label),
             }
@@ -1438,6 +1441,9 @@ def run_composition(cfg) -> ad.AnnData:
                             payload.get("condition_key"),
                             payload.get("reason"),
                         )
+                        tb = payload.get("traceback")
+                        if tb:
+                            LOGGER.error("composition: traceback\n%s", tb)
                         done += 1
                     else:
                         _write_outputs(payload)
@@ -1473,6 +1479,9 @@ def run_composition(cfg) -> ad.AnnData:
                     payload.get("condition_key"),
                     payload.get("reason"),
                 )
+                tb = payload.get("traceback")
+                if tb:
+                    LOGGER.error("composition: traceback\n%s", tb)
                 continue
             _write_outputs(payload)
 
