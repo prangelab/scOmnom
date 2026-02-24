@@ -32,22 +32,33 @@ def _extract_cnn_token(label: str) -> str:
     return s.split()[0][:8] if s.strip() else "C?"
 
 
-def _cluster_color_map(adata, label_key: str) -> dict[str, str]:
+def _normalize_color(value) -> str | tuple:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple, np.ndarray)):
+        try:
+            return tuple(float(x) for x in value)
+        except Exception:
+            return str(value)
+    return str(value)
+
+
+def _cluster_color_map(adata, label_key: str) -> dict[str, str | tuple]:
     palette = adata.uns.get(f"{label_key}_colors", None)
     if not palette:
         return {}
     if isinstance(palette, dict):
-        return {str(k): str(v) for k, v in palette.items()}
+        return {str(k): _normalize_color(v) for k, v in palette.items()}
     if hasattr(palette, "to_dict"):
         try:
-            return {str(k): str(v) for k, v in palette.to_dict().items()}
+            return {str(k): _normalize_color(v) for k, v in palette.to_dict().items()}
         except Exception:
             pass
     try:
         cats = list(adata.obs[label_key].cat.categories)
     except Exception:
         cats = list(pd.Series(adata.obs[label_key].astype(str)).unique())
-    return {str(cat): palette[i % len(palette)] for i, cat in enumerate(cats)}
+    return {str(cat): _normalize_color(palette[i % len(palette)]) for i, cat in enumerate(cats)}
 
 
 def _add_outside_legend(
