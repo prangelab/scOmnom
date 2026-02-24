@@ -724,6 +724,13 @@ def volcano(
     if x_cap < float(lfc_thresh):
         x_cap = float(lfc_thresh) * 1.1
     x_pad = 0.05 * x_cap
+    try:
+        if label_genes is not None:
+            max_lab = max([len(str(g)) for g in label_genes], default=0)
+            if max_lab > 0:
+                x_pad = max(x_pad, 0.03 * float(max_lab))
+    except Exception:
+        pass
     x_plot = x.copy()
 
     sig = (tmp_plot[padj_col].to_numpy(dtype=float) < float(padj_thresh)) & (
@@ -794,6 +801,7 @@ def volcano(
 
     ax.grid(True, linestyle=":", linewidth=0.8, alpha=0.6)
 
+    fig.subplots_adjust(left=0.12, right=0.96, top=0.90)
     fig.tight_layout()
 
     if show:
@@ -823,6 +831,18 @@ def dotplot_top_genes(
     import scanpy as sc
 
     _normalize_scanpy_groupby_colors(adata, str(display_groupby or groupby))
+    cnn_groupby = None
+    cnn_legend_map: dict[str, str] = {}
+    try:
+        cnn_groupby, cnn_legend_map = _build_cnn_groupby(
+            adata,
+            groupby=str(groupby),
+            display_map=display_map,
+            display_groupby=str(display_groupby) if display_groupby else None,
+        )
+    except Exception:
+        cnn_groupby = None
+        cnn_legend_map = {}
 
     genes = [str(g) for g in genes if g is not None and str(g) != ""]
     if not genes:
@@ -860,10 +880,17 @@ def dotplot_top_genes(
             fig = plt.gcf()
 
     # ---- cosmetics -------------------------------------------------
-    # 1) avoid cutoff of rotated gene labels
+    left = 0.25
+    try:
+        grp = adata.obs[str(groupby)].astype(str)
+        max_len = max([len(s) for s in pd.unique(grp)], default=0)
+        if max_len > 0:
+            left = min(0.45, 0.20 + max(0.0, (max_len - 20) * 0.005))
+    except Exception:
+        left = 0.25
     fig.subplots_adjust(
-        left=0.25,   # space for long cluster names
-        bottom=0.30  # space for rotated gene labels
+        left=left,
+        bottom=0.30
     )
 
     # 2) remove gridlines everywhere
@@ -879,7 +906,7 @@ def dotplot_top_genes(
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
 
-    fig.tight_layout(rect=(0.25, 0.30, 1, 1))
+    fig.tight_layout(rect=(left, 0.30, 1, 1))
 
     if show:
         plt.show()
@@ -907,6 +934,100 @@ def _normalize_scanpy_groupby_colors(adata, groupby: str) -> None:
         return
 
     adata.uns[k] = colors
+
+
+def _extract_cnn_label(label: str) -> str:
+    s = str(label or "")
+    m = re.search(r"\b(C\d+)\b", s)
+    if m:
+        return m.group(1)
+    m2 = re.search(r"(C\d+)", s)
+    if m2:
+        return m2.group(1)
+    return s.split()[0][:8] if s.strip() else "C?"
+
+
+def _build_cnn_groupby(
+    adata,
+    *,
+    groupby: str,
+    display_map: Mapping[str, str] | None = None,
+    display_groupby: str | None = None,
+    key_suffix: str = "cnn_display",
+) -> tuple[str, dict[str, str]]:
+    if groupby not in adata.obs:
+        raise KeyError(f"groupby={groupby!r} not found in adata.obs")
+
+    labels = adata.obs[groupby].astype(str)
+    groups = pd.Index(pd.unique(labels)).astype(str).tolist()
+
+    full_by_group: dict[str, str] = {}
+    if display_groupby and display_groupby in adata.obs:
+        tmp = pd.DataFrame(
+            {"group": labels.to_numpy(), "disp": adata.obs[display_groupby].astype(str).to_numpy()},
+            index=adata.obs_names,
+        )
+        for g, sub in tmp.groupby("group", sort=False):
+            full_by_group[str(g)] = str(sub["disp"].iloc[0])
+    elif isinstance(display_map, Mapping):
+        for g in groups:
+            full_by_group[str(g)] = str(display_map.get(str(g), str(g)))
+    else:
+        for g in groups:
+            full_by_group[str(g)] = str(g)
+
+    cnn_by_group = {str(g): _extract_cnn_label(full_by_group.get(str(g), str(g))) for g in groups}
+    cnn_labels = labels.map(lambda g: cnn_by_group.get(str(g), str(g)))
+
+    key = f"{groupby}__{key_suffix}"
+    if key in adata.obs:
+        key = f"{key}__{_safe_combo_token(str(groupby))}"
+    adata.obs[key] = pd.Categorical(
+        cnn_labels.astype(str),
+        categories=list(dict.fromkeys(cnn_by_group.values())),
+        ordered=False,
+    )
+
+    # carry colors if possible
+    try:
+        _normalize_scanpy_groupby_colors(adata, str(groupby))
+        colors = adata.uns.get(f"{groupby}_colors", None)
+        if isinstance(colors, dict) and "data" in colors:
+            colors = colors["data"]
+        if colors is not None:
+            colors = list(np.asarray(colors).astype(str))
+            group_cats = pd.Index(adata.obs[groupby].astype("category").cat.categories.astype(str)).tolist()
+            color_map = {str(g): str(colors[i]) for i, g in enumerate(group_cats) if i < len(colors)}
+            new_colors = []
+            for g in groups:
+                new_colors.append(color_map.get(str(g), "#808080"))
+            adata.uns[f"{key}_colors"] = new_colors
+    except Exception:
+        pass
+
+    cnn_to_full = {cnn_by_group[str(g)]: full_by_group.get(str(g), str(g)) for g in groups}
+    return key, cnn_to_full
+
+
+def _save_cluster_label_legend(figdir, mapping: Mapping[str, str], *, stem: str = "legend_cluster_labels") -> None:
+    if not mapping:
+        return
+    try:
+        from . import plot_utils
+        items = [(str(k), str(v)) for k, v in mapping.items()]
+        items.sort(key=lambda x: x[0])
+        labels = [f"{k}: {v}" for k, v in items]
+        n = len(labels)
+        max_len = max([len(l) for l in labels], default=0)
+        fig_w = max(6.0, min(12.0, 0.16 * float(max_len)))
+        fig_h = max(2.5, 0.35 * float(n) + 0.8)
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+        ax.axis("off")
+        ax.text(0.0, 1.0, "\n".join(labels), ha="left", va="top", fontsize=9)
+        plot_utils.save_multi(stem=str(stem), figdir=figdir, fig=fig)
+        plt.close(fig)
+    except Exception:
+        return
 
 
 def heatmap_top_genes(
@@ -1259,6 +1380,18 @@ def violin_genes(
     import matplotlib.pyplot as plt
 
     _normalize_scanpy_groupby_colors(adata, str(groupby))
+    cnn_groupby = None
+    cnn_legend_map: dict[str, str] = {}
+    try:
+        cnn_groupby, cnn_legend_map = _build_cnn_groupby(
+            adata,
+            groupby=str(groupby),
+            display_map=display_map,
+            display_groupby=str(display_groupby) if display_groupby else None,
+        )
+    except Exception:
+        cnn_groupby = None
+        cnn_legend_map = {}
 
     # ---- normalize genes
     if genes is None:
@@ -1411,6 +1544,18 @@ def plot_marker_genes_pseudobulk(
     from . import plot_utils
 
     _normalize_scanpy_groupby_colors(adata, str(groupby))
+    cnn_groupby = None
+    cnn_legend_map: dict[str, str] = {}
+    try:
+        cnn_groupby, cnn_legend_map = _build_cnn_groupby(
+            adata,
+            groupby=str(groupby),
+            display_map=display_map,
+            display_groupby=str(display_groupby) if display_groupby else None,
+        )
+    except Exception:
+        cnn_groupby = None
+        cnn_legend_map = {}
     dot_n = int(dotplot_top_n_genes) if dotplot_top_n_genes is not None else int(top_n_genes)
 
     figroot = Path("markers") / "pseudobulk_markers"
@@ -1484,7 +1629,7 @@ def plot_marker_genes_pseudobulk(
             padj_thresh=float(alpha),
             top_n=int(dot_n),
         )
-        key_name = cl_disp if display_groupby else str(cl)
+        key_name = _extract_cnn_label(cl_disp) if cnn_groupby else (cl_disp if display_groupby else str(cl))
         genes_by_cluster[str(key_name)] = topg
 
         if topg_dot:
@@ -1503,8 +1648,8 @@ def plot_marker_genes_pseudobulk(
             fig = violin_grid_genes(
                 adata,
                 genes=topg,
-                groupby=str(display_groupby or groupby),
-                display_groupby=str(display_groupby or groupby),
+                groupby=str(cnn_groupby or display_groupby or groupby),
+                display_groupby=str(cnn_groupby or display_groupby or groupby),
                 use_raw=bool(use_raw),
                 layer=layer,
                 ncols=int(max(1, umap_ncols)),
@@ -1528,7 +1673,7 @@ def plot_marker_genes_pseudobulk(
         fig = heatmap_top_genes(
             adata,
             genes_by_cluster=genes_by_cluster,
-            groupby=str(display_groupby or groupby),
+            groupby=str(cnn_groupby or display_groupby or groupby),
             use_raw=bool(use_raw),
             layer=layer,
             cmap="bwr",
@@ -1536,6 +1681,12 @@ def plot_marker_genes_pseudobulk(
             show=False,
         )
         plot_utils.save_multi(stem="heatmap__marker_genes__all_clusters", figdir=d_heat, fig=fig)
+        if cnn_legend_map:
+            _save_cluster_label_legend(d_heat, cnn_legend_map, stem="legend_cluster_labels")
+
+    if cnn_groupby is not None:
+        adata.obs.drop(columns=[cnn_groupby], inplace=True, errors="ignore")
+        adata.uns.pop(f"{cnn_groupby}_colors", None)
 
 
 def plot_marker_genes_ranksum(
@@ -1570,6 +1721,18 @@ def plot_marker_genes_ranksum(
     from scanpy.get import rank_genes_groups_df
 
     _normalize_scanpy_groupby_colors(adata, str(display_groupby or groupby))
+    cnn_groupby = None
+    cnn_legend_map: dict[str, str] = {}
+    try:
+        cnn_groupby, cnn_legend_map = _build_cnn_groupby(
+            adata,
+            groupby=str(groupby),
+            display_map=display_map,
+            display_groupby=str(display_groupby) if display_groupby else None,
+        )
+    except Exception:
+        cnn_groupby = None
+        cnn_legend_map = {}
     dot_n = int(dotplot_top_n_genes) if dotplot_top_n_genes is not None else int(top_n_genes)
 
     figroot = Path("markers") / "cell_level_markers"
@@ -1725,7 +1888,7 @@ def plot_marker_genes_ranksum(
             padj_thresh=float(alpha),
             top_n=int(top_n_genes),
         )
-        key_name = cl_disp if display_groupby else str(cl)
+        key_name = _extract_cnn_label(cl_disp) if cnn_groupby else (cl_disp if display_groupby else str(cl))
         genes_by_cluster[str(key_name)] = topg
 
         topg_dot = _select_top_genes_with_fallback(
@@ -1753,8 +1916,8 @@ def plot_marker_genes_ranksum(
             fig = violin_grid_genes(
                 adata,
                 genes=topg,
-                groupby=str(display_groupby or groupby),
-                display_groupby=str(display_groupby or groupby),
+                groupby=str(cnn_groupby or display_groupby or groupby),
+                display_groupby=str(cnn_groupby or display_groupby or groupby),
                 use_raw=bool(use_raw),
                 layer=layer,
                 ncols=int(max(1, umap_ncols)),
@@ -1778,7 +1941,7 @@ def plot_marker_genes_ranksum(
         fig = heatmap_top_genes(
             adata,
             genes_by_cluster=genes_by_cluster,
-            groupby=str(display_groupby or groupby),
+            groupby=str(cnn_groupby or display_groupby or groupby),
             use_raw=bool(use_raw),
             layer=layer,
             cmap="bwr",
@@ -1787,6 +1950,12 @@ def plot_marker_genes_ranksum(
             show=False,
         )
         plot_utils.save_multi(stem="heatmap__marker_genes__all_clusters", figdir=d_heat, fig=fig)
+        if cnn_legend_map:
+            _save_cluster_label_legend(d_heat, cnn_legend_map, stem="legend_cluster_labels")
+
+    if cnn_groupby is not None:
+        adata.obs.drop(columns=[cnn_groupby], inplace=True, errors="ignore")
+        adata.uns.pop(f"{cnn_groupby}_colors", None)
 
 
 def plot_condition_within_cluster(

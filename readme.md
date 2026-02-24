@@ -987,6 +987,26 @@ Markers are computed per cluster against all other cells. The module supports **
 
 Within-cluster DE compares **condition levels inside each cluster**, e.g. `treated vs control` within each cell type. You can provide a single `--condition-key` or multiple `--condition-keys`, plus optional explicit contrasts (`--contrasts`).
 
+**Condition key syntax**
+
+| Syntax | Meaning | Resulting behavior                                                           |
+| --- | --- |------------------------------------------------------------------------------|
+| `A` | Single obs key | Compare levels of `A` within each cluster                                    |
+| `A:B` | Composite key | Create a combined key across **all combinations** of `A` and `B` levels      |
+| `A@B` | Within‑B | Run **A within each level of B** (usually what you want)                     |
+| `A^B` | Interaction | Run interaction contrasts between A and B (requires a pseudobulk DESeq2 run) |
+
+**Examples**
+
+* `--condition-keys treatment`  
+  Compare treatment levels within each cluster.
+* `--condition-keys MASLD:sex`  
+  Full combinations of MASLD × sex.
+* `--condition-keys treatment@sex`  
+  Treatment contrasts within each sex.
+* `--condition-keys treatment^sex`  
+  Treatment‑by‑sex interaction contrasts.
+
 **Cell-level within-cluster DE**
 
 * Runs contrast-conditional markers per cluster using `wilcoxon` and `logreg` (configurable).
@@ -1024,6 +1044,10 @@ Running both can be informative: cell-level for discovery, pseudobulk for robust
 ### DA (differential abundance / composition)
 
 The DA submodule tests whether **cluster proportions change across conditions**. It works on per-sample cell-type counts and provides multiple backends, each with different assumptions:
+
+**Condition key syntax (DA)**
+
+DA supports the same `A` and `A:B` composite syntax as DE, plus `A@B` to run `A` within each `B` level. Interaction syntax (`A^B`) is **DE-only**. See the DE section above for examples.
 
 **Reference selection**
 
