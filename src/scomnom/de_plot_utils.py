@@ -853,6 +853,15 @@ def dotplot_top_genes(
             plt.show()
         return fig
 
+    if figsize is None:
+        try:
+            n_groups = int(adata.obs[str(groupby)].astype(str).nunique())
+        except Exception:
+            n_groups = 1
+        fig_w = max(10.0, 0.35 * float(len(genes)) + 6.0)
+        fig_h = max(4.0, 0.35 * float(n_groups) + 2.5)
+        figsize = (fig_w, fig_h)
+
     ret = sc.pl.dotplot(
         adata,
         var_names=genes,
@@ -888,9 +897,17 @@ def dotplot_top_genes(
             left = min(0.60, 0.28 + max(0.0, (max_len - 16) * 0.008))
     except Exception:
         left = 0.32
+    right = 0.78
+    try:
+        n_axes = len(fig.axes) if hasattr(fig, "axes") else 1
+        if n_axes <= 2:
+            right = 0.85
+    except Exception:
+        right = 0.78
     fig.subplots_adjust(
         left=left,
-        bottom=0.30
+        bottom=0.30,
+        right=right,
     )
 
     # 2) remove gridlines everywhere
@@ -906,7 +923,7 @@ def dotplot_top_genes(
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
 
-    fig.tight_layout(rect=(left, 0.30, 1, 1))
+    fig.tight_layout(rect=(left, 0.30, right, 1))
 
     if show:
         plt.show()
