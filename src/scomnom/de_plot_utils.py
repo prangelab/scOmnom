@@ -880,14 +880,17 @@ def dotplot_top_genes(
             fig = plt.gcf()
 
     # ---- cosmetics -------------------------------------------------
-    left = 0.32
+    left = 0.22
     try:
         grp = adata.obs[str(groupby)].astype(str)
         max_len = max([len(s) for s in pd.unique(grp)], default=0)
         if max_len > 0:
-            left = min(0.60, 0.28 + max(0.0, (max_len - 16) * 0.008))
+            fig_w, _ = fig.get_size_inches()
+            left_in = 0.6 + (0.055 * float(max_len))
+            left = left_in / max(fig_w, 1.0)
+            left = max(0.18, min(0.32, left))
     except Exception:
-        left = 0.32
+        left = 0.22
     try:
         n_groups = int(adata.obs[str(groupby)].astype(str).nunique())
     except Exception:
@@ -897,10 +900,11 @@ def dotplot_top_genes(
     min_h = max(5.5, 0.33 * float(n_groups) + 2.8)
     if fig_w < min_w or fig_h < min_h:
         fig.set_size_inches(max(fig_w, min_w), max(fig_h, min_h))
+    right = 0.90
     fig.subplots_adjust(
         left=left,
         bottom=0.30,
-        right=0.86,
+        right=right,
     )
 
     # 2) remove gridlines everywhere
@@ -916,7 +920,7 @@ def dotplot_top_genes(
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
 
-    fig.tight_layout(rect=(left, 0.30, 0.86, 1))
+    fig.tight_layout(rect=(left, 0.30, right, 1))
 
     try:
         legend_axes = []
@@ -926,8 +930,8 @@ def dotplot_top_genes(
                 legend_axes.append(ax)
         if legend_axes:
             # place legends in the reserved right strip (no overlap with main plot)
-            strip_left = 0.89
-            strip_width = 0.08
+            strip_left = 0.92
+            strip_width = 0.06
             for ax in legend_axes:
                 pos = ax.get_position()
                 ax.set_position([strip_left, pos.y0, strip_width, pos.height])
