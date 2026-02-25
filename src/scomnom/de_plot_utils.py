@@ -853,15 +853,6 @@ def dotplot_top_genes(
             plt.show()
         return fig
 
-    if figsize is None:
-        try:
-            n_groups = int(adata.obs[str(groupby)].astype(str).nunique())
-        except Exception:
-            n_groups = 1
-        fig_w = max(10.0, 0.35 * float(len(genes)) + 6.0)
-        fig_h = max(4.0, 0.35 * float(n_groups) + 2.5)
-        figsize = (fig_w, fig_h)
-
     ret = sc.pl.dotplot(
         adata,
         var_names=genes,
@@ -897,17 +888,9 @@ def dotplot_top_genes(
             left = min(0.60, 0.28 + max(0.0, (max_len - 16) * 0.008))
     except Exception:
         left = 0.32
-    right = 0.78
-    try:
-        n_axes = len(fig.axes) if hasattr(fig, "axes") else 1
-        if n_axes <= 2:
-            right = 0.85
-    except Exception:
-        right = 0.78
     fig.subplots_adjust(
         left=left,
         bottom=0.30,
-        right=right,
     )
 
     # 2) remove gridlines everywhere
@@ -923,7 +906,24 @@ def dotplot_top_genes(
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
 
-    fig.tight_layout(rect=(left, 0.30, right, 1))
+    fig.tight_layout(rect=(left, 0.30, 0.98, 1))
+
+    try:
+        legend_axes = []
+        for ax in fig.axes:
+            title = ax.get_title()
+            if "Fraction of cells" in title or "Mean expression" in title:
+                legend_axes.append(ax)
+        if legend_axes:
+            base_x0 = 0.82
+            width = 0.14
+            for ax in legend_axes:
+                pos = ax.get_position()
+                ax.set_position([base_x0, pos.y0, width, pos.height])
+                ax.tick_params(labelsize=8)
+                base_x0 = min(0.92, base_x0 + 0.02)
+    except Exception:
+        pass
 
     if show:
         plt.show()
