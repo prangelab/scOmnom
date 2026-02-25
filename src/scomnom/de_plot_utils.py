@@ -888,9 +888,19 @@ def dotplot_top_genes(
             left = min(0.60, 0.28 + max(0.0, (max_len - 16) * 0.008))
     except Exception:
         left = 0.32
+    try:
+        n_groups = int(adata.obs[str(groupby)].astype(str).nunique())
+    except Exception:
+        n_groups = 1
+    fig_w, fig_h = fig.get_size_inches()
+    min_w = max(10.0, 0.30 * float(len(genes)) + 6.0)
+    min_h = max(4.5, 0.30 * float(n_groups) + 2.5)
+    if fig_w < min_w or fig_h < min_h:
+        fig.set_size_inches(max(fig_w, min_w), max(fig_h, min_h))
     fig.subplots_adjust(
         left=left,
         bottom=0.30,
+        right=0.72,
     )
 
     # 2) remove gridlines everywhere
@@ -906,7 +916,7 @@ def dotplot_top_genes(
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
 
-    fig.tight_layout(rect=(left, 0.30, 0.98, 1))
+    fig.tight_layout(rect=(left, 0.30, 0.72, 1))
 
     try:
         legend_axes = []
@@ -915,13 +925,13 @@ def dotplot_top_genes(
             if "Fraction of cells" in title or "Mean expression" in title:
                 legend_axes.append(ax)
         if legend_axes:
-            base_x0 = 0.82
-            width = 0.14
+            # place legends in the reserved right strip (no overlap with main plot)
+            strip_left = 0.76
+            strip_width = 0.20
             for ax in legend_axes:
                 pos = ax.get_position()
-                ax.set_position([base_x0, pos.y0, width, pos.height])
+                ax.set_position([strip_left, pos.y0, strip_width, pos.height])
                 ax.tick_params(labelsize=8)
-                base_x0 = min(0.92, base_x0 + 0.02)
     except Exception:
         pass
 
