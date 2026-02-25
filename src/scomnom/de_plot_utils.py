@@ -880,32 +880,32 @@ def dotplot_top_genes(
             fig = plt.gcf()
 
     # ---- cosmetics -------------------------------------------------
-    left = 0.22
-    try:
-        grp = adata.obs[str(groupby)].astype(str)
-        max_len = max([len(s) for s in pd.unique(grp)], default=0)
-        if max_len > 0:
-            fig_w, _ = fig.get_size_inches()
-            left_in = 0.6 + (0.055 * float(max_len))
-            left = left_in / max(fig_w, 1.0)
-            left = max(0.18, min(0.32, left))
-    except Exception:
-        left = 0.22
     try:
         n_groups = int(adata.obs[str(groupby)].astype(str).nunique())
     except Exception:
         n_groups = 1
     fig_w, fig_h = fig.get_size_inches()
-    min_w = max(20.0, 0.75 * float(len(genes)) + 12.0)
-    min_h = max(7.0, 0.45 * float(n_groups) + 3.5)
+    min_w = max(22.0, 0.85 * float(len(genes)) + 12.0)
+    min_h = max(8.0, 0.55 * float(n_groups) + 3.5)
     if fig_w < min_w or fig_h < min_h:
         fig.set_size_inches(max(fig_w, min_w), max(fig_h, min_h))
-    right = 0.90
+    left = 0.20
+    try:
+        grp = adata.obs[str(groupby)].astype(str)
+        max_len = max([len(s) for s in pd.unique(grp)], default=0)
+        if max_len > 0:
+            fig_w, _ = fig.get_size_inches()
+            left_in = 0.5 + (0.05 * float(max_len))
+            left = left_in / max(fig_w, 1.0)
+            left = max(0.16, min(0.30, left))
+    except Exception:
+        left = 0.20
+    right = 0.92
     fig.subplots_adjust(
         left=left,
-        bottom=0.22,
+        bottom=0.18,
         right=right,
-        top=0.96,
+        top=0.98,
     )
 
     # 2) remove gridlines everywhere
@@ -921,7 +921,7 @@ def dotplot_top_genes(
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
 
-    fig.tight_layout(rect=(left, 0.22, right, 0.96))
+    fig.tight_layout(rect=(left, 0.18, right, 0.98))
 
     try:
         legend_axes = []
