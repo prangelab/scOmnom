@@ -901,8 +901,8 @@ def dotplot_top_genes(
     except Exception:
         left = 0.16
     bottom = 0.14
-    top = 0.96
-    main_right = 0.86
+    top = 0.93
+    main_right = 0.88
     fig.subplots_adjust(
         left=left,
         bottom=bottom,
@@ -953,14 +953,14 @@ def dotplot_top_genes(
                 continue
             if len(ax.get_xticks()) == 0 and len(ax.get_yticks()) == 0:
                 dendro_axes.append(ax)
-        dendro_left = main_right + 0.005
+        dendro_left = main_right + 0.002
         dendro_width = 0.035
         for ax in dendro_axes:
             pos = ax.get_position()
             ax.set_position([dendro_left, pos.y0, dendro_width, pos.height])
         if legend_axes:
-            strip_left = dendro_left + dendro_width + 0.005
-            strip_width = 0.07
+            strip_left = dendro_left + dendro_width + 0.003
+            strip_width = 0.055
             for ax in legend_axes:
                 pos = ax.get_position()
                 ax.set_position([strip_left, pos.y0, strip_width, pos.height])
