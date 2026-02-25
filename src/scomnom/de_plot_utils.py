@@ -889,20 +889,20 @@ def dotplot_top_genes(
     min_h = max(6.5, 0.40 * float(n_groups) + 3.0)
     if fig_w < min_w or fig_h < min_h:
         fig.set_size_inches(max(fig_w, min_w), max(fig_h, min_h))
-    left = 0.18
+    left = 0.20
     try:
         grp = adata.obs[str(groupby)].astype(str)
         max_len = max([len(s) for s in pd.unique(grp)], default=0)
         if max_len > 0:
             fig_w, _ = fig.get_size_inches()
-            left_in = 0.35 + (0.055 * float(max_len))
+            left_in = 0.45 + (0.06 * float(max_len))
             left = left_in / max(fig_w, 1.0)
-            left = max(0.18, min(0.30, left))
+            left = max(0.20, min(0.34, left))
     except Exception:
-        left = 0.18
+        left = 0.20
     bottom = 0.12
     top = 0.98
-    main_right = 0.90
+    main_right = 0.905
     fig.subplots_adjust(
         left=left,
         bottom=bottom,
@@ -962,8 +962,8 @@ def dotplot_top_genes(
         for ax in dendro_axes:
             ax.set_position([dendro_left, bottom, dendro_width, main_height])
         if legend_axes:
-            strip_left = dendro_left + dendro_width + 0.005
-            strip_width = 0.06
+            strip_left = dendro_left + dendro_width + 0.004
+            strip_width = 0.07
             for ax in legend_axes:
                 pos = ax.get_position()
                 ax.set_position([strip_left, pos.y0, strip_width, pos.height])
@@ -973,10 +973,10 @@ def dotplot_top_genes(
 
     try:
         for ax in fig.axes:
-            ax.tick_params(axis="x", labelsize=8)
-            ax.tick_params(axis="y", labelsize=9)
+            ax.tick_params(axis="x", labelsize=9)
+            ax.tick_params(axis="y", labelsize=10)
         if main_ax is not None:
-            size_factor = 1.6 if len(genes) <= 25 and n_groups <= 25 else 1.3
+            size_factor = 2.0 if len(genes) <= 25 and n_groups <= 25 else 1.5
             for coll in getattr(main_ax, "collections", []):
                 if hasattr(coll, "get_sizes") and hasattr(coll, "set_sizes"):
                     sizes = np.asarray(coll.get_sizes(), dtype=float)
