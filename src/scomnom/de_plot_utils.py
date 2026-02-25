@@ -885,27 +885,29 @@ def dotplot_top_genes(
     except Exception:
         n_groups = 1
     fig_w, fig_h = fig.get_size_inches()
-    min_w = max(22.0, 0.85 * float(len(genes)) + 12.0)
-    min_h = max(9.0, 0.75 * float(n_groups) + 4.0)
+    min_w = max(16.0, 0.55 * float(len(genes)) + 8.0)
+    min_h = max(6.5, 0.40 * float(n_groups) + 3.0)
     if fig_w < min_w or fig_h < min_h:
         fig.set_size_inches(max(fig_w, min_w), max(fig_h, min_h))
-    left = 0.20
+    left = 0.16
     try:
         grp = adata.obs[str(groupby)].astype(str)
         max_len = max([len(s) for s in pd.unique(grp)], default=0)
         if max_len > 0:
             fig_w, _ = fig.get_size_inches()
-            left_in = 0.5 + (0.05 * float(max_len))
+            left_in = 0.25 + (0.045 * float(max_len))
             left = left_in / max(fig_w, 1.0)
-            left = max(0.16, min(0.30, left))
+            left = max(0.10, min(0.26, left))
     except Exception:
-        left = 0.20
-    right = 0.93
+        left = 0.16
+    bottom = 0.14
+    top = 0.96
+    main_right = 0.86
     fig.subplots_adjust(
         left=left,
-        bottom=0.14,
-        right=right,
-        top=0.99,
+        bottom=bottom,
+        right=main_right,
+        top=top,
     )
 
     # 2) remove gridlines everywhere
@@ -921,18 +923,44 @@ def dotplot_top_genes(
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
 
-    fig.tight_layout(rect=(left, 0.14, right, 0.99))
+    fig.tight_layout(rect=(left, bottom, main_right, top))
 
     try:
         legend_axes = []
+        main_ax = None
+        main_score = -1
+        for ax in fig.axes:
+            title = ax.get_title()
+            if "Fraction of cells" in title or "Mean expression" in title:
+                continue
+            if not ax.get_visible():
+                continue
+            xlab = [t.get_text() for t in ax.get_xticklabels() if t.get_text()]
+            ylab = [t.get_text() for t in ax.get_yticklabels() if t.get_text()]
+            score = len(xlab) + len(ylab)
+            if score > main_score:
+                main_score = score
+                main_ax = ax
         for ax in fig.axes:
             title = ax.get_title()
             if "Fraction of cells" in title or "Mean expression" in title:
                 legend_axes.append(ax)
+        dendro_axes = []
+        for ax in fig.axes:
+            if ax in legend_axes or ax is main_ax:
+                continue
+            if not ax.get_visible():
+                continue
+            if len(ax.get_xticks()) == 0 and len(ax.get_yticks()) == 0:
+                dendro_axes.append(ax)
+        dendro_left = main_right + 0.005
+        dendro_width = 0.035
+        for ax in dendro_axes:
+            pos = ax.get_position()
+            ax.set_position([dendro_left, pos.y0, dendro_width, pos.height])
         if legend_axes:
-            # place legends in the reserved right strip (no overlap with main plot)
-            strip_left = 0.935
-            strip_width = 0.05
+            strip_left = dendro_left + dendro_width + 0.005
+            strip_width = 0.07
             for ax in legend_axes:
                 pos = ax.get_position()
                 ax.set_position([strip_left, pos.y0, strip_width, pos.height])
@@ -942,11 +970,15 @@ def dotplot_top_genes(
 
     try:
         for ax in fig.axes:
-            for coll in getattr(ax, "collections", []):
+            ax.tick_params(axis="x", labelsize=8)
+            ax.tick_params(axis="y", labelsize=9)
+        if main_ax is not None:
+            size_factor = 1.6 if len(genes) <= 25 and n_groups <= 25 else 1.3
+            for coll in getattr(main_ax, "collections", []):
                 if hasattr(coll, "get_sizes") and hasattr(coll, "set_sizes"):
                     sizes = np.asarray(coll.get_sizes(), dtype=float)
                     if sizes.size > 0:
-                        coll.set_sizes(sizes * 2.0)
+                        coll.set_sizes(sizes * size_factor)
     except Exception:
         pass
 
