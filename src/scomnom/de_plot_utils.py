@@ -889,20 +889,20 @@ def dotplot_top_genes(
     min_h = max(6.5, 0.40 * float(n_groups) + 3.0)
     if fig_w < min_w or fig_h < min_h:
         fig.set_size_inches(max(fig_w, min_w), max(fig_h, min_h))
-    left = 0.16
+    left = 0.18
     try:
         grp = adata.obs[str(groupby)].astype(str)
         max_len = max([len(s) for s in pd.unique(grp)], default=0)
         if max_len > 0:
             fig_w, _ = fig.get_size_inches()
-            left_in = 0.25 + (0.045 * float(max_len))
+            left_in = 0.35 + (0.055 * float(max_len))
             left = left_in / max(fig_w, 1.0)
-            left = max(0.10, min(0.26, left))
+            left = max(0.18, min(0.30, left))
     except Exception:
-        left = 0.16
-    bottom = 0.14
-    top = 0.93
-    main_right = 0.88
+        left = 0.18
+    bottom = 0.12
+    top = 0.98
+    main_right = 0.90
     fig.subplots_adjust(
         left=left,
         bottom=bottom,
@@ -953,14 +953,17 @@ def dotplot_top_genes(
                 continue
             if len(ax.get_xticks()) == 0 and len(ax.get_yticks()) == 0:
                 dendro_axes.append(ax)
-        dendro_left = main_right + 0.002
+        dendro_left = main_right + 0.005
         dendro_width = 0.035
+        main_width = main_right - left
+        main_height = top - bottom
+        if main_ax is not None:
+            main_ax.set_position([left, bottom, main_width, main_height])
         for ax in dendro_axes:
-            pos = ax.get_position()
-            ax.set_position([dendro_left, pos.y0, dendro_width, pos.height])
+            ax.set_position([dendro_left, bottom, dendro_width, main_height])
         if legend_axes:
-            strip_left = dendro_left + dendro_width + 0.003
-            strip_width = 0.055
+            strip_left = dendro_left + dendro_width + 0.005
+            strip_width = 0.06
             for ax in legend_axes:
                 pos = ax.get_position()
                 ax.set_position([strip_left, pos.y0, strip_width, pos.height])
