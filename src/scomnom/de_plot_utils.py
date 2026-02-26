@@ -889,20 +889,20 @@ def dotplot_top_genes(
     min_h = max(6.5, 0.40 * float(n_groups) + 3.0)
     if fig_w < min_w or fig_h < min_h:
         fig.set_size_inches(max(fig_w, min_w), max(fig_h, min_h))
-    left = 0.20
+    left = 0.24
     try:
         grp = adata.obs[str(groupby)].astype(str)
         max_len = max([len(s) for s in pd.unique(grp)], default=0)
         if max_len > 0:
             fig_w, _ = fig.get_size_inches()
-            left_in = 0.45 + (0.06 * float(max_len))
+            left_in = 0.65 + (0.07 * float(max_len))
             left = left_in / max(fig_w, 1.0)
-            left = max(0.20, min(0.34, left))
+            left = max(0.24, min(0.38, left))
     except Exception:
-        left = 0.20
-    bottom = 0.12
-    top = 0.98
-    main_right = 0.905
+        left = 0.24
+    bottom = 0.10
+    top = 0.99
+    main_right = 0.90
     fig.subplots_adjust(
         left=left,
         bottom=bottom,
@@ -954,7 +954,7 @@ def dotplot_top_genes(
             if len(ax.get_xticks()) == 0 and len(ax.get_yticks()) == 0:
                 dendro_axes.append(ax)
         dendro_left = main_right + 0.005
-        dendro_width = 0.035
+        dendro_width = 0.04
         main_width = main_right - left
         main_height = top - bottom
         if main_ax is not None:
@@ -962,8 +962,8 @@ def dotplot_top_genes(
         for ax in dendro_axes:
             ax.set_position([dendro_left, bottom, dendro_width, main_height])
         if legend_axes:
-            strip_left = dendro_left + dendro_width + 0.004
-            strip_width = 0.07
+            strip_left = dendro_left + dendro_width + 0.005
+            strip_width = 0.05
             for ax in legend_axes:
                 pos = ax.get_position()
                 ax.set_position([strip_left, pos.y0, strip_width, pos.height])
@@ -973,10 +973,10 @@ def dotplot_top_genes(
 
     try:
         for ax in fig.axes:
-            ax.tick_params(axis="x", labelsize=9)
-            ax.tick_params(axis="y", labelsize=10)
+            ax.tick_params(axis="x", labelsize=10)
+            ax.tick_params(axis="y", labelsize=11)
         if main_ax is not None:
-            size_factor = 2.0 if len(genes) <= 25 and n_groups <= 25 else 1.5
+            size_factor = 2.5 if len(genes) <= 25 and n_groups <= 25 else 1.8
             for coll in getattr(main_ax, "collections", []):
                 if hasattr(coll, "get_sizes") and hasattr(coll, "set_sizes"):
                     sizes = np.asarray(coll.get_sizes(), dtype=float)
