@@ -828,25 +828,32 @@ def dotplot_top_genes(
     genes = [str(g) for g in genes if g and str(g) != ""]
     if not genes: return plt.figure()
 
-    # 1. Calculation Logic
+    # 1. AGGRESSIVE WIDTH CALCULATION
+    # Reducing the multipliers to shrink the 'box' around the content
     max_label_len = max([len(str(x)) for x in adata.obs[groupby].unique()])
-    label_width = max_label_len * 0.12
-    plot_width = len(genes) * 0.4 + (1.2 if dendrogram else 0)
-    legend_width = 2.0
+    label_width = max_label_len * 0.10  # Shrunk from 0.12
+    plot_width = len(genes) * 0.35 + (1.0 if dendrogram else 0)  # Shrunk from 0.4
+    legend_width = 1.5  # Shrunk from 2.0
 
     total_w = label_width + plot_width + legend_width
-    total_h = adata.obs[groupby].nunique() * 0.5 + 1.0
-    actual_figsize = figsize if figsize else (max(14, total_w), max(6, total_h))
+    total_h = adata.obs[groupby].nunique() * 0.4 + 0.8  # Tighter height
 
-    # 2. Setup the Grid
+    actual_figsize = figsize if figsize else (total_w, total_h)
+
+    # 2. SETUP GRID WITH ZERO EXTRA SPACE
     fig = plt.figure(figsize=actual_figsize)
-    # top=0.92 removes the extra ceiling space
+
+    # hspace/wspace=0 and tight margins [left, bottom, right, top]
+    # This stretches the grid to the very edges of the figure
     gs = gridspec.GridSpec(1, 3, width_ratios=[label_width, plot_width, legend_width],
-                           wspace=0.0, top=0.92, bottom=0.15)
+                           wspace=0.0, hspace=0.0)
+
+    # Force the margins to be as tight as possible (0.05 is ~5% of fig)
+    plt.subplots_adjust(left=0.05, right=0.95, top=0.95, bottom=0.15)
 
     ax_main = fig.add_subplot(gs[0, 1])
 
-    # 3. Plot
+    # 3. PLOT
     dp = sc.pl.dotplot(
         adata, var_names=genes, groupby=groupby, use_raw=use_raw, layer=layer,
         standard_scale=standard_scale, dendrogram=dendrogram, color_map=color_map,
@@ -859,32 +866,30 @@ def dotplot_top_genes(
     dendro_width = 0.02
     dendro_x1 = main_pos.x1 + (dendro_width if dendrogram else 0)
 
-    # REVERTED: Anchored immediately to the right edge of the dendrogram
-    legend_x_start = dendro_x1 + 0.015
+    # 4. THE HUG (Legend anchored to dendrogram)
+    legend_x_start = dendro_x1 + 0.01
 
-    # 4. COMPACT LEGENDS (Fixed position, standard padding)
     if 'size_legend_ax' in axes_dict:
         sax = axes_dict['size_legend_ax']
-        sax.set_position([legend_x_start, 0.48, 0.10, 0.15])
+        sax.set_position([legend_x_start, 0.50, 0.10, 0.20])
         sax.set_title("")
-        # Using loc='left' and a small pad to keep it directly above
-        sax.set_title("Fraction of cells (%)", fontsize=10, fontweight='bold', loc='left', pad=6)
+        sax.set_title("Fraction of cells (%)", fontsize=9, fontweight='bold', loc='left', pad=4)
 
     if 'color_legend_ax' in axes_dict:
         cax = axes_dict['color_legend_ax']
-        cax.set_position([legend_x_start, 0.28, 0.015, 0.10])
+        cax.set_position([legend_x_start, 0.25, 0.015, 0.15])
         cax.set_title("")
-        cax.set_title("Mean expression", fontsize=10, fontweight='bold', loc='left', pad=6)
+        cax.set_title("Mean expression", fontsize=9, fontweight='bold', loc='left', pad=4)
 
-    # 5. Dendrogram Placement
+    # 5. DENDROGRAM
     if 'dendrogram_ax' in axes_dict:
         dax = axes_dict['dendrogram_ax']
         dax.set_position([main_pos.x1, main_pos.y0, dendro_width, main_pos.height])
 
-    # 6. Final Polish
+    # 6. FINAL POLISH
     for coll in ax_main.collections:
         if hasattr(coll, 'set_sizes'):
-            coll.set_sizes((coll.get_sizes() / (coll.get_sizes().max() or 1)) * 220)
+            coll.set_sizes((coll.get_sizes() / (coll.get_sizes().max() or 1)) * 180)
 
     ax_main.spines['top'].set_visible(False)
     ax_main.spines['right'].set_visible(False)
@@ -892,7 +897,8 @@ def dotplot_top_genes(
     ax_main.set_title("")
 
     if show:
-        plt.show()
+        # Using bbox_inches='tight' during show/save is the ultimate whitespace killer
+        plt.show(bbox_inches='tight')
     return fig
 
 
