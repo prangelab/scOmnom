@@ -828,18 +828,17 @@ def dotplot_top_genes(
     if not genes:
         return plt.figure()
 
-    # 1. Calculate Canvas Size based on long labels
+    # 1. GENERATE BASE PLOT
+    # Pre-calculating a generous figure size to prevent the 'left >= right' error
     max_label_len = max([len(str(x)) for x in adata.obs[groupby].unique()])
-    # Give roughly 0.12 inches per character to prevent clipping
     text_width_req = 1.0 + (max_label_len * 0.12)
     plot_width_req = len(genes) * 0.4
-    # We add 4 inches for the dendrogram + legend stack area
+
+    # Total width includes the left labels, the dots, and a 4-inch right-side buffer
     total_w = text_width_req + plot_width_req + 4.0
     total_h = adata.obs[groupby].nunique() * 0.45 + 2.0
+    dynamic_figsize = (max(16, total_w), max(7, total_h)) if figsize is None else figsize
 
-    dynamic_figsize = (max(14, total_w), max(6, total_h)) if figsize is None else figsize
-
-    # 2. Generate Plot
     dp = sc.pl.dotplot(
         adata,
         var_names=genes,
@@ -858,49 +857,45 @@ def dotplot_top_genes(
     main_ax = axes_dict['mainplot_ax']
     fig = main_ax.get_figure()
 
-    # 3. Define Layout Coordinates (Fractions of 0 to 1)
+    # 2. DEFINE THE LAYOUT GRID (Fractions of 0.0 to 1.0)
     L_MARGIN = text_width_req / dynamic_figsize[0]
-    R_PLOT_EDGE = 0.80  # End of the dot area
-    B_MARGIN = 0.18
-    T_MARGIN = 0.92
+    R_PLOT_EDGE = 0.82  # Dots end here
+    DENDRO_X = 0.83  # Dendrogram starts here
+    DENDRO_W = 0.02  # Dendrogram width
+    LEGEND_X = 0.88  # Legends start here (Clean gap after dendrogram)
 
-    # 4. Position Main Plot
+    B_MARGIN = 0.15
+    T_MARGIN = 0.90
+
+    # 3. POSITION MAIN PLOT
     main_ax.set_position([L_MARGIN, B_MARGIN, R_PLOT_EDGE - L_MARGIN, T_MARGIN - B_MARGIN])
 
-    # 5. Position Dendrogram and push Legends Right
-    # legend_x is the key fix here to stop overlapping the dendrogram
+    # 4. POSITION DENDROGRAM (Exactly where it should be)
     if 'dendrogram_ax' in axes_dict:
         dax = axes_dict['dendrogram_ax']
-        # Pin dendrogram 1% to the right of the plot
-        dax.set_position([R_PLOT_EDGE + 0.01, B_MARGIN, 0.03, T_MARGIN - B_MARGIN])
-        # Push legends 6% further right from the plot edge
-        legend_x = R_PLOT_EDGE + 0.07
-    else:
-        legend_x = R_PLOT_EDGE + 0.03
+        dax.set_position([DENDRO_X, B_MARGIN, DENDRO_W, T_MARGIN - B_MARGIN])
 
-    # 6. Absolute Positioning for Legends (Stacked Vertically)
+    # 5. POSITION LEGENDS (Pushed further right to avoid tree)
     if 'size_legend_ax' in axes_dict:
         sax = axes_dict['size_legend_ax']
-        sax.set_position([legend_x, 0.55, 0.10, 0.20])
-        sax.set_title("Fraction of cells (%)", fontsize=10, loc='left', pad=12)
+        sax.set_position([LEGEND_X, 0.55, 0.08, 0.20])
+        sax.set_title("Fraction of cells (%)", fontsize=10, loc='left', weight='bold')
 
     if 'color_legend_ax' in axes_dict:
         cax = axes_dict['color_legend_ax']
-        # Positioned below the size legend with a clear gap
-        cax.set_position([legend_x, 0.25, 0.02, 0.15])
-        cax.set_title("Mean expression", fontsize=10, loc='left', pad=12)
+        cax.set_position([LEGEND_X, 0.25, 0.02, 0.15])
+        cax.set_title("Mean expression", fontsize=10, loc='left', weight='bold')
 
-    # 7. Aesthetics: Dot sizing and Ticks
+    # 6. FINAL POLISH
     for coll in main_ax.collections:
         if hasattr(coll, 'set_sizes'):
-            # Size 200 fits nicely in 0.4" grids without bleeding
-            coll.set_sizes((coll.get_sizes() / (coll.get_sizes().max() or 1)) * 200)
+            coll.set_sizes((coll.get_sizes() / (coll.get_sizes().max() or 1)) * 210)
 
     main_ax.grid(False)
     main_ax.tick_params(axis='x', labelsize=10, rotation=90)
     main_ax.tick_params(axis='y', labelsize=10)
 
-    # Lock the layout so Matplotlib doesn't try to move things
+    # Disable the automatic layout engine to prevent it from resetting our coordinates
     fig.layout_engine = None
 
     if show:
