@@ -832,10 +832,10 @@ def dotplot_top_genes(
     max_label_len = max([len(str(x)) for x in adata.obs[groupby].unique()])
     label_width = max_label_len * 0.12
     plot_width = len(genes) * 0.4 + (1.2 if dendrogram else 0)
-    legend_width = 2.8  # Giving legends their own wide column
+    legend_width = 3.0  # Slightly wider for cleaner titles
 
     total_w = label_width + plot_width + legend_width
-    total_h = adata.obs[groupby].nunique() * 0.5 + 2.0
+    total_h = adata.obs[groupby].nunique() * 0.5 + 2.5
     actual_figsize = figsize if figsize else (max(16, total_w), max(7, total_h))
 
     # 2. Setup the Grid
@@ -853,30 +853,33 @@ def dotplot_top_genes(
     axes_dict = dp.get_axes()
     leg_pos = gs[0, 2].get_position(fig)
 
-    # LEGEND ALIGNMENT FIX
-    # We use a shared X-coordinate for both titles to ensure vertical alignment
+    # Shared X-coordinate for perfect alignment
     shared_x_start = leg_pos.x0 + 0.02
 
+    # 4. FIXING DUPLICATED TITLES
     if 'size_legend_ax' in axes_dict:
         sax = axes_dict['size_legend_ax']
-        # Set exact box for size legend
         sax.set_position([shared_x_start, 0.55, 0.12, 0.20])
-        # Force title to top-left of its axis for alignment
-        sax.set_title("Fraction of cells (%)", fontsize=10, fontweight='bold', loc='left', pad=12)
+        # CLEAR existing titles/labels that Scanpy might have injected
+        sax.set_title("")
+        # Apply our clean, aligned title
+        sax.set_title("Fraction of cells (%)", fontsize=10, fontweight='bold', loc='left', pad=20)
 
     if 'color_legend_ax' in axes_dict:
         cax = axes_dict['color_legend_ax']
-        # Set exact box for color legend (lower down)
         cax.set_position([shared_x_start, 0.30, 0.02, 0.15])
-        # Force title to top-left of its axis for alignment
-        cax.set_title("Mean expression", fontsize=10, fontweight='bold', loc='left', pad=12)
+        # CLEAR existing titles
+        cax.set_title("")
+        # Apply our clean, aligned title
+        cax.set_title("Mean expression", fontsize=10, fontweight='bold', loc='left', pad=20)
 
-    # 4. Final Touches
+    # 5. Dendrogram Alignment
     if 'dendrogram_ax' in axes_dict:
         dax = axes_dict['dendrogram_ax']
         main_pos = ax_main.get_position()
         dax.set_position([main_pos.x1, main_pos.y0, 0.02, main_pos.height])
 
+    # 6. Final Polish
     for coll in ax_main.collections:
         if hasattr(coll, 'set_sizes'):
             coll.set_sizes((coll.get_sizes() / (coll.get_sizes().max() or 1)) * 220)
