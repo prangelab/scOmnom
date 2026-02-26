@@ -828,14 +828,11 @@ def dotplot_top_genes(
     if not genes:
         return plt.figure()
 
-    # 1. GENERATE BASE PLOT
-    # Pre-calculating a generous figure size to prevent the 'left >= right' error
+    # 1. Calculate Canvas
     max_label_len = max([len(str(x)) for x in adata.obs[groupby].unique()])
-    text_width_req = 1.0 + (max_label_len * 0.12)
+    text_width_req = 1.2 + (max_label_len * 0.12)
     plot_width_req = len(genes) * 0.4
-
-    # Total width includes the left labels, the dots, and a 4-inch right-side buffer
-    total_w = text_width_req + plot_width_req + 4.0
+    total_w = text_width_req + plot_width_req + 4.5
     total_h = adata.obs[groupby].nunique() * 0.45 + 2.0
     dynamic_figsize = (max(16, total_w), max(7, total_h)) if figsize is None else figsize
 
@@ -857,36 +854,37 @@ def dotplot_top_genes(
     main_ax = axes_dict['mainplot_ax']
     fig = main_ax.get_figure()
 
-    # 2. DEFINE THE LAYOUT GRID (Fractions of 0.0 to 1.0)
+    # 2. Coordinates - The "Touch" Fix
     L_MARGIN = text_width_req / dynamic_figsize[0]
-    R_PLOT_EDGE = 0.82  # Dots end here
-    DENDRO_X = 0.83  # Dendrogram starts here
-    DENDRO_W = 0.02  # Dendrogram width
-    LEGEND_X = 0.88  # Legends start here (Clean gap after dendrogram)
+    R_PLOT_EDGE = 0.80  # Main plot ends
+    DENDRO_W = 0.02  # Width of the tree
+    LEGEND_X = 0.88  # Gap before legends start
 
     B_MARGIN = 0.15
     T_MARGIN = 0.90
+    PLOT_HEIGHT = T_MARGIN - B_MARGIN
 
-    # 3. POSITION MAIN PLOT
-    main_ax.set_position([L_MARGIN, B_MARGIN, R_PLOT_EDGE - L_MARGIN, T_MARGIN - B_MARGIN])
+    # 3. Position Main Plot
+    main_ax.set_position([L_MARGIN, B_MARGIN, R_PLOT_EDGE - L_MARGIN, PLOT_HEIGHT])
 
-    # 4. POSITION DENDROGRAM (Exactly where it should be)
+    # 4. Position Dendrogram - NO GAP
     if 'dendrogram_ax' in axes_dict:
         dax = axes_dict['dendrogram_ax']
-        dax.set_position([DENDRO_X, B_MARGIN, DENDRO_W, T_MARGIN - B_MARGIN])
+        # We start exactly at R_PLOT_EDGE so it touches the plot
+        dax.set_position([R_PLOT_EDGE, B_MARGIN, DENDRO_W, PLOT_HEIGHT])
 
-    # 5. POSITION LEGENDS (Pushed further right to avoid tree)
+    # 5. Position Legends - Pushed out to 0.88
     if 'size_legend_ax' in axes_dict:
         sax = axes_dict['size_legend_ax']
-        sax.set_position([LEGEND_X, 0.55, 0.08, 0.20])
-        sax.set_title("Fraction of cells (%)", fontsize=10, loc='left', weight='bold')
+        sax.set_position([LEGEND_X, 0.55, 0.10, 0.20])
+        sax.set_title("Fraction of cells (%)", fontsize=10, loc='left', fontweight='bold')
 
     if 'color_legend_ax' in axes_dict:
         cax = axes_dict['color_legend_ax']
         cax.set_position([LEGEND_X, 0.25, 0.02, 0.15])
-        cax.set_title("Mean expression", fontsize=10, loc='left', weight='bold')
+        cax.set_title("Mean expression", fontsize=10, loc='left', fontweight='bold')
 
-    # 6. FINAL POLISH
+    # 6. Dot size and Ticks
     for coll in main_ax.collections:
         if hasattr(coll, 'set_sizes'):
             coll.set_sizes((coll.get_sizes() / (coll.get_sizes().max() or 1)) * 210)
@@ -895,7 +893,6 @@ def dotplot_top_genes(
     main_ax.tick_params(axis='x', labelsize=10, rotation=90)
     main_ax.tick_params(axis='y', labelsize=10)
 
-    # Disable the automatic layout engine to prevent it from resetting our coordinates
     fig.layout_engine = None
 
     if show:
