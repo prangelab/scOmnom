@@ -832,15 +832,18 @@ def dotplot_top_genes(
     max_label_len = max([len(str(x)) for x in adata.obs[groupby].unique()])
     label_width = max_label_len * 0.12
     plot_width = len(genes) * 0.4 + (1.2 if dendrogram else 0)
-    legend_width = 2.0  # Tightened width
+    legend_width = 2.0
 
     total_w = label_width + plot_width + legend_width
-    total_h = adata.obs[groupby].nunique() * 0.5 + 2.0
-    actual_figsize = figsize if figsize else (max(16, total_w), max(7, total_h))
+    total_h = adata.obs[groupby].nunique() * 0.5 + 1.0  # Reduced padding here
+    actual_figsize = figsize if figsize else (max(14, total_w), max(6, total_h))
 
     # 2. Setup the Grid
     fig = plt.figure(figsize=actual_figsize)
-    gs = gridspec.GridSpec(1, 3, width_ratios=[label_width, plot_width, legend_width], wspace=0.0)
+    # Use top=0.9 to cut off the ceiling whitespace
+    gs = gridspec.GridSpec(1, 3, width_ratios=[label_width, plot_width, legend_width],
+                           wspace=0.0, top=0.92, bottom=0.15)
+
     ax_main = fig.add_subplot(gs[0, 1])
 
     # 3. Plot
@@ -853,40 +856,48 @@ def dotplot_top_genes(
     axes_dict = dp.get_axes()
     main_pos = ax_main.get_position()
 
-    # Calculate dendrogram edge for legend anchoring
     dendro_width = 0.02
     dendro_x1 = main_pos.x1 + (dendro_width if dendrogram else 0)
-    legend_x_start = dendro_x1 + 0.015  # Very close to dendrogram
+    legend_x_start = dendro_x1 + 0.01
 
-    # 4. FINAL TITLE PROXIMITY ADJUSTMENTS
+    # 4. LEGEND POSITIONING & MANUAL TITLES
     if 'size_legend_ax' in axes_dict:
         sax = axes_dict['size_legend_ax']
-        # Position: [left, bottom, width, height]
-        sax.set_position([legend_x_start, 0.48, 0.10, 0.15])
-        sax.set_title("")
-        # Low pad (2-4) moves the title right onto the legend's "head"
-        sax.set_title("Fraction of cells (%)", fontsize=10, fontweight='bold', loc='left', pad=4)
+        # Fixed box for size legend
+        sax_pos = [legend_x_start, 0.45, 0.10, 0.15]
+        sax.set_position(sax_pos)
+        sax.set_title("")  # Wipe Scanpy's title
+
+        # Manually place text right above the box
+        fig.text(sax_pos[0], sax_pos[1] + sax_pos[3] + 0.01,
+                 "Fraction of cells (%)", fontsize=10, fontweight='bold', va='bottom')
 
     if 'color_legend_ax' in axes_dict:
         cax = axes_dict['color_legend_ax']
-        # Tucked closer to the size legend
-        cax.set_position([legend_x_start, 0.28, 0.015, 0.10])
-        cax.set_title("")
-        cax.set_title("Mean expression", fontsize=10, fontweight='bold', loc='left', pad=4)
+        cax_pos = [legend_x_start, 0.25, 0.015, 0.10]
+        cax.set_position(cax_pos)
+        cax.set_title("")  # Wipe Scanpy's title
+
+        # Manually place text right above the box
+        fig.text(cax_pos[0], cax_pos[1] + cax_pos[3] + 0.01,
+                 "Mean expression", fontsize=10, fontweight='bold', va='bottom')
 
     # 5. Dendrogram Placement
     if 'dendrogram_ax' in axes_dict:
         dax = axes_dict['dendrogram_ax']
         dax.set_position([main_pos.x1, main_pos.y0, dendro_width, main_pos.height])
 
-    # 6. Aesthetic Clean-up
+    # 6. Polish
     for coll in ax_main.collections:
         if hasattr(coll, 'set_sizes'):
             coll.set_sizes((coll.get_sizes() / (coll.get_sizes().max() or 1)) * 220)
 
     ax_main.spines['top'].set_visible(False)
     ax_main.spines['right'].set_visible(False)
-    ax_main.grid(False)
+
+    # Remove the generic "Genes" label at top if Scanpy added one
+    ax_main.set_xlabel("")
+    ax_main.set_title("")
 
     if show:
         plt.show()
