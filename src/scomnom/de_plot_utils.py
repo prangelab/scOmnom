@@ -830,7 +830,7 @@ def dotplot_top_genes(
         ax.text(0.5, 0.5, "No genes found", ha="center")
         return fig
 
-    # 1. Generate the DotPlot object
+    # 1. Generate the base plot
     dp = sc.pl.dotplot(
         adata,
         var_names=genes,
@@ -849,55 +849,63 @@ def dotplot_top_genes(
     main_ax = axes_dict['mainplot_ax']
     fig = main_ax.get_figure()
 
-    # 2. Dynamic Width Calculation to avoid "left >= right" error
-    # We estimate 0.1 inches per character for the labels
+    # 2. Snug the plot to eliminate the "crazy" margins
+    # We call this first to get rid of the empty space scanpy leaves at the top
+    fig.tight_layout()
+
+    # 3. Calculate dynamic left margin for long labels
     max_label_len = max([len(str(x)) for x in adata.obs[groupby].unique()])
-    needed_left_in = 0.5 + (max_label_len * 0.11)
+    fig_w, fig_h = fig.get_size_inches()
 
-    # Get current size; if it's too narrow for these labels, expand it
-    cur_w, cur_h = fig.get_size_inches()
-    # We want the plot area to be at least 6 inches wide regardless of labels
-    target_w = max(cur_w, needed_left_in + 6.0)
-    fig.set_size_inches(target_w, cur_h)
+    # Estimate width needed for labels (inches)
+    left_margin_in = 0.5 + (max_label_len * 0.1)
+    left_frac = min(0.45, left_margin_in / fig_w)
 
-    # 3. Calculate Fractions with Safety Guard
-    left_frac = min(0.5, needed_left_in / target_w)  # Never let labels take > 50%
-    right_plot_edge = 0.85
+    # 4. Re-position main plot and dendrogram
+    # We define a 'right_edge' for the plot area (before legends)
+    plot_right_edge = 0.85
 
-    # 4. Apply Adjustments
-    # top=0.9 reduces the massive top whitespace
-    fig.subplots_adjust(left=left_frac, right=right_plot_edge, top=0.9, bottom=0.15)
+    # Shift the main plot
+    pos = main_ax.get_position()
+    main_ax.set_position([left_frac, pos.y0, plot_right_edge - left_frac, pos.height])
 
-    # 5. Stack Legends closer to the plot
-    legend_x = right_plot_edge + 0.01
+    # Shift dendrogram if it exists
+    if 'dendrogram_ax' in axes_dict:
+        d_ax = axes_dict['dendrogram_ax']
+        d_pos = d_ax.get_position()
+        # Place it right next to the main plot
+        d_ax.set_position([plot_right_edge + 0.005, pos.y0, 0.02, pos.height])
+        legend_start_x = plot_right_edge + 0.04
+    else:
+        legend_start_x = plot_right_edge + 0.01
 
-    if 'color_legend_ax' in axes_dict:
-        cax = axes_dict['color_legend_ax']
-        cax.set_position([legend_x, 0.15, 0.02, 0.12])
-        cax.set_title("Mean expression", fontsize=8, pad=5)
-
+    # 5. Stack Legends with explicit spacing to prevent overlap
+    # Size legend on top
     if 'size_legend_ax' in axes_dict:
         sax = axes_dict['size_legend_ax']
-        # Positioned directly above the colorbar
-        sax.set_position([legend_x, 0.32, 0.08, 0.20])
-        sax.set_title("Fraction of cells (%)", fontsize=8, pad=5)
+        # [left, bottom, width, height]
+        sax.set_position([legend_start_x, 0.55, 0.08, 0.25])
+        sax.set_title("Fraction of cells (%)", fontsize=9, pad=10)
 
-    # 6. Aesthetic cleanup
+    # Color legend on bottom
+    if 'color_legend_ax' in axes_dict:
+        cax = axes_dict['color_legend_ax']
+        cax.set_position([legend_start_x, 0.25, 0.02, 0.15])
+        cax.set_title("Mean expression", fontsize=9, pad=10)
+
+    # 6. Aesthetic Polish
     for coll in main_ax.collections:
         if hasattr(coll, 'set_sizes'):
             current_sizes = coll.get_sizes()
             if len(current_sizes) > 0:
-                # Scaled up for better visibility
-                coll.set_sizes((current_sizes / current_sizes.max()) * 280)
+                # Target max size 300 to fill the grid cells better
+                coll.set_sizes((current_sizes / current_sizes.max()) * 300)
 
     main_ax.grid(False)
     main_ax.spines['top'].set_visible(False)
     main_ax.spines['right'].set_visible(False)
-
-    # Optional: Truncate y-labels if they are still too long (e.g., > 50 chars)
-    labels = [item.get_text() for item in main_ax.get_yticklabels()]
-    truncated_labels = [l[:50] + '...' if len(l) > 53 else l for l in labels]
-    main_ax.set_yticklabels(truncated_labels)
+    main_ax.tick_params(axis='x', labelsize=10, rotation=90)
+    main_ax.tick_params(axis='y', labelsize=10)
 
     if show:
         plt.show()
