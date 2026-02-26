@@ -828,11 +828,11 @@ def dotplot_top_genes(
     genes = [str(g) for g in genes if g and str(g) != ""]
     if not genes: return plt.figure()
 
-    # 1. Calculation Logic
+    # 1. Spacing Calculations
     max_label_len = max([len(str(x)) for x in adata.obs[groupby].unique()])
     label_width = max_label_len * 0.12
     plot_width = len(genes) * 0.4 + (1.2 if dendrogram else 0)
-    legend_width = 2.5  # Reduced slightly to pull things in
+    legend_width = 2.0  # Tightened width
 
     total_w = label_width + plot_width + legend_width
     total_h = adata.obs[groupby].nunique() * 0.5 + 2.0
@@ -853,34 +853,33 @@ def dotplot_top_genes(
     axes_dict = dp.get_axes()
     main_pos = ax_main.get_position()
 
-    # Calculate dendrogram edge
+    # Calculate dendrogram edge for legend anchoring
     dendro_width = 0.02
-    dendro_x1 = main_pos.x1 + dendro_width if dendrogram else main_pos.x1
+    dendro_x1 = main_pos.x1 + (dendro_width if dendrogram else 0)
+    legend_x_start = dendro_x1 + 0.015  # Very close to dendrogram
 
-    # Pull legends IMMEDIATELY adjacent to the dendrogram edge
-    legend_x_start = dendro_x1 + 0.02
-
-    # 4. FIXING LEGEND PROXIMITY & PADDING
+    # 4. FINAL TITLE PROXIMITY ADJUSTMENTS
     if 'size_legend_ax' in axes_dict:
         sax = axes_dict['size_legend_ax']
-        # Moved down slightly (0.50) and scrunched title padding
-        sax.set_position([legend_x_start, 0.45, 0.10, 0.20])
+        # Position: [left, bottom, width, height]
+        sax.set_position([legend_x_start, 0.48, 0.10, 0.15])
         sax.set_title("")
-        sax.set_title("Fraction of cells (%)", fontsize=10, fontweight='bold', loc='left', pad=8)
+        # Low pad (2-4) moves the title right onto the legend's "head"
+        sax.set_title("Fraction of cells (%)", fontsize=10, fontweight='bold', loc='left', pad=4)
 
     if 'color_legend_ax' in axes_dict:
         cax = axes_dict['color_legend_ax']
-        # Moved up to be closer to the size legend
-        cax.set_position([legend_x_start, 0.22, 0.015, 0.12])
+        # Tucked closer to the size legend
+        cax.set_position([legend_x_start, 0.28, 0.015, 0.10])
         cax.set_title("")
-        cax.set_title("Mean expression", fontsize=10, fontweight='bold', loc='left', pad=8)
+        cax.set_title("Mean expression", fontsize=10, fontweight='bold', loc='left', pad=4)
 
     # 5. Dendrogram Placement
     if 'dendrogram_ax' in axes_dict:
         dax = axes_dict['dendrogram_ax']
         dax.set_position([main_pos.x1, main_pos.y0, dendro_width, main_pos.height])
 
-    # 6. Final Polish
+    # 6. Aesthetic Clean-up
     for coll in ax_main.collections:
         if hasattr(coll, 'set_sizes'):
             coll.set_sizes((coll.get_sizes() / (coll.get_sizes().max() or 1)) * 220)
