@@ -830,7 +830,7 @@ def dotplot_top_genes(
         ax.text(0.5, 0.5, "No genes found", ha="center")
         return fig
 
-    # 1. Generate the base plot
+    # 1. Generate plot - keep figsize flexible
     dp = sc.pl.dotplot(
         adata,
         var_names=genes,
@@ -849,63 +849,60 @@ def dotplot_top_genes(
     main_ax = axes_dict['mainplot_ax']
     fig = main_ax.get_figure()
 
-    # 2. Snug the plot to eliminate the "crazy" margins
-    # We call this first to get rid of the empty space scanpy leaves at the top
-    fig.tight_layout()
-
-    # 3. Calculate dynamic left margin for long labels
+    # 2. Calculate dynamic label space
+    # 66 chars need roughly 40% of a standard figure width to be safe
     max_label_len = max([len(str(x)) for x in adata.obs[groupby].unique()])
-    fig_w, fig_h = fig.get_size_inches()
 
-    # Estimate width needed for labels (inches)
-    left_margin_in = 0.5 + (max_label_len * 0.1)
-    left_frac = min(0.45, left_margin_in / fig_w)
+    # We define our "Sanity Zone" coordinates (0 to 1 scale)
+    left_margin = 0.38 if max_label_len > 40 else 0.25
+    right_margin = 0.82
+    top_margin = 0.92
+    bottom_margin = 0.20
 
-    # 4. Re-position main plot and dendrogram
-    # We define a 'right_edge' for the plot area (before legends)
-    plot_right_edge = 0.85
+    # 3. Position the Main Plot
+    # [left, bottom, width, height]
+    main_ax.set_position([left_margin, bottom_margin, right_margin - left_margin, top_margin - bottom_margin])
 
-    # Shift the main plot
-    pos = main_ax.get_position()
-    main_ax.set_position([left_frac, pos.y0, plot_right_edge - left_frac, pos.height])
-
-    # Shift dendrogram if it exists
+    # 4. Handle Dendrogram (pin it to the right of the plot)
+    legend_x_start = right_margin + 0.02
     if 'dendrogram_ax' in axes_dict:
         d_ax = axes_dict['dendrogram_ax']
-        d_pos = d_ax.get_position()
-        # Place it right next to the main plot
-        d_ax.set_position([plot_right_edge + 0.005, pos.y0, 0.02, pos.height])
-        legend_start_x = plot_right_edge + 0.04
-    else:
-        legend_start_x = plot_right_edge + 0.01
+        d_ax.set_position([right_margin + 0.005, bottom_margin, 0.02, top_margin - bottom_margin])
+        legend_x_start = right_margin + 0.05
 
-    # 5. Stack Legends with explicit spacing to prevent overlap
-    # Size legend on top
+    # 5. Position Legends (Fixed vertical stack, no overlap)
+    # Size legend on top half
     if 'size_legend_ax' in axes_dict:
         sax = axes_dict['size_legend_ax']
-        # [left, bottom, width, height]
-        sax.set_position([legend_start_x, 0.55, 0.08, 0.25])
-        sax.set_title("Fraction of cells (%)", fontsize=9, pad=10)
+        sax.set_position([legend_x_start, 0.50, 0.10, 0.25])
+        sax.set_title("Fraction of cells (%)", fontsize=9, loc='left')
 
-    # Color legend on bottom
+    # Color legend on bottom half
     if 'color_legend_ax' in axes_dict:
         cax = axes_dict['color_legend_ax']
-        cax.set_position([legend_start_x, 0.25, 0.02, 0.15])
-        cax.set_title("Mean expression", fontsize=9, pad=10)
+        cax.set_position([legend_x_start, 0.20, 0.02, 0.15])
+        cax.set_title("Mean expression", fontsize=9, loc='left')
 
-    # 6. Aesthetic Polish
+    # 6. Fix Dot Overlap & Scaling
+    # Instead of making them huge, we target a size that fits the grid
     for coll in main_ax.collections:
         if hasattr(coll, 'set_sizes'):
             current_sizes = coll.get_sizes()
             if len(current_sizes) > 0:
-                # Target max size 300 to fill the grid cells better
-                coll.set_sizes((current_sizes / current_sizes.max()) * 300)
+                # 180 is a safe "large" size that won't bleed into other rows/cols
+                new_sizes = (current_sizes / current_sizes.max()) * 180
+                coll.set_sizes(new_sizes)
 
+    # 7. Final Polish
     main_ax.grid(False)
-    main_ax.spines['top'].set_visible(False)
-    main_ax.spines['right'].set_visible(False)
+    for spine in main_ax.spines.values():
+        spine.set_visible(True)  # Keep the L-frame for structure
+
     main_ax.tick_params(axis='x', labelsize=10, rotation=90)
     main_ax.tick_params(axis='y', labelsize=10)
+
+    # IMPORTANT: DO NOT CALL tight_layout() or subplots_adjust() here.
+    # It will overwrite the set_position coordinates we just painstakingly set.
 
     if show:
         plt.show()
