@@ -813,47 +813,30 @@ def volcano(
 # Scanpy-based expression visualizations (return Figure; never save)
 # -----------------------------------------------------------------------------
 def dotplot_top_genes(
-    adata,
-    *,
-    genes: Sequence[str],
-    groupby: str,
-    display_groupby: str | None = None,
-    use_raw: bool = False,
-    layer: Optional[str] = None,
-    standard_scale: Optional[str] = "var",
-    dendrogram: bool = False,
-    color_map: str = "viridis",
-    figsize: Optional[tuple[float, float]] = None,
-    show: bool = False,
+        adata,
+        *,
+        genes: Sequence[str],
+        groupby: str,
+        display_groupby: str | None = None,
+        use_raw: bool = False,
+        layer: Optional[str] = None,
+        standard_scale: Optional[str] = "var",
+        dendrogram: bool = False,
+        color_map: str = "viridis",
+        figsize: Optional[tuple[float, float]] = None,
+        show: bool = False,
 ) -> Figure:
-    import matplotlib.pyplot as plt
-    from matplotlib.figure import Figure
-    import scanpy as sc
-
-    _normalize_scanpy_groupby_colors(adata, str(display_groupby or groupby))
-    cnn_groupby = None
-    cnn_legend_map: dict[str, str] = {}
-    try:
-        cnn_groupby, cnn_legend_map = _build_cnn_groupby(
-            adata,
-            groupby=str(groupby),
-            display_map=display_map,
-            display_groupby=str(display_groupby) if display_groupby else None,
-        )
-    except Exception:
-        cnn_groupby = None
-        cnn_legend_map = {}
-
     genes = [str(g) for g in genes if g is not None and str(g) != ""]
     if not genes:
         fig, ax = plt.subplots(figsize=(7.5, 2.5))
         ax.text(0.5, 0.5, "No genes to plot", ha="center", va="center")
         ax.set_axis_off()
-        if show:
-            plt.show()
+        if show: plt.show()
         return fig
 
-    ret = sc.pl.dotplot(
+    # 1. Generate the base plot
+    # We set show=False and return_fig=True to get the DotPlot object
+    dp = sc.pl.dotplot(
         adata,
         var_names=genes,
         groupby=groupby,
@@ -867,123 +850,70 @@ def dotplot_top_genes(
         return_fig=True,
     )
 
-    # ---- robustly obtain the matplotlib Figure
-    fig = None
-    if hasattr(ret, "figure") and isinstance(ret.figure, Figure):
-        fig = ret.figure
-    else:
-        try:
-            if hasattr(ret, "make_figure"):
-                ret.make_figure()
-            fig = plt.gcf()
-        except Exception:
-            fig = plt.gcf()
+    # 2. Get the figure and calculate dynamic margins
+    fig = dp.get_axes()['mainplot_ax'].get_figure()
 
-    # ---- cosmetics -------------------------------------------------
-    try:
-        n_groups = int(adata.obs[str(groupby)].astype(str).nunique())
-    except Exception:
-        n_groups = 1
-    fig_w, fig_h = fig.get_size_inches()
-    min_w = max(16.0, 0.55 * float(len(genes)) + 8.0)
-    min_h = max(6.5, 0.40 * float(n_groups) + 3.0)
-    if fig_w < min_w or fig_h < min_h:
-        fig.set_size_inches(max(fig_w, min_w), max(fig_h, min_h))
-    left = 0.24
-    try:
-        grp = adata.obs[str(groupby)].astype(str)
-        max_len = max([len(s) for s in pd.unique(grp)], default=0)
-        if max_len > 0:
-            fig_w, _ = fig.get_size_inches()
-            left_in = 0.65 + (0.07 * float(max_len))
-            left = left_in / max(fig_w, 1.0)
-            left = max(0.24, min(0.38, left))
-    except Exception:
-        left = 0.24
-    bottom = 0.10
-    top = 0.99
-    main_right = 0.90
-    fig.subplots_adjust(
-        left=left,
-        bottom=bottom,
-        right=main_right,
-        top=top,
-    )
+    n_groups = adata.obs[groupby].nunique()
+    n_genes = len(genes)
 
-    # 2) remove gridlines everywhere
-    for ax in fig.axes:
+    # Calculate required width for labels based on character count
+    max_label_len = max([len(str(x)) for x in adata.obs[groupby].unique()])
+    # Heuristic: approx 0.1 inches per character for labels + some padding
+    left_margin_inches = 0.5 + (max_label_len * 0.12)
+
+    # Adjust figure size if not provided to prevent crowding
+    if figsize is None:
+        width = max(12, n_genes * 0.4 + left_margin_inches + 2)
+        height = max(6, n_groups * 0.5 + 2)
+        fig.set_size_inches(width, height)
+
+    fig_w, _ = fig.get_size_inches()
+    left_ratio = left_margin_inches / fig_w
+    right_ratio = 0.85  # Leave 15% for legends
+
+    # 3. Apply layout adjustments
+    # IMPORTANT: Avoid fig.tight_layout() as it resets manual positioning
+    fig.subplots_adjust(left=left_ratio, right=right_ratio, bottom=0.15, top=0.95)
+
+    # 4. Fix Legend and Main Plot positions
+    axes_dict = dp.get_axes()
+    main_ax = axes_dict['mainplot_ax']
+
+    # Remove gridlines and clean spines
+    for ax_name, ax in axes_dict.items():
         ax.grid(False)
-        ax.xaxis.grid(False)
-        ax.yaxis.grid(False)
-        for gl in ax.get_ygridlines():
-            gl.set_visible(False)
+        if ax_name == 'mainplot_ax':
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            ax.tick_params(axis='x', rotation=90, labelsize=10)
+            ax.tick_params(axis='y', labelsize=11)
 
-    # 3) cleaner look (optional but recommended)
-    for ax in fig.axes:
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
+    # 5. Robust Dot Scaling
+    # Instead of multiplier, we target a specific max size for clarity
+    # 200-400 is usually a "sweet spot" for scRNA-seq dot plots
+    target_size = 300
+    for coll in main_ax.collections:
+        if hasattr(coll, 'set_sizes'):
+            # This scales the 'Fraction of cells' dots
+            current_sizes = coll.get_sizes()
+            if len(current_sizes) > 0:
+                # Normalize so the largest dot is our target_size
+                new_sizes = (current_sizes / current_sizes.max()) * target_size
+                coll.set_sizes(new_sizes)
 
-    fig.tight_layout(rect=(left, bottom, main_right, top))
+    # 6. Reposition Legends so they aren't clipped
+    # Scanpy legends are usually in 'color_legend_ax' and 'size_legend_ax'
+    legend_x_start = right_ratio + 0.02
+    if 'color_legend_ax' in axes_dict:
+        ax = axes_dict['color_legend_ax']
+        pos = ax.get_position()
+        ax.set_position([legend_x_start, pos.y0, 0.02, pos.height])
 
-    try:
-        legend_axes = []
-        main_ax = None
-        main_score = -1
-        for ax in fig.axes:
-            title = ax.get_title()
-            if "Fraction of cells" in title or "Mean expression" in title:
-                continue
-            if not ax.get_visible():
-                continue
-            xlab = [t.get_text() for t in ax.get_xticklabels() if t.get_text()]
-            ylab = [t.get_text() for t in ax.get_yticklabels() if t.get_text()]
-            score = len(xlab) + len(ylab)
-            if score > main_score:
-                main_score = score
-                main_ax = ax
-        for ax in fig.axes:
-            title = ax.get_title()
-            if "Fraction of cells" in title or "Mean expression" in title:
-                legend_axes.append(ax)
-        dendro_axes = []
-        for ax in fig.axes:
-            if ax in legend_axes or ax is main_ax:
-                continue
-            if not ax.get_visible():
-                continue
-            if len(ax.get_xticks()) == 0 and len(ax.get_yticks()) == 0:
-                dendro_axes.append(ax)
-        dendro_left = main_right + 0.005
-        dendro_width = 0.04
-        main_width = main_right - left
-        main_height = top - bottom
-        if main_ax is not None:
-            main_ax.set_position([left, bottom, main_width, main_height])
-        for ax in dendro_axes:
-            ax.set_position([dendro_left, bottom, dendro_width, main_height])
-        if legend_axes:
-            strip_left = dendro_left + dendro_width + 0.005
-            strip_width = 0.05
-            for ax in legend_axes:
-                pos = ax.get_position()
-                ax.set_position([strip_left, pos.y0, strip_width, pos.height])
-                ax.tick_params(labelsize=8)
-    except Exception:
-        pass
-
-    try:
-        for ax in fig.axes:
-            ax.tick_params(axis="x", labelsize=10)
-            ax.tick_params(axis="y", labelsize=11)
-        if main_ax is not None:
-            size_factor = 2.5 if len(genes) <= 25 and n_groups <= 25 else 1.8
-            for coll in getattr(main_ax, "collections", []):
-                if hasattr(coll, "get_sizes") and hasattr(coll, "set_sizes"):
-                    sizes = np.asarray(coll.get_sizes(), dtype=float)
-                    if sizes.size > 0:
-                        coll.set_sizes(sizes * size_factor)
-    except Exception:
-        pass
+    if 'size_legend_ax' in axes_dict:
+        ax = axes_dict['size_legend_ax']
+        pos = ax.get_position()
+        # Stack size legend below or offset from color legend
+        ax.set_position([legend_x_start + 0.05, pos.y0, 0.08, pos.height])
 
     if show:
         plt.show()
