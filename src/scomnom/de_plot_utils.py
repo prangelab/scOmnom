@@ -813,43 +813,41 @@ def volcano(
 # Scanpy-based expression visualizations (return Figure; never save)
 # ----------------------------------------------------------------------------
 def dotplot_top_genes(
-        adata,
-        *,
-        genes: Sequence[str],
-        groupby: str,
-        use_raw: bool = False,
-        layer: Optional[str] = None,
-        standard_scale: Optional[str] = "var",
-        dendrogram: bool = False,
-        color_map: str = "viridis",
-        figsize: Optional[tuple[float, float]] = None,
-        show: bool = False,
+    adata,
+    *,
+    genes: Sequence[str],
+    groupby: str,
+    use_raw: bool = False,
+    layer: Optional[str] = None,
+    standard_scale: Optional[str] = "var",
+    dendrogram: bool = False,
+    color_map: str = "viridis",
+    figsize: Optional[tuple[float, float]] = None,
+    show: bool = False,
 ) -> plt.Figure:
     genes = [str(g) for g in genes if g and str(g) != ""]
     if not genes: return plt.figure()
 
-    # 1. AGGRESSIVE WIDTH CALCULATION
-    # Reducing the multipliers to shrink the 'box' around the content
+    # 1. TIGHTENED WIDTH/HEIGHT CALCULATION
     max_label_len = max([len(str(x)) for x in adata.obs[groupby].unique()])
-    label_width = max_label_len * 0.10  # Shrunk from 0.12
-    plot_width = len(genes) * 0.35 + (1.0 if dendrogram else 0)  # Shrunk from 0.4
-    legend_width = 1.5  # Shrunk from 2.0
+    label_width = max_label_len * 0.10
+    plot_width = len(genes) * 0.35 + (1.0 if dendrogram else 0)
+    legend_width = 1.2 # Shrunk further from 1.5 to kill right-side space
 
     total_w = label_width + plot_width + legend_width
-    total_h = adata.obs[groupby].nunique() * 0.4 + 0.8  # Tighter height
+    # Shrunk height constant from 0.8 to 0.4 to kill top space
+    total_h = adata.obs[groupby].nunique() * 0.4 + 0.4
 
     actual_figsize = figsize if figsize else (total_w, total_h)
 
-    # 2. SETUP GRID WITH ZERO EXTRA SPACE
+    # 2. SETUP GRID
     fig = plt.figure(figsize=actual_figsize)
-
-    # hspace/wspace=0 and tight margins [left, bottom, right, top]
-    # This stretches the grid to the very edges of the figure
     gs = gridspec.GridSpec(1, 3, width_ratios=[label_width, plot_width, legend_width],
                            wspace=0.0, hspace=0.0)
 
-    # Force the margins to be as tight as possible (0.05 is ~5% of fig)
-    plt.subplots_adjust(left=0.05, right=0.95, top=0.95, bottom=0.15)
+    # ADJUST MARGINS: Push content closer to boundaries
+    # top=0.98 and right=0.98 pull plot closer to the top and right edges
+    plt.subplots_adjust(left=0.05, right=0.98, top=0.98, bottom=0.15)
 
     ax_main = fig.add_subplot(gs[0, 1])
 
@@ -871,13 +869,15 @@ def dotplot_top_genes(
 
     if 'size_legend_ax' in axes_dict:
         sax = axes_dict['size_legend_ax']
-        sax.set_position([legend_x_start, 0.50, 0.10, 0.20])
+        # Moved up slightly (0.55) to align with top clusters
+        sax.set_position([legend_x_start, 0.55, 0.10, 0.20])
         sax.set_title("")
         sax.set_title("Fraction of cells (%)", fontsize=9, fontweight='bold', loc='left', pad=4)
 
     if 'color_legend_ax' in axes_dict:
         cax = axes_dict['color_legend_ax']
-        cax.set_position([legend_x_start, 0.25, 0.015, 0.15])
+        # Tucked closer to size legend
+        cax.set_position([legend_x_start, 0.35, 0.015, 0.15])
         cax.set_title("")
         cax.set_title("Mean expression", fontsize=9, fontweight='bold', loc='left', pad=4)
 
@@ -897,7 +897,7 @@ def dotplot_top_genes(
     ax_main.set_title("")
 
     if show:
-        # Using bbox_inches='tight' during show/save is the ultimate whitespace killer
+        # Crucial for cropping final extraneous whitespace
         plt.show(bbox_inches='tight')
     return fig
 
