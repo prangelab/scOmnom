@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Dict, Sequence, Mapping, Iterable, List, Any
+import ast
 
 import logging
 from sklearn.metrics import silhouette_samples
@@ -34,7 +35,16 @@ def _extract_cnn_token(label: str) -> str:
 
 def _normalize_color(value) -> str | tuple:
     if isinstance(value, str):
-        return value
+        s = value.strip()
+        # Accept legacy stringified tuples from prior color-map serialization.
+        if s.startswith("(") and s.endswith(")"):
+            try:
+                parsed = ast.literal_eval(s)
+                if isinstance(parsed, (list, tuple, np.ndarray)):
+                    return tuple(float(x) for x in parsed)
+            except Exception:
+                pass
+        return s
     if isinstance(value, (list, tuple, np.ndarray)):
         try:
             return tuple(float(x) for x in value)
@@ -283,7 +293,7 @@ def plot_composition_volcano(method: str, df: pd.DataFrame, figdir: Path) -> Non
 
 def plot_sccoda_effects_top(
     df: pd.DataFrame,
-    color_map: Mapping[str, str],
+    color_map: Mapping[str, Any],
     figdir: Path,
 ) -> None:
     """
@@ -324,7 +334,7 @@ def plot_sccoda_effects_top(
     else:
         labels = top.index.astype(str)
     labels = pd.Index(labels).astype(str)
-    colors = [color_map.get(str(label), "#6b7aa1") for label in labels]
+    colors = [_normalize_color(color_map.get(str(label), "#6b7aa1")) for label in labels]
     y_pos = np.arange(len(labels))
 
     fig, ax = plt.subplots(figsize=(7, max(4, 0.3 * len(labels))))

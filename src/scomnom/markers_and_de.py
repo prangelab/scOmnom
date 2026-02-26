@@ -1461,7 +1461,7 @@ def run_composition(cfg) -> ad.AnnData:
                             labels=labels,
                             round_id=getattr(cfg, "round_id", None),
                         )
-                        color_map = {str(label): str(color) for label, color in zip(labels, colors)}
+                        color_map = {str(label): color for label, color in zip(labels, colors)}
                         plot_utils.plot_sccoda_effects_top(df, color_map, fig_subdir)
                 except Exception:
                     LOGGER.exception("composition: method plot failed for %s", method)
