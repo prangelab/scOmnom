@@ -826,21 +826,20 @@ def dotplot_top_genes(
 ) -> Figure:
     genes = [str(g) for g in genes if g and str(g) != ""]
     if not genes:
-        fig, ax = plt.subplots()
-        ax.text(0.5, 0.5, "No genes found", ha="center")
-        return fig
+        return plt.figure()
 
-    # 1. Calculate required width BEFORE plotting
-    # Long labels (60+ chars) need ~6-7 inches just for the text
+    # 1. Calculate Canvas Size based on long labels
     max_label_len = max([len(str(x)) for x in adata.obs[groupby].unique()])
-    text_width_req = 0.5 + (max_label_len * 0.11)
-    plot_width_req = len(genes) * 0.35
-    total_w = text_width_req + plot_width_req + 3.0  # +3 for dendro/legends
-    total_h = adata.obs[groupby].nunique() * 0.4 + 2.0
+    # Give roughly 0.12 inches per character to prevent clipping
+    text_width_req = 1.0 + (max_label_len * 0.12)
+    plot_width_req = len(genes) * 0.4
+    # We add 4 inches for the dendrogram + legend stack area
+    total_w = text_width_req + plot_width_req + 4.0
+    total_h = adata.obs[groupby].nunique() * 0.45 + 2.0
 
-    dynamic_figsize = (max(12, total_w), max(6, total_h)) if figsize is None else figsize
+    dynamic_figsize = (max(14, total_w), max(6, total_h)) if figsize is None else figsize
 
-    # 2. Generate the plot
+    # 2. Generate Plot
     dp = sc.pl.dotplot(
         adata,
         var_names=genes,
@@ -859,50 +858,49 @@ def dotplot_top_genes(
     main_ax = axes_dict['mainplot_ax']
     fig = main_ax.get_figure()
 
-    # 3. Define Hard-Coded Zones (Percentages of Figure)
-    # This prevents the "left >= right" error by ensuring margins are relative
+    # 3. Define Layout Coordinates (Fractions of 0 to 1)
     L_MARGIN = text_width_req / dynamic_figsize[0]
-    R_PLOT_EDGE = 0.82
+    R_PLOT_EDGE = 0.80  # End of the dot area
     B_MARGIN = 0.18
-    T_MARGIN = 0.90
+    T_MARGIN = 0.92
 
     # 4. Position Main Plot
     main_ax.set_position([L_MARGIN, B_MARGIN, R_PLOT_EDGE - L_MARGIN, T_MARGIN - B_MARGIN])
 
-    # 5. Position Dendrogram (immediately to the right of dots)
-    dendro_width = 0.03
+    # 5. Position Dendrogram and push Legends Right
+    # legend_x is the key fix here to stop overlapping the dendrogram
     if 'dendrogram_ax' in axes_dict:
         dax = axes_dict['dendrogram_ax']
-        dax.set_position([R_PLOT_EDGE + 0.005, B_MARGIN, dendro_width, T_MARGIN - B_MARGIN])
-        legend_x = R_PLOT_EDGE + dendro_width + 0.03
+        # Pin dendrogram 1% to the right of the plot
+        dax.set_position([R_PLOT_EDGE + 0.01, B_MARGIN, 0.03, T_MARGIN - B_MARGIN])
+        # Push legends 6% further right from the plot edge
+        legend_x = R_PLOT_EDGE + 0.07
     else:
-        legend_x = R_PLOT_EDGE + 0.02
+        legend_x = R_PLOT_EDGE + 0.03
 
-    # 6. Clean Stack for Legends (Absolute placement)
-    # Size legend (Top)
+    # 6. Absolute Positioning for Legends (Stacked Vertically)
     if 'size_legend_ax' in axes_dict:
         sax = axes_dict['size_legend_ax']
-        sax.set_position([legend_x, 0.55, 0.08, 0.20])
-        sax.set_title("Fraction of cells (%)", fontsize=9, loc='left', pad=10)
+        sax.set_position([legend_x, 0.55, 0.10, 0.20])
+        sax.set_title("Fraction of cells (%)", fontsize=10, loc='left', pad=12)
 
-    # Color legend (Bottom)
     if 'color_legend_ax' in axes_dict:
         cax = axes_dict['color_legend_ax']
-        # Smaller, more compact colorbar
+        # Positioned below the size legend with a clear gap
         cax.set_position([legend_x, 0.25, 0.02, 0.15])
-        cax.set_title("Mean expression", fontsize=9, loc='left', pad=10)
+        cax.set_title("Mean expression", fontsize=10, loc='left', pad=12)
 
-    # 7. Final Dot and Label tweaks
+    # 7. Aesthetics: Dot sizing and Ticks
     for coll in main_ax.collections:
         if hasattr(coll, 'set_sizes'):
-            # Size 180-200 is the sweet spot for 0.35" spacing
-            coll.set_sizes((coll.get_sizes() / (coll.get_sizes().max() or 1)) * 190)
+            # Size 200 fits nicely in 0.4" grids without bleeding
+            coll.set_sizes((coll.get_sizes() / (coll.get_sizes().max() or 1)) * 200)
 
     main_ax.grid(False)
     main_ax.tick_params(axis='x', labelsize=10, rotation=90)
     main_ax.tick_params(axis='y', labelsize=10)
 
-    # Remove any automatic layout attempts that would ruin our manual positioning
+    # Lock the layout so Matplotlib doesn't try to move things
     fig.layout_engine = None
 
     if show:
