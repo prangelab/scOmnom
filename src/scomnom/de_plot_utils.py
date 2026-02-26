@@ -828,11 +828,11 @@ def dotplot_top_genes(
     genes = [str(g) for g in genes if g and str(g) != ""]
     if not genes: return plt.figure()
 
-    # 1. Spacing Calculations
+    # 1. Calculation Logic
     max_label_len = max([len(str(x)) for x in adata.obs[groupby].unique()])
     label_width = max_label_len * 0.12
     plot_width = len(genes) * 0.4 + (1.2 if dendrogram else 0)
-    legend_width = 1.8  # Tightened further to prevent "floating"
+    legend_width = 2.0
 
     total_w = label_width + plot_width + legend_width
     total_h = adata.obs[groupby].nunique() * 0.5 + 1.0
@@ -840,7 +840,7 @@ def dotplot_top_genes(
 
     # 2. Setup the Grid
     fig = plt.figure(figsize=actual_figsize)
-    # top=0.92 slices off the extra vertical room at the top
+    # top=0.92 removes the extra ceiling space
     gs = gridspec.GridSpec(1, 3, width_ratios=[label_width, plot_width, legend_width],
                            wspace=0.0, top=0.92, bottom=0.15)
 
@@ -858,33 +858,30 @@ def dotplot_top_genes(
 
     dendro_width = 0.02
     dendro_x1 = main_pos.x1 + (dendro_width if dendrogram else 0)
-    # Reverted: Anchored immediately to the dendrogram edge
+
+    # REVERTED: Anchored immediately to the right edge of the dendrogram
     legend_x_start = dendro_x1 + 0.015
 
-    # 4. COMPACT LEGENDS
+    # 4. COMPACT LEGENDS (Fixed position, standard padding)
     if 'size_legend_ax' in axes_dict:
         sax = axes_dict['size_legend_ax']
-        sax_pos = [legend_x_start, 0.48, 0.10, 0.15]
-        sax.set_position(sax_pos)
+        sax.set_position([legend_x_start, 0.48, 0.10, 0.15])
         sax.set_title("")
-        # va='bottom' ensures it sits right on top of the circles
-        fig.text(sax_pos[0], sax_pos[1] + sax_pos[3] + 0.005,
-                 "Fraction of cells (%)", fontsize=10, fontweight='bold', va='bottom')
+        # Using loc='left' and a small pad to keep it directly above
+        sax.set_title("Fraction of cells (%)", fontsize=10, fontweight='bold', loc='left', pad=6)
 
     if 'color_legend_ax' in axes_dict:
         cax = axes_dict['color_legend_ax']
-        cax_pos = [legend_x_start, 0.30, 0.015, 0.10]
-        cax.set_position(cax_pos)
+        cax.set_position([legend_x_start, 0.28, 0.015, 0.10])
         cax.set_title("")
-        fig.text(cax_pos[0], cax_pos[1] + cax_pos[3] + 0.005,
-                 "Mean expression", fontsize=10, fontweight='bold', va='bottom')
+        cax.set_title("Mean expression", fontsize=10, fontweight='bold', loc='left', pad=6)
 
     # 5. Dendrogram Placement
     if 'dendrogram_ax' in axes_dict:
         dax = axes_dict['dendrogram_ax']
         dax.set_position([main_pos.x1, main_pos.y0, dendro_width, main_pos.height])
 
-    # 6. Aesthetic Polish
+    # 6. Final Polish
     for coll in ax_main.collections:
         if hasattr(coll, 'set_sizes'):
             coll.set_sizes((coll.get_sizes() / (coll.get_sizes().max() or 1)) * 220)
