@@ -823,19 +823,29 @@ def dotplot_top_genes(
         color_map: str = "viridis",
         figsize: Optional[tuple[float, float]] = None,
         show: bool = False,
-) -> Figure:
+) -> plt.Figure:
     genes = [str(g) for g in genes if g and str(g) != ""]
-    if not genes:
-        return plt.figure()
+    if not genes: return plt.figure()
 
-    # 1. Calculate Canvas
+    # 1. PRE-CALCULATE SPACING
     max_label_len = max([len(str(x)) for x in adata.obs[groupby].unique()])
-    text_width_req = 1.2 + (max_label_len * 0.12)
-    plot_width_req = len(genes) * 0.4
-    total_w = text_width_req + plot_width_req + 4.5
-    total_h = adata.obs[groupby].nunique() * 0.45 + 2.0
-    dynamic_figsize = (max(16, total_w), max(7, total_h)) if figsize is None else figsize
+    # Allocate width proportions: [Labels, Main Plot, Dendro, Legend Buffer, Legends]
+    width_ratios = [max_label_len * 0.15, len(genes) * 0.4, 0.5, 1.0, 2.0]
 
+    total_w = sum(width_ratios) * 0.8
+    total_h = adata.obs[groupby].nunique() * 0.5 + 2.0
+    actual_figsize = figsize if figsize else (max(14, total_w), max(6, total_h))
+
+    # 2. CREATE MANUFACTURED GRID
+    fig = plt.figure(figsize=actual_figsize)
+    gs = gridspec.GridSpec(1, 5, width_ratios=width_ratios, wspace=0.0)
+
+    # We only need the main axis; Scanpy will find the others if we pass the fig
+    main_ax = fig.add_subplot(gs[0, 1])
+
+    # 3. PLOT
+    # We use 'ax=main_ax' to anchor the plot.
+    # 'return_fig=True' gives us access to the legends Scanpy creates.
     dp = sc.pl.dotplot(
         adata,
         var_names=genes,
@@ -845,55 +855,45 @@ def dotplot_top_genes(
         standard_scale=standard_scale,
         dendrogram=dendrogram,
         color_map=color_map,
-        figsize=dynamic_figsize,
         show=False,
-        return_fig=True,
+        ax=main_ax,
+        return_fig=True
     )
 
+    # 4. RE-ANCHOR EVERYTHING TO OUR GRID
     axes_dict = dp.get_axes()
-    main_ax = axes_dict['mainplot_ax']
-    fig = main_ax.get_figure()
 
-    # 2. Coordinates - The "Touch" Fix
-    L_MARGIN = text_width_req / dynamic_figsize[0]
-    R_PLOT_EDGE = 0.80  # Main plot ends
-    DENDRO_W = 0.02  # Width of the tree
-    LEGEND_X = 0.88  # Gap before legends start
-
-    B_MARGIN = 0.15
-    T_MARGIN = 0.90
-    PLOT_HEIGHT = T_MARGIN - B_MARGIN
-
-    # 3. Position Main Plot
-    main_ax.set_position([L_MARGIN, B_MARGIN, R_PLOT_EDGE - L_MARGIN, PLOT_HEIGHT])
-
-    # 4. Position Dendrogram - NO GAP
+    # Move Dendrogram to Slot 2 (directly touching plot)
     if 'dendrogram_ax' in axes_dict:
         dax = axes_dict['dendrogram_ax']
-        # We start exactly at R_PLOT_EDGE so it touches the plot
-        dax.set_position([R_PLOT_EDGE, B_MARGIN, DENDRO_W, PLOT_HEIGHT])
+        dax.set_subplotspec(gs[0, 2])
+        dax.set_visible(True)
 
-    # 5. Position Legends - Pushed out to 0.88
+    # Move Legends to Slot 4 (the far right)
+    # We stack them manually in that slot to prevent vertical overlap
     if 'size_legend_ax' in axes_dict:
         sax = axes_dict['size_legend_ax']
-        sax.set_position([LEGEND_X, 0.55, 0.10, 0.20])
-        sax.set_title("Fraction of cells (%)", fontsize=10, loc='left', fontweight='bold')
+        # Position in upper half of the rightmost slot
+        sax.set_position(gs[0, 4].get_position(fig))
+        sax.set_shrink(0.5)
+        sax.set_anchor('N')
 
     if 'color_legend_ax' in axes_dict:
         cax = axes_dict['color_legend_ax']
-        cax.set_position([LEGEND_X, 0.25, 0.02, 0.15])
-        cax.set_title("Mean expression", fontsize=10, loc='left', fontweight='bold')
+        # Position in lower half of the rightmost slot
+        pos = gs[0, 4].get_position(fig)
+        cax.set_position([pos.x0, pos.y0, pos.width * 0.2, pos.height * 0.3])
+        cax.set_anchor('S')
 
-    # 6. Dot size and Ticks
+    # 5. FIX DOT SIZING
     for coll in main_ax.collections:
         if hasattr(coll, 'set_sizes'):
-            coll.set_sizes((coll.get_sizes() / (coll.get_sizes().max() or 1)) * 210)
+            coll.set_sizes((coll.get_sizes() / (coll.get_sizes().max() or 1)) * 250)
 
-    main_ax.grid(False)
-    main_ax.tick_params(axis='x', labelsize=10, rotation=90)
-    main_ax.tick_params(axis='y', labelsize=10)
-
-    fig.layout_engine = None
+    # Clean up labels and spines
+    main_ax.spines['top'].set_visible(False)
+    main_ax.spines['right'].set_visible(False)
+    main_ax.tick_params(axis='x', rotation=90)
 
     if show:
         plt.show()
