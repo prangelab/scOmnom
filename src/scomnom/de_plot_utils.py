@@ -20,7 +20,6 @@ from . import io_utils
 LOGGER = logging.getLogger(__name__)
 
 
-
 # -----------------------------------------------------------------------------
 # Small helpers
 # -----------------------------------------------------------------------------
@@ -817,7 +816,6 @@ def dotplot_top_genes(
         *,
         genes: Sequence[str],
         groupby: str,
-        display_groupby: str | None = None,
         use_raw: bool = False,
         layer: Optional[str] = None,
         standard_scale: Optional[str] = "var",
@@ -826,16 +824,13 @@ def dotplot_top_genes(
         figsize: Optional[tuple[float, float]] = None,
         show: bool = False,
 ) -> Figure:
-    genes = [str(g) for g in genes if g is not None and str(g) != ""]
+    genes = [str(g) for g in genes if g and str(g) != ""]
     if not genes:
-        fig, ax = plt.subplots(figsize=(7.5, 2.5))
-        ax.text(0.5, 0.5, "No genes to plot", ha="center", va="center")
-        ax.set_axis_off()
-        if show: plt.show()
+        fig, ax = plt.subplots()
+        ax.text(0.5, 0.5, "No genes found", ha="center")
         return fig
 
-    # 1. Generate the base plot
-    # We set show=False and return_fig=True to get the DotPlot object
+    # 1. Generate the DotPlot object
     dp = sc.pl.dotplot(
         adata,
         var_names=genes,
@@ -850,70 +845,59 @@ def dotplot_top_genes(
         return_fig=True,
     )
 
-    # 2. Get the figure and calculate dynamic margins
-    fig = dp.get_axes()['mainplot_ax'].get_figure()
-
-    n_groups = adata.obs[groupby].nunique()
-    n_genes = len(genes)
-
-    # Calculate required width for labels based on character count
-    max_label_len = max([len(str(x)) for x in adata.obs[groupby].unique()])
-    # Heuristic: approx 0.1 inches per character for labels + some padding
-    left_margin_inches = 0.5 + (max_label_len * 0.12)
-
-    # Adjust figure size if not provided to prevent crowding
-    if figsize is None:
-        width = max(12, n_genes * 0.4 + left_margin_inches + 2)
-        height = max(6, n_groups * 0.5 + 2)
-        fig.set_size_inches(width, height)
-
-    fig_w, _ = fig.get_size_inches()
-    left_ratio = left_margin_inches / fig_w
-    right_ratio = 0.85  # Leave 15% for legends
-
-    # 3. Apply layout adjustments
-    # IMPORTANT: Avoid fig.tight_layout() as it resets manual positioning
-    fig.subplots_adjust(left=left_ratio, right=right_ratio, bottom=0.15, top=0.95)
-
-    # 4. Fix Legend and Main Plot positions
+    # 2. Extract Figure and Axes
     axes_dict = dp.get_axes()
     main_ax = axes_dict['mainplot_ax']
+    fig = main_ax.get_figure()
 
-    # Remove gridlines and clean spines
-    for ax_name, ax in axes_dict.items():
-        ax.grid(False)
-        if ax_name == 'mainplot_ax':
-            ax.spines['top'].set_visible(False)
-            ax.spines['right'].set_visible(False)
-            ax.tick_params(axis='x', rotation=90, labelsize=10)
-            ax.tick_params(axis='y', labelsize=11)
+    # 3. Calculate dynamic left margin based on label length
+    # Approx 0.11 inches per character is usually safe for default fonts
+    max_label_len = max([len(str(x)) for x in adata.obs[groupby].unique()])
+    left_margin_in = 0.4 + (max_label_len * 0.11)
 
-    # 5. Robust Dot Scaling
-    # Instead of multiplier, we target a specific max size for clarity
-    # 200-400 is usually a "sweet spot" for scRNA-seq dot plots
-    target_size = 300
+    fig_w, fig_h = fig.get_size_inches()
+    left_frac = left_margin_in / fig_w
+
+    # We want the plot to end around 82% to leave room for the legend stack
+    right_plot_edge = 0.82
+
+    # 4. Global adjustment to remove top/bottom dead space
+    # Using 0.05 top and 0.15 bottom (for x-axis labels)
+    fig.subplots_adjust(left=left_frac, right=right_plot_edge, top=0.95, bottom=0.15)
+
+    # 5. Stack Legends Vertically
+    # We place them in a fixed column to the right of the main plot
+    legend_x = right_plot_edge + 0.02
+
+    # Mean Expression (Colorbar) - usually at the bottom right
+    if 'color_legend_ax' in axes_dict:
+        cax = axes_dict['color_legend_ax']
+        # [left, bottom, width, height]
+        cax.set_position([legend_x, 0.15, 0.02, 0.15])
+        cax.set_title("Mean expression\nin group", fontsize=9, pad=8)
+
+    # Fraction of cells (Size legend) - stacked above the colorbar
+    if 'size_legend_ax' in axes_dict:
+        sax = axes_dict['size_legend_ax']
+        # Positioned higher up to keep them together
+        sax.set_position([legend_x, 0.35, 0.08, 0.25])
+        sax.set_title("Fraction of cells\nin group (%)", fontsize=9, pad=8)
+
+    # 6. Fine-tune Dot Sizes and Aesthetics
+    # Dot size: 200-300 is typically "fleshed out" without overlapping
     for coll in main_ax.collections:
         if hasattr(coll, 'set_sizes'):
-            # This scales the 'Fraction of cells' dots
             current_sizes = coll.get_sizes()
             if len(current_sizes) > 0:
-                # Normalize so the largest dot is our target_size
-                new_sizes = (current_sizes / current_sizes.max()) * target_size
+                # Standardize so the 100% dot is size 250
+                new_sizes = (current_sizes / current_sizes.max()) * 250
                 coll.set_sizes(new_sizes)
 
-    # 6. Reposition Legends so they aren't clipped
-    # Scanpy legends are usually in 'color_legend_ax' and 'size_legend_ax'
-    legend_x_start = right_ratio + 0.02
-    if 'color_legend_ax' in axes_dict:
-        ax = axes_dict['color_legend_ax']
-        pos = ax.get_position()
-        ax.set_position([legend_x_start, pos.y0, 0.02, pos.height])
-
-    if 'size_legend_ax' in axes_dict:
-        ax = axes_dict['size_legend_ax']
-        pos = ax.get_position()
-        # Stack size legend below or offset from color legend
-        ax.set_position([legend_x_start + 0.05, pos.y0, 0.08, pos.height])
+    main_ax.grid(False)
+    main_ax.spines['top'].set_visible(False)
+    main_ax.spines['right'].set_visible(False)
+    main_ax.tick_params(axis='x', labelsize=10)
+    main_ax.tick_params(axis='y', labelsize=10)
 
     if show:
         plt.show()
