@@ -830,7 +830,17 @@ def dotplot_top_genes(
         ax.text(0.5, 0.5, "No genes found", ha="center")
         return fig
 
-    # 1. Generate plot - keep figsize flexible
+    # 1. Calculate required width BEFORE plotting
+    # Long labels (60+ chars) need ~6-7 inches just for the text
+    max_label_len = max([len(str(x)) for x in adata.obs[groupby].unique()])
+    text_width_req = 0.5 + (max_label_len * 0.11)
+    plot_width_req = len(genes) * 0.35
+    total_w = text_width_req + plot_width_req + 3.0  # +3 for dendro/legends
+    total_h = adata.obs[groupby].nunique() * 0.4 + 2.0
+
+    dynamic_figsize = (max(12, total_w), max(6, total_h)) if figsize is None else figsize
+
+    # 2. Generate the plot
     dp = sc.pl.dotplot(
         adata,
         var_names=genes,
@@ -840,7 +850,7 @@ def dotplot_top_genes(
         standard_scale=standard_scale,
         dendrogram=dendrogram,
         color_map=color_map,
-        figsize=figsize,
+        figsize=dynamic_figsize,
         show=False,
         return_fig=True,
     )
@@ -849,60 +859,51 @@ def dotplot_top_genes(
     main_ax = axes_dict['mainplot_ax']
     fig = main_ax.get_figure()
 
-    # 2. Calculate dynamic label space
-    # 66 chars need roughly 40% of a standard figure width to be safe
-    max_label_len = max([len(str(x)) for x in adata.obs[groupby].unique()])
+    # 3. Define Hard-Coded Zones (Percentages of Figure)
+    # This prevents the "left >= right" error by ensuring margins are relative
+    L_MARGIN = text_width_req / dynamic_figsize[0]
+    R_PLOT_EDGE = 0.82
+    B_MARGIN = 0.18
+    T_MARGIN = 0.90
 
-    # We define our "Sanity Zone" coordinates (0 to 1 scale)
-    left_margin = 0.38 if max_label_len > 40 else 0.25
-    right_margin = 0.82
-    top_margin = 0.92
-    bottom_margin = 0.20
+    # 4. Position Main Plot
+    main_ax.set_position([L_MARGIN, B_MARGIN, R_PLOT_EDGE - L_MARGIN, T_MARGIN - B_MARGIN])
 
-    # 3. Position the Main Plot
-    # [left, bottom, width, height]
-    main_ax.set_position([left_margin, bottom_margin, right_margin - left_margin, top_margin - bottom_margin])
-
-    # 4. Handle Dendrogram (pin it to the right of the plot)
-    legend_x_start = right_margin + 0.02
+    # 5. Position Dendrogram (immediately to the right of dots)
+    dendro_width = 0.03
     if 'dendrogram_ax' in axes_dict:
-        d_ax = axes_dict['dendrogram_ax']
-        d_ax.set_position([right_margin + 0.005, bottom_margin, 0.02, top_margin - bottom_margin])
-        legend_x_start = right_margin + 0.05
+        dax = axes_dict['dendrogram_ax']
+        dax.set_position([R_PLOT_EDGE + 0.005, B_MARGIN, dendro_width, T_MARGIN - B_MARGIN])
+        legend_x = R_PLOT_EDGE + dendro_width + 0.03
+    else:
+        legend_x = R_PLOT_EDGE + 0.02
 
-    # 5. Position Legends (Fixed vertical stack, no overlap)
-    # Size legend on top half
+    # 6. Clean Stack for Legends (Absolute placement)
+    # Size legend (Top)
     if 'size_legend_ax' in axes_dict:
         sax = axes_dict['size_legend_ax']
-        sax.set_position([legend_x_start, 0.50, 0.10, 0.25])
-        sax.set_title("Fraction of cells (%)", fontsize=9, loc='left')
+        sax.set_position([legend_x, 0.55, 0.08, 0.20])
+        sax.set_title("Fraction of cells (%)", fontsize=9, loc='left', pad=10)
 
-    # Color legend on bottom half
+    # Color legend (Bottom)
     if 'color_legend_ax' in axes_dict:
         cax = axes_dict['color_legend_ax']
-        cax.set_position([legend_x_start, 0.20, 0.02, 0.15])
-        cax.set_title("Mean expression", fontsize=9, loc='left')
+        # Smaller, more compact colorbar
+        cax.set_position([legend_x, 0.25, 0.02, 0.15])
+        cax.set_title("Mean expression", fontsize=9, loc='left', pad=10)
 
-    # 6. Fix Dot Overlap & Scaling
-    # Instead of making them huge, we target a size that fits the grid
+    # 7. Final Dot and Label tweaks
     for coll in main_ax.collections:
         if hasattr(coll, 'set_sizes'):
-            current_sizes = coll.get_sizes()
-            if len(current_sizes) > 0:
-                # 180 is a safe "large" size that won't bleed into other rows/cols
-                new_sizes = (current_sizes / current_sizes.max()) * 180
-                coll.set_sizes(new_sizes)
+            # Size 180-200 is the sweet spot for 0.35" spacing
+            coll.set_sizes((coll.get_sizes() / (coll.get_sizes().max() or 1)) * 190)
 
-    # 7. Final Polish
     main_ax.grid(False)
-    for spine in main_ax.spines.values():
-        spine.set_visible(True)  # Keep the L-frame for structure
-
     main_ax.tick_params(axis='x', labelsize=10, rotation=90)
     main_ax.tick_params(axis='y', labelsize=10)
 
-    # IMPORTANT: DO NOT CALL tight_layout() or subplots_adjust() here.
-    # It will overwrite the set_position coordinates we just painstakingly set.
+    # Remove any automatic layout attempts that would ruin our manual positioning
+    fig.layout_engine = None
 
     if show:
         plt.show()
