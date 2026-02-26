@@ -1438,6 +1438,7 @@ def run_composition(cfg) -> ad.AnnData:
                         graph_meta_global,
                         fig_subdir,
                         alpha=alpha,
+                        all_clusters=counts.columns.astype(str).tolist(),
                     )
                 except Exception:
                     LOGGER.exception("composition: failed to plot GraphDA summary")
@@ -1449,7 +1450,7 @@ def run_composition(cfg) -> ad.AnnData:
                     continue
                 try:
                     if method in ("glm", "clr"):
-                        plot_utils.plot_composition_volcano(method, df, fig_subdir)
+                        plot_utils.plot_composition_volcano(method, df, fig_subdir, alpha=alpha)
                     if method == "sccoda":
                         if "cluster" in df.columns:
                             labels = df["cluster"].astype(str)
@@ -1462,7 +1463,7 @@ def run_composition(cfg) -> ad.AnnData:
                             round_id=getattr(cfg, "round_id", None),
                         )
                         color_map = {str(label): color for label, color in zip(labels, colors)}
-                        plot_utils.plot_sccoda_effects_top(df, color_map, fig_subdir)
+                        plot_utils.plot_sccoda_effects_top(df, color_map, fig_subdir, alpha=alpha)
                 except Exception:
                     LOGGER.exception("composition: method plot failed for %s", method)
 
@@ -1493,9 +1494,33 @@ def run_composition(cfg) -> ad.AnnData:
 
         if write_figures and bool(getattr(cfg, "make_figures", True)):
             try:
+                def _effect_sig_mask(df_eff: pd.DataFrame, labels_eff: pd.Index, alpha_eff: float) -> np.ndarray:
+                    if df_eff is None or df_eff.empty:
+                        return np.zeros(len(labels_eff), dtype=bool)
+                    dtmp = df_eff.copy()
+                    if "cluster" in dtmp.columns:
+                        dtmp["cluster"] = dtmp["cluster"].astype(str)
+                    else:
+                        dtmp["cluster"] = dtmp.index.astype(str)
+                    grp = dtmp.groupby("cluster", dropna=False)
+                    if "fdr" in dtmp.columns:
+                        s = grp["fdr"].min()
+                        return labels_eff.map(s).astype(float).le(float(alpha_eff)).fillna(False).to_numpy()
+                    if "pval" in dtmp.columns:
+                        s = grp["pval"].min()
+                        return labels_eff.map(s).astype(float).le(float(alpha_eff)).fillna(False).to_numpy()
+                    if "inclusion_prob" in dtmp.columns:
+                        s = grp["inclusion_prob"].max()
+                        return labels_eff.map(s).astype(float).ge(float(1.0 - alpha_eff)).fillna(False).to_numpy()
+                    if "Inclusion probability" in dtmp.columns:
+                        s = grp["Inclusion probability"].max()
+                        return labels_eff.map(s).astype(float).ge(float(1.0 - alpha_eff)).fillna(False).to_numpy()
+                    return np.zeros(len(labels_eff), dtype=bool)
+
                 global_df = results_by_method.get(primary_method)
                 if isinstance(global_df, pd.DataFrame) and not global_df.empty:
                     plotted = False
+                    plotted_name = "composition_effects_global"
                     if "effect" in global_df.columns:
                         vals = pd.to_numeric(global_df["effect"], errors="coerce")
                         if "cluster" in global_df.columns:
@@ -1510,11 +1535,30 @@ def run_composition(cfg) -> ad.AnnData:
                                 labels=labels,
                                 round_id=getattr(cfg, "round_id", None),
                             )
-                            plot_utils.plot_composition_effects_global(vals.to_numpy(), labels, colors, fig_subdir)
+                            plot_utils.plot_composition_effects_global(
+                                vals.to_numpy(),
+                                labels,
+                                colors,
+                                fig_subdir,
+                                plot_name="composition_effects_global",
+                                title="Composition effects (global)",
+                                sig_mask=_effect_sig_mask(global_df, labels, alpha),
+                                alpha=alpha,
+                            )
                             plotted = True
-                    elif primary_method == "sccoda" and "Final Parameter" in global_df.columns:
-                        vals = pd.to_numeric(global_df["Final Parameter"], errors="coerce")
-                        labels = global_df.index.astype(str)
+                    elif primary_method == "sccoda":
+                        if "Expected Sample log2-fold change" in global_df.columns:
+                            vals = pd.to_numeric(global_df["Expected Sample log2-fold change"], errors="coerce")
+                        elif "Expected Sample" in global_df.columns:
+                            vals = pd.to_numeric(global_df["Expected Sample"], errors="coerce")
+                        elif "Final Parameter" in global_df.columns:
+                            vals = pd.to_numeric(global_df["Final Parameter"], errors="coerce")
+                        else:
+                            vals = pd.Series(dtype=float)
+                        if "cluster" in global_df.columns:
+                            labels = global_df["cluster"].astype(str)
+                        else:
+                            labels = global_df.index.astype(str)
                         if not vals.isna().all():
                             labels = pd.Index(labels).astype(str)
                             colors = _resolve_cluster_colors(
@@ -1523,7 +1567,16 @@ def run_composition(cfg) -> ad.AnnData:
                                 labels=labels,
                                 round_id=getattr(cfg, "round_id", None),
                             )
-                            plot_utils.plot_composition_effects_global(vals.to_numpy(), labels, colors, fig_subdir)
+                            plot_utils.plot_composition_effects_global(
+                                vals.to_numpy(),
+                                labels,
+                                colors,
+                                fig_subdir,
+                                plot_name="composition_effects_global",
+                                title="Composition effects (global, scCODA expected sample log2-FC)",
+                                sig_mask=_effect_sig_mask(global_df, labels, alpha),
+                                alpha=alpha,
+                            )
                             plotted = True
                     elif primary_method == "glm" and "coef" in global_df.columns:
                         vals = global_df.groupby("cluster")["coef"].mean()
@@ -1536,10 +1589,46 @@ def run_composition(cfg) -> ad.AnnData:
                                 labels=labels,
                                 round_id=getattr(cfg, "round_id", None),
                             )
-                            plot_utils.plot_composition_effects_global(vals.values, labels, colors, fig_subdir)
+                            plot_utils.plot_composition_effects_global(
+                                vals.values,
+                                labels,
+                                colors,
+                                fig_subdir,
+                                plot_name="composition_effects_global",
+                                title="Composition effects (global)",
+                                sig_mask=_effect_sig_mask(global_df, labels, alpha),
+                                alpha=alpha,
+                            )
                             plotted = True
                     if plotted:
-                        LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_effects_global")
+                        LOGGER.info("Saved plot: %s/%s", fig_subdir, plotted_name)
+
+                clr_df = results_by_method.get("clr")
+                if isinstance(clr_df, pd.DataFrame) and not clr_df.empty and "effect" in clr_df.columns:
+                    clr_vals = pd.to_numeric(clr_df["effect"], errors="coerce")
+                    if "cluster" in clr_df.columns:
+                        clr_labels = clr_df["cluster"].astype(str)
+                    else:
+                        clr_labels = clr_df.index.astype(str)
+                    if not clr_vals.isna().all():
+                        clr_labels = pd.Index(clr_labels).astype(str)
+                        clr_colors = _resolve_cluster_colors(
+                            adata,
+                            cluster_key=cluster_key,
+                            labels=clr_labels,
+                            round_id=getattr(cfg, "round_id", None),
+                        )
+                        plot_utils.plot_composition_effects_global(
+                            clr_vals.to_numpy(),
+                            clr_labels,
+                            clr_colors,
+                            fig_subdir,
+                            plot_name="composition_effects_global_clr",
+                            title="Composition effects (global, CLR)",
+                            sig_mask=_effect_sig_mask(clr_df, clr_labels, alpha),
+                            alpha=alpha,
+                        )
+                        LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_effects_global_clr")
             except Exception:
                 LOGGER.exception("composition: failed to generate plots")
 

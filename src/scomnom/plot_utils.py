@@ -114,6 +114,7 @@ def plot_graphda_summaries(
     figdir: Path,
     *,
     alpha: float = 0.05,
+    all_clusters: Sequence[str] | None = None,
 ) -> None:
     """
     Plot GraphDA summary panels and save via save_multi().
@@ -177,21 +178,47 @@ def plot_graphda_summaries(
             color="#444444",
         )
     ax.grid(False)
+    if "fdr" in top.columns:
+        sig_top = pd.to_numeric(top["fdr"], errors="coerce") <= float(alpha)
+    elif "pval" in top.columns:
+        sig_top = pd.to_numeric(top["pval"], errors="coerce") <= float(alpha)
+    else:
+        sig_top = pd.Series(False, index=top.index)
+    for xi, yi, is_sig in zip(x, y, sig_top.to_numpy()):
+        if bool(is_sig):
+            va = "bottom" if yi >= 0 else "top"
+            yoff = 0.04 if yi >= 0 else -0.04
+            ax.text(xi, yi + yoff, "*", ha="center", va=va, fontsize=10, color="#d62728")
     save_multi("graphda_top_neighborhoods", figdir, fig=fig)
     plt.close(fig)
 
+    cluster_universe: list[str] = []
+    if all_clusters is not None:
+        cluster_universe = [str(c) for c in pd.Index(all_clusters).astype(str).tolist()]
     if "cluster_label" in gdf.columns:
         gdf["cluster_label"] = gdf["cluster_label"].astype(str)
         idx = gdf.groupby("cluster_label")["_abs_effect"].idxmax()
         top_by_cluster = gdf.loc[idx].copy().sort_values("cluster_label")
     else:
         top_by_cluster = pd.DataFrame()
+    if cluster_universe:
+        if top_by_cluster.empty:
+            top_by_cluster = pd.DataFrame({"cluster_label": cluster_universe, "effect": 0.0})
+            top_by_cluster["has_neighborhood"] = False
+        else:
+            top_by_cluster = top_by_cluster.set_index("cluster_label")
+            top_by_cluster = top_by_cluster.reindex(cluster_universe)
+            top_by_cluster["has_neighborhood"] = ~top_by_cluster["effect"].isna()
+            top_by_cluster["effect"] = pd.to_numeric(top_by_cluster["effect"], errors="coerce").fillna(0.0)
+            top_by_cluster = top_by_cluster.reset_index().rename(columns={"index": "cluster_label"})
     if not top_by_cluster.empty:
         fig, ax = plt.subplots(figsize=(8, max(4, 0.25 * len(top_by_cluster))))
         labels = top_by_cluster["cluster_label"].astype(str)
         x = np.arange(len(labels))
         y = pd.to_numeric(top_by_cluster["effect"], errors="coerce").to_numpy()
-        ax.bar(x, y, color="#6b7aa1")
+        has_nh = top_by_cluster.get("has_neighborhood", pd.Series(True, index=top_by_cluster.index)).astype(bool).to_numpy()
+        bar_colors = ["#6b7aa1" if h else "#c8cedd" for h in has_nh]
+        ax.bar(x, y, color=bar_colors)
         ax.set_xticks(x)
         ax.set_xticklabels(labels, rotation=45, ha="right")
         ax.set_ylabel("Effect")
@@ -210,12 +237,32 @@ def plot_graphda_summaries(
                 color="#444444",
             )
         ax.grid(False)
+        if "fdr" in top_by_cluster.columns:
+            sig_by = pd.to_numeric(top_by_cluster["fdr"], errors="coerce") <= float(alpha)
+        elif "pval" in top_by_cluster.columns:
+            sig_by = pd.to_numeric(top_by_cluster["pval"], errors="coerce") <= float(alpha)
+        else:
+            sig_by = pd.Series(False, index=top_by_cluster.index)
+        for xi, yi, is_sig, has_nh_i in zip(x, y, sig_by.to_numpy(), has_nh):
+            if bool(is_sig) and bool(has_nh_i):
+                va = "bottom" if yi >= 0 else "top"
+                yoff = 0.04 if yi >= 0 else -0.04
+                ax.text(xi, yi + yoff, "*", ha="center", va=va, fontsize=10, color="#d62728")
+        legend_handles = [
+            mpl.patches.Patch(facecolor="#6b7aa1", edgecolor="black", linewidth=0.4, label="Has neighborhoods"),
+            mpl.patches.Patch(facecolor="#c8cedd", edgecolor="black", linewidth=0.4, label="No neighborhoods"),
+            mpl.lines.Line2D([], [], marker="None", linestyle="None", label="* significant"),
+        ]
+        ax.legend(handles=legend_handles, loc="upper right", frameon=True, fontsize=8)
         plt.tight_layout()
         save_multi("graphda_top_by_cluster", figdir, fig=fig)
         plt.close(fig)
 
     labels = gdf["cluster_label"].astype(str)
-    order = pd.Index(pd.unique(labels))
+    if cluster_universe:
+        order = pd.Index(cluster_universe)
+    else:
+        order = pd.Index(pd.unique(labels))
     y_pos = {lab: i for i, lab in enumerate(order)}
     x = pd.to_numeric(gdf["effect"], errors="coerce")
     y = labels.map(y_pos).astype(float)
@@ -236,6 +283,38 @@ def plot_graphda_summaries(
 
     fig, ax = plt.subplots(figsize=(8, max(4, 0.25 * len(order))))
     ax.scatter(x, yj, s=16, c=colors, alpha=alphas, edgecolors="none")
+    sig_legend_handles = [
+        mpl.lines.Line2D([], [], marker="o", linestyle="None", color="#d62728", label="Significant", markersize=5),
+        mpl.lines.Line2D([], [], marker="o", linestyle="None", color="#b0b0b0", label="Not significant", markersize=5),
+    ]
+    if cluster_universe:
+        present = set(labels.tolist())
+        missing = [c for c in cluster_universe if c not in present]
+        if missing:
+            xm = np.zeros(len(missing), dtype=float)
+            ym = np.array([y_pos[c] for c in missing], dtype=float)
+            ax.scatter(
+                xm,
+                ym,
+                s=18,
+                c="#9aa0aa",
+                alpha=0.9,
+                marker="x",
+                linewidths=0.9,
+                label="No tested neighborhoods",
+            )
+            sig_legend_handles.append(
+                mpl.lines.Line2D(
+                    [],
+                    [],
+                    marker="x",
+                    linestyle="None",
+                    color="#9aa0aa",
+                    label="No tested neighborhoods",
+                    markersize=6,
+                )
+            )
+    ax.legend(handles=sig_legend_handles, loc="lower right", frameon=True, fontsize=8)
     ax.axvline(0, color="black", linestyle="--", linewidth=1)
     ax.set_yticks(list(y_pos.values()))
     ax.set_yticklabels(list(y_pos.keys()))
@@ -247,7 +326,7 @@ def plot_graphda_summaries(
     plt.close(fig)
 
 
-def plot_composition_volcano(method: str, df: pd.DataFrame, figdir: Path) -> None:
+def plot_composition_volcano(method: str, df: pd.DataFrame, figdir: Path, *, alpha: float = 0.05) -> None:
     """
     Plot a volcano for a composition method and save via save_multi().
     """
@@ -273,7 +352,8 @@ def plot_composition_volcano(method: str, df: pd.DataFrame, figdir: Path) -> Non
             y = pd.to_numeric(df["pval"], errors="coerce")
             y_source = "pval"
 
-    y = -np.log10(y)
+    y_numeric = y.copy()
+    y = -np.log10(y_numeric)
 
     mask = np.isfinite(x) & np.isfinite(y)
     x = x[mask]
@@ -282,11 +362,29 @@ def plot_composition_volcano(method: str, df: pd.DataFrame, figdir: Path) -> Non
         return
 
     fig, ax = plt.subplots(figsize=(6, 4))
-    ax.scatter(x, y, s=14, c="#7a7a7a", alpha=0.7, edgecolors="none")
+    sig = pd.Series(False, index=df.index)
+    if "fdr" in df.columns:
+        sig = pd.to_numeric(df["fdr"], errors="coerce") <= float(alpha)
+    elif "pval" in df.columns:
+        sig = pd.to_numeric(df["pval"], errors="coerce") <= float(alpha)
+    sig = sig[mask]
+    pt_colors = np.where(sig.to_numpy(), "#d62728", "#7a7a7a")
+    pt_alpha = np.where(sig.to_numpy(), 0.9, 0.65)
+    ax.scatter(x, y, s=16, c=pt_colors, alpha=pt_alpha, edgecolors="none")
     ax.axvline(0, color="black", linestyle="--", linewidth=1)
+    y_thr = -np.log10(float(alpha))
+    if np.isfinite(y_thr):
+        ax.axhline(y_thr, color="#d62728", linestyle=":", linewidth=1)
     ax.set_xlabel("Effect (log2 scale)")
     ax.set_ylabel(f"-log10({y_source})" if y_source else "-log10(pval)")
     ax.set_title(f"{str(method).upper()} volcano")
+    legend_handles = [
+        mpl.lines.Line2D([], [], marker="o", linestyle="None", color="#d62728", label="Significant", markersize=5),
+        mpl.lines.Line2D([], [], marker="o", linestyle="None", color="#7a7a7a", label="Not significant", markersize=5),
+        mpl.lines.Line2D([], [], color="#d62728", linestyle=":", label=f"{y_source or 'pval'}={alpha:g}"),
+    ]
+    ax.legend(handles=legend_handles, loc="upper right", frameon=True, fontsize=8)
+    ax.grid(False)
     save_multi(f"{str(method)}_volcano", figdir, fig=fig)
     plt.close(fig)
 
@@ -295,6 +393,8 @@ def plot_sccoda_effects_top(
     df: pd.DataFrame,
     color_map: Mapping[str, Any],
     figdir: Path,
+    *,
+    alpha: float = 0.05,
 ) -> None:
     """
     Plot top scCODA effects and save via save_multi().
@@ -335,17 +435,32 @@ def plot_sccoda_effects_top(
         labels = top.index.astype(str)
     labels = pd.Index(labels).astype(str)
     colors = [_normalize_color(color_map.get(str(label), "#6b7aa1")) for label in labels]
+    if "fdr" in top.columns:
+        sig = pd.to_numeric(top["fdr"], errors="coerce") <= float(alpha)
+    elif "pval" in top.columns:
+        sig = pd.to_numeric(top["pval"], errors="coerce") <= float(alpha)
+    elif "inclusion_prob" in top.columns:
+        sig = pd.to_numeric(top["inclusion_prob"], errors="coerce") >= float(1.0 - alpha)
+    elif "Inclusion probability" in top.columns:
+        sig = pd.to_numeric(top["Inclusion probability"], errors="coerce") >= float(1.0 - alpha)
+    else:
+        sig = pd.Series(False, index=top.index)
     y_pos = np.arange(len(labels))
 
     fig, ax = plt.subplots(figsize=(7, max(4, 0.3 * len(labels))))
     if ci_low is not None and ci_high is not None:
         ax.hlines(y_pos, ci_low, ci_high, color="#999999", linewidth=1.5)
     ax.scatter(eff, y_pos, s=30, color=colors, zorder=3)
+    for x_i, y_i, is_sig in zip(eff.to_numpy(), y_pos, sig.to_numpy()):
+        if bool(is_sig):
+            ax.text(x_i, y_i, " *", va="center", ha="left", fontsize=10, color="#d62728")
     ax.axvline(0, color="black", linestyle="--", linewidth=1)
     ax.set_yticks(y_pos)
     ax.set_yticklabels(labels)
     ax.set_xlabel("Effect")
     ax.set_title("scCODA effects (top)")
+    legend_handles = [mpl.lines.Line2D([], [], marker="None", linestyle="None", label=f"* significant (alpha={alpha:g})")]
+    ax.legend(handles=legend_handles, loc="lower right", frameon=True, fontsize=8)
     ax.grid(False)
     plt.tight_layout()
     save_multi("sccoda_effects_top", figdir, fig=fig)
@@ -357,6 +472,11 @@ def plot_composition_effects_global(
     labels: Sequence[str],
     colors: Sequence[str],
     figdir: Path,
+    *,
+    plot_name: str = "composition_effects_global",
+    title: str = "Composition effects (global)",
+    sig_mask: Sequence[bool] | None = None,
+    alpha: float = 0.05,
 ) -> None:
     """
     Plot global composition effects and save via save_multi().
@@ -369,16 +489,28 @@ def plot_composition_effects_global(
     x = np.arange(len(labels))
     vals_np = vals.to_numpy()
     ax.bar(x, vals_np, color=list(colors))
+    if sig_mask is not None:
+        sig_arr = np.array([bool(v) for v in sig_mask], dtype=bool)
+        if sig_arr.size != vals_np.size:
+            sig_arr = np.resize(sig_arr, vals_np.size)
+        for xi, yi, is_sig in zip(x, vals_np, sig_arr):
+            if is_sig and np.isfinite(yi):
+                va = "bottom" if yi >= 0 else "top"
+                yoff = 0.02 * max(1.0, float(np.nanmax(np.abs(vals_np))))
+                ax.text(xi, yi + (yoff if yi >= 0 else -yoff), "*", ha="center", va=va, fontsize=10, color="#d62728")
+        if sig_arr.any():
+            legend_handles = [mpl.lines.Line2D([], [], marker="None", linestyle="None", label=f"* significant (alpha={alpha:g})")]
+            ax.legend(handles=legend_handles, loc="upper right", frameon=True, fontsize=8)
     if np.nanmax(np.abs(vals_np)) == 0:
         ax.scatter(x, vals_np, color=list(colors), s=30, zorder=3)
         ax.set_ylim(-0.05, 0.05)
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=45, ha="right")
     ax.set_ylabel("Effect")
-    ax.set_title("Composition effects (global)")
+    ax.set_title(str(title))
     ax.tick_params(axis="x", labelrotation=45)
     ax.grid(False)
-    save_multi("composition_effects_global", figdir, fig=fig)
+    save_multi(str(plot_name), figdir, fig=fig)
     plt.close(fig)
 
 
@@ -432,39 +564,16 @@ def plot_composition_stacks(
     ax.set_ylabel("Mean proportion")
     ax.set_title("Cell Type Composition (100% stacked)")
     ax.grid(False)
+    _add_outside_legend(
+        ax,
+        [str(c) for c in cluster_order],
+        list(colors),
+        "Cluster",
+        max_rows=16,
+    )
     plt.tight_layout()
     save_multi("composition_stacked_bar_100", figdir, fig=fig)
     plt.close(fig)
-
-    if len(cond_levels) >= 2:
-        fig, axes = plt.subplots(1, len(cond_levels), figsize=(4 * len(cond_levels), 4), sharey=True)
-        if len(cond_levels) == 1:
-            axes = [axes]
-        for ax, cond in zip(axes, cond_levels):
-            mask = metadata.loc[metadata.index, str(condition_key)].astype(str) == str(cond)
-            if mask.sum() == 0:
-                mean_props = pd.Series(0.0, index=cluster_order)
-            else:
-                mean_props = props_plot.loc[mask].mean(axis=0).reindex(cluster_order)
-            bottom = 0.0
-            for idx, cl in enumerate(cluster_order):
-                val = mean_props[cl]
-                ax.bar(0, val, bottom=bottom, color=colors[idx], edgecolor="white", linewidth=0.3)
-                bottom += val
-            n = int((metadata.loc[metadata.index, str(condition_key)].astype(str) == str(cond)).sum())
-            ax.set_title(f"{cond}\n(n={n})")
-            ax.set_xticks([])
-            ax.grid(False)
-        axes[0].set_ylabel("Mean proportion")
-        fig.suptitle("Cell Type Composition", fontsize=12)
-        plt.tight_layout()
-        save_multi("composition_stacked_bar", figdir, fig=fig)
-        plt.close(fig)
-    else:
-        LOGGER.warning(
-            "composition: stacked bar plot skipped (requires at least 2 condition levels, found %d).",
-            len(cond_levels),
-        )
 
     sig_clusters = set()
     if consensus is not None and isinstance(consensus, pd.DataFrame) and not consensus.empty:
@@ -474,8 +583,6 @@ def plot_composition_stacks(
             sig_clusters = set()
 
     if len(cond_levels) == 2:
-        from matplotlib.patches import Patch
-
         fig, ax = plt.subplots(figsize=(8, max(4, 0.25 * len(cluster_order))))
         left = props_plot.loc[metadata[str(condition_key)].astype(str) == cond_levels[0]].mean()
         right = props_plot.loc[metadata[str(condition_key)].astype(str) == cond_levels[1]].mean()
@@ -501,19 +608,24 @@ def plot_composition_stacks(
         ax.set_yticklabels(cluster_order)
         ax.set_xlabel("Mean proportion")
         ax.set_title("Cell Type Composition (stacked comparison)")
-        legend_handles = [
-            Patch(facecolor="#7a7a7a", edgecolor="none", alpha=1.0, label=str(cond_levels[0])),
-            Patch(facecolor="#7a7a7a", edgecolor="none", alpha=0.6, label=str(cond_levels[1])),
-        ]
-        ax.legend(
-            handles=legend_handles,
-            title="Condition",
-            loc="upper right",
-            frameon=True,
+        ax.text(
+            0.98,
+            0.02,
+            f"Solid={cond_levels[0]}  Light={cond_levels[1]}",
+            transform=ax.transAxes,
+            ha="right",
+            va="bottom",
             fontsize=9,
-            title_fontsize=10,
+            color="#444444",
         )
         ax.grid(False)
+        _add_outside_legend(
+            ax,
+            [str(c) for c in cluster_order],
+            list(colors),
+            "Cluster",
+            max_rows=16,
+        )
         plt.tight_layout()
         save_multi("composition_stacked_comparison", figdir, fig=fig)
         plt.close(fig)
@@ -550,6 +662,13 @@ def plot_composition_stacks(
             color="#444444",
         )
         ax.grid(False)
+        _add_outside_legend(
+            ax,
+            [str(c) for c in cluster_order],
+            list(colors),
+            "Cluster",
+            max_rows=16,
+        )
         plt.tight_layout()
         save_multi("composition_flow", figdir, fig=fig)
         plt.close(fig)
@@ -628,6 +747,13 @@ def plot_composition_stacks(
         ax.set_ylabel("Mean proportion")
         ax.set_title("Cell Type Composition Alluvial")
         ax.grid(False)
+        _add_outside_legend(
+            ax,
+            [str(c) for c in cluster_order],
+            list(colors),
+            "Cluster",
+            max_rows=16,
+        )
         plt.tight_layout()
         save_multi("composition_alluvial", figdir, fig=fig)
         plt.close(fig)
