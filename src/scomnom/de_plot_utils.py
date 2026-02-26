@@ -828,13 +828,11 @@ def dotplot_top_genes(
     genes = [str(g) for g in genes if g and str(g) != ""]
     if not genes: return plt.figure()
 
-    # 1. Spacing Calculations for 66-char labels
+    # 1. Calculation Logic
     max_label_len = max([len(str(x)) for x in adata.obs[groupby].unique()])
-
-    # Ratios for [Labels, Plot, Legends]
     label_width = max_label_len * 0.12
-    plot_width = len(genes) * 0.4 + (1.0 if dendrogram else 0)
-    legend_width = 2.5
+    plot_width = len(genes) * 0.4 + (1.2 if dendrogram else 0)
+    legend_width = 2.8  # Giving legends their own wide column
 
     total_w = label_width + plot_width + legend_width
     total_h = adata.obs[groupby].nunique() * 0.5 + 2.0
@@ -842,66 +840,50 @@ def dotplot_top_genes(
 
     # 2. Setup the Grid
     fig = plt.figure(figsize=actual_figsize)
-    # wspace=0 ensures the label-to-plot and plot-to-dendro gaps are minimal
     gs = gridspec.GridSpec(1, 3, width_ratios=[label_width, plot_width, legend_width], wspace=0.05)
-
     ax_main = fig.add_subplot(gs[0, 1])
 
     # 3. Plot
     dp = sc.pl.dotplot(
-        adata,
-        var_names=genes,
-        groupby=groupby,
-        use_raw=use_raw,
-        layer=layer,
-        standard_scale=standard_scale,
-        dendrogram=dendrogram,
-        color_map=color_map,
-        show=False,
-        ax=ax_main,
-        return_fig=True
+        adata, var_names=genes, groupby=groupby, use_raw=use_raw, layer=layer,
+        standard_scale=standard_scale, dendrogram=dendrogram, color_map=color_map,
+        show=False, ax=ax_main, return_fig=True
     )
 
     axes_dict = dp.get_axes()
-
-    # 4. Legend Positioning (The Fix for 'set_shrink')
-    # We get the right-hand slot position
     leg_pos = gs[0, 2].get_position(fig)
+
+    # LEGEND ALIGNMENT FIX
+    # We use a shared X-coordinate for both titles to ensure vertical alignment
+    shared_x_start = leg_pos.x0 + 0.02
 
     if 'size_legend_ax' in axes_dict:
         sax = axes_dict['size_legend_ax']
-        # Define a fixed box: [left, bottom, width, height]
-        # We start at leg_pos.x0 + buffer to keep it away from the dendrogram
-        sax.set_position([leg_pos.x0 + 0.05, 0.50, 0.10, 0.25])
-        sax.set_title("Fraction of cells (%)", fontsize=10, fontweight='bold', loc='left', pad=15)
+        # Set exact box for size legend
+        sax.set_position([shared_x_start, 0.55, 0.12, 0.20])
+        # Force title to top-left of its axis for alignment
+        sax.set_title("Fraction of cells (%)", fontsize=10, fontweight='bold', loc='left', pad=12)
 
     if 'color_legend_ax' in axes_dict:
         cax = axes_dict['color_legend_ax']
-        # Position lower down to avoid overlap
-        cax.set_position([leg_pos.x0 + 0.05, 0.20, 0.015, 0.15])
-        cax.set_title("Mean expression", fontsize=10, fontweight='bold', loc='left', pad=15)
+        # Set exact box for color legend (lower down)
+        cax.set_position([shared_x_start, 0.30, 0.02, 0.15])
+        # Force title to top-left of its axis for alignment
+        cax.set_title("Mean expression", fontsize=10, fontweight='bold', loc='left', pad=12)
 
-    # 5. Handle Dendrogram Clipping/Overlap
-    # Scanpy creates the dendrogram ax automatically; we just ensure it's visible
+    # 4. Final Touches
     if 'dendrogram_ax' in axes_dict:
         dax = axes_dict['dendrogram_ax']
-        # Pin it to the right of the main plot within its grid slot
         main_pos = ax_main.get_position()
         dax.set_position([main_pos.x1, main_pos.y0, 0.02, main_pos.height])
 
-    # 6. Aesthetic Polish
     for coll in ax_main.collections:
         if hasattr(coll, 'set_sizes'):
-            # Size 200 is robust for 0.4 width spacing
-            coll.set_sizes((coll.get_sizes() / (coll.get_sizes().max() or 1)) * 200)
+            coll.set_sizes((coll.get_sizes() / (coll.get_sizes().max() or 1)) * 220)
 
     ax_main.spines['top'].set_visible(False)
     ax_main.spines['right'].set_visible(False)
     ax_main.grid(False)
-
-    # Ensure y-axis labels don't get truncated by the grid edge
-    ax_main.tick_params(axis='y', labelsize=10)
-    ax_main.tick_params(axis='x', labelsize=10, rotation=90)
 
     if show:
         plt.show()
