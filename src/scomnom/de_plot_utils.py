@@ -828,25 +828,26 @@ def dotplot_top_genes(
     genes = [str(g) for g in genes if g and str(g) != ""]
     if not genes: return plt.figure()
 
-    # 1. PRE-CALCULATE SPACING
+    # 1. Spacing Calculations for 66-char labels
     max_label_len = max([len(str(x)) for x in adata.obs[groupby].unique()])
-    # Allocate width proportions: [Labels, Main Plot, Dendro, Legend Buffer, Legends]
-    width_ratios = [max_label_len * 0.15, len(genes) * 0.4, 0.5, 1.0, 2.0]
 
-    total_w = sum(width_ratios) * 0.8
+    # Ratios for [Labels, Plot, Legends]
+    label_width = max_label_len * 0.12
+    plot_width = len(genes) * 0.4 + (1.0 if dendrogram else 0)
+    legend_width = 2.5
+
+    total_w = label_width + plot_width + legend_width
     total_h = adata.obs[groupby].nunique() * 0.5 + 2.0
-    actual_figsize = figsize if figsize else (max(14, total_w), max(6, total_h))
+    actual_figsize = figsize if figsize else (max(16, total_w), max(7, total_h))
 
-    # 2. CREATE MANUFACTURED GRID
+    # 2. Setup the Grid
     fig = plt.figure(figsize=actual_figsize)
-    gs = gridspec.GridSpec(1, 5, width_ratios=width_ratios, wspace=0.0)
+    # wspace=0 ensures the label-to-plot and plot-to-dendro gaps are minimal
+    gs = gridspec.GridSpec(1, 3, width_ratios=[label_width, plot_width, legend_width], wspace=0.05)
 
-    # We only need the main axis; Scanpy will find the others if we pass the fig
-    main_ax = fig.add_subplot(gs[0, 1])
+    ax_main = fig.add_subplot(gs[0, 1])
 
-    # 3. PLOT
-    # We use 'ax=main_ax' to anchor the plot.
-    # 'return_fig=True' gives us access to the legends Scanpy creates.
+    # 3. Plot
     dp = sc.pl.dotplot(
         adata,
         var_names=genes,
@@ -857,44 +858,50 @@ def dotplot_top_genes(
         dendrogram=dendrogram,
         color_map=color_map,
         show=False,
-        ax=main_ax,
+        ax=ax_main,
         return_fig=True
     )
 
-    # 4. RE-ANCHOR EVERYTHING TO OUR GRID
     axes_dict = dp.get_axes()
 
-    # Move Dendrogram to Slot 2 (directly touching plot)
-    if 'dendrogram_ax' in axes_dict:
-        dax = axes_dict['dendrogram_ax']
-        dax.set_subplotspec(gs[0, 2])
-        dax.set_visible(True)
+    # 4. Legend Positioning (The Fix for 'set_shrink')
+    # We get the right-hand slot position
+    leg_pos = gs[0, 2].get_position(fig)
 
-    # Move Legends to Slot 4 (the far right)
-    # We stack them manually in that slot to prevent vertical overlap
     if 'size_legend_ax' in axes_dict:
         sax = axes_dict['size_legend_ax']
-        # Position in upper half of the rightmost slot
-        sax.set_position(gs[0, 4].get_position(fig))
-        sax.set_shrink(0.5)
-        sax.set_anchor('N')
+        # Define a fixed box: [left, bottom, width, height]
+        # We start at leg_pos.x0 + buffer to keep it away from the dendrogram
+        sax.set_position([leg_pos.x0 + 0.05, 0.50, 0.10, 0.25])
+        sax.set_title("Fraction of cells (%)", fontsize=10, fontweight='bold', loc='left', pad=15)
 
     if 'color_legend_ax' in axes_dict:
         cax = axes_dict['color_legend_ax']
-        # Position in lower half of the rightmost slot
-        pos = gs[0, 4].get_position(fig)
-        cax.set_position([pos.x0, pos.y0, pos.width * 0.2, pos.height * 0.3])
-        cax.set_anchor('S')
+        # Position lower down to avoid overlap
+        cax.set_position([leg_pos.x0 + 0.05, 0.20, 0.015, 0.15])
+        cax.set_title("Mean expression", fontsize=10, fontweight='bold', loc='left', pad=15)
 
-    # 5. FIX DOT SIZING
-    for coll in main_ax.collections:
+    # 5. Handle Dendrogram Clipping/Overlap
+    # Scanpy creates the dendrogram ax automatically; we just ensure it's visible
+    if 'dendrogram_ax' in axes_dict:
+        dax = axes_dict['dendrogram_ax']
+        # Pin it to the right of the main plot within its grid slot
+        main_pos = ax_main.get_position()
+        dax.set_position([main_pos.x1, main_pos.y0, 0.02, main_pos.height])
+
+    # 6. Aesthetic Polish
+    for coll in ax_main.collections:
         if hasattr(coll, 'set_sizes'):
-            coll.set_sizes((coll.get_sizes() / (coll.get_sizes().max() or 1)) * 250)
+            # Size 200 is robust for 0.4 width spacing
+            coll.set_sizes((coll.get_sizes() / (coll.get_sizes().max() or 1)) * 200)
 
-    # Clean up labels and spines
-    main_ax.spines['top'].set_visible(False)
-    main_ax.spines['right'].set_visible(False)
-    main_ax.tick_params(axis='x', rotation=90)
+    ax_main.spines['top'].set_visible(False)
+    ax_main.spines['right'].set_visible(False)
+    ax_main.grid(False)
+
+    # Ensure y-axis labels don't get truncated by the grid edge
+    ax_main.tick_params(axis='y', labelsize=10)
+    ax_main.tick_params(axis='x', labelsize=10, rotation=90)
 
     if show:
         plt.show()
