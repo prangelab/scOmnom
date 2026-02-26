@@ -810,7 +810,7 @@ def volcano(
 
 # -----------------------------------------------------------------------------
 # Scanpy-based expression visualizations (return Figure; never save)
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 def dotplot_top_genes(
         adata,
         *,
@@ -845,59 +845,59 @@ def dotplot_top_genes(
         return_fig=True,
     )
 
-    # 2. Extract Figure and Axes
     axes_dict = dp.get_axes()
     main_ax = axes_dict['mainplot_ax']
     fig = main_ax.get_figure()
 
-    # 3. Calculate dynamic left margin based on label length
-    # Approx 0.11 inches per character is usually safe for default fonts
+    # 2. Dynamic Width Calculation to avoid "left >= right" error
+    # We estimate 0.1 inches per character for the labels
     max_label_len = max([len(str(x)) for x in adata.obs[groupby].unique()])
-    left_margin_in = 0.4 + (max_label_len * 0.11)
+    needed_left_in = 0.5 + (max_label_len * 0.11)
 
-    fig_w, fig_h = fig.get_size_inches()
-    left_frac = left_margin_in / fig_w
+    # Get current size; if it's too narrow for these labels, expand it
+    cur_w, cur_h = fig.get_size_inches()
+    # We want the plot area to be at least 6 inches wide regardless of labels
+    target_w = max(cur_w, needed_left_in + 6.0)
+    fig.set_size_inches(target_w, cur_h)
 
-    # We want the plot to end around 82% to leave room for the legend stack
-    right_plot_edge = 0.82
+    # 3. Calculate Fractions with Safety Guard
+    left_frac = min(0.5, needed_left_in / target_w)  # Never let labels take > 50%
+    right_plot_edge = 0.85
 
-    # 4. Global adjustment to remove top/bottom dead space
-    # Using 0.05 top and 0.15 bottom (for x-axis labels)
-    fig.subplots_adjust(left=left_frac, right=right_plot_edge, top=0.95, bottom=0.15)
+    # 4. Apply Adjustments
+    # top=0.9 reduces the massive top whitespace
+    fig.subplots_adjust(left=left_frac, right=right_plot_edge, top=0.9, bottom=0.15)
 
-    # 5. Stack Legends Vertically
-    # We place them in a fixed column to the right of the main plot
-    legend_x = right_plot_edge + 0.02
+    # 5. Stack Legends closer to the plot
+    legend_x = right_plot_edge + 0.01
 
-    # Mean Expression (Colorbar) - usually at the bottom right
     if 'color_legend_ax' in axes_dict:
         cax = axes_dict['color_legend_ax']
-        # [left, bottom, width, height]
-        cax.set_position([legend_x, 0.15, 0.02, 0.15])
-        cax.set_title("Mean expression\nin group", fontsize=9, pad=8)
+        cax.set_position([legend_x, 0.15, 0.02, 0.12])
+        cax.set_title("Mean expression", fontsize=8, pad=5)
 
-    # Fraction of cells (Size legend) - stacked above the colorbar
     if 'size_legend_ax' in axes_dict:
         sax = axes_dict['size_legend_ax']
-        # Positioned higher up to keep them together
-        sax.set_position([legend_x, 0.35, 0.08, 0.25])
-        sax.set_title("Fraction of cells\nin group (%)", fontsize=9, pad=8)
+        # Positioned directly above the colorbar
+        sax.set_position([legend_x, 0.32, 0.08, 0.20])
+        sax.set_title("Fraction of cells (%)", fontsize=8, pad=5)
 
-    # 6. Fine-tune Dot Sizes and Aesthetics
-    # Dot size: 200-300 is typically "fleshed out" without overlapping
+    # 6. Aesthetic cleanup
     for coll in main_ax.collections:
         if hasattr(coll, 'set_sizes'):
             current_sizes = coll.get_sizes()
             if len(current_sizes) > 0:
-                # Standardize so the 100% dot is size 250
-                new_sizes = (current_sizes / current_sizes.max()) * 250
-                coll.set_sizes(new_sizes)
+                # Scaled up for better visibility
+                coll.set_sizes((current_sizes / current_sizes.max()) * 280)
 
     main_ax.grid(False)
     main_ax.spines['top'].set_visible(False)
     main_ax.spines['right'].set_visible(False)
-    main_ax.tick_params(axis='x', labelsize=10)
-    main_ax.tick_params(axis='y', labelsize=10)
+
+    # Optional: Truncate y-labels if they are still too long (e.g., > 50 chars)
+    labels = [item.get_text() for item in main_ax.get_yticklabels()]
+    truncated_labels = [l[:50] + '...' if len(l) > 53 else l for l in labels]
+    main_ax.set_yticklabels(truncated_labels)
 
     if show:
         plt.show()
