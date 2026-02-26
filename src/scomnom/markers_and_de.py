@@ -795,8 +795,16 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
         has_cell = mk in adata.uns and isinstance(adata.uns.get(mk), dict)
         sk = str(getattr(cfg, "store_key", "scomnom_de"))
         pb = adata.uns.get(sk, {}).get("pseudobulk_cluster_vs_rest", {})
-        res = pb.get("results", {}) if isinstance(pb, dict) else {}
-        has_pb = isinstance(res, dict) and bool(res)
+        has_pb = False
+        if isinstance(pb, dict):
+            res = pb.get("results", {})
+            top = pb.get("top_genes", {})
+            summary = pb.get("summary", None)
+            has_pb = (
+                (isinstance(res, dict) and bool(res))
+                or (isinstance(top, dict) and bool(top))
+                or (isinstance(summary, pd.DataFrame) and not summary.empty)
+            )
 
         if not has_cell and not has_pb:
             raise RuntimeError("regenerate_figures: no cell-level or pseudobulk results found in adata.uns.")

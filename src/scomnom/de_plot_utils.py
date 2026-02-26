@@ -1613,15 +1613,22 @@ def plot_marker_genes_pseudobulk(
 
     pb_block = adata.uns.get(store_key, {}).get("pseudobulk_cluster_vs_rest", {})
     pb_results = pb_block.get("results", {}) if isinstance(pb_block, dict) else {}
+    if (not isinstance(pb_results, dict) or not pb_results) and isinstance(pb_block, dict):
+        pb_results = pb_block.get("top_genes", {})
     if not isinstance(pb_results, dict) or not pb_results:
         return
 
     genes_by_cluster: dict[str, list[str]] = {}
 
     def _display_label(c: str) -> str:
+        raw = str(c)
         if isinstance(display_map, dict):
-            return str(display_map.get(str(c), str(c)))
-        return str(c)
+            if raw in display_map:
+                return str(display_map.get(raw, raw))
+            token = _extract_cnn_label(raw)
+            if token in display_map:
+                return str(display_map.get(token, raw))
+        return raw
 
     def _safe_stem(c: str) -> str:
         try:
@@ -1870,9 +1877,14 @@ def plot_marker_genes_ranksum(
         return d
 
     def _display_label(c: str) -> str:
+        raw = str(c)
         if isinstance(display_map, dict):
-            return str(display_map.get(str(c), str(c)))
-        return str(c)
+            if raw in display_map:
+                return str(display_map.get(raw, raw))
+            token = _extract_cnn_label(raw)
+            if token in display_map:
+                return str(display_map.get(token, raw))
+        return raw
 
     def _safe_stem(c: str) -> str:
         try:
@@ -2454,9 +2466,14 @@ def plot_contrast_conditional_markers(
     dot_n = int(dotplot_top_n_genes) if dotplot_top_n_genes is not None else int(top_n_genes)
 
     def _display_label(c: str) -> str:
+        raw = str(c)
         if isinstance(display_map, dict):
-            return str(display_map.get(str(c), str(c)))
-        return str(c)
+            if raw in display_map:
+                return str(display_map.get(raw, raw))
+            token = _extract_cnn_label(raw)
+            if token in display_map:
+                return str(display_map.get(token, raw))
+        return raw
 
     def _safe_stem(c: str) -> str:
         try:
