@@ -443,6 +443,13 @@ def heatmap_top_genes_by_sample(
                 return out
             return None
 
+        def _stable_levels_for_key(df_obs: pd.DataFrame, key_name: str) -> list[str]:
+            s_all = df_obs[str(key_name)]
+            if pd.api.types.is_categorical_dtype(s_all):
+                return [str(x) for x in s_all.cat.categories]
+            vals = [str(x) for x in s_all.dropna().astype(str).tolist()]
+            return sorted(set(vals))
+
         color_rows = []
         palette_names = ["colorblind", "Set2", "Dark2", "Paired", "tab10", "tab20"]
         palette_offset = 0
@@ -471,21 +478,17 @@ def heatmap_top_genes_by_sample(
             levels = [str(x) for x in pd.unique(pd.Series([v.get(k, "") for v in cond_by_sample.values()])).tolist() if str(x)]
             if not levels:
                 continue
-            levels_cat = None
-            try:
-                levels_cat = adata.obs[str(k)].astype("category").cat.categories.astype(str).tolist()
-            except Exception:
-                levels_cat = None
+            levels_cat = _stable_levels_for_key(adata.obs, str(k))
             if levels_cat:
-                levels = [lv for lv in levels_cat if lv in levels]
+                level_set = set(levels)
+                levels = [lv for lv in levels_cat if lv in level_set]
 
             color_map = {}
             try:
                 palette = None
                 cats = []
-                try:
-                    cats = adata.obs[str(k)].astype("category").cat.categories.astype(str).tolist()
-                except Exception:
+                cats = _stable_levels_for_key(adata.obs, str(k))
+                if not cats:
                     cats = levels
                 used_shared = False
                 if shared_palette and cats:
@@ -828,15 +831,15 @@ def dotplot_top_genes(
     genes = [str(g) for g in genes if g and str(g) != ""]
     if not genes: return plt.figure()
 
-    # 1. TIGHTENED WIDTH/HEIGHT CALCULATION
-    max_label_len = max([len(str(x)) for x in adata.obs[groupby].unique()])
-    label_width = max_label_len * 0.10
-    plot_width = len(genes) * 0.35 + (1.0 if dendrogram else 0)
-    legend_width = 1.2 # Shrunk further from 1.5 to kill right-side space
+    # size scales with number of groups/genes and preserves usable y-space
+    n_groups = int(adata.obs[groupby].astype(str).nunique(dropna=True))
+    max_label_len = max([len(str(x)) for x in adata.obs[groupby].astype(str).unique()])
+    label_width = max(1.8, max_label_len * 0.10)
+    plot_width = max(4.8, len(genes) * 0.36 + (0.7 if dendrogram else 0.0))
+    legend_width = 1.8
 
     total_w = label_width + plot_width + legend_width
-    # Shrunk height constant from 0.8 to 0.4 to kill top space
-    total_h = adata.obs[groupby].nunique() * 0.4 + 0.4
+    total_h = max(3.4, n_groups * 0.85 + 1.3)
 
     actual_figsize = figsize if figsize else (total_w, total_h)
 
@@ -845,9 +848,7 @@ def dotplot_top_genes(
     gs = gridspec.GridSpec(1, 3, width_ratios=[label_width, plot_width, legend_width],
                            wspace=0.0, hspace=0.0)
 
-    # ADJUST MARGINS: Push content closer to boundaries
-    # top=0.98 and right=0.98 pull plot closer to the top and right edges
-    plt.subplots_adjust(left=0.05, right=0.98, top=0.98, bottom=0.15)
+    plt.subplots_adjust(left=0.06, right=0.97, top=0.95, bottom=0.26)
 
     ax_main = fig.add_subplot(gs[0, 1])
 
@@ -869,15 +870,13 @@ def dotplot_top_genes(
 
     if 'size_legend_ax' in axes_dict:
         sax = axes_dict['size_legend_ax']
-        # Moved up slightly (0.55) to align with top clusters
-        sax.set_position([legend_x_start, 0.55, 0.10, 0.20])
+        sax.set_position([legend_x_start, main_pos.y0 + 0.55 * main_pos.height, 0.12, 0.22 * main_pos.height])
         sax.set_title("")
         sax.set_title("Fraction of cells (%)", fontsize=9, fontweight='bold', loc='left', pad=4)
 
     if 'color_legend_ax' in axes_dict:
         cax = axes_dict['color_legend_ax']
-        # Tucked closer to size legend
-        cax.set_position([legend_x_start, 0.35, 0.015, 0.15])
+        cax.set_position([legend_x_start, main_pos.y0 + 0.18 * main_pos.height, 0.02, 0.18 * main_pos.height])
         cax.set_title("")
         cax.set_title("Mean expression", fontsize=9, fontweight='bold', loc='left', pad=4)
 
@@ -897,8 +896,7 @@ def dotplot_top_genes(
     ax_main.set_title("")
 
     if show:
-        # Crucial for cropping final extraneous whitespace
-        plt.show(bbox_inches='tight')
+        plt.show()
     return fig
 
 
@@ -2264,22 +2262,24 @@ def plot_condition_within_cluster(
         genes_25_25 = _unique_keep_order(list(up25) + list(down25))
 
         if genes_25_25 and plot_key in sub.obs:
-            fig = heatmap_top_genes(
-                sub,
-                genes=genes_25_25,
-                groupby=str(plot_key),
-                use_raw=bool(use_raw),
-                layer=layer,
-                cmap="bwr",
-                show_gene_labels=True,
-                z_clip=3.0,
-                show=False,
-            )
-            plot_utils.save_multi(
-                stem=f"heatmap__top{int(heatmap_top_n)}up_down__{group_value}__{pair_dir}",
-                figdir=out_heat,
-                fig=fig,
-            )
+            n_levels = int(sub.obs[str(plot_key)].dropna().astype(str).nunique())
+            if n_levels > 2:
+                fig = heatmap_top_genes(
+                    sub,
+                    genes=genes_25_25,
+                    groupby=str(plot_key),
+                    use_raw=bool(use_raw),
+                    layer=layer,
+                    cmap="bwr",
+                    show_gene_labels=True,
+                    z_clip=3.0,
+                    show=False,
+                )
+                plot_utils.save_multi(
+                    stem=f"heatmap__top{int(heatmap_top_n)}up_down__{group_value}__{pair_dir}",
+                    figdir=out_heat,
+                    fig=fig,
+                )
 
         # sample-aggregated heatmap: top 50 DE genes per contrast
         if sample_key is not None and sample_key in sub.obs and plot_key in sub.obs:
