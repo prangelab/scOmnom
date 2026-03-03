@@ -195,6 +195,7 @@ def subset_adata_by_cluster_mapping(
         wanted = {str(c) for c in clusters}
         mask = cell_cnn.isin(wanted).to_numpy()
         sub = adata[mask].copy()
+        sub.uns["Compartment"] = str(subset_name)
         _refresh_round_metadata_after_subset(sub)
         outputs[str(subset_name)] = sub
         rows.append(
@@ -287,4 +288,3 @@ def run_adata_ops(cfg: AdataOpsConfig) -> tuple[dict[str, Path], pd.DataFrame]:
         output_format=cfg.output_format,
         round_id=cfg.round_id,
     )
-
