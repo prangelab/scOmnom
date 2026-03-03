@@ -1309,7 +1309,7 @@ def run_composition(cfg) -> ad.AnnData:
                         min_nonzero_samples_per_level=int(
                             getattr(cfg, "composition_graph_min_nonzero_samples_per_level", 3)
                         ),
-                        n_permutations=int(getattr(cfg, "composition_graph_n_permutations", 200)),
+                        n_permutations=int(getattr(cfg, "composition_graph_n_permutations", 0)),
                         effect_shrink_k=float(getattr(cfg, "composition_graph_effect_shrink_k", 10.0)),
                     )
                     if graph_meta is not None and not graph_meta.empty and isinstance(res, pd.DataFrame) and not res.empty:
@@ -1493,7 +1493,7 @@ def run_composition(cfg) -> ad.AnnData:
                     f"graph_min_size={getattr(cfg, 'composition_graph_min_size', None)}",
                     f"graph_random_state={getattr(cfg, 'composition_graph_random_state', None)}",
                     f"graph_min_nonzero_samples_per_level={getattr(cfg, 'composition_graph_min_nonzero_samples_per_level', None)}",
-                    f"graph_n_permutations={getattr(cfg, 'composition_graph_n_permutations', None)}",
+                    f"graph_n_permutations_deprecated={getattr(cfg, 'composition_graph_n_permutations', None)}",
                     f"graph_effect_shrink_k={getattr(cfg, 'composition_graph_effect_shrink_k', None)}",
                     f"glm_min_samples_per_level={_MIN_GLM_SAMPLES_PER_LEVEL}",
                     f"glm_min_levels=3",
@@ -2773,8 +2773,14 @@ def run_within_cluster(cfg) -> ad.AnnData:
         dotplot_top_n_genes = int(getattr(cfg, "plot_dotplot_top_n_genes", 15))
         use_raw = bool(getattr(cfg, "plot_use_raw", False))
         layer = getattr(cfg, "plot_layer", None)
+        plot_ann_keys = list(getattr(cfg, "plot_sample_annotation_keys", ()) or condition_keys)
 
         try:
+            de_plot_utils.prepare_condition_color_registry(
+                adata,
+                condition_keys=condition_keys,
+                annotation_keys=plot_ann_keys,
+            )
             if condition_keys:
                 LOGGER.info("within-cluster: plotting UMAPs for condition keys...")
                 de_plot_utils.plot_condition_umaps(
@@ -2786,7 +2792,6 @@ def run_within_cluster(cfg) -> ad.AnnData:
             # Condition plots only if pseudobulk ran
             if ran_pseudobulk:
                 LOGGER.info("within-cluster: plotting pseudobulk condition figures...")
-                plot_ann_keys = list(getattr(cfg, "plot_sample_annotation_keys", ()) or condition_keys)
                 for condition_key in condition_keys:
                     de_plot_utils.plot_condition_within_cluster_all(
                         adata,
@@ -2810,7 +2815,6 @@ def run_within_cluster(cfg) -> ad.AnnData:
 
             if ran_cell_contrast:
                 LOGGER.info("within-cluster: plotting cell-level contrast figures...")
-                plot_ann_keys = list(getattr(cfg, "plot_sample_annotation_keys", ()) or condition_keys)
                 for condition_key in condition_keys:
                     de_plot_utils.plot_contrast_conditional_markers_multi(
                         adata,

@@ -50,6 +50,114 @@ def _safe_combo_token(value: str) -> str:
     return s
 
 
+def _stable_levels_for_key(obs: pd.DataFrame, key_name: str) -> list[str]:
+    if str(key_name) not in obs.columns:
+        return []
+    s_all = obs[str(key_name)]
+    if pd.api.types.is_categorical_dtype(s_all):
+        return [str(x) for x in s_all.cat.categories]
+    vals = [str(x) for x in s_all.dropna().astype(str).tolist()]
+    return sorted(set(vals))
+
+
+def _coerce_palette(raw) -> list[str]:
+    import matplotlib.colors as mcolors
+
+    if raw is None:
+        return []
+    colors = None
+    if isinstance(raw, dict):
+        items: list[tuple[int, str]] = []
+        for k0, v0 in raw.items():
+            if str(k0).startswith("__"):
+                continue
+            try:
+                idx = int(k0)
+            except Exception:
+                continue
+            items.append((idx, str(v0)))
+        if items:
+            items.sort(key=lambda t: t[0])
+            colors = [v for _, v in items]
+    else:
+        try:
+            colors = [str(c) for c in list(raw)]
+        except Exception:
+            colors = None
+    if not colors:
+        return []
+    out = []
+    for c in colors:
+        if mcolors.is_color_like(c):
+            out.append(str(c))
+    return out
+
+
+def prepare_condition_color_registry(
+    adata,
+    *,
+    condition_keys: Optional[Sequence[str]] = None,
+    annotation_keys: Optional[Sequence[str]] = None,
+) -> dict[str, dict[str, str]]:
+    import seaborn as sns
+    import matplotlib.colors as mcolors
+
+    requested: list[str] = []
+    for raw in list(condition_keys or []) + list(annotation_keys or []):
+        key = str(raw).strip()
+        if not key:
+            continue
+        requested.append(key)
+        if "^" in key:
+            parts = key.split("^", 1)
+            if len(parts) == 2:
+                factor_a = str(parts[0]).strip()
+                factor_b = str(parts[1]).strip()
+                if factor_a:
+                    requested.append(factor_a)
+                if factor_b:
+                    requested.append(factor_b)
+                if factor_a in adata.obs and factor_b in adata.obs:
+                    combo_key = f"{_safe_combo_token(factor_a)}.{_safe_combo_token(factor_b)}"
+                    if combo_key not in adata.obs:
+                        a_vals = _normalize_levels_for_combo(adata.obs[str(factor_a)])
+                        b_vals = _normalize_levels_for_combo(adata.obs[str(factor_b)])
+                        adata.obs[combo_key] = a_vals + "." + b_vals
+                    requested.append(combo_key)
+
+    requested = _unique_keep_order([k for k in requested if k in adata.obs])
+    if not requested:
+        return {}
+
+    obs_order = [str(c) for c in adata.obs.columns]
+    ordered = [k for k in obs_order if k in set(requested)]
+    for k in requested:
+        if k not in ordered:
+            ordered.append(k)
+
+    try:
+        from scanpy.plotting.palettes import default_102
+
+        palette_pool = [str(c) for c in list(default_102)]
+    except Exception:
+        palette_pool = [mcolors.to_hex(c) for c in sns.color_palette("tab20", n_colors=20)]
+    if not palette_pool:
+        palette_pool = [mcolors.to_hex(c) for c in sns.color_palette("tab20", n_colors=20)]
+
+    cursor = 0
+    registry: dict[str, dict[str, str]] = {}
+    for key in ordered:
+        levels = _stable_levels_for_key(adata.obs, str(key))
+        if not levels:
+            continue
+        n = len(levels)
+        colors = [str(palette_pool[(cursor + i) % len(palette_pool)]) for i in range(n)]
+        cursor += n
+        adata.uns[f"{key}_colors"] = list(colors)
+        registry[str(key)] = {str(levels[i]): str(colors[i]) for i in range(n)}
+    return registry
+
+
 def _parse_plot_gene_filter_entry(raw: str) -> tuple[Optional[str], Optional[str]]:
     s = str(raw).strip()
     if not s:
@@ -408,73 +516,8 @@ def heatmap_top_genes_by_sample(
                 per[k] = str(vals[0])
             if per:
                 cond_by_sample[str(s)] = per
-        from . import plot_utils
-        import matplotlib.colors as mcolors
-
-        def _coerce_palette(raw, n_expected: int) -> list[str] | None:
-            if raw is None:
-                return None
-            colors = None
-            if isinstance(raw, dict):
-                items: list[tuple[int, str]] = []
-                for k0, v0 in raw.items():
-                    if str(k0).startswith("__"):
-                        continue
-                    try:
-                        idx = int(k0)
-                    except Exception:
-                        continue
-                    items.append((idx, str(v0)))
-                if items:
-                    items.sort(key=lambda t: t[0])
-                    colors = [v for _, v in items]
-            else:
-                try:
-                    colors = [str(c) for c in list(raw)]
-                except Exception:
-                    colors = None
-            if not colors:
-                return None
-            out = []
-            for c in colors:
-                if mcolors.is_color_like(c):
-                    out.append(c)
-            if len(out) >= int(n_expected):
-                return out
-            return None
-
-        def _stable_levels_for_key(df_obs: pd.DataFrame, key_name: str) -> list[str]:
-            s_all = df_obs[str(key_name)]
-            if pd.api.types.is_categorical_dtype(s_all):
-                return [str(x) for x in s_all.cat.categories]
-            vals = [str(x) for x in s_all.dropna().astype(str).tolist()]
-            return sorted(set(vals))
-
         color_rows = []
-        palette_names = ["colorblind", "Set2", "Dark2", "Paired", "tab10", "tab20"]
-        palette_offset = 0
-        used_colors: set[str] = set()
-        try:
-            from scanpy.plotting.palettes import default_102
-            palette_pool = [str(c) for c in list(default_102)]
-        except Exception:
-            palette_pool = [plt.matplotlib.colors.to_hex(c) for c in sns.color_palette("tab20", n_colors=20)]
-        shared_palette = None
-        composite_keys = set()
-        if condition_key and ("." in str(condition_key) or "^" in str(condition_key)):
-            composite_keys.add(str(condition_key))
-        composite_keys.update([k for k in keys if ("." in k or "^" in k)])
-        if composite_keys:
-            for ck in composite_keys:
-                colors_key = f"{ck}_colors"
-                if colors_key in adata.uns:
-                    try:
-                        shared_palette = [str(c) for c in list(adata.uns.get(colors_key, []))]
-                        if shared_palette:
-                            break
-                    except Exception:
-                        shared_palette = None
-        for idx, k in enumerate(keys):
+        for k in keys:
             levels = [str(x) for x in pd.unique(pd.Series([v.get(k, "") for v in cond_by_sample.values()])).tolist() if str(x)]
             if not levels:
                 continue
@@ -484,60 +527,17 @@ def heatmap_top_genes_by_sample(
                 levels = [lv for lv in levels_cat if lv in level_set]
 
             color_map = {}
-            try:
-                palette = None
-                cats = []
-                cats = _stable_levels_for_key(adata.obs, str(k))
-                if not cats:
-                    cats = levels
-                used_shared = False
-                if shared_palette and cats:
-                    need = len(cats)
-                    if len(shared_palette) >= palette_offset + need:
-                        palette = shared_palette[palette_offset: palette_offset + need]
-                        palette_offset += need
-                        used_shared = True
-                if palette is None:
-                    raw = adata.uns.get(f"{k}_colors", None)
-                    palette = _coerce_palette(raw, len(cats))
-                if palette is not None and cats:
-                    if not used_shared:
-                        # If palette overlaps with used colors, pick a distinct slice
-                        overlap = any(str(c) in used_colors for c in palette[: len(cats)])
-                        if overlap and palette_pool:
-                            need = len(cats)
-                            tries = 0
-                            while tries < max(1, len(palette_pool)):
-                                start = int(palette_offset) % max(1, len(palette_pool))
-                                cand = []
-                                for i in range(need):
-                                    cand.append(palette_pool[(start + i) % len(palette_pool)])
-                                if not any(c in used_colors for c in cand):
-                                    palette = cand
-                                    break
-                                palette_offset += need
-                                tries += 1
-                        if palette_offset > 0:
-                            shift = int(palette_offset) % max(1, len(palette))
-                            if shift:
-                                palette = list(palette[shift:]) + list(palette[:shift])
+            cats = _stable_levels_for_key(adata.obs, str(k)) or levels
+            palette = _coerce_palette(adata.uns.get(f"{k}_colors", None))
+            if palette and cats:
+                if len(palette) >= len(cats):
                     color_map = {str(cat): str(palette[i]) for i, cat in enumerate(cats)}
-                    if not used_shared:
-                        palette_offset += len(cats)
-                        used_colors.update([str(palette[i]) for i in range(min(len(palette), len(cats)))])
-            except Exception:
-                color_map = {}
-
+                elif len(palette) >= len(levels):
+                    color_map = {str(levels[i]): str(palette[i]) for i in range(len(levels))}
             if not color_map:
-                pal_name = palette_names[idx % len(palette_names)]
-                base = [plt.matplotlib.colors.to_hex(c) for c in sns.color_palette(pal_name, n_colors=max(3, len(levels) + palette_offset))]
-                if palette_offset >= len(base):
-                    palette_offset = 0
-                color_list = base[palette_offset: palette_offset + len(levels)]
-                if len(color_list) < len(levels):
-                    color_list = (color_list * (1 + len(levels) // max(1, len(color_list))))[: len(levels)]
+                fallback = sns.color_palette("tab20", n_colors=max(3, len(levels)))
+                color_list = [plt.matplotlib.colors.to_hex(c) for c in fallback][: len(levels)]
                 color_map = dict(zip(levels, color_list))
-                palette_offset += len(levels)
 
             row = [
                 color_map.get(cond_by_sample.get(str(s), {}).get(k, ""), (0.85, 0.85, 0.85))
@@ -872,7 +872,7 @@ def dotplot_top_genes(
         sax = axes_dict['size_legend_ax']
         sax.set_position([legend_x_start, main_pos.y0 + 0.55 * main_pos.height, 0.12, 0.22 * main_pos.height])
         sax.set_title("")
-        sax.set_title("Fraction of cells (%)", fontsize=9, fontweight='bold', loc='left', pad=4)
+        sax.set_title("Fraction of cells (%)", fontsize=9, fontweight='bold', loc='left', pad=1)
 
     if 'color_legend_ax' in axes_dict:
         cax = axes_dict['color_legend_ax']
@@ -2394,9 +2394,11 @@ def plot_condition_umaps(
         try:
             cats = adata.obs[plot_key].astype("category").cat.categories
             n_cats = int(len(cats))
-            palette = sns.color_palette("colorblind", n_colors=n_cats)
-            colors = [mcolors.to_hex(c) for c in palette]
-            adata.uns[f"{plot_key}_colors"] = list(colors)
+            existing = _coerce_palette(adata.uns.get(f"{plot_key}_colors", None))
+            if len(existing) < n_cats:
+                palette = sns.color_palette("colorblind", n_colors=n_cats)
+                colors = [mcolors.to_hex(c) for c in palette]
+                adata.uns[f"{plot_key}_colors"] = list(colors)
         except Exception:
             pass
 

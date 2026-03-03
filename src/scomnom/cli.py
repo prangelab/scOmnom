@@ -1662,7 +1662,11 @@ def composition(
     graph_min_size: int = typer.Option(20, "--graph-min-size"),
     graph_random_state: int = typer.Option(42, "--graph-random-state"),
     graph_min_nonzero_samples_per_level: int = typer.Option(3, "--graph-min-nonzero-samples-per-level"),
-    graph_n_permutations: int = typer.Option(200, "--graph-n-permutations"),
+    graph_n_permutations: int = typer.Option(
+        0,
+        "--graph-n-permutations",
+        help="[Deprecated, ignored] GraphDA uses NB-GLM + spatial weighted-BH FDR.",
+    ),
     graph_effect_shrink_k: float = typer.Option(10.0, "--graph-effect-shrink-k"),
 ):
     if output_name is None:

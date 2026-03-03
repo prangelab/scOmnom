@@ -738,7 +738,7 @@ class MarkersAndDEConfig(BaseModel):
     composition_graph_min_size: int = 20
     composition_graph_random_state: int = 42
     composition_graph_min_nonzero_samples_per_level: int = 3
-    composition_graph_n_permutations: int = 200
+    composition_graph_n_permutations: int = 0
     composition_graph_effect_shrink_k: float = 10.0
 
     # ------------------------------------------------------------------

@@ -341,7 +341,7 @@ def run_graph_da(
     min_size: int = 20,
     random_state: int = 42,
     min_nonzero_samples_per_level: int = 3,
-    n_permutations: int = 200,
+    n_permutations: int | None = None,
     effect_shrink_k: float = 10.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     try:
@@ -364,6 +364,12 @@ def run_graph_da(
             raise RuntimeError(
                 f"composition: embedding_key={emb_key!r} not found in adata.obsm and no fallback found."
             )
+
+    if n_permutations not in (None, 0):
+        LOGGER.warning(
+            "composition: GraphDA argument n_permutations is deprecated and ignored; "
+            "GraphDA now uses NB-GLM with spatial weighted-BH FDR."
+        )
 
     X = np.asarray(adata.obsm[emb_key])
     n_cells = X.shape[0]
@@ -484,15 +490,24 @@ def run_graph_da(
     if counts_test.shape[1] == 0:
         return pd.DataFrame(), neighborhoods_df
 
-    if len(levels) <= 2:
-        results = run_clr_mannwhitney(
-            counts_test,
-            metadata,
-            condition_key=str(condition_key),
-        )
-        if not results.empty:
-            results = results.assign(effect=results["log2fc_test_vs_ref"])
-    else:
+    sample_offsets = adata.obs.groupby(str(sample_key), observed=False).size()
+    sample_offsets = sample_offsets.reindex(counts_test.index).fillna(0).astype(float)
+    sample_offsets = sample_offsets.clip(lower=1.0)
+    LOGGER.info(
+        "composition: GraphDA testing with NB-GLM + spatial weighted-BH FDR "
+        "(min_nonzero_samples_per_level=%d, effect_shrink_k=%.3g).",
+        int(min_nonzero_samples_per_level),
+        float(effect_shrink_k),
+    )
+
+    results = _run_graph_nb_glm(
+        counts_test,
+        metadata,
+        condition_key=str(condition_key),
+        covariates=covariates,
+        sample_offsets=sample_offsets,
+    )
+    if results.empty:
         results = run_glm_composition(
             counts_test,
             metadata,
@@ -520,33 +535,34 @@ def run_graph_da(
             how="left",
         ).drop(columns=["key_0"], errors="ignore")
 
-        if len(levels) == 2 and "log2fc_test_vs_ref" in results.columns:
-            rng_perm = np.random.default_rng(int(random_state))
-            perm_p = _graph_permutation_pvalues_two_level(
-                counts=counts_test,
-                metadata=metadata,
-                condition_key=str(condition_key),
-                n_permutations=int(max(50, n_permutations)),
-                rng=rng_perm,
+        if "pval" in results.columns:
+            dist_map = neighborhoods_df.set_index("neighborhood")["max_dist"]
+            w_raw = pd.to_numeric(
+                pd.Index(results["cluster"].astype(str)).map(dist_map.to_dict()),
+                errors="coerce",
             )
-            if perm_p is not None and not perm_p.empty:
-                results = results.merge(
-                    perm_p.rename("pval_perm"),
-                    left_on=results["cluster"].astype(str),
-                    right_index=True,
-                    how="left",
-                ).drop(columns=["key_0"], errors="ignore")
-                if "pval" in results.columns:
-                    results["pval_parametric"] = pd.to_numeric(results["pval"], errors="coerce")
-                results["pval"] = pd.to_numeric(results["pval_perm"], errors="coerce")
-                finite = results["pval"].replace([np.inf, -np.inf], np.nan).dropna()
-                if not finite.empty:
-                    from statsmodels.stats.multitest import multipletests
+            w = 1.0 / np.clip(w_raw.astype(float), 1e-8, np.inf)
+            results["spatial_weight"] = w
+            results["fdr_bh"] = np.nan
+            results["fdr_spatial"] = np.nan
+            if "term" in results.columns:
+                g = results.groupby(results["term"].astype(str), sort=False).groups
+            else:
+                g = {"all": results.index}
+            from statsmodels.stats.multitest import multipletests
 
-                    _, fdr_perm, _, _ = multipletests(finite.to_numpy(), method="fdr_bh")
-                    fdr_series = pd.Series(np.nan, index=results.index, dtype=float)
-                    fdr_series.loc[finite.index] = fdr_perm
-                    results["fdr"] = fdr_series
+            for _, idx in g.items():
+                p = pd.to_numeric(results.loc[idx, "pval"], errors="coerce")
+                valid = p.replace([np.inf, -np.inf], np.nan).dropna()
+                if valid.empty:
+                    continue
+                _, q_bh, _, _ = multipletests(valid.to_numpy(), method="fdr_bh")
+                q_bh_s = pd.Series(np.nan, index=results.loc[idx].index, dtype=float)
+                q_bh_s.loc[valid.index] = q_bh
+                results.loc[idx, "fdr_bh"] = q_bh_s
+                q_sp = _weighted_bh(valid, pd.to_numeric(results.loc[valid.index, "spatial_weight"], errors="coerce"))
+                results.loc[idx, "fdr_spatial"] = q_sp
+            results["fdr"] = pd.to_numeric(results["fdr_spatial"], errors="coerce")
 
         if "effect" in results.columns:
             eff = pd.to_numeric(results["effect"], errors="coerce")
@@ -559,43 +575,108 @@ def run_graph_da(
     return results, neighborhoods_df
 
 
-def _graph_permutation_pvalues_two_level(
-    *,
+def _run_graph_nb_glm(
     counts: pd.DataFrame,
     metadata: pd.DataFrame,
+    *,
     condition_key: str,
-    n_permutations: int,
-    rng: np.random.Generator,
-    pseudocount: float = 1e-6,
-) -> pd.Series | None:
-    cond = metadata[str(condition_key)].astype(str)
-    levels = sorted(cond.dropna().unique().tolist())
-    if len(levels) != 2 or counts.empty:
-        return None
-    ref_level, test_level = str(levels[0]), str(levels[1])
-    ref_mask = (cond == ref_level).to_numpy()
-    test_mask = (cond == test_level).to_numpy()
-    if ref_mask.sum() == 0 or test_mask.sum() == 0:
-        return None
+    covariates: Sequence[str],
+    sample_offsets: pd.Series,
+) -> pd.DataFrame:
+    try:
+        import statsmodels.api as sm
+    except Exception as e:
+        raise RuntimeError(f"composition: failed to import statsmodels: {e}")
 
-    totals = counts.sum(axis=1).replace(0, np.nan)
-    props = counts.div(totals, axis=0).fillna(0.0)
-    X = props.to_numpy(dtype=float)
-    obs = np.log2((X[test_mask, :].mean(axis=0) + float(pseudocount)) / (X[ref_mask, :].mean(axis=0) + float(pseudocount)))
-    obs_abs = np.abs(obs)
+    cond = str(condition_key)
+    covar_cols = [str(c) for c in covariates]
+    cols = [cond, *covar_cols]
+    meta = metadata.loc[:, cols].dropna()
+    if meta.empty:
+        return pd.DataFrame()
 
-    n_samples = X.shape[0]
-    test_n = int(test_mask.sum())
-    hits = np.zeros(X.shape[1], dtype=int)
-    for _ in range(int(n_permutations)):
-        perm_idx = rng.permutation(n_samples)
-        test_idx = perm_idx[:test_n]
-        ref_idx = perm_idx[test_n:]
-        stat = np.log2((X[test_idx, :].mean(axis=0) + float(pseudocount)) / (X[ref_idx, :].mean(axis=0) + float(pseudocount)))
-        hits += (np.abs(stat) >= obs_abs).astype(int)
+    levels = sorted(meta[cond].astype(str).dropna().unique().tolist())
+    if len(levels) < 2:
+        return pd.DataFrame()
+    meta[cond] = pd.Categorical(meta[cond].astype(str), categories=levels, ordered=True)
 
-    pvals = (hits + 1.0) / (float(n_permutations) + 1.0)
-    return pd.Series(pvals, index=counts.columns.astype(str), dtype=float)
+    common = counts.index.intersection(meta.index).intersection(sample_offsets.index.astype(str))
+    if common.empty:
+        return pd.DataFrame()
+    meta = meta.loc[common]
+    counts = counts.loc[common]
+    offsets = pd.to_numeric(sample_offsets.reindex(common), errors="coerce").fillna(0.0).clip(lower=1.0)
+
+    design = pd.get_dummies(meta[[cond, *covar_cols]], drop_first=True, dtype=float)
+    if design.empty:
+        return pd.DataFrame()
+    design = sm.add_constant(design, has_constant="add")
+    cond_prefix = f"{cond}_"
+    cond_terms = [t for t in design.columns if t.startswith(cond_prefix)]
+    if not cond_terms:
+        return pd.DataFrame()
+
+    results: list[dict] = []
+    off = np.log(offsets.to_numpy(dtype=float))
+    for nh in counts.columns:
+        y = pd.to_numeric(counts[nh], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        try:
+            fit = sm.GLM(
+                y,
+                design,
+                family=sm.families.NegativeBinomial(alpha=1.0),
+                offset=off,
+            ).fit()
+        except Exception:
+            continue
+        for term in cond_terms:
+            coef = float(fit.params.get(term, np.nan))
+            se = float(fit.bse.get(term, np.nan)) if hasattr(fit, "bse") else np.nan
+            pval = float(fit.pvalues.get(term, np.nan)) if hasattr(fit, "pvalues") else np.nan
+            z = coef / se if np.isfinite(coef) and np.isfinite(se) and se > 0 else np.nan
+            ci_low = coef - 1.96 * se if np.isfinite(se) else np.nan
+            ci_high = coef + 1.96 * se if np.isfinite(se) else np.nan
+            test_level = str(term[len(cond_prefix):]) if term.startswith(cond_prefix) else str(term)
+            results.append(
+                {
+                    "cluster": str(nh),
+                    "term": str(term),
+                    "level_ref": str(levels[0]),
+                    "level_test": test_level,
+                    "coef": coef,
+                    "ci_low": float(ci_low) if np.isfinite(ci_low) else np.nan,
+                    "ci_high": float(ci_high) if np.isfinite(ci_high) else np.nan,
+                    "z": float(z) if np.isfinite(z) else np.nan,
+                    "pval": pval if np.isfinite(pval) else np.nan,
+                    "effect": float(coef / np.log(2)) if np.isfinite(coef) else np.nan,
+                }
+            )
+
+    return pd.DataFrame(results)
+
+
+def _weighted_bh(pvals: pd.Series, weights: pd.Series) -> pd.Series:
+    p = pd.to_numeric(pvals, errors="coerce")
+    w = pd.to_numeric(weights, errors="coerce")
+    valid = p.notna() & w.notna() & np.isfinite(p) & np.isfinite(w) & (w > 0)
+    out = pd.Series(np.nan, index=p.index, dtype=float)
+    if not valid.any():
+        return out
+
+    pv = p.loc[valid].to_numpy(dtype=float)
+    wv = w.loc[valid].to_numpy(dtype=float)
+    wv = wv * (len(wv) / float(wv.sum()))
+    pw = pv / wv
+    order = np.argsort(pw)
+    pw_sorted = pw[order]
+    m = float(len(pw_sorted))
+    ranks = np.arange(1, len(pw_sorted) + 1, dtype=float)
+    adj_sorted = np.minimum.accumulate((pw_sorted * m / ranks)[::-1])[::-1]
+    adj_sorted = np.clip(adj_sorted, 0.0, 1.0)
+    adj = np.empty_like(adj_sorted)
+    adj[order] = adj_sorted
+    out.loc[valid] = adj
+    return out
 
 
 def _standardize_composition_results(
@@ -738,7 +819,8 @@ def _build_composition_consensus_summary(
             out[sig_col] = False
         if sign_col not in out.columns:
             out[sign_col] = 0
-        out[sig_col] = out[sig_col].fillna(False).astype(bool)
+        # Avoid pandas object-dtype fillna downcasting warnings on newer versions.
+        out[sig_col] = pd.array(out[sig_col], dtype="boolean").fillna(False).to_numpy(dtype=bool)
         out[sign_col] = pd.to_numeric(out[sign_col], errors="coerce").fillna(0).astype(int)
 
     graph_sig = out["method_sig_graph"]

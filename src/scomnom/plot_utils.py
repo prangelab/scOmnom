@@ -119,16 +119,6 @@ def plot_graphda_summaries(
     """
     Plot GraphDA summary panels and save via save_multi().
     """
-    if graph_meta is not None and not graph_meta.empty:
-        fig, ax = plt.subplots(figsize=(6, 4))
-        ax.hist(graph_meta["neighborhood_size"].astype(int), bins=30, color="steelblue", edgecolor="white")
-        ax.set_xlabel("Neighborhood size")
-        ax.set_ylabel("Count")
-        ax.set_title("GraphDA neighborhood sizes")
-        ax.grid(False)
-        save_multi("graphda_neighborhood_sizes", figdir, fig=fig)
-        plt.close(fig)
-
     if graph_df is None or graph_df.empty or "effect" not in graph_df.columns:
         return
 
@@ -318,7 +308,7 @@ def plot_graphda_summaries(
     ax.axvline(0, color="black", linestyle="--", linewidth=1)
     ax.set_yticks(list(y_pos.values()))
     ax.set_yticklabels(list(y_pos.keys()))
-    ax.set_xlabel("Effect (log2-odds)")
+    ax.set_xlabel("Effect (log2 fold-change)")
     ax.set_ylabel("Cluster")
     ax.set_title("GraphDA effects by cluster")
     ax.grid(False)
@@ -610,11 +600,11 @@ def plot_composition_stacks(
         ax.set_title("Cell Type Composition (stacked comparison)")
         ax.text(
             0.98,
-            0.02,
+            0.98,
             f"Solid={cond_levels[0]}  Light={cond_levels[1]}",
             transform=ax.transAxes,
             ha="right",
-            va="bottom",
+            va="top",
             fontsize=9,
             color="#444444",
         )
@@ -644,20 +634,34 @@ def plot_composition_stacks(
         y = np.arange(len(cluster_order))
         for idx, cl in enumerate(cluster_order):
             y0 = idx
-            y1 = idx
-            ax.plot([left[cl], right[cl]], [y0, y1], color=colors[idx], linewidth=2, alpha=0.8)
-            ax.scatter([left[cl], right[cl]], [y0, y1], color=colors[idx], s=25, zorder=3)
+            x0 = float(left[cl])
+            x1 = float(right[cl])
+            ax.annotate(
+                "",
+                xy=(x1, y0),
+                xytext=(x0, y0),
+                arrowprops=dict(
+                    arrowstyle="-|>",
+                    color=colors[idx],
+                    lw=2,
+                    alpha=0.85,
+                    shrinkA=0,
+                    shrinkB=0,
+                    mutation_scale=10,
+                ),
+            )
+            ax.scatter([x0], [y0], color=colors[idx], s=28, zorder=3)
         ax.set_yticks(y)
         ax.set_yticklabels(cluster_order)
         ax.set_xlabel("Mean proportion")
         ax.set_title("Cell Type Composition Flow")
         ax.text(
             0.98,
-            0.02,
-            f"Left: {cond_levels[0]}   Right: {cond_levels[1]}",
+            0.98,
+            f"Start(dot): {cond_levels[0]}   End(arrow): {cond_levels[1]}",
             transform=ax.transAxes,
             ha="right",
-            va="bottom",
+            va="top",
             fontsize=9,
             color="#444444",
         )
