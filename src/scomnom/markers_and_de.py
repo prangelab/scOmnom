@@ -57,6 +57,11 @@ def _match_cluster_color(label: str, color_map: dict[str, str]) -> Optional[str]
     token = plot_utils._extract_cnn_token(lab)
     if token in color_map:
         return color_map[token]
+    if token:
+        # Support maps keyed by verbose labels like "C02: Hepatocytes".
+        for key, color in color_map.items():
+            if plot_utils._extract_cnn_token(str(key)) == token:
+                return color
     digits = re.sub(r"[^0-9]", "", lab)
     if digits:
         try:
@@ -1423,6 +1428,70 @@ def run_composition(cfg) -> ad.AnnData:
                 )
             return df2
 
+        def _build_graphda_diagnostics_df() -> pd.DataFrame:
+            gdf = results_by_method.get("graph", pd.DataFrame())
+            if gdf is None or gdf.empty:
+                return pd.DataFrame()
+            d = gdf.copy()
+            cluster_col = "cluster_label" if "cluster_label" in d.columns else "cluster"
+            if cluster_col not in d.columns:
+                return pd.DataFrame()
+            d[cluster_col] = d[cluster_col].astype(str)
+            d["pval"] = pd.to_numeric(d.get("pval", np.nan), errors="coerce")
+            d["fdr"] = pd.to_numeric(d.get("fdr", np.nan), errors="coerce")
+            d["effect"] = pd.to_numeric(d.get("effect", np.nan), errors="coerce")
+
+            fdr_ok = d["fdr"].notna()
+            d["is_sig"] = np.where(fdr_ok, d["fdr"] <= float(alpha), d["pval"] <= float(alpha))
+            agg = (
+                d.groupby(cluster_col, observed=False)
+                .agg(
+                    n_test_rows=("is_sig", "size"),
+                    n_sig_fdr=("is_sig", "sum"),
+                    min_pval=("pval", "min"),
+                    min_fdr=("fdr", "min"),
+                    median_pval=("pval", "median"),
+                    median_fdr=("fdr", "median"),
+                    median_abs_effect=("effect", lambda x: np.nanmedian(np.abs(pd.to_numeric(x, errors="coerce")))),
+                )
+                .reset_index()
+                .rename(columns={cluster_col: "cluster"})
+            )
+
+            if graph_meta_global is not None and not graph_meta_global.empty:
+                m = graph_meta_global.copy()
+                if "cluster_label" in m.columns:
+                    m["cluster"] = m["cluster_label"].astype(str)
+                elif "cluster" in m.columns:
+                    m["cluster"] = m["cluster"].astype(str)
+                else:
+                    m["cluster"] = "NA"
+                tested = pd.to_numeric(m.get("tested", False), errors="coerce").fillna(0.0).astype(bool)
+                m["tested"] = tested
+                m_agg = (
+                    m.groupby("cluster", observed=False)
+                    .agg(
+                        n_total_neighborhoods=("cluster", "size"),
+                        n_tested_neighborhoods=("tested", "sum"),
+                    )
+                    .reset_index()
+                )
+                agg = agg.merge(m_agg, on="cluster", how="outer")
+
+            for col in ("n_test_rows", "n_sig_fdr", "n_total_neighborhoods", "n_tested_neighborhoods"):
+                if col in agg.columns:
+                    agg[col] = pd.to_numeric(agg[col], errors="coerce").fillna(0).astype(int)
+            if "n_test_rows" in agg.columns:
+                denom = agg["n_test_rows"].replace(0, np.nan)
+                agg["frac_sig_rows"] = (agg["n_sig_fdr"] / denom).fillna(0.0)
+            if "n_total_neighborhoods" in agg.columns and "n_tested_neighborhoods" in agg.columns:
+                denom = agg["n_total_neighborhoods"].replace(0, np.nan)
+                agg["frac_tested_neighborhoods"] = (agg["n_tested_neighborhoods"] / denom).fillna(0.0)
+
+            return agg.sort_values("cluster").reset_index(drop=True)
+
+        graph_diag_df = _build_graphda_diagnostics_df()
+
         if write_tables:
             for method, df in results_by_method.items():
                 if isinstance(df, pd.DataFrame):
@@ -1434,6 +1503,9 @@ def run_composition(cfg) -> ad.AnnData:
             if graph_meta_global is not None and not graph_meta_global.empty:
                 graph_out = _cnnize_df(graph_meta_global)
                 graph_out.to_csv(results_dir / "composition_graph_neighborhoods.tsv", sep="\t", index=False)
+            if not graph_diag_df.empty:
+                graph_diag_out = _cnnize_df(graph_diag_df)
+                graph_diag_out.to_csv(results_dir / "graphda_diagnostics.tsv", sep="\t", index=False)
 
         if write_figures and bool(getattr(cfg, "make_figures", True)):
             if graph_meta_global is not None and not graph_meta_global.empty:
@@ -1445,6 +1517,13 @@ def run_composition(cfg) -> ad.AnnData:
                         alpha=alpha,
                         all_clusters=counts.columns.astype(str).tolist(),
                     )
+                    if not graph_diag_df.empty:
+                        plot_utils.plot_graphda_diagnostics(
+                            results_by_method.get("graph", pd.DataFrame()),
+                            graph_diag_df,
+                            fig_subdir,
+                            alpha=alpha,
+                        )
                 except Exception:
                     LOGGER.exception("composition: failed to plot GraphDA summary")
 

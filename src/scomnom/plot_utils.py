@@ -316,6 +316,76 @@ def plot_graphda_summaries(
     plt.close(fig)
 
 
+def plot_graphda_diagnostics(
+    graph_df: pd.DataFrame,
+    diag_df: pd.DataFrame,
+    figdir: Path,
+    *,
+    alpha: float = 0.05,
+) -> None:
+    """
+    Plot GraphDA diagnostics and save via save_multi().
+    """
+    if graph_df is None or graph_df.empty:
+        return
+
+    gdf = graph_df.copy()
+    p = pd.to_numeric(gdf.get("pval", np.nan), errors="coerce")
+    q = pd.to_numeric(gdf.get("fdr", np.nan), errors="coerce")
+    sig = (q <= float(alpha)) if np.isfinite(q).any() else (p <= float(alpha))
+
+    # QC 1: p-value vs FDR to inspect multiplicity impact.
+    mask = np.isfinite(p) & np.isfinite(q)
+    if mask.any():
+        x = -np.log10(np.clip(p[mask].to_numpy(dtype=float), 1e-300, 1.0))
+        y = -np.log10(np.clip(q[mask].to_numpy(dtype=float), 1e-300, 1.0))
+        sig_m = np.asarray(sig[mask].fillna(False), dtype=bool)
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.scatter(
+            x,
+            y,
+            s=14,
+            c=np.where(sig_m, "#d62728", "#9e9e9e"),
+            alpha=np.where(sig_m, 0.9, 0.5),
+            edgecolors="none",
+        )
+        thr = -np.log10(float(alpha))
+        ax.axhline(thr, color="#d62728", linestyle=":", linewidth=1.0)
+        ax.set_xlabel("-log10(p-value)")
+        ax.set_ylabel("-log10(FDR)")
+        ax.set_title("GraphDA QC: p-value vs FDR")
+        handles = [
+            mpl.lines.Line2D([], [], marker="o", linestyle="None", color="#d62728", label="Significant", markersize=5),
+            mpl.lines.Line2D([], [], marker="o", linestyle="None", color="#9e9e9e", label="Not significant", markersize=5),
+            mpl.lines.Line2D([], [], linestyle=":", color="#d62728", label=f"FDR={alpha:g}"),
+        ]
+        ax.legend(handles=handles, loc="lower right", frameon=True, fontsize=8)
+        ax.grid(False)
+        save_multi("graphda_qc_pval_vs_fdr", figdir, fig=fig)
+        plt.close(fig)
+
+    # QC 2: per-cluster tested vs significant counts.
+    if diag_df is not None and not diag_df.empty and "cluster" in diag_df.columns:
+        d = diag_df.copy()
+        d["cluster"] = d["cluster"].astype(str)
+        d["n_tested_neighborhoods"] = pd.to_numeric(d.get("n_tested_neighborhoods", 0), errors="coerce").fillna(0.0)
+        d["n_sig_fdr"] = pd.to_numeric(d.get("n_sig_fdr", 0), errors="coerce").fillna(0.0)
+        d = d.sort_values(["n_tested_neighborhoods", "cluster"], ascending=[False, True])
+        fig, ax = plt.subplots(figsize=(8, max(4, 0.28 * len(d))))
+        y = np.arange(len(d))
+        ax.barh(y, d["n_tested_neighborhoods"].to_numpy(), color="#6b7aa1", alpha=0.75, label="Tested neighborhoods")
+        ax.barh(y, d["n_sig_fdr"].to_numpy(), color="#d62728", alpha=0.9, label="Significant (FDR)")
+        ax.set_yticks(y)
+        ax.set_yticklabels(d["cluster"].tolist())
+        ax.invert_yaxis()
+        ax.set_xlabel("Count")
+        ax.set_title("GraphDA QC: tested vs significant by cluster")
+        ax.legend(loc="lower right", frameon=True, fontsize=8)
+        ax.grid(False)
+        save_multi("graphda_qc_cluster_power", figdir, fig=fig)
+        plt.close(fig)
+
+
 def plot_composition_volcano(method: str, df: pd.DataFrame, figdir: Path, *, alpha: float = 0.05) -> None:
     """
     Plot a volcano for a composition method and save via save_multi().

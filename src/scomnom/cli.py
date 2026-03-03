@@ -647,6 +647,7 @@ def adata_ops_subset(
     subset_mapping_tsv: Path = typer.Option(
         ...,
         "--subset-mapping-tsv",
+        "-s",
         help="[Subset] Two-column, tab-delimited file (no header): Cnn<tab>subset_name.",
     ),
     output_format: Optional[Literal["zarr", "h5ad"]] = typer.Option(

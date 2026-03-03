@@ -231,6 +231,104 @@ def _export_round_annotations_csv(adata: ad.AnnData, cfg: ClusterAnnotateConfig)
     io_utils.export_cluster_annotations(adata, columns=cols, out_path=cfg.annotation_csv)
 
 
+def _recompute_hvg_and_pca(adata: ad.AnnData, *, batch_key: str | None) -> None:
+    """
+    Recompute HVGs + PCA for the current dataset snapshot.
+
+    This remains independent from the clustering embedding choice:
+    cfg.embedding_key (typically X_integrated) is still used downstream.
+    """
+    hvg_source_layer = None
+    X_src = None
+    for layer in ("counts_cb", "counts_raw"):
+        if layer in adata.layers:
+            hvg_source_layer = layer
+            X_src = adata.layers[layer]
+            break
+
+    if X_src is None:
+        X_src = adata.X
+        LOGGER.info("HVG/PCA recompute: using adata.X as HVG source.")
+    else:
+        LOGGER.info("HVG/PCA recompute: using adata.layers[%r] as HVG source.", hvg_source_layer)
+
+    try:
+        X_tmp = X_src.copy()
+    except Exception:
+        X_tmp = np.array(X_src, copy=True)
+
+    ad_tmp = ad.AnnData(
+        X=X_tmp,
+        obs=adata.obs.copy(),
+        var=adata.var.copy(),
+    )
+    ad_tmp.obs_names = adata.obs_names.copy()
+    ad_tmp.var_names = adata.var_names.copy()
+
+    sc.pp.normalize_total(ad_tmp)
+    sc.pp.log1p(ad_tmp)
+
+    hvg_kwargs = {"n_top_genes": 2000}
+    if batch_key and batch_key in ad_tmp.obs:
+        hvg_kwargs["batch_key"] = str(batch_key)
+    sc.pp.highly_variable_genes(ad_tmp, **hvg_kwargs)
+
+    if "highly_variable" not in ad_tmp.var:
+        raise RuntimeError("HVG recompute failed: 'highly_variable' missing in temporary var.")
+    hv_mask = ad_tmp.var["highly_variable"].to_numpy(dtype=bool)
+    if int(hv_mask.sum()) == 0:
+        raise RuntimeError("HVG recompute failed: 0 genes selected as highly variable.")
+
+    adata.var["highly_variable"] = hv_mask
+    adata.uns["hvg_recomputed_for_cluster_and_annotate"] = {
+        "n_top_genes": 2000,
+        "n_hvg": int(hv_mask.sum()),
+        "source_layer": hvg_source_layer if hvg_source_layer is not None else "X",
+        "batch_key": str(batch_key) if batch_key else None,
+    }
+
+    adata.obsm.pop("X_pca", None)
+    adata.uns.pop("pca", None)
+    adata.varm.pop("PCs", None)
+
+    # Match load-and-filter policy: cap PCA dimension, then derive n_pcs by explained variance.
+    var_explained = 0.85
+    min_pcs = 20
+    max_pcs = 50
+    n_obs = int(adata.n_obs)
+    n_hvg = int(hv_mask.sum())
+    max_pcs_eff = max(2, min(max_pcs, n_obs - 1, n_hvg - 1))
+
+    sc.tl.pca(
+        adata,
+        n_comps=max_pcs_eff,
+        mask_var="highly_variable",
+        svd_solver="arpack",
+    )
+    if "X_pca" not in adata.obsm:
+        raise RuntimeError("PCA recompute failed: adata.obsm['X_pca'] missing.")
+
+    vr = adata.uns.get("pca", {}).get("variance_ratio", None)
+    if vr is not None:
+        cum = np.cumsum(np.asarray(vr, dtype=float))
+        n_pcs = int(np.searchsorted(cum, var_explained) + 1)
+        n_pcs = max(min_pcs, min(n_pcs, max_pcs_eff))
+        adata.uns["n_pcs"] = int(n_pcs)
+        adata.uns["variance_explained"] = float(cum[n_pcs - 1])
+    else:
+        adata.uns["n_pcs"] = int(min(max_pcs_eff, max(min_pcs, 2)))
+        adata.uns["variance_explained"] = None
+
+    LOGGER.info(
+        "HVG/PCA recompute complete: n_hvg=%d, X_pca shape=%s, n_pcs=%s, var_expl=%s. "
+        "Clustering still uses cfg.embedding_key.",
+        int(hv_mask.sum()),
+        tuple(adata.obsm["X_pca"].shape),
+        adata.uns.get("n_pcs", None),
+        adata.uns.get("variance_explained", None),
+    )
+
+
 def _json_encode_round_plateaus_in_place(adata: ad.AnnData) -> None:
     """Make plateaus HDF5/Zarr-safe by JSON encoding under active round sweep."""
     active_round_id = adata.uns.get("active_cluster_round", None)
@@ -405,6 +503,8 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
 
     batch_key = io_utils.infer_batch_key(adata, cfg.batch_key)
     cfg.batch_key = batch_key
+
+    _recompute_hvg_and_pca(adata, batch_key=batch_key)
 
     embedding_key = _ensure_embedding(adata, cfg.embedding_key)
     LOGGER.info("Using embedding_key='%s', batch_key='%s'", embedding_key, batch_key)
