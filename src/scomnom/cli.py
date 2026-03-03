@@ -8,10 +8,17 @@ from pandas.errors import PerformanceWarning
 
 from .load_and_filter import run_load_and_filter
 from .integrate import run_integrate
+from .adata_ops import run_adata_ops
 from .cluster_and_annotate import run_clustering
 from .markers_and_de import run_cluster_vs_rest, run_within_cluster, run_composition
 
-from .config import LoadAndFilterConfig, IntegrateConfig, ClusterAnnotateConfig, MarkersAndDEConfig
+from .config import (
+    LoadAndFilterConfig,
+    IntegrateConfig,
+    AdataOpsConfig,
+    ClusterAnnotateConfig,
+    MarkersAndDEConfig,
+)
 import logging
 from .logging_utils import init_logging
 
@@ -609,6 +616,66 @@ def integrate(
     )
 
     run_integrate(cfg)
+
+
+# ======================================================================
+#  adata-ops
+# ======================================================================
+adata_ops_app = typer.Typer(
+    help="AnnData object operations.",
+)
+app.add_typer(adata_ops_app, name="adata-ops")
+
+
+@adata_ops_app.command(
+    "subset",
+    help="Subset input AnnData into named outputs based on a Cnn -> subset TSV.",
+)
+def adata_ops_subset(
+    input_path: Path = typer.Option(
+        ...,
+        "--input-path",
+        "-i",
+        help="[I/O] Input dataset (.zarr or .h5ad).",
+    ),
+    output_dir: Optional[Path] = typer.Option(
+        None,
+        "--output-dir",
+        "-o",
+        help="[I/O] Output root directory (default: input parent).",
+    ),
+    subset_mapping_tsv: Path = typer.Option(
+        ...,
+        "--subset-mapping-tsv",
+        help="[Subset] Two-column, tab-delimited file (no header): Cnn<tab>subset_name.",
+    ),
+    output_format: Optional[Literal["zarr", "h5ad"]] = typer.Option(
+        None,
+        "--output-format",
+        help="[I/O] Output format for subsetted datasets. Default: match input when possible.",
+    ),
+    round_id: Optional[str] = typer.Option(
+        None,
+        "--round-id",
+        help="[Subset] Optional cluster round id used to resolve pretty labels for Cnn parsing.",
+    ),
+):
+    out_dir = output_dir or input_path.parent
+    log_dir = out_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    logfile = log_dir / "adata-ops.log"
+    init_logging(logfile)
+
+    cfg = AdataOpsConfig(
+        input_path=input_path,
+        output_dir=out_dir,
+        operation="subset",
+        subset_mapping_tsv=subset_mapping_tsv,
+        output_format=output_format,
+        round_id=round_id,
+        logfile=logfile,
+    )
+    run_adata_ops(cfg)
 
 
 # ======================================================================

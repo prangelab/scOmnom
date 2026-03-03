@@ -201,3 +201,46 @@ def test_cluster_dispatch(mock_run):
     assert cfg.output_path == "out.h5ad"
     assert cfg.res_min == 0.2
     assert cfg.res_max == 1.2
+
+
+# ---------------------------------------------------------
+# adata-ops
+# ---------------------------------------------------------
+def test_adata_ops_help():
+    result = runner.invoke(app, ["adata-ops", "--help"])
+    assert result.exit_code == 0
+    assert "AnnData object operations" in result.output
+    assert "subset" in result.output
+
+
+def test_adata_ops_subset_requires_mapping():
+    result = runner.invoke(
+        app,
+        [
+            "adata-ops",
+            "subset",
+            "--input-path", "adata.h5ad",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "subset-mapping-tsv" in result.output
+
+
+@patch("scomnom.cli.run_adata_ops")
+def test_adata_ops_dispatch(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "adata-ops",
+            "subset",
+            "--input-path", "adata.h5ad",
+            "--subset-mapping-tsv", "mapping.tsv",
+            "--output-format", "zarr",
+        ],
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.input_path == "adata.h5ad"
+    assert cfg.subset_mapping_tsv == "mapping.tsv"
+    assert cfg.output_format == "zarr"

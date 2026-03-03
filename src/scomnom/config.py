@@ -255,6 +255,23 @@ class IntegrateConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------
+# ADATA OPS CONFIG
+# ---------------------------------------------------------------------
+class AdataOpsConfig(BaseModel):
+    input_path: Path
+    output_dir: Optional[Path] = None
+    operation: Literal["subset"] = "subset"
+    subset_mapping_tsv: Path
+    output_format: Optional[Literal["zarr", "h5ad"]] = None
+    round_id: Optional[str] = None
+    logfile: Optional[Path] = None
+
+    @property
+    def resolved_output_dir(self) -> Path:
+        return (self.output_dir or self.input_path.parent).resolve()
+
+
+# ---------------------------------------------------------------------
 # CLUSTER AND ANNOTATE CONFIG
 # ---------------------------------------------------------------------
 class ClusterAnnotateConfig(BaseModel):
