@@ -1503,18 +1503,23 @@ def run_composition(cfg) -> ad.AnnData:
                     else:
                         dtmp["cluster"] = dtmp.index.astype(str)
                     grp = dtmp.groupby("cluster", dropna=False)
+                    labels_series = pd.Series(labels_eff.astype(str), index=np.arange(len(labels_eff)))
                     if "fdr" in dtmp.columns:
                         s = grp["fdr"].min()
-                        return labels_eff.map(s).astype(float).le(float(alpha_eff)).fillna(False).to_numpy()
+                        mapped = pd.to_numeric(labels_series.map(s), errors="coerce")
+                        return mapped.le(float(alpha_eff)).fillna(False).to_numpy()
                     if "pval" in dtmp.columns:
                         s = grp["pval"].min()
-                        return labels_eff.map(s).astype(float).le(float(alpha_eff)).fillna(False).to_numpy()
+                        mapped = pd.to_numeric(labels_series.map(s), errors="coerce")
+                        return mapped.le(float(alpha_eff)).fillna(False).to_numpy()
                     if "inclusion_prob" in dtmp.columns:
                         s = grp["inclusion_prob"].max()
-                        return labels_eff.map(s).astype(float).ge(float(1.0 - alpha_eff)).fillna(False).to_numpy()
+                        mapped = pd.to_numeric(labels_series.map(s), errors="coerce")
+                        return mapped.ge(float(1.0 - alpha_eff)).fillna(False).to_numpy()
                     if "Inclusion probability" in dtmp.columns:
                         s = grp["Inclusion probability"].max()
-                        return labels_eff.map(s).astype(float).ge(float(1.0 - alpha_eff)).fillna(False).to_numpy()
+                        mapped = pd.to_numeric(labels_series.map(s), errors="coerce")
+                        return mapped.ge(float(1.0 - alpha_eff)).fillna(False).to_numpy()
                     return np.zeros(len(labels_eff), dtype=bool)
 
                 global_df = results_by_method.get(primary_method)
