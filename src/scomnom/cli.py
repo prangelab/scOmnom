@@ -1360,6 +1360,9 @@ def _build_cfg_composition(
     graph_max_k: int,
     graph_min_size: int,
     graph_random_state: int,
+    graph_min_nonzero_samples_per_level: int,
+    graph_n_permutations: int,
+    graph_effect_shrink_k: float,
 ) -> MarkersAndDEConfig:
     out_dir = output_dir or input_path.parent
     log_dir = out_dir / "logs"
@@ -1407,6 +1410,9 @@ def _build_cfg_composition(
         composition_graph_max_k=int(graph_max_k),
         composition_graph_min_size=int(graph_min_size),
         composition_graph_random_state=int(graph_random_state),
+        composition_graph_min_nonzero_samples_per_level=int(graph_min_nonzero_samples_per_level),
+        composition_graph_n_permutations=int(graph_n_permutations),
+        composition_graph_effect_shrink_k=float(graph_effect_shrink_k),
     )
 
 
@@ -1650,11 +1656,14 @@ def composition(
     min_cells_per_sample_cluster: int = typer.Option(20, "--min-cells-per-sample-cluster"),
     alpha: float = typer.Option(0.05, "--alpha"),
 
-    graph_n_seeds: int = typer.Option(1000, "--graph-n-seeds"),
-    graph_k_ref: int = typer.Option(50, "--graph-k-ref"),
+    graph_n_seeds: int = typer.Option(2000, "--graph-n-seeds"),
+    graph_k_ref: int = typer.Option(30, "--graph-k-ref"),
     graph_max_k: int = typer.Option(200, "--graph-max-k"),
     graph_min_size: int = typer.Option(20, "--graph-min-size"),
     graph_random_state: int = typer.Option(42, "--graph-random-state"),
+    graph_min_nonzero_samples_per_level: int = typer.Option(3, "--graph-min-nonzero-samples-per-level"),
+    graph_n_permutations: int = typer.Option(200, "--graph-n-permutations"),
+    graph_effect_shrink_k: float = typer.Option(10.0, "--graph-effect-shrink-k"),
 ):
     if output_name is None:
         output_name = _default_output_name(input_path, "da")
@@ -1685,6 +1694,9 @@ def composition(
         graph_max_k=graph_max_k,
         graph_min_size=graph_min_size,
         graph_random_state=graph_random_state,
+        graph_min_nonzero_samples_per_level=graph_min_nonzero_samples_per_level,
+        graph_n_permutations=graph_n_permutations,
+        graph_effect_shrink_k=graph_effect_shrink_k,
     )
 
     run_composition(cfg)

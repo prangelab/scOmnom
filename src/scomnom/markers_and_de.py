@@ -1301,11 +1301,16 @@ def run_composition(cfg) -> ad.AnnData:
                         condition_key=str(condition_key),
                         covariates=covariates,
                         embedding_key="X_integrated",
-                        n_seeds=int(getattr(cfg, "composition_graph_n_seeds", 1000)),
-                        k_ref=int(getattr(cfg, "composition_graph_k_ref", 50)),
+                        n_seeds=int(getattr(cfg, "composition_graph_n_seeds", 2000)),
+                        k_ref=int(getattr(cfg, "composition_graph_k_ref", 30)),
                         max_k=int(getattr(cfg, "composition_graph_max_k", 200)),
                         min_size=int(getattr(cfg, "composition_graph_min_size", 20)),
                         random_state=int(getattr(cfg, "composition_graph_random_state", 42)),
+                        min_nonzero_samples_per_level=int(
+                            getattr(cfg, "composition_graph_min_nonzero_samples_per_level", 3)
+                        ),
+                        n_permutations=int(getattr(cfg, "composition_graph_n_permutations", 200)),
+                        effect_shrink_k=float(getattr(cfg, "composition_graph_effect_shrink_k", 10.0)),
                     )
                     if graph_meta is not None and not graph_meta.empty and isinstance(res, pd.DataFrame) and not res.empty:
                         if "cluster" in res.columns:
@@ -1487,6 +1492,9 @@ def run_composition(cfg) -> ad.AnnData:
                     f"graph_max_k={getattr(cfg, 'composition_graph_max_k', None)}",
                     f"graph_min_size={getattr(cfg, 'composition_graph_min_size', None)}",
                     f"graph_random_state={getattr(cfg, 'composition_graph_random_state', None)}",
+                    f"graph_min_nonzero_samples_per_level={getattr(cfg, 'composition_graph_min_nonzero_samples_per_level', None)}",
+                    f"graph_n_permutations={getattr(cfg, 'composition_graph_n_permutations', None)}",
+                    f"graph_effect_shrink_k={getattr(cfg, 'composition_graph_effect_shrink_k', None)}",
                     f"glm_min_samples_per_level={_MIN_GLM_SAMPLES_PER_LEVEL}",
                     f"glm_min_levels=3",
                 ],
@@ -1526,32 +1534,7 @@ def run_composition(cfg) -> ad.AnnData:
                 if isinstance(global_df, pd.DataFrame) and not global_df.empty:
                     plotted = False
                     plotted_name = "composition_effects_global"
-                    if "effect" in global_df.columns:
-                        vals = pd.to_numeric(global_df["effect"], errors="coerce")
-                        if "cluster" in global_df.columns:
-                            labels = global_df["cluster"].astype(str)
-                        else:
-                            labels = global_df.index.astype(str)
-                        if not vals.isna().all():
-                            labels = pd.Index(labels).astype(str)
-                            colors = _resolve_cluster_colors(
-                                adata,
-                                cluster_key=cluster_key,
-                                labels=labels,
-                                round_id=getattr(cfg, "round_id", None),
-                            )
-                            plot_utils.plot_composition_effects_global(
-                                vals.to_numpy(),
-                                labels,
-                                colors,
-                                fig_subdir,
-                                plot_name="composition_effects_global",
-                                title="Composition effects (global)",
-                                sig_mask=_effect_sig_mask(global_df, labels, alpha),
-                                alpha=alpha,
-                            )
-                            plotted = True
-                    elif primary_method == "sccoda":
+                    if primary_method == "sccoda":
                         if "Expected Sample log2-fold change" in global_df.columns:
                             vals = pd.to_numeric(global_df["Expected Sample log2-fold change"], errors="coerce")
                         elif "Expected Sample" in global_df.columns:
@@ -1577,8 +1560,34 @@ def run_composition(cfg) -> ad.AnnData:
                                 labels,
                                 colors,
                                 fig_subdir,
+                                plot_name="composition_effects_global_sccoda",
+                                title="Composition effects (global, scCODA)",
+                                sig_mask=_effect_sig_mask(global_df, labels, alpha),
+                                alpha=alpha,
+                            )
+                            plotted_name = "composition_effects_global_sccoda"
+                            plotted = True
+                    elif "effect" in global_df.columns:
+                        vals = pd.to_numeric(global_df["effect"], errors="coerce")
+                        if "cluster" in global_df.columns:
+                            labels = global_df["cluster"].astype(str)
+                        else:
+                            labels = global_df.index.astype(str)
+                        if not vals.isna().all():
+                            labels = pd.Index(labels).astype(str)
+                            colors = _resolve_cluster_colors(
+                                adata,
+                                cluster_key=cluster_key,
+                                labels=labels,
+                                round_id=getattr(cfg, "round_id", None),
+                            )
+                            plot_utils.plot_composition_effects_global(
+                                vals.to_numpy(),
+                                labels,
+                                colors,
+                                fig_subdir,
                                 plot_name="composition_effects_global",
-                                title="Composition effects (global, scCODA expected sample log2-FC)",
+                                title="Composition effects (global)",
                                 sig_mask=_effect_sig_mask(global_df, labels, alpha),
                                 alpha=alpha,
                             )

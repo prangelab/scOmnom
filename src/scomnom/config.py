@@ -732,11 +732,14 @@ class MarkersAndDEConfig(BaseModel):
     composition_stratify: bool = False
     composition_stratify_key: Optional[str] = None
     composition_stratify_levels: Tuple[str, ...] = ()
-    composition_graph_n_seeds: int = 1000
-    composition_graph_k_ref: int = 50
+    composition_graph_n_seeds: int = 2000
+    composition_graph_k_ref: int = 30
     composition_graph_max_k: int = 200
     composition_graph_min_size: int = 20
     composition_graph_random_state: int = 42
+    composition_graph_min_nonzero_samples_per_level: int = 3
+    composition_graph_n_permutations: int = 200
+    composition_graph_effect_shrink_k: float = 10.0
 
     # ------------------------------------------------------------------
     # DE-based decoupler (pathway/TF activity from DE stats)

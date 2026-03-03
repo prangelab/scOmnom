@@ -336,24 +336,15 @@ def plot_composition_volcano(method: str, df: pd.DataFrame, figdir: Path, *, alp
         x = pd.to_numeric(df["effect"], errors="coerce")
     else:
         return
-    y_source = None
-    if "fdr" in df.columns:
-        y = pd.to_numeric(df["fdr"], errors="coerce")
-        y_source = "FDR"
-    elif "pval" in df.columns:
-        y = pd.to_numeric(df["pval"], errors="coerce")
+    if "pval" in df.columns:
+        y_raw = pd.to_numeric(df["pval"], errors="coerce")
         y_source = "pval"
+    elif "fdr" in df.columns:
+        y_raw = pd.to_numeric(df["fdr"], errors="coerce")
+        y_source = "FDR"
     else:
         return
-
-    if y_source == "FDR":
-        finite = y[np.isfinite(y)]
-        if finite.nunique(dropna=True) <= 1 and "pval" in df.columns:
-            y = pd.to_numeric(df["pval"], errors="coerce")
-            y_source = "pval"
-
-    y_numeric = y.copy()
-    y = -np.log10(y_numeric)
+    y = -np.log10(y_raw)
 
     mask = np.isfinite(x) & np.isfinite(y)
     x = x[mask]
@@ -365,8 +356,12 @@ def plot_composition_volcano(method: str, df: pd.DataFrame, figdir: Path, *, alp
     sig = pd.Series(False, index=df.index)
     if "fdr" in df.columns:
         sig = pd.to_numeric(df["fdr"], errors="coerce") <= float(alpha)
+        sig_label = f"FDR<={alpha:g}"
     elif "pval" in df.columns:
         sig = pd.to_numeric(df["pval"], errors="coerce") <= float(alpha)
+        sig_label = f"pval<={alpha:g}"
+    else:
+        sig_label = "significant"
     sig = sig[mask]
     pt_colors = np.where(sig.to_numpy(), "#d62728", "#7a7a7a")
     pt_alpha = np.where(sig.to_numpy(), 0.9, 0.65)
@@ -376,12 +371,12 @@ def plot_composition_volcano(method: str, df: pd.DataFrame, figdir: Path, *, alp
     if np.isfinite(y_thr):
         ax.axhline(y_thr, color="#d62728", linestyle=":", linewidth=1)
     ax.set_xlabel("Effect (log2 scale)")
-    ax.set_ylabel(f"-log10({y_source})" if y_source else "-log10(pval)")
+    ax.set_ylabel(f"-log10({y_source})")
     ax.set_title(f"{str(method).upper()} volcano")
     legend_handles = [
-        mpl.lines.Line2D([], [], marker="o", linestyle="None", color="#d62728", label="Significant", markersize=5),
+        mpl.lines.Line2D([], [], marker="o", linestyle="None", color="#d62728", label=f"Significant ({sig_label})", markersize=5),
         mpl.lines.Line2D([], [], marker="o", linestyle="None", color="#7a7a7a", label="Not significant", markersize=5),
-        mpl.lines.Line2D([], [], color="#d62728", linestyle=":", label=f"{y_source or 'pval'}={alpha:g}"),
+        mpl.lines.Line2D([], [], color="#d62728", linestyle=":", label=f"{y_source}={alpha:g}"),
     ]
     ax.legend(handles=legend_handles, loc="upper right", frameon=True, fontsize=8)
     ax.grid(False)
@@ -578,7 +573,12 @@ def plot_composition_stacks(
     sig_clusters = set()
     if consensus is not None and isinstance(consensus, pd.DataFrame) and not consensus.empty:
         try:
-            sig_clusters = set(consensus.loc[consensus["n_sig"] > 0, "cluster"].astype(str).tolist())
+            if "high_confidence_da" in consensus.columns:
+                sig_clusters = set(
+                    consensus.loc[consensus["high_confidence_da"].fillna(False), "cluster"].astype(str).tolist()
+                )
+            else:
+                sig_clusters = set(consensus.loc[consensus["n_sig"] > 0, "cluster"].astype(str).tolist())
         except Exception:
             sig_clusters = set()
 
@@ -643,8 +643,8 @@ def plot_composition_stacks(
         right = right.reindex(cluster_order)
         y = np.arange(len(cluster_order))
         for idx, cl in enumerate(cluster_order):
-            y0 = idx - 0.3
-            y1 = idx + 0.3
+            y0 = idx
+            y1 = idx
             ax.plot([left[cl], right[cl]], [y0, y1], color=colors[idx], linewidth=2, alpha=0.8)
             ax.scatter([left[cl], right[cl]], [y0, y1], color=colors[idx], s=25, zorder=3)
         ax.set_yticks(y)
