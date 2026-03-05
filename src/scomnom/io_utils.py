@@ -13,6 +13,7 @@ import re
 import json
 import tarfile
 import tempfile
+import subprocess
 import urllib.request
 import urllib.error
 import hashlib
@@ -1207,20 +1208,59 @@ def _validate_tar_members_safe(member_names: List[str]) -> None:
             raise RuntimeError(f"Refusing to extract archive with parent traversal member path: {name}")
 
 
+def _use_system_tar_zstd() -> bool:
+    return shutil.which("tar") is not None and shutil.which("zstd") is not None
+
+
+def _zstd_threads_flag() -> str:
+    return os.getenv("SCOMNOM_ZSTD_THREADS", "0")
+
+
+def _zstd_level() -> str:
+    return os.getenv("SCOMNOM_ZSTD_LEVEL", "19")
+
+
 def _tar_create_zst(src_root: Path, item_name: str, out_archive: Path) -> None:
+    if _use_system_tar_zstd():
+        zstd_prog = f"zstd -{_zstd_level()} -T{_zstd_threads_flag()}"
+        cmd = [
+            "tar",
+            "-I",
+            zstd_prog,
+            "-cf",
+            str(out_archive),
+            "-C",
+            str(src_root),
+            item_name,
+        ]
+        subprocess.run(cmd, check=True)
+        return
+
     try:
         import zstandard as zstd
     except Exception as e:
         raise RuntimeError("zstandard is required for writing .zarr.tar.zst archives.") from e
 
     with out_archive.open("wb") as fh:
-        cctx = zstd.ZstdCompressor(level=19)
+        cctx = zstd.ZstdCompressor(level=int(_zstd_level()), threads=max(1, (os.cpu_count() or 1)))
         with cctx.stream_writer(fh) as compressor:
             with tarfile.open(fileobj=compressor, mode="w|") as tf:
                 tf.add(src_root / item_name, arcname=item_name)
 
 
 def _tar_list_zst(archive_path: Path) -> List[str]:
+    if _use_system_tar_zstd():
+        zstd_prog = f"zstd -T{_zstd_threads_flag()}"
+        cmd = [
+            "tar",
+            "-I",
+            zstd_prog,
+            "-tf",
+            str(archive_path),
+        ]
+        out = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        return [line.strip() for line in out.stdout.splitlines() if line.strip()]
+
     try:
         import zstandard as zstd
     except Exception as e:
@@ -1237,6 +1277,20 @@ def _tar_list_zst(archive_path: Path) -> List[str]:
 
 
 def _tar_extract_zst(archive_path: Path, out_dir: Path) -> None:
+    if _use_system_tar_zstd():
+        zstd_prog = f"zstd -T{_zstd_threads_flag()}"
+        cmd = [
+            "tar",
+            "-I",
+            zstd_prog,
+            "-xf",
+            str(archive_path),
+            "-C",
+            str(out_dir),
+        ]
+        subprocess.run(cmd, check=True)
+        return
+
     try:
         import zstandard as zstd
     except Exception as e:
