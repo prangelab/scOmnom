@@ -1322,8 +1322,9 @@ def run_integrate(cfg: IntegrateConfig) -> ad.AnnData:
         pre_key = "X_umap__pre_annotated_run"
         post_key = "X_umap__scANVI__annotated"
 
-        # ---- stash current active UMAP once (if present) ----
-        if "X_umap" in adata.obsm and pre_key not in adata.obsm:
+        # ---- stash current active UMAP for this annotated run (if present) ----
+        # Always refresh to avoid reusing a stale pre-run embedding from a previous rerun.
+        if "X_umap" in adata.obsm:
             try:
                 adata.obsm[pre_key] = np.asarray(adata.obsm["X_umap"])
             except Exception:
