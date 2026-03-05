@@ -1369,6 +1369,14 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
     # Prepare output path
     # ------------------------------------------------------------
     out_path = Path(out_path)
+    if fmt == "zarr":
+        zarr_archive_infix = f"{_ZARR_ARCHIVE_EXT}."
+        out_name = out_path.name
+        if zarr_archive_infix in out_name:
+            while zarr_archive_infix in out_name:
+                out_name = out_name.replace(zarr_archive_infix, ".")
+            out_path = out_path.with_name(out_name)
+            LOGGER.warning("save_dataset: normalized embedded archive suffix in output name → %s", out_path)
     if fmt == "zarr" and not archive and _is_zarr_archive_path(out_path):
         out_path = Path(str(out_path)[: -len(".tar.zst")])
     if fmt in ("zarr", "h5ad"):
