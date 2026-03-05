@@ -265,7 +265,7 @@ def load_and_filter(
     apply_doublet_score_path: Optional[Path] = typer.Option(
         None,
         "--apply-doublet-score-path",
-        help="Path to pre-doublet AnnData (.zarr or .h5ad). Defaults to <out>/adata.merged.zarr.",
+        help="Path to pre-doublet AnnData (.zarr, .zarr.tar.zst, or .h5ad). Defaults to <out>/adata.merged.zarr.",
     ),
 
     # -------------------------------------------------------------
@@ -356,7 +356,7 @@ def integrate(
         ...,
         "--input-path",
         "-i",
-        help="[I/O] Dataset produced by load-and-filter (.zarr or .h5ad).",
+        help="[I/O] Dataset produced by load-and-filter (.zarr, .zarr.tar.zst, or .h5ad).",
     ),
     output_dir: Optional[Path] = typer.Option(
         None,
@@ -636,7 +636,7 @@ def adata_ops_subset(
         ...,
         "--input-path",
         "-i",
-        help="[I/O] Input dataset (.zarr or .h5ad).",
+        help="[I/O] Input dataset (.zarr, .zarr.tar.zst, or .h5ad).",
     ),
     output_dir: Optional[Path] = typer.Option(
         None,
@@ -694,7 +694,7 @@ def cluster_and_annotate(
         None,
         "--input-path",
         "-i",
-        help="[I/O] Integrated dataset produced by `scomnom integrate` (.zarr or .h5ad).",
+        help="[I/O] Integrated dataset produced by `scomnom integrate` (.zarr, .zarr.tar.zst, or .h5ad).",
     ),
     output_dir: Optional[Path] = typer.Option(
         None,

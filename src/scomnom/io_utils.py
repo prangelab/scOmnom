@@ -11,6 +11,8 @@ import shutil
 import os
 import re
 import json
+import tarfile
+import tempfile
 import urllib.request
 import urllib.error
 import hashlib
@@ -1174,9 +1176,84 @@ def merge_samples(
 # ============================================================
 # Dataset IO Helpers
 # ============================================================
-def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr") -> None:
+_ZARR_ARCHIVE_EXT = ".zarr.tar.zst"
+
+
+def _is_zarr_archive_path(path: Path) -> bool:
+    return str(path).endswith(_ZARR_ARCHIVE_EXT)
+
+
+def _default_zarr_archive_path(path: Path) -> Path:
+    p = Path(path)
+    if _is_zarr_archive_path(p):
+        return p
+    if p.suffix == ".zarr" or p.name.endswith(".zarr"):
+        return p.with_name(f"{p.name}.tar.zst")
+    return p.with_name(f"{p.name}{_ZARR_ARCHIVE_EXT}")
+
+
+def _archive_to_zarr_dir_name(archive_path: Path) -> str:
+    return archive_path.name[: -len(".tar.zst")]
+
+
+def _validate_tar_members_safe(member_names: List[str]) -> None:
+    for name in member_names:
+        if not name:
+            continue
+        if name.startswith("/"):
+            raise RuntimeError(f"Refusing to extract archive with absolute member path: {name}")
+        pure = Path(name)
+        if ".." in pure.parts:
+            raise RuntimeError(f"Refusing to extract archive with parent traversal member path: {name}")
+
+
+def _tar_create_zst(src_root: Path, item_name: str, out_archive: Path) -> None:
+    try:
+        import zstandard as zstd
+    except Exception as e:
+        raise RuntimeError("zstandard is required for writing .zarr.tar.zst archives.") from e
+
+    with out_archive.open("wb") as fh:
+        cctx = zstd.ZstdCompressor(level=19)
+        with cctx.stream_writer(fh) as compressor:
+            with tarfile.open(fileobj=compressor, mode="w|") as tf:
+                tf.add(src_root / item_name, arcname=item_name)
+
+
+def _tar_list_zst(archive_path: Path) -> List[str]:
+    try:
+        import zstandard as zstd
+    except Exception as e:
+        raise RuntimeError("zstandard is required for reading .zarr.tar.zst archives.") from e
+
+    names: List[str] = []
+    with archive_path.open("rb") as fh:
+        dctx = zstd.ZstdDecompressor()
+        with dctx.stream_reader(fh) as reader:
+            with tarfile.open(fileobj=reader, mode="r|") as tf:
+                for member in tf:
+                    names.append(member.name)
+    return names
+
+
+def _tar_extract_zst(archive_path: Path, out_dir: Path) -> None:
+    try:
+        import zstandard as zstd
+    except Exception as e:
+        raise RuntimeError("zstandard is required for reading .zarr.tar.zst archives.") from e
+
+    with archive_path.open("rb") as fh:
+        dctx = zstd.ZstdDecompressor()
+        with dctx.stream_reader(fh) as reader:
+            with tarfile.open(fileobj=reader, mode="r|") as tf:
+                for member in tf:
+                    _validate_tar_members_safe([member.name])
+                    tf.extract(member, path=out_dir)
+
+
+def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: bool = True) -> None:
     """
-    Save an AnnData object either as .zarr or .h5ad.
+    Save an AnnData object either as .zarr/.zarr.tar.zst or .h5ad.
 
     Makes adata.uns safe for H5AD/Zarr by:
       - tagging pandas.DataFrame / Series
@@ -1292,6 +1369,8 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr") -> None:
     # Prepare output path
     # ------------------------------------------------------------
     out_path = Path(out_path)
+    if fmt == "zarr" and not archive and _is_zarr_archive_path(out_path):
+        out_path = Path(str(out_path)[: -len(".tar.zst")])
     if fmt in ("zarr", "h5ad"):
         desired = f".{fmt}"
         dup = desired + desired
@@ -1351,8 +1430,27 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr") -> None:
     # Write dataset
     # ------------------------------------------------------------
     if fmt == "zarr":
-        LOGGER.info("Saving dataset as Zarr → %s", out_path)
-        adata_to_write.write_zarr(str(out_path), chunks=None)
+        if archive:
+            archive_path = _default_zarr_archive_path(out_path)
+            zarr_dir_name = _archive_to_zarr_dir_name(archive_path)
+            tmp_root = Path(tempfile.mkdtemp(prefix="scomnom_save_", dir=str(archive_path.parent)))
+            tmp_archive = archive_path.parent / f".{archive_path.name}.{os.getpid()}.tmp"
+            try:
+                tmp_zarr_dir = tmp_root / zarr_dir_name
+                LOGGER.info("Saving dataset as staged Zarr directory → %s", tmp_zarr_dir)
+                adata_to_write.write_zarr(str(tmp_zarr_dir), chunks=None)
+
+                LOGGER.info("Archiving staged Zarr dataset → %s", archive_path)
+                _tar_create_zst(tmp_root, zarr_dir_name, tmp_archive)
+                tmp_archive.replace(archive_path)
+                LOGGER.info("Saved dataset as Zarr archive → %s", archive_path)
+            finally:
+                shutil.rmtree(tmp_root, ignore_errors=True)
+                if tmp_archive.exists():
+                    tmp_archive.unlink(missing_ok=True)
+        else:
+            LOGGER.info("Saving dataset as Zarr directory → %s", out_path)
+            adata_to_write.write_zarr(str(out_path), chunks=None)
     elif fmt == "h5ad":
         LOGGER.info("Saving dataset as H5AD → %s", out_path)
         adata_to_write.write_h5ad(str(out_path), compression="gzip")
@@ -1432,17 +1530,47 @@ def load_dataset(path: Path) -> ad.AnnData:
 
     path = Path(path)
 
+    if not path.exists() and str(path).endswith(".zarr"):
+        candidate = Path(f"{path}.tar.zst")
+        if candidate.exists():
+            LOGGER.info("Resolved missing Zarr path %s to archived dataset %s", path, candidate)
+            path = candidate
+
     if not path.exists():
         raise FileNotFoundError(f"Dataset not found: {path}")
 
     if path.suffix == ".h5ad":
         LOGGER.info(f"Loading H5AD dataset → {path}")
         adata = ad.read_h5ad(str(path))
+    elif _is_zarr_archive_path(path):
+        tmp_dir = Path(tempfile.mkdtemp(prefix="scomnom_load_"))
+        try:
+            member_names = _tar_list_zst(path)
+            _validate_tar_members_safe(member_names)
+            _tar_extract_zst(path, tmp_dir)
+
+            expected = tmp_dir / _archive_to_zarr_dir_name(path)
+            if expected.exists() and expected.is_dir():
+                extracted = expected
+            else:
+                candidates = sorted(p for p in tmp_dir.iterdir() if p.is_dir() and p.name.endswith(".zarr"))
+                if len(candidates) != 1:
+                    raise RuntimeError(
+                        f"Archive {path} did not extract to a single .zarr directory. Found: {[p.name for p in candidates]}"
+                    )
+                extracted = candidates[0]
+
+            LOGGER.info("Loading archived Zarr dataset %s via extracted directory %s", path, extracted)
+            adata = ad.read_zarr(str(extracted))
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
     elif path.suffix == ".zarr" or path.is_dir():
         LOGGER.info(f"Loading Zarr dataset → {path}")
         adata = ad.read_zarr(str(path))  # fully in-memory
     else:
-        raise ValueError(f"Cannot load dataset from: {path}. Expected .zarr directory or .h5ad file.")
+        raise ValueError(
+            f"Cannot load dataset from: {path}. Expected .zarr directory, .zarr.tar.zst archive, or .h5ad file."
+        )
 
     # Rehydrate tagged structures in uns
     try:

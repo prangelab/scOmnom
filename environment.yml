@@ -34,6 +34,7 @@ dependencies:
   - scanpy
   - anndata
   - zarr
+  - zstandard
   - igraph
   - python-igraph
   - leidenalg
