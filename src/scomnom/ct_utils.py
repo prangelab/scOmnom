@@ -76,12 +76,33 @@ def ensure_celltypist(
     store: bool = True,
 ) -> tuple[Optional[np.ndarray], Optional[pd.DataFrame], dict]:
     label_key = str(getattr(cfg, "celltypist_label_key", "celltypist_label"))
+    proba_key = "celltypist_proba"
+    proba_cols_key = "celltypist_proba_columns"
 
     if reuse:
         labels, proba, meta = get_celltypist_outputs(adata, label_key)
-        if labels is not None or proba is not None:
+        # Reuse only when labels and a valid probability matrix are both present.
+        # Otherwise recompute to avoid stale/inconsistent mask inputs on subsetted objects.
+        if labels is not None and proba is not None:
             meta["reused"] = True
             return labels, proba, meta
+        if labels is not None or proba is not None:
+            LOGGER.info(
+                "CellTypist reuse payload incomplete/invalid (labels_ok=%s, proba_ok=%s); recomputing.",
+                bool(labels is not None),
+                bool(proba is not None),
+            )
+            # Clear stale payloads before recompute so downstream cannot pick up mismatched arrays/columns.
+            try:
+                if proba_key in adata.obsm:
+                    del adata.obsm[proba_key]
+            except Exception:
+                pass
+            try:
+                if proba_cols_key in adata.uns:
+                    del adata.uns[proba_cols_key]
+            except Exception:
+                pass
 
     meta = {"reused": False}
 
