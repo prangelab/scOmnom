@@ -248,7 +248,7 @@ def subset_dataset_from_tsv(
         raise ValueError("output_format must be 'zarr' or 'h5ad'.")
 
     output_root = Path(output_root)
-    out_dataset_dir = output_root / "datasets" / "subsets"
+    out_dataset_dir = output_root / "subsets"
     out_tables_dir = output_root / "tables"
     out_dataset_dir.mkdir(parents=True, exist_ok=True)
     out_tables_dir.mkdir(parents=True, exist_ok=True)
