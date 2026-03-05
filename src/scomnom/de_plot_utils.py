@@ -135,14 +135,34 @@ def prepare_condition_color_registry(
         if k not in ordered:
             ordered.append(k)
 
+    # Primary palette: tab20 for first 20 categories.
+    # Overflow palette: scanpy default_102 (excluding tab20 duplicates) for category 21+.
+    primary_pool = [mcolors.to_hex(c) for c in sns.color_palette("tab20", n_colors=20)]
     try:
         from scanpy.plotting.palettes import default_102
 
-        palette_pool = [str(c) for c in list(default_102)]
+        overflow_pool = [mcolors.to_hex(c) for c in list(default_102)]
     except Exception:
-        palette_pool = [mcolors.to_hex(c) for c in sns.color_palette("tab20", n_colors=20)]
-    if not palette_pool:
-        palette_pool = [mcolors.to_hex(c) for c in sns.color_palette("tab20", n_colors=20)]
+        overflow_pool = [mcolors.to_hex(c) for c in sns.color_palette("husl", n_colors=120)]
+
+    primary_lc = {str(c).lower() for c in primary_pool}
+    overflow_pool = [c for c in overflow_pool if str(c).lower() not in primary_lc]
+    if not overflow_pool:
+        overflow_pool = [mcolors.to_hex(c) for c in sns.color_palette("husl", n_colors=120)]
+
+    total_levels = 0
+    for key in ordered:
+        levels = _stable_levels_for_key(adata.obs, str(key))
+        n = int(len(levels))
+        if n > 0:
+            total_levels += n
+
+    if total_levels > len(primary_pool):
+        LOGGER.info(
+            "Category palette overflow: assigning first %d from tab20 and remaining %d from overflow palette.",
+            len(primary_pool),
+            max(0, total_levels - len(primary_pool)),
+        )
 
     cursor = 0
     registry: dict[str, dict[str, str]] = {}
@@ -151,7 +171,18 @@ def prepare_condition_color_registry(
         if not levels:
             continue
         n = len(levels)
-        colors = [str(palette_pool[(cursor + i) % len(palette_pool)]) for i in range(n)]
+        colors: list[str] = []
+        for i in range(n):
+            global_idx = cursor + i
+            if global_idx < len(primary_pool):
+                colors.append(str(primary_pool[global_idx]))
+            else:
+                overflow_idx = global_idx - len(primary_pool)
+                if overflow_idx < len(overflow_pool):
+                    colors.append(str(overflow_pool[overflow_idx]))
+                else:
+                    # Very high-cardinality edge case; repeat only after both pools are exhausted.
+                    colors.append(str(overflow_pool[overflow_idx % len(overflow_pool)]))
         cursor += n
         adata.uns[f"{key}_colors"] = list(colors)
         registry[str(key)] = {str(levels[i]): str(colors[i]) for i in range(n)}
