@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from scomnom.adata_ops import (
+    _dataset_stem_for_outputs,
     load_subset_mapping_tsv,
     subset_adata_by_cluster_mapping,
     subset_dataset_from_tsv,
@@ -86,6 +87,21 @@ def test_subset_adata_by_cluster_mapping_updates_round_sizes() -> None:
     assert got == {"immune": 4, "stromal": 2}
 
 
+def test_subset_adata_by_cluster_mapping_rejects_missing_requested_clusters() -> None:
+    adata = _make_test_adata()
+    subset_map = {"immune": ["C00", "C99"]}
+
+    with pytest.raises(ValueError, match="Requested Cnn clusters were not found"):
+        _ = subset_adata_by_cluster_mapping(adata, subset_map)
+
+
+def test_dataset_stem_for_outputs_normalizes_archives() -> None:
+    assert _dataset_stem_for_outputs(Path("foo.zarr.tar.zst")) == "foo"
+    assert _dataset_stem_for_outputs(Path("foo.zarr")) == "foo"
+    assert _dataset_stem_for_outputs(Path("foo.h5ad")) == "foo"
+    assert _dataset_stem_for_outputs(Path("foo.bar")) == "foo"
+
+
 def test_subset_dataset_from_tsv_saves_outputs(tmp_path: Path, monkeypatch) -> None:
     adata = _make_test_adata()
     mapping = tmp_path / "mapping.tsv"
@@ -110,3 +126,30 @@ def test_subset_dataset_from_tsv_saves_outputs(tmp_path: Path, monkeypatch) -> N
     assert all(path.endswith(".zarr") for path, _ in calls)
     assert summary["n_cells"].sum() == 6
     assert (tmp_path / "results" / "tables" / "adata__subset_summary.tsv").exists()
+
+
+def test_subset_dataset_from_tsv_uses_archive_stem_for_output_names(tmp_path: Path, monkeypatch) -> None:
+    mapping = tmp_path / "mapping.tsv"
+    mapping.write_text("C00\timmune\n")
+
+    adata = _make_test_adata()
+
+    def _fake_load_dataset(_path):
+        return adata
+
+    calls: list[tuple[str, str]] = []
+
+    def _fake_save_dataset(in_adata, out_path, fmt="zarr"):
+        calls.append((str(out_path), str(fmt)))
+
+    monkeypatch.setattr("scomnom.adata_ops.load_dataset", _fake_load_dataset)
+    monkeypatch.setattr("scomnom.adata_ops.save_dataset", _fake_save_dataset)
+
+    _ = subset_dataset_from_tsv(
+        tmp_path / "input.zarr.tar.zst",
+        mapping,
+        output_root=tmp_path / "results",
+        output_format="zarr",
+    )
+
+    assert any("input__subset_immune.zarr" in path for path, _ in calls)

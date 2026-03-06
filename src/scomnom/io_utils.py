@@ -1499,27 +1499,26 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
             tmp_archive = archive_path.parent / f".{archive_path.name}.{os.getpid()}.tmp"
             try:
                 tmp_zarr_dir = tmp_root / zarr_dir_name
-                LOGGER.info("Saving dataset as staged Zarr directory → %s", tmp_zarr_dir)
+                LOGGER.debug("save_dataset: staging zarr write at %s", tmp_zarr_dir)
                 adata_to_write.write_zarr(str(tmp_zarr_dir), chunks=None)
 
-                LOGGER.info("Archiving staged Zarr dataset → %s", archive_path)
+                LOGGER.debug("save_dataset: archiving staged zarr to %s", archive_path)
                 _tar_create_zst(tmp_root, zarr_dir_name, tmp_archive)
                 tmp_archive.replace(archive_path)
-                LOGGER.info("Saved dataset as Zarr archive → %s", archive_path)
             finally:
                 shutil.rmtree(tmp_root, ignore_errors=True)
                 if tmp_archive.exists():
                     tmp_archive.unlink(missing_ok=True)
         else:
-            LOGGER.info("Saving dataset as Zarr directory → %s", out_path)
+            LOGGER.debug("save_dataset: writing zarr directory %s", out_path)
             adata_to_write.write_zarr(str(out_path), chunks=None)
     elif fmt == "h5ad":
-        LOGGER.info("Saving dataset as H5AD → %s", out_path)
+        LOGGER.debug("save_dataset: writing h5ad %s", out_path)
         adata_to_write.write_h5ad(str(out_path), compression="gzip")
     else:
         raise ValueError(f"Unknown dataset format '{fmt}'. Expected 'zarr' or 'h5ad'.")
 
-    LOGGER.info("Finished writing dataset → %s", out_path)
+    # Intentionally silent at INFO level to avoid duplicate save-path chatter.
 
 
 

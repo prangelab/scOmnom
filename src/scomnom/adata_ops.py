@@ -15,6 +15,18 @@ from .io_utils import load_dataset, save_dataset, sanitize_identifier
 LOGGER = logging.getLogger(__name__)
 
 
+def _dataset_stem_for_outputs(path: Path) -> str:
+    name = path.name
+    lower = name.lower()
+    if lower.endswith(".zarr.tar.zst"):
+        return name[: -len(".zarr.tar.zst")]
+    if lower.endswith(".zarr"):
+        return name[: -len(".zarr")]
+    if lower.endswith(".h5ad"):
+        return name[: -len(".h5ad")]
+    return path.stem
+
+
 def _extract_cnn(label: str) -> str | None:
     s = str(label or "").strip()
     if not s:
@@ -190,6 +202,16 @@ def subset_adata_by_cluster_mapping(
 
     outputs: dict[str, ad.AnnData] = {}
     rows: list[dict[str, Any]] = []
+    available = {x for x in cell_cnn.dropna().astype(str).unique().tolist() if x}
+    requested = {str(c) for clusters in subset_to_clusters.values() for c in clusters}
+    missing = sorted(requested - available)
+    if missing:
+        avail_preview = ",".join(sorted(available)) if available else "<none>"
+        raise ValueError(
+            "Requested Cnn clusters were not found in resolved labels "
+            f"({label_key_used!r}): {','.join(missing)}. "
+            f"Available Cnn values: {avail_preview}."
+        )
 
     for subset_name, clusters in subset_to_clusters.items():
         wanted = {str(c) for c in clusters}
@@ -229,7 +251,7 @@ def subset_dataset_from_tsv(
     else:
         source_path = Path(adata_or_path)
         adata = load_dataset(source_path)
-        dataset_stem = source_path.stem
+        dataset_stem = _dataset_stem_for_outputs(source_path)
 
     subset_to_clusters = load_subset_mapping_tsv(subset_mapping_tsv)
     subset_map, summary_df = subset_adata_by_cluster_mapping(
