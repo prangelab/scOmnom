@@ -1,4 +1,4 @@
-__version__ = "0.1.11"
+__version__ = "0.2.0"
 
 # Convenience re-exports
 from .io_utils import load_dataset, save_dataset  # noqa: F401
