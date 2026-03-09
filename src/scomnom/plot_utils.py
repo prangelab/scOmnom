@@ -1138,12 +1138,6 @@ def save_multi(stem: str, figdir: Path, fig=None, *, savefig_kwargs: dict | None
         raise RuntimeError("ROOT_FIGDIR is not set. Call setup_scanpy_figs() first.")
 
     # --------------------------------------------------
-    # Activate provided figure if any
-    # --------------------------------------------------
-    if fig is not None:
-        plt.figure(fig.number)
-
-    # --------------------------------------------------
     # Save in all configured formats
     # --------------------------------------------------
     # Lazily infer run folder from the first save call
