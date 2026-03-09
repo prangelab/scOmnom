@@ -1,0 +1,60 @@
+module	function	type	expose_api
+plot_utils.py	plot_graphda_summaries	artifact_function	x
+plot_utils.py	plot_graphda_diagnostics	artifact_function	x
+plot_utils.py	plot_composition_volcano	artifact_function	x
+plot_utils.py	plot_sccoda_effects_top	artifact_function	x
+plot_utils.py	plot_composition_effects_global	artifact_function	x
+plot_utils.py	plot_composition_stacks	artifact_function	x
+plot_utils.py	save_umap_multi	artifact_function	
+plot_utils.py	qc_scatter	artifact_function	
+plot_utils.py	hvgs_and_pca_plots	artifact_function	x
+plot_utils.py	umap_by	artifact_function	x
+plot_utils.py	plot_elbow_knee	artifact_function	
+plot_utils.py	plot_final_cell_counts	artifact_function	x
+plot_utils.py	plot_mt_histogram	artifact_function	x
+plot_utils.py	run_qc_plots_pre_filter_df	artifact_function	
+plot_utils.py	run_qc_plots_postfilter	artifact_function	x
+plot_utils.py	plot_hist_total_counts	artifact_function	x
+plot_utils.py	plot_hist_n_genes	artifact_function	x
+plot_utils.py	qc_scatter_panels	artifact_function	x
+plot_utils.py	plot_cellbender_effects	artifact_function	x
+plot_utils.py	plot_qc_filter_stack	artifact_function	x
+plot_utils.py	doublet_plots	artifact_function	x
+plot_utils.py	umap_plots	artifact_function	
+plot_utils.py	umap_by_two_legend_styles	artifact_function	
+plot_utils.py	plot_scib_results_table	artifact_function	x
+plot_utils.py	plot_clustering_resolution_sweep	artifact_function	x
+plot_utils.py	plot_clustering_stability_ari	artifact_function	x
+plot_utils.py	plot_cluster_umaps	artifact_function	x
+plot_utils.py	plot_integration_umaps	artifact_function	
+plot_utils.py	plot_annotated_run_umaps	artifact_function	
+plot_utils.py	plot_cluster_tree	artifact_function	x
+plot_utils.py	plot_compaction_flow	artifact_function	x
+plot_utils.py	plot_stability_curves	artifact_function	x
+plot_utils.py	plot_biological_metrics	artifact_function	x
+plot_utils.py	plot_composite_only	artifact_function	x
+plot_utils.py	plot_plateau_highlights	artifact_function	x
+plot_utils.py	plot_cluster_sizes	artifact_function	x
+plot_utils.py	plot_cluster_qc_summary	artifact_function	x
+plot_utils.py	plot_cluster_silhouette_by_cluster	artifact_function	x
+plot_utils.py	plot_cluster_batch_composition	artifact_function	x
+plot_utils.py	plot_decoupler_cluster_topn_barplots	artifact_function	x
+plot_utils.py	plot_decoupler_activity_heatmap	artifact_function	x
+plot_utils.py	plot_decoupler_dotplot	artifact_function	x
+plot_utils.py	plot_decoupler_all_styles	artifact_function	
+de_plot_utils.py	plot_marker_genes_pseudobulk	artifact_function	
+de_plot_utils.py	plot_marker_genes_ranksum	artifact_function	
+de_plot_utils.py	plot_condition_within_cluster	artifact_function	
+de_plot_utils.py	plot_condition_within_cluster_all	artifact_function	
+de_plot_utils.py	plot_condition_umaps	artifact_function	
+de_plot_utils.py	plot_contrast_conditional_markers	artifact_function	
+de_plot_utils.py	plot_contrast_conditional_markers_multi	artifact_function	
+de_plot_utils.py	plot_de_decoupler_payload	artifact_function	
+plot_utils.py	qc_violin_panels	low_level_figure	x
+de_plot_utils.py	heatmap_top_genes_by_sample	low_level_figure	x
+de_plot_utils.py	volcano	low_level_figure	x
+de_plot_utils.py	dotplot_top_genes	low_level_figure	x
+de_plot_utils.py	heatmap_top_genes	low_level_figure	x
+de_plot_utils.py	violin_grid_genes	low_level_figure	x
+de_plot_utils.py	violin_genes	low_level_figure	x
+de_plot_utils.py	umap_features_grid	low_level_figure	x

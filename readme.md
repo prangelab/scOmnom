@@ -222,6 +222,8 @@ scomnom markers-and-de da \
 
 For manual analysis in notebooks or scripts, always use `load_dataset()` and `save_dataset()` from `src/scomnom/io_utils.py`. This ensures consistent handling of Zarr/H5AD, metadata, and safety checks.
 
+See also: [`API_REFERENCE.md`](API_REFERENCE.md) for the current Python API namespaces (`scomnom.plotting`, `scomnom.adata_ops`).
+
 ```python
 from pathlib import Path
 from scomnom.io_utils import load_dataset, save_dataset

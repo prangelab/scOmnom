@@ -549,10 +549,12 @@ def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) ->
     if cfg.raw_sample_dir:
         LOGGER.info("Loading raw 10x matrices with CellRanger-like cell calling...")
         qc_plot_dir = cfg.output_dir / "figures" / "QC_plots"
-        sample_map, read_counts, _ = io_utils.load_raw_data(
-            cfg,
-            plot_dir=qc_plot_dir,
-        )
+        with plot_utils.capture_plot_artifacts() as artifacts:
+            sample_map, read_counts, _ = io_utils.load_raw_data(
+                cfg,
+                plot_dir=qc_plot_dir,
+            )
+        plot_utils.persist_plot_artifacts(artifacts)
 
     elif cfg.filtered_sample_dir:
         LOGGER.info("Loading CellRanger filtered matrices...")
@@ -610,7 +612,8 @@ def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) ->
 
     # Pre-filter QC plots from lightweight QC dataframe
     LOGGER.info("Plotting pre-filter QC...")
-    plot_utils.run_qc_plots_pre_filter_df(qc_df, cfg)
+    artifacts = plot_utils.run_qc_plots_pre_filter_df(qc_df, cfg)
+    plot_utils.persist_plot_artifacts(artifacts)
 
     # Merge samples
     tmp_dir = Path.cwd() / "tmp_merge"
@@ -646,13 +649,17 @@ def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) ->
     adata = cluster_and_cleanup_qc(adata, cfg)
 
     LOGGER.info("Plotting post-filter QC...")
-    plot_utils.run_qc_plots_postfilter(adata, cfg)
-    plot_utils.plot_final_cell_counts(adata, cfg)
-    plot_utils.plot_elbow_knee(
-        adata,
-        figpath_stem="QC_elbow_knee_postfilter",
-        figdir=cfg.figdir / "QC_plots",
+    artifacts = []
+    artifacts.extend(plot_utils.run_qc_plots_postfilter(adata, cfg))
+    artifacts.extend(plot_utils.plot_final_cell_counts(adata, cfg))
+    artifacts.extend(
+        plot_utils.plot_elbow_knee(
+            adata,
+            figpath_stem="QC_elbow_knee_postfilter",
+            figdir=cfg.figdir / "QC_plots",
+        )
     )
+    plot_utils.persist_plot_artifacts(artifacts)
 
     # Save to zarr
     out_zarr = Path(cfg.output_dir) / (cfg.output_name + ".zarr")
@@ -670,4 +677,3 @@ def run_load_and_filter(cfg: LoadAndQCConfig, logfile: Optional[Path] = None) ->
 
     LOGGER.info("Finished load_and_filter")
     return adata
-

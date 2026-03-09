@@ -106,13 +106,14 @@ def _plot_round_clustering_diagnostics(
         alpha = float(getattr(cfg, "penalty_alpha", 0.0))
         pen_arr = np.array([float(s) - alpha * float(n) for s, n in zip(sil_arr, n_arr)], dtype=float)
 
-    plot_utils.plot_clustering_resolution_sweep(
-        resolutions=np.array(res_sorted, dtype=float),
-        silhouette_scores=[float(x) for x in sil_arr],
-        n_clusters=[int(round(x)) if np.isfinite(x) else 0 for x in n_arr],
-        penalized_scores=[float(x) for x in pen_arr],
-        figdir=figdir_cluster,
-    )
+    artifacts = []
+    artifacts.extend(plot_utils.plot_clustering_resolution_sweep(
+            resolutions=np.array(res_sorted, dtype=float),
+            silhouette_scores=[float(x) for x in sil_arr],
+            n_clusters=[int(round(x)) if np.isfinite(x) else 0 for x in n_arr],
+            penalized_scores=[float(x) for x in pen_arr],
+            figdir=figdir_cluster,
+        ))
 
     # Cluster tree (rebuild from sweep-added obs keys)
     labels_per_resolution: dict[str, np.ndarray] = {}
@@ -122,26 +123,26 @@ def _plot_round_clustering_diagnostics(
             labels_per_resolution[_res_key(r)] = adata.obs[obs_key].to_numpy()
 
     if len(labels_per_resolution) >= 2:
-        plot_utils.plot_cluster_tree(
+        artifacts.extend(plot_utils.plot_cluster_tree(
             labels_per_resolution=labels_per_resolution,
             resolutions=res_sorted,
             figdir=figdir_cluster,
             best_resolution=float(best_res) if best_res is not None else None,
-        )
+        ))
 
-    plot_utils.plot_cluster_umaps(
+    artifacts.extend(plot_utils.plot_cluster_umaps(
         adata=adata,
         label_key=cfg.label_key,
         batch_key=batch_key,
         figdir=figdir_cluster,
-    )
+    ))
 
     stability = rinfo.get("stability", {}) if isinstance(rinfo.get("stability", {}), dict) else {}
     stability_aris = stability.get("subsampling_ari", []) or []
-    plot_utils.plot_clustering_stability_ari(
+    artifacts.extend(plot_utils.plot_clustering_stability_ari(
         stability_aris=[float(x) for x in stability_aris],
         figdir=figdir_cluster,
-    )
+    ))
 
     if best_res is not None and res_sorted and stab_dict and comp_dict and tiny_dict:
         plateaus = sweep.get("plateaus", None)
@@ -151,7 +152,7 @@ def _plot_round_clustering_diagnostics(
             except Exception:
                 plateaus = None
 
-        plot_utils.plot_stability_curves(
+        artifacts.extend(plot_utils.plot_stability_curves(
             resolutions=res_sorted,
             silhouette=sil_dict,
             stability=stab_dict,
@@ -160,7 +161,7 @@ def _plot_round_clustering_diagnostics(
             best_resolution=float(best_res),
             plateaus=plateaus if isinstance(plateaus, list) else None,
             figdir=figdir_cluster,
-        )
+        ))
 
     # Bio metrics plot (if present)
     if (
@@ -182,7 +183,7 @@ def _plot_round_clustering_diagnostics(
             except Exception:
                 plateaus = None
 
-        plot_utils.plot_biological_metrics(
+        artifacts.extend(plot_utils.plot_biological_metrics(
             resolutions=res_sorted,
             bio_homogeneity=bh,
             bio_fragmentation=bf,
@@ -192,7 +193,8 @@ def _plot_round_clustering_diagnostics(
             plateaus=plateaus if isinstance(plateaus, list) else None,
             figdir=figdir_cluster,
             figure_formats=cfg.figure_formats,
-        )
+        ))
+    plot_utils.persist_plot_artifacts(artifacts)
 
 
 def _export_round_annotations_csv(adata: ad.AnnData, cfg: ClusterAnnotateConfig) -> None:
@@ -472,7 +474,8 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                     legend_loc="right margin",
                     ax=ax_full,
                 )
-                plot_utils.save_umap_multi("umap_pretty_cluster_label__fulllegend", figdir_cluster, fig_full)
+                artifacts = plot_utils.save_umap_multi("umap_pretty_cluster_label__fulllegend", figdir_cluster, fig_full)
+                plot_utils.persist_plot_artifacts(artifacts)
 
                 fig_overlay, ax_overlay = plt.subplots(figsize=(base_w, base_h))
                 sc.pl.umap(
@@ -484,7 +487,8 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                     ax=ax_overlay,
                 )
                 _annotate_cnn(ax_overlay, np.asarray(adata.obsm["X_umap"]), adata.obs[pretty_key].astype(str).to_numpy())
-                plot_utils.save_umap_multi("umap_pretty_cluster_label__overlay_cnn", figdir_cluster, fig_overlay)
+                artifacts = plot_utils.save_umap_multi("umap_pretty_cluster_label__overlay_cnn", figdir_cluster, fig_overlay)
+                plot_utils.persist_plot_artifacts(artifacts)
             else:
                 LOGGER.warning("Rename-only: pretty label key '%s' not found; skipping UMAP plots.", pretty_key)
         out_zarr = cfg.resolved_output_dir / (cfg.output_name + ".zarr")
@@ -518,15 +522,17 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
 
     # --- BISC round ---
     best_emb = _get_best_integration_tag(adata)
-    run_BISC(
-        adata,
-        cfg,
-        embedding_key=embedding_key,
-        celltypist_labels=celltypist_labels,
-        celltypist_proba=celltypist_proba,
-        round_suffix=f"{best_emb}_BISC",
-        make_figures=True,
-    )
+    with plot_utils.capture_plot_artifacts() as artifacts:
+        run_BISC(
+            adata,
+            cfg,
+            embedding_key=embedding_key,
+            celltypist_labels=celltypist_labels,
+            celltypist_proba=celltypist_proba,
+            round_suffix=f"{best_emb}_BISC",
+            make_figures=True,
+        )
+    plot_utils.persist_plot_artifacts(artifacts)
 
     if cfg.make_figures:
         _plot_round_clustering_diagnostics(adata, cfg, embedding_key=embedding_key, batch_key=batch_key)
@@ -561,22 +567,26 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
         round_part = ann_keys.get("round_id", active_round_id) or "r0"
         figdir_ct = figdir_cluster / str(round_part) / "clustering"
 
-        plot_utils.umap_by(adata, keys=ann_keys["celltypist_cell_key"], figdir=figdir_ct, stem="umap_celltypist_celllevel")
-        plot_utils.umap_by(adata, keys=ann_keys["celltypist_cluster_key"], figdir=figdir_ct, stem="umap_celltypist_clusterlevel")
-        plot_utils.umap_by_two_legend_styles(
-            adata,
-            key=ann_keys["pretty_cluster_key"],
-            figdir=figdir_ct,
-            stem="umap_pretty_cluster_label",
-            title=ann_keys["pretty_cluster_key"],
+        artifacts = []
+        artifacts.extend(plot_utils.umap_by(adata, keys=ann_keys["celltypist_cell_key"], figdir=figdir_ct, stem="umap_celltypist_celllevel"))
+        artifacts.extend(plot_utils.umap_by(adata, keys=ann_keys["celltypist_cluster_key"], figdir=figdir_ct, stem="umap_celltypist_clusterlevel"))
+        artifacts.extend(
+            plot_utils.umap_by_two_legend_styles(
+                adata,
+                key=ann_keys["pretty_cluster_key"],
+                figdir=figdir_ct,
+                stem="umap_pretty_cluster_label",
+                title=ann_keys["pretty_cluster_key"],
+            )
         )
 
         id_key = ann_keys["pretty_cluster_key"]
-        plot_utils.plot_cluster_sizes(adata, id_key, figdir_ct)
-        plot_utils.plot_cluster_qc_summary(adata, id_key, figdir_ct)
-        plot_utils.plot_cluster_silhouette_by_cluster(adata, id_key, embedding_key, figdir_ct)
+        artifacts.extend(plot_utils.plot_cluster_sizes(adata, id_key, figdir_ct))
+        artifacts.extend(plot_utils.plot_cluster_qc_summary(adata, id_key, figdir_ct))
+        artifacts.extend(plot_utils.plot_cluster_silhouette_by_cluster(adata, id_key, embedding_key, figdir_ct))
         if batch_key is not None:
-            plot_utils.plot_cluster_batch_composition(adata, id_key, batch_key, figdir_ct)
+            artifacts.extend(plot_utils.plot_cluster_batch_composition(adata, id_key, batch_key, figdir_ct))
+        plot_utils.persist_plot_artifacts(artifacts)
 
     # legacy-ish pointers
     ca_uns = adata.uns.get("cluster_and_annotate", {})
@@ -606,45 +616,53 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
         else:
             figdir_round = Path("cluster_and_annotate") / active_round_id
 
+            artifacts = []
             if "msigdb" in adata.uns:
-                plot_utils.plot_decoupler_all_styles(
-                    adata,
-                    net_key="msigdb",
-                    net_name=f"MSigDB",
-                    figdir=figdir_round,
-                    heatmap_top_k=30,
-                    bar_top_n=15,
-                    bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
-                    bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
-                    bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
-                    dotplot_top_k=25,
+                artifacts.extend(
+                    plot_utils.plot_decoupler_all_styles(
+                        adata,
+                        net_key="msigdb",
+                        net_name=f"MSigDB",
+                        figdir=figdir_round,
+                        heatmap_top_k=30,
+                        bar_top_n=15,
+                        bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
+                        bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
+                        bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
+                        dotplot_top_k=25,
+                    )
                 )
             if "progeny" in adata.uns:
-                plot_utils.plot_decoupler_all_styles(
-                    adata,
-                    net_key="progeny",
-                    net_name=f"PROGENy",
-                    figdir=figdir_round,
-                    heatmap_top_k=30,
-                    bar_top_n=15,
-                    bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
-                    bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
-                    bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
-                    dotplot_top_k=25,
+                artifacts.extend(
+                    plot_utils.plot_decoupler_all_styles(
+                        adata,
+                        net_key="progeny",
+                        net_name=f"PROGENy",
+                        figdir=figdir_round,
+                        heatmap_top_k=30,
+                        bar_top_n=15,
+                        bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
+                        bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
+                        bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
+                        dotplot_top_k=25,
+                    )
                 )
             if "dorothea" in adata.uns:
-                plot_utils.plot_decoupler_all_styles(
-                    adata,
-                    net_key="dorothea",
-                    net_name=f"DoRothEA",
-                    figdir=figdir_round,
-                    heatmap_top_k=30,
-                    bar_top_n=15,
-                    bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
-                    bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
-                    bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
-                    dotplot_top_k=25,
+                artifacts.extend(
+                    plot_utils.plot_decoupler_all_styles(
+                        adata,
+                        net_key="dorothea",
+                        net_name=f"DoRothEA",
+                        figdir=figdir_round,
+                        heatmap_top_k=30,
+                        bar_top_n=15,
+                        bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
+                        bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
+                        bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
+                        dotplot_top_k=25,
+                    )
                 )
+            plot_utils.persist_plot_artifacts(artifacts)
 
     # ------------------------------------------------------------------
     # Compaction (new round)
@@ -749,39 +767,49 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                     try:
                         figdir_cluster = Path("cluster_and_annotate") / new_round_id / "clustering"
                         cluster_key = str(adata.uns["cluster_rounds"][new_round_id]["cluster_key"])
-                        plot_utils.plot_cluster_umaps(
-                            adata=adata,
-                            label_key=cluster_key,
-                            batch_key=batch_key,
-                            figdir=figdir_cluster,
+                        artifacts = []
+                        artifacts.extend(
+                            plot_utils.plot_cluster_umaps(
+                                adata=adata,
+                                label_key=cluster_key,
+                                batch_key=batch_key,
+                                figdir=figdir_cluster,
+                            )
                         )
                         pretty_key = f"{CLUSTER_LABEL_KEY}__{new_round_id}"
                         id_key = pretty_key if pretty_key in adata.obs else cluster_key
                         if pretty_key in adata.obs:
-                            plot_utils.umap_by_two_legend_styles(
-                                adata,
-                                key=pretty_key,
-                                figdir=figdir_cluster,
-                                stem="umap_pretty_cluster_label",
-                                title=pretty_key,
+                            artifacts.extend(
+                                plot_utils.umap_by_two_legend_styles(
+                                    adata,
+                                    key=pretty_key,
+                                    figdir=figdir_cluster,
+                                    stem="umap_pretty_cluster_label",
+                                    title=pretty_key,
+                                )
                             )
-                        plot_utils.plot_cluster_sizes(adata, id_key, figdir_cluster)
-                        plot_utils.plot_cluster_qc_summary(adata, id_key, figdir_cluster)
-                        plot_utils.plot_cluster_silhouette_by_cluster(
-                            adata,
-                            id_key,
-                            embedding_key,
-                            figdir_cluster,
+                        artifacts.extend(plot_utils.plot_cluster_sizes(adata, id_key, figdir_cluster))
+                        artifacts.extend(plot_utils.plot_cluster_qc_summary(adata, id_key, figdir_cluster))
+                        artifacts.extend(
+                            plot_utils.plot_cluster_silhouette_by_cluster(
+                                adata,
+                                id_key,
+                                embedding_key,
+                                figdir_cluster,
+                            )
                         )
                         if batch_key is not None:
-                            plot_utils.plot_cluster_batch_composition(adata, id_key, batch_key, figdir_cluster)
-                        plot_utils.plot_compaction_flow(
-                            adata,
-                            parent_round_id=parent_round_id,
-                            child_round_id=new_round_id,
-                            figdir=Path("cluster_and_annotate") / new_round_id / "clustering",
-                            min_frac=0.02,
+                            artifacts.extend(plot_utils.plot_cluster_batch_composition(adata, id_key, batch_key, figdir_cluster))
+                        artifacts.extend(
+                            plot_utils.plot_compaction_flow(
+                                adata,
+                                parent_round_id=parent_round_id,
+                                child_round_id=new_round_id,
+                                figdir=Path("cluster_and_annotate") / new_round_id / "clustering",
+                                min_frac=0.02,
+                            )
                         )
+                        plot_utils.persist_plot_artifacts(artifacts)
                     except Exception as e:
                         LOGGER.warning("Compaction: failed to plot compacted-round UMAPs: %s", e)
 
@@ -790,47 +818,55 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                         try:
                             figdir_round = Path("cluster_and_annotate") / new_round_id
 
+                            artifacts = []
                             if "msigdb" in adata.uns:
-                                plot_utils.plot_decoupler_all_styles(
-                                    adata,
-                                    net_key="msigdb",
-                                    net_name=f"MSigDB",
-                                    figdir=figdir_round,
-                                    heatmap_top_k=30,
-                                    bar_top_n=15,
-                                    bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
-                                    bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
-                                    bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
-                                    dotplot_top_k=25,
+                                artifacts.extend(
+                                    plot_utils.plot_decoupler_all_styles(
+                                        adata,
+                                        net_key="msigdb",
+                                        net_name=f"MSigDB",
+                                        figdir=figdir_round,
+                                        heatmap_top_k=30,
+                                        bar_top_n=15,
+                                        bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
+                                        bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
+                                        bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
+                                        dotplot_top_k=25,
+                                    )
                                 )
 
                             if "progeny" in adata.uns:
-                                plot_utils.plot_decoupler_all_styles(
-                                    adata,
-                                    net_key="progeny",
-                                    net_name=f"PROGENy",
-                                    figdir=figdir_round,
-                                    heatmap_top_k=30,
-                                    bar_top_n=15,
-                                    bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
-                                    bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
-                                    bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
-                                    dotplot_top_k=25,
+                                artifacts.extend(
+                                    plot_utils.plot_decoupler_all_styles(
+                                        adata,
+                                        net_key="progeny",
+                                        net_name=f"PROGENy",
+                                        figdir=figdir_round,
+                                        heatmap_top_k=30,
+                                        bar_top_n=15,
+                                        bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
+                                        bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
+                                        bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
+                                        dotplot_top_k=25,
+                                    )
                                 )
 
                             if "dorothea" in adata.uns:
-                                plot_utils.plot_decoupler_all_styles(
-                                    adata,
-                                    net_key="dorothea",
-                                    net_name=f"DoRothEA",
-                                    figdir=figdir_round,
-                                    heatmap_top_k=30,
-                                    bar_top_n=15,
-                                    bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
-                                    bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
-                                    bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
-                                    dotplot_top_k=25,
+                                artifacts.extend(
+                                    plot_utils.plot_decoupler_all_styles(
+                                        adata,
+                                        net_key="dorothea",
+                                        net_name=f"DoRothEA",
+                                        figdir=figdir_round,
+                                        heatmap_top_k=30,
+                                        bar_top_n=15,
+                                        bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
+                                        bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
+                                        bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
+                                        dotplot_top_k=25,
+                                    )
                                 )
+                            plot_utils.persist_plot_artifacts(artifacts)
 
                         except Exception as e:
                             LOGGER.warning("Compaction: failed to plot decoupler for compacted round '%s': %s",

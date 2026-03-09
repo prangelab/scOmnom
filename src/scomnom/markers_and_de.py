@@ -1066,7 +1066,7 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
             ncols = int(getattr(cfg, "plot_umap_ncols", 3))
 
             if run_cell_requested and markers_key:
-                de_plot_utils.plot_marker_genes_ranksum(
+                artifacts = de_plot_utils.plot_marker_genes_ranksum(
                     adata,
                     groupby=str(groupby),
                     display_groupby=str(display_key) if display_key else None,
@@ -1082,11 +1082,12 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
                     umap_ncols=ncols,
                     plot_gene_filter=getattr(cfg, "plot_gene_filter", ()),
                 )
+                plot_utils.persist_plot_artifacts(artifacts)
             else:
                 LOGGER.info("cluster-vs-rest: skipping cell-level marker plots (no markers computed).")
 
             if run_pb_requested:
-                de_plot_utils.plot_marker_genes_pseudobulk(
+                artifacts = de_plot_utils.plot_marker_genes_pseudobulk(
                     adata,
                     groupby=str(groupby),
                     display_groupby=str(display_key) if display_key else None,
@@ -1102,6 +1103,7 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
                     umap_ncols=ncols,
                     plot_gene_filter=getattr(cfg, "plot_gene_filter", ()),
                 )
+                plot_utils.persist_plot_artifacts(artifacts)
             else:
                 LOGGER.info("cluster-vs-rest: skipping pseudobulk plots (pseudobulk disabled or not requested).")
 
@@ -1510,20 +1512,26 @@ def run_composition(cfg) -> ad.AnnData:
         if write_figures and bool(getattr(cfg, "make_figures", True)):
             if graph_meta_global is not None and not graph_meta_global.empty:
                 try:
-                    plot_utils.plot_graphda_summaries(
-                        results_by_method.get("graph", pd.DataFrame()),
-                        graph_meta_global,
-                        fig_subdir,
-                        alpha=alpha,
-                        all_clusters=counts.columns.astype(str).tolist(),
-                    )
-                    if not graph_diag_df.empty:
-                        plot_utils.plot_graphda_diagnostics(
+                    artifacts = []
+                    artifacts.extend(
+                        plot_utils.plot_graphda_summaries(
                             results_by_method.get("graph", pd.DataFrame()),
-                            graph_diag_df,
+                            graph_meta_global,
                             fig_subdir,
                             alpha=alpha,
+                            all_clusters=counts.columns.astype(str).tolist(),
                         )
+                    )
+                    if not graph_diag_df.empty:
+                        artifacts.extend(
+                            plot_utils.plot_graphda_diagnostics(
+                                results_by_method.get("graph", pd.DataFrame()),
+                                graph_diag_df,
+                                fig_subdir,
+                                alpha=alpha,
+                            )
+                        )
+                    plot_utils.persist_plot_artifacts(artifacts)
                 except Exception:
                     LOGGER.exception("composition: failed to plot GraphDA summary")
 
@@ -1533,8 +1541,9 @@ def run_composition(cfg) -> ad.AnnData:
                 if df is None or df.empty:
                     continue
                 try:
+                    artifacts = []
                     if method in ("glm", "clr"):
-                        plot_utils.plot_composition_volcano(method, df, fig_subdir, alpha=alpha)
+                        artifacts.extend(plot_utils.plot_composition_volcano(method, df, fig_subdir, alpha=alpha))
                     if method == "sccoda":
                         if "cluster" in df.columns:
                             labels = df["cluster"].astype(str)
@@ -1547,7 +1556,8 @@ def run_composition(cfg) -> ad.AnnData:
                             round_id=getattr(cfg, "round_id", None),
                         )
                         color_map = {str(label): color for label, color in zip(labels, colors)}
-                        plot_utils.plot_sccoda_effects_top(df, color_map, fig_subdir, alpha=alpha)
+                        artifacts.extend(plot_utils.plot_sccoda_effects_top(df, color_map, fig_subdir, alpha=alpha))
+                    plot_utils.persist_plot_artifacts(artifacts)
                 except Exception:
                     LOGGER.exception("composition: method plot failed for %s", method)
 
@@ -1634,7 +1644,7 @@ def run_composition(cfg) -> ad.AnnData:
                                 labels=labels,
                                 round_id=getattr(cfg, "round_id", None),
                             )
-                            plot_utils.plot_composition_effects_global(
+                            artifacts = plot_utils.plot_composition_effects_global(
                                 vals.to_numpy(),
                                 labels,
                                 colors,
@@ -1644,6 +1654,7 @@ def run_composition(cfg) -> ad.AnnData:
                                 sig_mask=_effect_sig_mask(global_df, labels, alpha),
                                 alpha=alpha,
                             )
+                            plot_utils.persist_plot_artifacts(artifacts)
                             plotted_name = "composition_effects_global_sccoda"
                             plotted = True
                     elif "effect" in global_df.columns:
@@ -1660,7 +1671,7 @@ def run_composition(cfg) -> ad.AnnData:
                                 labels=labels,
                                 round_id=getattr(cfg, "round_id", None),
                             )
-                            plot_utils.plot_composition_effects_global(
+                            artifacts = plot_utils.plot_composition_effects_global(
                                 vals.to_numpy(),
                                 labels,
                                 colors,
@@ -1670,6 +1681,7 @@ def run_composition(cfg) -> ad.AnnData:
                                 sig_mask=_effect_sig_mask(global_df, labels, alpha),
                                 alpha=alpha,
                             )
+                            plot_utils.persist_plot_artifacts(artifacts)
                             plotted = True
                     elif primary_method == "glm" and "coef" in global_df.columns:
                         vals = global_df.groupby("cluster")["coef"].mean()
@@ -1682,7 +1694,7 @@ def run_composition(cfg) -> ad.AnnData:
                                 labels=labels,
                                 round_id=getattr(cfg, "round_id", None),
                             )
-                            plot_utils.plot_composition_effects_global(
+                            artifacts = plot_utils.plot_composition_effects_global(
                                 vals.values,
                                 labels,
                                 colors,
@@ -1692,6 +1704,7 @@ def run_composition(cfg) -> ad.AnnData:
                                 sig_mask=_effect_sig_mask(global_df, labels, alpha),
                                 alpha=alpha,
                             )
+                            plot_utils.persist_plot_artifacts(artifacts)
                             plotted = True
                     if plotted:
                         LOGGER.info("Saved plot: %s/%s", fig_subdir, plotted_name)
@@ -1711,7 +1724,7 @@ def run_composition(cfg) -> ad.AnnData:
                             labels=clr_labels,
                             round_id=getattr(cfg, "round_id", None),
                         )
-                        plot_utils.plot_composition_effects_global(
+                        artifacts = plot_utils.plot_composition_effects_global(
                             clr_vals.to_numpy(),
                             clr_labels,
                             clr_colors,
@@ -1721,6 +1734,7 @@ def run_composition(cfg) -> ad.AnnData:
                             sig_mask=_effect_sig_mask(clr_df, clr_labels, alpha),
                             alpha=alpha,
                         )
+                        plot_utils.persist_plot_artifacts(artifacts)
                         LOGGER.info("Saved plot: %s/%s", fig_subdir, "composition_effects_global_clr")
             except Exception:
                 LOGGER.exception("composition: failed to generate plots")
@@ -1741,7 +1755,7 @@ def run_composition(cfg) -> ad.AnnData:
                     labels=cluster_order,
                     round_id=getattr(cfg, "round_id", None),
                 )
-                plot_utils.plot_composition_stacks(
+                artifacts = plot_utils.plot_composition_stacks(
                     counts,
                     metadata,
                     condition_key=str(condition_key),
@@ -1751,6 +1765,7 @@ def run_composition(cfg) -> ad.AnnData:
                     consensus=consensus if isinstance(consensus, pd.DataFrame) else None,
                     alpha=float(alpha),
                 )
+                plot_utils.persist_plot_artifacts(artifacts)
             except Exception:
                 LOGGER.exception("composition: failed to plot composition stacks")
 
@@ -2862,17 +2877,18 @@ def run_within_cluster(cfg) -> ad.AnnData:
             )
             if condition_keys:
                 LOGGER.info("within-cluster: plotting UMAPs for condition keys...")
-                de_plot_utils.plot_condition_umaps(
+                artifacts = de_plot_utils.plot_condition_umaps(
                     adata,
                     groupby=str(groupby),
                     condition_keys=condition_keys,
                 )
+                plot_utils.persist_plot_artifacts(artifacts)
 
             # Condition plots only if pseudobulk ran
             if ran_pseudobulk:
                 LOGGER.info("within-cluster: plotting pseudobulk condition figures...")
                 for condition_key in condition_keys:
-                    de_plot_utils.plot_condition_within_cluster_all(
+                    artifacts = de_plot_utils.plot_condition_within_cluster_all(
                         adata,
                         cluster_key=str(groupby),
                         condition_key=str(condition_key),
@@ -2889,13 +2905,14 @@ def run_within_cluster(cfg) -> ad.AnnData:
                         plot_gene_filter=getattr(cfg, "plot_gene_filter", ()),
                         annotation_keys=plot_ann_keys,
                     )
+                    plot_utils.persist_plot_artifacts(artifacts)
             else:
                 LOGGER.info("within-cluster: skipping condition plots (pseudobulk not run).")
 
             if ran_cell_contrast:
                 LOGGER.info("within-cluster: plotting cell-level contrast figures...")
                 for condition_key in condition_keys:
-                    de_plot_utils.plot_contrast_conditional_markers_multi(
+                    artifacts = de_plot_utils.plot_contrast_conditional_markers_multi(
                         adata,
                         groupby=str(groupby),
                         display_map=display_map,
@@ -2912,6 +2929,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                         plot_gene_filter=getattr(cfg, "plot_gene_filter", ()),
                         annotation_keys=plot_ann_keys,
                     )
+                    plot_utils.persist_plot_artifacts(artifacts)
 
             # DE-based decoupler plots (if available)
             if de_source != "none":
@@ -2976,7 +2994,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                                             break
 
                                 for net_name, net_payload in nets.items():
-                                    de_plot_utils.plot_de_decoupler_payload(
+                                    artifacts = de_plot_utils.plot_de_decoupler_payload(
                                         net_payload,
                                         net_name=str(net_name),
                                         figdir=base,
@@ -2990,6 +3008,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                                         pos_label=pos_label,
                                         neg_label=neg_label,
                                     )
+                                    plot_utils.persist_plot_artifacts(artifacts)
 
             try:
                 LOGGER.info("within-cluster: generating DE report...")

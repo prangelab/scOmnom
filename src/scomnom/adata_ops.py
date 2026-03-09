@@ -11,8 +11,17 @@ import pandas as pd
 from .clustering_utils import CLUSTER_LABEL_KEY
 from .config import AdataOpsConfig
 from .io_utils import load_dataset, save_dataset, sanitize_identifier
+from .rename_utils import rename_idents
 
 LOGGER = logging.getLogger(__name__)
+
+__all__ = [
+    "rename_idents",
+    "load_subset_mapping_tsv",
+    "subset_adata_by_cluster_mapping",
+    "subset_dataset_from_tsv",
+    "run_adata_ops",
+]
 
 
 def _dataset_stem_for_outputs(path: Path) -> str:

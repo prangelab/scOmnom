@@ -1217,7 +1217,8 @@ def _select_best_embedding(
     LOGGER.info("Wrote scIB tables: %s and %s", raw_path.name, scaled_path.name)
 
     fig_stem = f"scib_results_table{tag_part}" if tag_part else "scib_results_table"
-    plot_utils.plot_scib_results_table(scaled, stem=fig_stem)
+    artifacts = plot_utils.plot_scib_results_table(scaled, stem=fig_stem)
+    plot_utils.persist_plot_artifacts(artifacts)
 
     numeric = (
         scaled.astype(str)
@@ -1359,13 +1360,14 @@ def run_integrate(cfg: IntegrateConfig) -> ad.AnnData:
         # ---- plot annotated-run UMAP outputs (your dedicated function) ----
         if getattr(cfg, "make_figures", True):
             try:
-                plot_utils.plot_annotated_run_umaps(
+                artifacts = plot_utils.plot_annotated_run_umaps(
                     adata,
                     batch_key=batch_key,
                     final_label_key=final_label_key,
                     round_id=round_id_for_title,
                     figdir="integration",
                 )
+                plot_utils.persist_plot_artifacts(artifacts)
 
             except Exception as e:
                 LOGGER.warning("ANNOTATED RUN: failed to plot annotated-run UMAPs: %s", e)
@@ -1481,13 +1483,14 @@ def run_integrate(cfg: IntegrateConfig) -> ad.AnnData:
         plot_keys = list(dict.fromkeys(plot_keys))
 
         if getattr(cfg, "make_figures", True):
-            plot_utils.plot_integration_umaps(
+            artifacts = plot_utils.plot_integration_umaps(
                 adata,
                 embedding_keys=plot_keys,
                 batch_key=batch_key,
                 color=batch_key,
                 selected_embedding=best,
             )
+            plot_utils.persist_plot_artifacts(artifacts)
 
         if best.lower().startswith("bbknn"):
             LOGGER.warning(

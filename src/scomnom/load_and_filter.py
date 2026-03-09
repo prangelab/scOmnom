@@ -950,10 +950,12 @@ def run_load_and_filter(
 
         else:
             LOGGER.info("Loading RAW matrices...")
-            sample_map, read_counts, _ = io_utils.load_raw_data(
-                cfg,
-                plot_dir=cfg.figdir / "cell_qc",
-            )
+            with plot_utils.capture_plot_artifacts() as artifacts:
+                sample_map, read_counts, _ = io_utils.load_raw_data(
+                    cfg,
+                    plot_dir=cfg.figdir / "cell_qc",
+                )
+            plot_utils.persist_plot_artifacts(artifacts)
 
         # ---------------------------------------------------------
         # Validate metadata vs loaded samples
@@ -982,7 +984,8 @@ def run_load_and_filter(
         # ---------------------------------------------------------
         if cfg.make_figures:
             LOGGER.info("Plotting pre-filter QC...")
-            plot_utils.run_qc_plots_pre_filter_df(qc_df, cfg)
+            artifacts = plot_utils.run_qc_plots_pre_filter_df(qc_df, cfg)
+            plot_utils.persist_plot_artifacts(artifacts)
 
         # ---------------------------------------------------------
         # Merge filtered samples into a single AnnData
@@ -1054,11 +1057,12 @@ def run_load_and_filter(
     )
 
     if cfg.make_figures:
-        plot_utils.doublet_plots(
+        artifacts = plot_utils.doublet_plots(
             adata,
             batch_key=batch_key,
             figdir=Path("QC_plots") / "doublets",
         )
+        plot_utils.persist_plot_artifacts(artifacts)
 
     adata = cleanup_after_solo(
         adata,
@@ -1087,18 +1091,23 @@ def run_load_and_filter(
     # ---------------------------------------------------------
     if cfg.make_figures:
         LOGGER.info("Plotting post-filter QC...")
-        plot_utils.run_qc_plots_postfilter(adata, cfg)
-        plot_utils.plot_cellbender_effects(
-            adata,
-            batch_key=batch_key,
-            figdir=Path("QC_plots") / "cellbender",
+        artifacts = []
+        artifacts.extend(plot_utils.run_qc_plots_postfilter(adata, cfg))
+        artifacts.extend(
+            plot_utils.plot_cellbender_effects(
+                adata,
+                batch_key=batch_key,
+                figdir=Path("QC_plots") / "cellbender",
+            )
         )
-
-        plot_utils.plot_final_cell_counts(adata, cfg)
-        plot_utils.plot_qc_filter_stack(
-            adata,
-            figdir=Path("QC_plots") / "overview",
+        artifacts.extend(plot_utils.plot_final_cell_counts(adata, cfg))
+        artifacts.extend(
+            plot_utils.plot_qc_filter_stack(
+                adata,
+                figdir=Path("QC_plots") / "overview",
+            )
         )
+        plot_utils.persist_plot_artifacts(artifacts)
 
     # ---------------------------------------------------------
     # Normalize
@@ -1108,11 +1117,12 @@ def run_load_and_filter(
     adata = cluster_unintegrated(adata)
 
     if cfg.make_figures:
-        plot_utils.umap_plots(
+        artifacts = plot_utils.umap_plots(
             adata,
             batch_key=batch_key,
             figdir=Path("QC_plots") / "overview",
         )
+        plot_utils.persist_plot_artifacts(artifacts)
         for fmt in cfg.figure_formats:
             reporting.generate_qc_report(
                 fig_root=Path(cfg.figdir),

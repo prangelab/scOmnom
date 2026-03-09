@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 from typing import Dict, Sequence, Mapping, Iterable, List, Any
 import ast
@@ -20,6 +23,99 @@ import textwrap
 import seaborn as sns
 
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class PlotArtifact:
+    stem: str
+    figdir: Path
+    fig: Any = None
+    savefig_kwargs: dict | None = None
+
+
+_ACTIVE_PLOT_CAPTURE: list[PlotArtifact] | None = None
+_ARTIFACT_COLLECTION_STACK: list[list[PlotArtifact]] = []
+_KEEP_PLOTS_OPEN_DEPTH: int = 0
+
+
+@contextmanager
+def capture_plot_artifacts():
+    global _ACTIVE_PLOT_CAPTURE
+    prev = _ACTIVE_PLOT_CAPTURE
+    bucket: list[PlotArtifact] = []
+    _ACTIVE_PLOT_CAPTURE = bucket
+    try:
+        yield bucket
+    finally:
+        _ACTIVE_PLOT_CAPTURE = prev
+
+
+@contextmanager
+def keep_plots_open():
+    global _KEEP_PLOTS_OPEN_DEPTH
+    _KEEP_PLOTS_OPEN_DEPTH += 1
+    try:
+        yield
+    finally:
+        _KEEP_PLOTS_OPEN_DEPTH = max(0, _KEEP_PLOTS_OPEN_DEPTH - 1)
+
+
+def close_plot(fig=None) -> None:
+    if _KEEP_PLOTS_OPEN_DEPTH > 0:
+        return
+    if fig is not None:
+        plt.close(fig)
+    else:
+        plt.close()
+
+
+def persist_plot_artifacts(artifacts: Iterable[PlotArtifact]) -> None:
+    for artifact in artifacts:
+        save_multi(
+            stem=str(artifact.stem),
+            figdir=Path(artifact.figdir),
+            fig=artifact.fig,
+            savefig_kwargs=artifact.savefig_kwargs,
+        )
+
+
+def collect_plot_artifacts(func):
+    @wraps(func)
+    def _wrapped(*args, **kwargs):
+        _ARTIFACT_COLLECTION_STACK.append([])
+        result = None
+        try:
+            result = func(*args, **kwargs)
+            bucket = list(_ARTIFACT_COLLECTION_STACK[-1])
+        finally:
+            _ARTIFACT_COLLECTION_STACK.pop()
+        if isinstance(result, PlotArtifact):
+            return [result]
+        if isinstance(result, list) and all(isinstance(x, PlotArtifact) for x in result):
+            return result
+        return bucket
+
+    return _wrapped
+
+
+def record_plot_artifact(stem: str, figdir: Path, fig=None, *, savefig_kwargs: dict | None = None) -> PlotArtifact:
+    if fig is None:
+        try:
+            fig = plt.gcf()
+        except Exception:
+            fig = None
+    artifact = PlotArtifact(
+        stem=stem,
+        figdir=Path(figdir),
+        fig=fig,
+        savefig_kwargs=savefig_kwargs,
+    )
+    if _ACTIVE_PLOT_CAPTURE is not None:
+        _ACTIVE_PLOT_CAPTURE.append(artifact)
+    if _ARTIFACT_COLLECTION_STACK:
+        for bucket in _ARTIFACT_COLLECTION_STACK:
+            bucket.append(artifact)
+    return artifact
 
 
 def _extract_cnn_token(label: str) -> str:
@@ -108,6 +204,7 @@ def _add_outside_legend(
     )
 
 
+@collect_plot_artifacts
 def plot_graphda_summaries(
     graph_df: pd.DataFrame,
     graph_meta: pd.DataFrame | None,
@@ -117,7 +214,7 @@ def plot_graphda_summaries(
     all_clusters: Sequence[str] | None = None,
 ) -> None:
     """
-    Plot GraphDA summary panels and save via save_multi().
+    Plot GraphDA summary panels and save via record_plot_artifact().
     """
     if graph_df is None or graph_df.empty or "effect" not in graph_df.columns:
         return
@@ -179,8 +276,8 @@ def plot_graphda_summaries(
             va = "bottom" if yi >= 0 else "top"
             yoff = 0.04 if yi >= 0 else -0.04
             ax.text(xi, yi + yoff, "*", ha="center", va=va, fontsize=10, color="#d62728")
-    save_multi("graphda_top_neighborhoods", figdir, fig=fig)
-    plt.close(fig)
+    record_plot_artifact("graphda_top_neighborhoods", figdir, fig=fig)
+    close_plot(fig)
 
     cluster_universe: list[str] = []
     if all_clusters is not None:
@@ -245,8 +342,8 @@ def plot_graphda_summaries(
         ]
         ax.legend(handles=legend_handles, loc="upper right", frameon=True, fontsize=8)
         plt.tight_layout()
-        save_multi("graphda_top_by_cluster", figdir, fig=fig)
-        plt.close(fig)
+        record_plot_artifact("graphda_top_by_cluster", figdir, fig=fig)
+        close_plot(fig)
 
     labels = gdf["cluster_label"].astype(str)
     if cluster_universe:
@@ -312,10 +409,11 @@ def plot_graphda_summaries(
     ax.set_ylabel("Cluster")
     ax.set_title("GraphDA effects by cluster")
     ax.grid(False)
-    save_multi("graphda_effects_by_cluster", figdir, fig=fig)
-    plt.close(fig)
+    record_plot_artifact("graphda_effects_by_cluster", figdir, fig=fig)
+    close_plot(fig)
 
 
+@collect_plot_artifacts
 def plot_graphda_diagnostics(
     graph_df: pd.DataFrame,
     diag_df: pd.DataFrame,
@@ -324,7 +422,7 @@ def plot_graphda_diagnostics(
     alpha: float = 0.05,
 ) -> None:
     """
-    Plot GraphDA diagnostics and save via save_multi().
+    Plot GraphDA diagnostics and save via record_plot_artifact().
     """
     if graph_df is None or graph_df.empty:
         return
@@ -361,8 +459,8 @@ def plot_graphda_diagnostics(
         ]
         ax.legend(handles=handles, loc="lower right", frameon=True, fontsize=8)
         ax.grid(False)
-        save_multi("graphda_qc_pval_vs_fdr", figdir, fig=fig)
-        plt.close(fig)
+        record_plot_artifact("graphda_qc_pval_vs_fdr", figdir, fig=fig)
+        close_plot(fig)
 
     # QC 2: per-cluster tested vs significant counts.
     if diag_df is not None and not diag_df.empty and "cluster" in diag_df.columns:
@@ -382,13 +480,14 @@ def plot_graphda_diagnostics(
         ax.set_title("GraphDA QC: tested vs significant by cluster")
         ax.legend(loc="lower right", frameon=True, fontsize=8)
         ax.grid(False)
-        save_multi("graphda_qc_cluster_power", figdir, fig=fig)
-        plt.close(fig)
+        record_plot_artifact("graphda_qc_cluster_power", figdir, fig=fig)
+        close_plot(fig)
 
 
+@collect_plot_artifacts
 def plot_composition_volcano(method: str, df: pd.DataFrame, figdir: Path, *, alpha: float = 0.05) -> None:
     """
-    Plot a volcano for a composition method and save via save_multi().
+    Plot a volcano for a composition method and save via record_plot_artifact().
     """
     if df is None or df.empty:
         return
@@ -440,10 +539,11 @@ def plot_composition_volcano(method: str, df: pd.DataFrame, figdir: Path, *, alp
     ]
     ax.legend(handles=legend_handles, loc="upper right", frameon=True, fontsize=8)
     ax.grid(False)
-    save_multi(f"{str(method)}_volcano", figdir, fig=fig)
-    plt.close(fig)
+    record_plot_artifact(f"{str(method)}_volcano", figdir, fig=fig)
+    close_plot(fig)
 
 
+@collect_plot_artifacts
 def plot_sccoda_effects_top(
     df: pd.DataFrame,
     color_map: Mapping[str, Any],
@@ -452,7 +552,7 @@ def plot_sccoda_effects_top(
     alpha: float = 0.05,
 ) -> None:
     """
-    Plot top scCODA effects and save via save_multi().
+    Plot top scCODA effects and save via record_plot_artifact().
     """
     if df is None or df.empty:
         return
@@ -518,10 +618,11 @@ def plot_sccoda_effects_top(
     ax.legend(handles=legend_handles, loc="lower right", frameon=True, fontsize=8)
     ax.grid(False)
     plt.tight_layout()
-    save_multi("sccoda_effects_top", figdir, fig=fig)
-    plt.close(fig)
+    record_plot_artifact("sccoda_effects_top", figdir, fig=fig)
+    close_plot(fig)
 
 
+@collect_plot_artifacts
 def plot_composition_effects_global(
     values: np.ndarray,
     labels: Sequence[str],
@@ -534,7 +635,7 @@ def plot_composition_effects_global(
     alpha: float = 0.05,
 ) -> None:
     """
-    Plot global composition effects and save via save_multi().
+    Plot global composition effects and save via record_plot_artifact().
     """
     labels = pd.Index(labels).astype(str)
     vals = pd.to_numeric(pd.Series(values), errors="coerce")
@@ -565,10 +666,11 @@ def plot_composition_effects_global(
     ax.set_title(str(title))
     ax.tick_params(axis="x", labelrotation=45)
     ax.grid(False)
-    save_multi(str(plot_name), figdir, fig=fig)
-    plt.close(fig)
+    record_plot_artifact(str(plot_name), figdir, fig=fig)
+    close_plot(fig)
 
 
+@collect_plot_artifacts
 def plot_composition_stacks(
     counts: pd.DataFrame,
     metadata: pd.DataFrame,
@@ -581,7 +683,7 @@ def plot_composition_stacks(
     alpha: float = 0.05,
 ) -> None:
     """
-    Plot stacked composition summaries and save via save_multi().
+    Plot stacked composition summaries and save via record_plot_artifact().
     """
     totals = counts.sum(axis=1).replace(0, np.nan)
     props = counts.div(totals, axis=0)
@@ -627,8 +729,8 @@ def plot_composition_stacks(
         max_rows=16,
     )
     plt.tight_layout()
-    save_multi("composition_stacked_bar_100", figdir, fig=fig)
-    plt.close(fig)
+    record_plot_artifact("composition_stacked_bar_100", figdir, fig=fig)
+    close_plot(fig)
 
     sig_clusters = set()
     if consensus is not None and isinstance(consensus, pd.DataFrame) and not consensus.empty:
@@ -687,8 +789,8 @@ def plot_composition_stacks(
             max_rows=16,
         )
         plt.tight_layout()
-        save_multi("composition_stacked_comparison", figdir, fig=fig)
-        plt.close(fig)
+        record_plot_artifact("composition_stacked_comparison", figdir, fig=fig)
+        close_plot(fig)
     else:
         LOGGER.warning(
             "composition: stacked comparison plot skipped (requires exactly 2 condition levels, found %d).",
@@ -744,8 +846,8 @@ def plot_composition_stacks(
             max_rows=16,
         )
         plt.tight_layout()
-        save_multi("composition_flow", figdir, fig=fig)
-        plt.close(fig)
+        record_plot_artifact("composition_flow", figdir, fig=fig)
+        close_plot(fig)
     else:
         LOGGER.warning(
             "composition: flow plot skipped (requires exactly 2 condition levels, found %d).",
@@ -829,8 +931,8 @@ def plot_composition_stacks(
             max_rows=16,
         )
         plt.tight_layout()
-        save_multi("composition_alluvial", figdir, fig=fig)
-        plt.close(fig)
+        record_plot_artifact("composition_alluvial", figdir, fig=fig)
+        close_plot(fig)
     else:
         LOGGER.warning(
             "composition: alluvial plot skipped (requires exactly 2 condition levels, found %d).",
@@ -910,7 +1012,7 @@ def setup_scanpy_figs(figdir: Path, formats: Sequence[str] | None = None) -> Non
 
 def get_run_subdir(run_key: str | None = None) -> Path:
     """
-    Ensure and return the current run subdir used by save_multi().
+    Ensure and return the current run subdir used by record_plot_artifact().
 
     If not set yet, it initializes the run folder using the provided run_key
     (or the first inferred key if available) and pre-creates per-format dirs.
@@ -971,10 +1073,7 @@ def save_multi(stem: str, figdir: Path, fig=None, *, savefig_kwargs: dict | None
     """
     import re
     import matplotlib.pyplot as plt
-    global ROOT_FIGDIR, RUN_FIG_SUBDIR, RUN_KEY
-
-    if ROOT_FIGDIR is None:
-        raise RuntimeError("ROOT_FIGDIR is not set. Call setup_scanpy_figs() first.")
+    global ROOT_FIGDIR, RUN_FIG_SUBDIR, RUN_KEY, _ACTIVE_PLOT_CAPTURE
 
     # --------------------------------------------------
     # Sanitize filename stem
@@ -1014,13 +1113,33 @@ def save_multi(stem: str, figdir: Path, fig=None, *, savefig_kwargs: dict | None
 
     stem = _safe_stem(stem)
 
+    figdir = Path(figdir)
+
+    if _ACTIVE_PLOT_CAPTURE is not None:
+        fig_obj = fig
+        if fig_obj is None:
+            try:
+                fig_obj = plt.gcf()
+            except Exception:
+                fig_obj = None
+        _ACTIVE_PLOT_CAPTURE.append(
+            PlotArtifact(
+                stem=stem,
+                figdir=figdir,
+                fig=fig_obj,
+                savefig_kwargs=savefig_kwargs,
+            )
+        )
+        return
+
+    if ROOT_FIGDIR is None:
+        raise RuntimeError("ROOT_FIGDIR is not set. Call setup_scanpy_figs() first.")
+
     # --------------------------------------------------
     # Activate provided figure if any
     # --------------------------------------------------
     if fig is not None:
         plt.figure(fig.number)
-
-    figdir = Path(figdir)
 
     # --------------------------------------------------
     # Save in all configured formats
@@ -1071,11 +1190,12 @@ def save_multi(stem: str, figdir: Path, fig=None, *, savefig_kwargs: dict | None
     # Close safely
     # --------------------------------------------------
     if fig is not None:
-        plt.close(fig)  # closes exactly that figure
+        close_plot(fig)  # closes exactly that figure
     else:
-        plt.close()  # closes current figure
+        close_plot()  # closes current figure
 
 
+@collect_plot_artifacts
 def save_umap_multi(
     stem: str,
     figdir: Path,
@@ -1087,7 +1207,7 @@ def save_umap_multi(
 ) -> None:
     """
     UMAP-only saver that prevents Scanpy legends / annotations from being clipped.
-    Delegates actual saving to save_multi().
+    Delegates actual saving to record_plot_artifact().
     """
     if right is not None:
         try:
@@ -1100,7 +1220,7 @@ def save_umap_multi(
         savefig_kwargs["bbox_inches"] = "tight"
         savefig_kwargs["pad_inches"] = pad_inches
 
-    save_multi(
+    record_plot_artifact(
         stem=stem,
         figdir=figdir,
         fig=fig,
@@ -1545,6 +1665,7 @@ def _violin_with_points(
             )
 
 
+@collect_plot_artifacts
 def qc_scatter(adata, groupby: str, cfg):
     figdir = Path("QC_plots") / "qc_scatter"
 
@@ -1555,19 +1676,21 @@ def qc_scatter(adata, groupby: str, cfg):
         color="pct_counts_mt",
         show=False,
     )
-    save_multi("QC_scatter_mt", figdir)
+    record_plot_artifact("QC_scatter_mt", figdir)
 
 
+@collect_plot_artifacts
 def hvgs_and_pca_plots(adata, max_pcs_plot: int, cfg):
     figdir = Path("QC_plots") / "overview"
 
     sc.pl.highly_variable_genes(adata, show=False)
-    save_multi("QC_highly_variable_genes", figdir)
+    record_plot_artifact("QC_highly_variable_genes", figdir)
 
     sc.pl.pca_variance_ratio(adata, n_pcs=max_pcs_plot, log=True, show=False)
-    save_multi("QC_pca_variance_ratio", figdir)
+    record_plot_artifact("QC_pca_variance_ratio", figdir)
 
 
+@collect_plot_artifacts
 def umap_by(adata, keys, figdir: Path | None = None, stem: str | None = None):
     """
     Plot UMAP colored by one or more keys.
@@ -1628,13 +1751,14 @@ def umap_by(adata, keys, figdir: Path | None = None, stem: str | None = None):
         else:
             fig.subplots_adjust(left=0.08, right=0.98, top=0.92, bottom=0.08)
 
-        save_multi(f"{name}_{key}", figdir, fig)
-        plt.close(fig)
+        record_plot_artifact(f"{name}_{key}", figdir, fig)
+        close_plot(fig)
 
 
 # -------------------------------------------------------------------------
 # Cell-calling elbow/knee plot
 # -------------------------------------------------------------------------
+@collect_plot_artifacts
 def plot_elbow_knee(
         adata,
         figpath_stem: str,
@@ -1672,12 +1796,13 @@ def plot_elbow_knee(
     _clean_axes(ax)
     fig.tight_layout()
 
-    save_multi(figpath_stem, figdir)
+    record_plot_artifact(figpath_stem, figdir)
 
 
 # -------------------------------------------------------------------------
 # Final cell-counts plot
 # -------------------------------------------------------------------------
+@collect_plot_artifacts
 def plot_final_cell_counts(adata, cfg) -> None:
     """Plot final per-sample cell counts with a mean line and summary box."""
     batch_key = cfg.batch_key or adata.uns.get("batch_key")
@@ -1713,14 +1838,15 @@ def plot_final_cell_counts(adata, cfg) -> None:
     fig.tight_layout()
 
     figdir_qc = Path("QC_plots") / "overview"
-    save_multi(stem="final_cell_counts", figdir=figdir_qc)
+    record_plot_artifact(stem="final_cell_counts", figdir=figdir_qc)
 
-    plt.close(fig)
+    close_plot(fig)
 
 
 # -------------------------------------------------------------------------
 # MT histogram
 # -------------------------------------------------------------------------
+@collect_plot_artifacts
 def plot_mt_histogram(adata, cfg, suffix: str):
     figdir_qc = Path("QC_plots") / "qc_metrics"
 
@@ -1734,12 +1860,13 @@ def plot_mt_histogram(adata, cfg, suffix: str):
     ax.set_title("Distribution of mitochondrial content")
 
     fig.tight_layout()
-    save_multi(f"{suffix}_QC_hist_pct_mt", figdir_qc)
+    record_plot_artifact(f"{suffix}_QC_hist_pct_mt", figdir_qc)
 
 
 # -------------------------------------------------------------------------
 # QC plots: pre + post filter
 # -------------------------------------------------------------------------
+@collect_plot_artifacts
 def run_qc_plots_pre_filter_df(qc_df: pd.DataFrame, cfg) -> None:
     """
     Pre-filter QC plots using a lightweight DataFrame instead of a giant AnnData.
@@ -1766,6 +1893,7 @@ def run_qc_plots_pre_filter_df(qc_df: pd.DataFrame, cfg) -> None:
     plot_hist_total_counts(qc_adata, cfg, "prefilter")
 
 
+@collect_plot_artifacts
 def run_qc_plots_postfilter(adata, cfg):
     """
     Run post-filter QC plots on:
@@ -1837,6 +1965,7 @@ def run_qc_plots_postfilter(adata, cfg):
         )
 
 
+@collect_plot_artifacts
 def plot_hist_total_counts(adata, cfg, stage: str):
     """
     Histogram of total_counts for prefilter / postfilter.
@@ -1861,10 +1990,11 @@ def plot_hist_total_counts(adata, cfg, stage: str):
     plt.ylabel("Cell count")
     plt.title(f"total_counts ({stage})")
 
-    save_multi(f"{stage}_QC_hist_total_counts", figdir_qc)
-    plt.close()
+    record_plot_artifact(f"{stage}_QC_hist_total_counts", figdir_qc)
+    close_plot()
 
 
+@collect_plot_artifacts
 def plot_hist_n_genes(adata, cfg, stage: str):
     """
     Histogram of n_genes_by_counts for prefilter / postfilter.
@@ -1889,8 +2019,8 @@ def plot_hist_n_genes(adata, cfg, stage: str):
     plt.ylabel("Cell count")
     plt.title(f"n_genes_by_counts ({stage})")
 
-    save_multi(f"{stage}_QC_hist_n_genes", figdir_qc)
-    plt.close()
+    record_plot_artifact(f"{stage}_QC_hist_n_genes", figdir_qc)
+    close_plot()
 
 
 def qc_violin_panels(adata, cfg, stage: str):
@@ -1983,10 +2113,11 @@ def qc_violin_panels(adata, cfg, stage: str):
             bottom=bottom,
         )
 
-        save_multi(f"{stem}_{stage}", figdir_qc)
-        plt.close()
+        record_plot_artifact(f"{stem}_{stage}", figdir_qc)
+        close_plot()
 
 
+@collect_plot_artifacts
 def qc_scatter_panels(adata, cfg, stage: str):
     """
     Additional scatter QC plots:
@@ -2010,8 +2141,8 @@ def qc_scatter_panels(adata, cfg, stage: str):
         color="pct_counts_mt",
         show=False,
     )
-    save_multi(f"QC_complexity_{stage}", figdir)
-    plt.close()
+    record_plot_artifact(f"QC_complexity_{stage}", figdir)
+    close_plot()
 
     # --------------------------------------------------------------
     # Scatter 2: total_counts vs pct_counts_mt
@@ -2022,9 +2153,10 @@ def qc_scatter_panels(adata, cfg, stage: str):
         y="pct_counts_mt",
         show=False,
     )
-    save_multi(f"QC_scatter_mt_{stage}", figdir)
-    plt.close()
+    record_plot_artifact(f"QC_scatter_mt_{stage}", figdir)
+    close_plot()
 
+@collect_plot_artifacts
 def plot_cellbender_effects(
         adata: ad.AnnData,
         *,
@@ -2072,8 +2204,8 @@ def plot_cellbender_effects(
     ax.set_title("CellBender background removal (per cell)")
     _clean_axes(ax)
     fig.tight_layout()
-    save_multi("cellbender_removed_fraction_hist", figdir, fig)
-    plt.close(fig)
+    record_plot_artifact("cellbender_removed_fraction_hist", figdir, fig)
+    close_plot(fig)
 
     # ------------------------------------------------------------------
     # 2. Per-sample removed fraction (if batch_key present)
@@ -2093,8 +2225,8 @@ def plot_cellbender_effects(
         ax.set_title("CellBender background removal per sample")
         _clean_axes(ax)
         fig.tight_layout()
-        save_multi("cellbender_removed_fraction_per_sample", figdir, fig)
-        plt.close(fig)
+        record_plot_artifact("cellbender_removed_fraction_per_sample", figdir, fig)
+        close_plot(fig)
 
     # ------------------------------------------------------------------
     # Per-gene aggregates (OOM-safe)
@@ -2131,8 +2263,8 @@ def plot_cellbender_effects(
     ax.set_title("Gene-level counts: raw vs CellBender")
     _clean_axes(ax)
     fig.tight_layout()
-    save_multi("cellbender_gene_raw_vs_cb", figdir, fig)
-    plt.close(fig)
+    record_plot_artifact("cellbender_gene_raw_vs_cb", figdir, fig)
+    close_plot(fig)
 
     # ------------------------------------------------------------------
     # 4. Per-gene removed fraction vs expression
@@ -2150,8 +2282,8 @@ def plot_cellbender_effects(
     ax.set_title("Gene-level background removal")
     _clean_axes(ax)
     fig.tight_layout()
-    save_multi("cellbender_gene_removed_fraction", figdir, fig)
-    plt.close(fig)
+    record_plot_artifact("cellbender_gene_removed_fraction", figdir, fig)
+    close_plot(fig)
 
     # ------------------------------------------------------------------
     # 5. Per-cell removed fraction vs library size, colored by %mt
@@ -2175,12 +2307,13 @@ def plot_cellbender_effects(
         ax.set_title("CellBender effect vs library size")
         _clean_axes(ax)
         fig.tight_layout()
-        save_multi("cellbender_removed_fraction_vs_library_mt", figdir, fig)
-        plt.close(fig)
+        record_plot_artifact("cellbender_removed_fraction_vs_library_mt", figdir, fig)
+        close_plot(fig)
 
     LOGGER.info("Generated CellBender effect QC plots.")
 
 
+@collect_plot_artifacts
 def plot_qc_filter_stack(
     adata,
     *,
@@ -2280,10 +2413,11 @@ def plot_qc_filter_stack(
     ax.set_xticklabels(plot_df.index, rotation=45, ha="right")
 
     fig.tight_layout()
-    save_multi("QC Filter effects", figdir, fig)
-    plt.close(fig)
+    record_plot_artifact("QC Filter effects", figdir, fig)
+    close_plot(fig)
 
 
+@collect_plot_artifacts
 def doublet_plots(
     adata: ad.AnnData,
     *,
@@ -2352,8 +2486,8 @@ def doublet_plots(
     ax.set_ylabel("Cells")
     ax.set_title("SOLO doublet score distribution")
     fig.tight_layout()
-    save_multi("doublet_score_hist", figdir, fig)
-    plt.close(fig)
+    record_plot_artifact("doublet_score_hist", figdir, fig)
+    close_plot(fig)
 
     # ==================================================
     # 2. Per-sample inferred doublet score threshold
@@ -2386,8 +2520,8 @@ def doublet_plots(
         )
         plt.xticks(rotation=45, ha="right")
         fig.tight_layout()
-        save_multi("doublet_inferred_threshold_per_sample", figdir, fig)
-        plt.close(fig)
+        record_plot_artifact("doublet_inferred_threshold_per_sample", figdir, fig)
+        close_plot(fig)
 
     # ==================================================
     # 3. Per-sample observed doublet fraction
@@ -2406,8 +2540,8 @@ def doublet_plots(
     ax.set_ylim(0, max(0.05, frac.max() * 1.2))
     plt.xticks(rotation=45, ha="right")
     fig.tight_layout()
-    save_multi("doublet_fraction_per_sample", figdir, fig)
-    plt.close(fig)
+    record_plot_artifact("doublet_fraction_per_sample", figdir, fig)
+    close_plot(fig)
 
     # ==================================================
     # 4. Doublet score vs library size
@@ -2429,8 +2563,8 @@ def doublet_plots(
     ax.set_ylabel("Doublet score")
     ax.set_title("Doublet score vs library size")
     fig.tight_layout()
-    save_multi("doublet_score_vs_total_counts", figdir, fig)
-    plt.close(fig)
+    record_plot_artifact("doublet_score_vs_total_counts", figdir, fig)
+    close_plot(fig)
 
     # ==================================================
     # 5. Violin: doublet score per sample
@@ -2469,8 +2603,8 @@ def doublet_plots(
     ax.set_ylabel("Doublet score")
     ax.set_title("Doublet score distribution per sample")
     fig.tight_layout()
-    save_multi("doublet_score_violin_per_sample", figdir, fig)
-    plt.close(fig)
+    record_plot_artifact("doublet_score_violin_per_sample", figdir, fig)
+    close_plot(fig)
 
     # ==================================================
     # 6. ECDF of doublet scores
@@ -2486,12 +2620,13 @@ def doublet_plots(
     ax.set_ylabel("Cumulative fraction")
     ax.set_title("ECDF of doublet scores")
     fig.tight_layout()
-    save_multi("doublet_score_ecdf", figdir, fig)
-    plt.close(fig)
+    record_plot_artifact("doublet_score_ecdf", figdir, fig)
+    close_plot(fig)
 
     LOGGER.info("Generated SOLO doublet QC plots (per-sample inferred thresholds).")
 
 
+@collect_plot_artifacts
 def umap_plots(
     adata: ad.AnnData,
     *,
@@ -2537,6 +2672,7 @@ def umap_plots(
     LOGGER.info("Generated UMAP plots (batch + %s)", cluster_key)
 
 
+@collect_plot_artifacts
 def umap_by_two_legend_styles(
     adata,
     *,
@@ -2644,6 +2780,7 @@ import numpy as np
 from pathlib import Path
 
 
+@collect_plot_artifacts
 def plot_scib_results_table(scaled: pd.DataFrame, *, stem: str = "scIB_results_table") -> None:
     df = scaled.copy()
 
@@ -2826,12 +2963,13 @@ def plot_scib_results_table(scaled: pd.DataFrame, *, stem: str = "scIB_results_t
     ax.tick_params(axis="both", which="both", length=0)
 
     plt.tight_layout()
-    save_multi(stem, Path("integration"), fig=fig)
+    record_plot_artifact(stem, Path("integration"), fig=fig)
 
 
 # -------------------------------------------------------------------------
 # CLUSTERING RESOLUTION / STABILITY PLOTS
 # -------------------------------------------------------------------------
+@collect_plot_artifacts
 def plot_clustering_resolution_sweep(
         resolutions: np.ndarray,
         silhouette_scores: List[float],
@@ -2866,9 +3004,10 @@ def plot_clustering_resolution_sweep(
     ax.set_ylabel("Score")
 
     fig.tight_layout()
-    save_multi("clustering_resolution_sweep", figdir)
+    record_plot_artifact("clustering_resolution_sweep", figdir)
 
 
+@collect_plot_artifacts
 def plot_clustering_stability_ari(
         stability_aris: List[float],
         figdir: Path,
@@ -2890,11 +3029,12 @@ def plot_clustering_stability_ari(
     ax.legend(frameon=False)
 
     fig.tight_layout()
-    save_multi("clustering_stability_ari", figdir)
+    record_plot_artifact("clustering_stability_ari", figdir)
 
 #------------------------------------------
 # Plot UMAPs
 #------------------------------------------
+@collect_plot_artifacts
 def plot_cluster_umaps(
     adata,
     label_key: str,
@@ -2924,6 +3064,7 @@ def plot_cluster_umaps(
 
 
 
+@collect_plot_artifacts
 def plot_integration_umaps(
     adata,
     embedding_keys,
@@ -3063,6 +3204,7 @@ def plot_integration_umaps(
         except Exception as e:
             LOGGER.warning("Failed to restore selected embedding '%s': %s", selected_embedding, e)
 
+@collect_plot_artifacts
 def plot_annotated_run_umaps(
     adata,
     *,
@@ -3389,6 +3531,7 @@ def plot_annotated_run_umaps(
 # ----------------------------------------------------------------------
 import networkx as nx
 
+@collect_plot_artifacts
 def plot_cluster_tree(
         labels_per_resolution: Mapping[str, np.ndarray],
         resolutions: Sequence[float | str],
@@ -3635,9 +3778,10 @@ def plot_cluster_tree(
     ax.grid(False)
     plt.tight_layout()
 
-    save_multi(stem, figdir, fig, savefig_kwargs={"bbox_inches": "tight"})
+    record_plot_artifact(stem, figdir, fig, savefig_kwargs={"bbox_inches": "tight"})
 
 
+@collect_plot_artifacts
 def plot_compaction_flow(
     adata: "ad.AnnData",
     *,
@@ -3859,13 +4003,14 @@ def plot_compaction_flow(
     ax.grid(False)
     plt.tight_layout()
 
-    save_multi(stem, figdir, fig, savefig_kwargs={"bbox_inches": "tight"})
+    record_plot_artifact(stem, figdir, fig, savefig_kwargs={"bbox_inches": "tight"})
 
 
 
 # ----------------------------------------------------------------------
 # Stability curves (silhouette, stability, composite, tiny penalty)
 # ----------------------------------------------------------------------
+@collect_plot_artifacts
 def plot_stability_curves(
         resolutions: Sequence[float | str],
         silhouette: Mapping[Any, Any],
@@ -3914,9 +4059,10 @@ def plot_stability_curves(
     ax.grid(True, alpha=0.2)
 
     plt.tight_layout()
-    save_multi(stem, _ensure_path(figdir), fig)
+    record_plot_artifact(stem, _ensure_path(figdir), fig)
 
 
+@collect_plot_artifacts
 def plot_biological_metrics(
         resolutions: Sequence[float | str],
         bio_homogeneity: Mapping[Any, Any],
@@ -3984,9 +4130,10 @@ def plot_biological_metrics(
     ax.grid(True, alpha=0.2)
 
     plt.tight_layout()
-    save_multi(stem, _ensure_path(figdir), fig)
+    record_plot_artifact(stem, _ensure_path(figdir), fig)
 
 
+@collect_plot_artifacts
 def plot_composite_only(
         resolutions: Sequence[float | str],
         structural_comp: Mapping[Any, Any],
@@ -4060,12 +4207,13 @@ def plot_composite_only(
     ax.grid(True, alpha=0.2)
 
     plt.tight_layout()
-    save_multi(stem, _ensure_path(figdir), fig)
+    record_plot_artifact(stem, _ensure_path(figdir), fig)
 
 
 # ----------------------------------------------------------------------
 # Plateau highlights
 # ----------------------------------------------------------------------
+@collect_plot_artifacts
 def plot_plateau_highlights(
         resolutions: Sequence[float | str],
         silhouette: Mapping[Any, Any],
@@ -4110,13 +4258,14 @@ def plot_plateau_highlights(
 
     fig.suptitle("Plateau-aware metrics for resolution selection", y=0.95)
     plt.tight_layout()
-    save_multi(stem, _ensure_path(figdir), fig)
+    record_plot_artifact(stem, _ensure_path(figdir), fig)
 
 
 # -------------------------------------------------------------------------
 # Cluster-level statistics
 # -------------------------------------------------------------------------
 
+@collect_plot_artifacts
 def plot_cluster_sizes(
         adata,
         label_key: str,
@@ -4179,10 +4328,11 @@ def plot_cluster_sizes(
     _finalize_categorical_x(fig, ax, rotate=45, ha="right", bottom=0.40)
     _reserve_bottom_for_xticklabels(fig, ax, rotation=45, fontsize=9, ha="right")
     fig.subplots_adjust(bottom=max(fig.subplotpars.bottom, 0.34))
-    save_multi(stem, figdir, fig, savefig_kwargs={"bbox_inches": "tight"})
-    plt.close(fig)
+    record_plot_artifact(stem, figdir, fig, savefig_kwargs={"bbox_inches": "tight"})
+    close_plot(fig)
 
 
+@collect_plot_artifacts
 def plot_cluster_qc_summary(
     adata,
     label_key: str,
@@ -4247,10 +4397,11 @@ def plot_cluster_qc_summary(
     fig.tight_layout()
     _finalize_categorical_x(fig, axs[-1], rotate=45, ha="right", bottom=0.40)
     fig.subplots_adjust(bottom=max(fig.subplotpars.bottom, 0.34))
-    save_multi(stem, figdir, fig, savefig_kwargs={"bbox_inches": "tight"})
-    plt.close(fig)
+    record_plot_artifact(stem, figdir, fig, savefig_kwargs={"bbox_inches": "tight"})
+    close_plot(fig)
 
 
+@collect_plot_artifacts
 def plot_cluster_silhouette_by_cluster(
         adata,
         label_key: str,
@@ -4322,10 +4473,11 @@ def plot_cluster_silhouette_by_cluster(
     _finalize_categorical_x(fig, ax, rotate=45, ha="right", bottom=0.45)
     _reserve_bottom_for_xticklabels(fig, ax, rotation=45, fontsize=9, ha="right")
     fig.subplots_adjust(bottom=max(fig.subplotpars.bottom, 0.34))
-    save_multi(stem, figdir, fig, savefig_kwargs={"bbox_inches": "tight"})
-    plt.close(fig)
+    record_plot_artifact(stem, figdir, fig, savefig_kwargs={"bbox_inches": "tight"})
+    close_plot(fig)
 
 
+@collect_plot_artifacts
 def plot_cluster_batch_composition(
     adata,
     label_key: str,
@@ -4403,8 +4555,8 @@ def plot_cluster_batch_composition(
         bottom=max(fig.subplotpars.bottom, 0.42),
     )
 
-    save_multi(stem, figdir, fig, savefig_kwargs={"bbox_inches": "tight"})
-    plt.close(fig)
+    record_plot_artifact(stem, figdir, fig, savefig_kwargs={"bbox_inches": "tight"})
+    close_plot(fig)
 
 # -------------------------------------------------------------------------
 # Decoupler net plots (msigdb / progeny / dorothea)
@@ -4413,7 +4565,7 @@ def _decoupler_figdir(base: Path | None, net_name: str) -> Path:
     """
     Put decoupler plots under:
       cluster_and_annotate/decoupler/<net_name>/
-    while staying compatible with save_multi() routing.
+    while staying compatible with record_plot_artifact() routing.
     """
     base = Path("cluster_and_annotate") if base is None else Path(base)
     return base / "decoupler" / str(net_name).lower().strip()
@@ -4551,6 +4703,7 @@ def _dynamic_fig_width_for_barplot(labels: Sequence[str], *, min_w: float = 12.0
     return float(np.clip(w, min_w, max_w))
 
 
+@collect_plot_artifacts
 def plot_decoupler_cluster_topn_barplots(
         activity: pd.DataFrame,
         *,
@@ -4624,8 +4777,8 @@ def plot_decoupler_cluster_topn_barplots(
             ax.text(0.5, 1.02, str(net_name).upper(), transform=ax.transAxes, ha="center", color="#666666", fontsize=14)
 
             stem = f"{stem_prefix}_{cl}__top{int(n_pos_eff)}_up_down_bar"
-            save_multi(stem, outdir, fig)
-            plt.close(fig)
+            record_plot_artifact(stem, outdir, fig)
+            close_plot(fig)
             continue
 
         s_rank = s.abs() if use_abs else s
@@ -4674,9 +4827,10 @@ def plot_decoupler_cluster_topn_barplots(
         ax.text(0.5, 1.02, str(net_name).upper(), transform=ax.transAxes, ha="center", color="#666666", fontsize=14)
 
         stem = f"{stem_prefix}_{cl}__top{int(n)}_bar"
-        save_multi(stem, outdir, fig)
-        plt.close(fig)
+        record_plot_artifact(stem, outdir, fig)
+        close_plot(fig)
 
+@collect_plot_artifacts
 def plot_decoupler_activity_heatmap(
         activity: pd.DataFrame,
         *,
@@ -4730,8 +4884,8 @@ def plot_decoupler_activity_heatmap(
 
     fig.subplots_adjust(bottom=bottom, left=left, right=0.92, top=0.92)
 
-    save_multi(f"{stem}{int(top_k)}", outdir, fig)
-    plt.close(fig)
+    record_plot_artifact(f"{stem}{int(top_k)}", outdir, fig)
+    close_plot(fig)
 
 
 def _decoupler_balanced_clustered(
@@ -4776,6 +4930,7 @@ def _decoupler_balanced_clustered(
     return sub_raw, sub_z
 
 
+@collect_plot_artifacts
 def plot_decoupler_dotplot(
     activity: pd.DataFrame,
     *,
@@ -4919,10 +5074,11 @@ def plot_decoupler_dotplot(
     cbar = fig.colorbar(sca, cax=ax_cbar)
     cbar.set_label(cbar_label, weight="bold", size=14)
 
-    save_multi(f"{stem}{int(top_k)}_{cbar_label}_{size_by}", outdir, fig)
-    plt.close(fig)
+    record_plot_artifact(f"{stem}{int(top_k)}_{cbar_label}_{size_by}", outdir, fig)
+    close_plot(fig)
 
 
+@collect_plot_artifacts
 def plot_decoupler_all_styles(
     adata,
     *,

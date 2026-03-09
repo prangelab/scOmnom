@@ -1269,7 +1269,7 @@ def _final_real_silhouette_qc(
         title_key = f"{cluster_key}" + (f" [{round_id}]" if round_id else "")
         ax.set_title(f"Final clustering: true silhouette ({title_key}, mean={sil_mean:.3f})")
         fig.tight_layout()
-        plot_utils.save_multi("final_real_silhouette", figdir, fig)
+        plot_utils.record_plot_artifact("final_real_silhouette", figdir, fig)
 
     return sil_mean
 

@@ -374,7 +374,7 @@ def filter_raw_barcodes(
     import matplotlib.pyplot as plt
     from kneed import KneeLocator
     from sklearn.mixture import GaussianMixture
-    from .plot_utils import save_multi
+    from . import plot_utils
 
     total_counts = np.array(adata.X.sum(axis=1)).flatten()
     sorted_idx = np.argsort(total_counts)[::-1]
@@ -434,7 +434,7 @@ def filter_raw_barcodes(
         plt.legend()
         plt.tight_layout()
 
-        save_multi(stem, figdir)
+        plot_utils.record_plot_artifact(stem=stem, figdir=figdir)
 
     LOGGER.info(
         "Cell-calling (Cell Ranger-like): retained %d / %d barcodes (%.1f%%)",
