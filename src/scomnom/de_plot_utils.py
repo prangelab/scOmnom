@@ -45,18 +45,26 @@ def _emit_figure_artifact(
     default_stem: str,
 ) -> plot_utils.PlotArtifact:
     if artifact_stem is not None and artifact_figdir is not None:
-        return plot_utils.record_plot_artifact(
+        artifact = plot_utils.record_plot_artifact(
             stem=str(artifact_stem),
             figdir=Path(artifact_figdir),
             fig=fig,
             savefig_kwargs=savefig_kwargs,
         )
-    return plot_utils.PlotArtifact(
-        stem=str(artifact_stem or default_stem),
-        figdir=Path(artifact_figdir) if artifact_figdir is not None else Path("."),
-        fig=fig,
-        savefig_kwargs=dict(savefig_kwargs) if isinstance(savefig_kwargs, dict) else None,
-    )
+    else:
+        artifact = plot_utils.PlotArtifact(
+            stem=str(artifact_stem or default_stem),
+            figdir=Path(artifact_figdir) if artifact_figdir is not None else Path("."),
+            fig=fig,
+            savefig_kwargs=dict(savefig_kwargs) if isinstance(savefig_kwargs, dict) else None,
+        )
+    # Prevent figure-manager accumulation in CLI loops. In API wrappers this is
+    # suppressed by plot_utils.keep_plots_open().
+    try:
+        plot_utils.close_plot(fig)
+    except Exception:
+        pass
+    return artifact
 
 
 def _normalize_levels_for_combo(series: pd.Series) -> pd.Series:
