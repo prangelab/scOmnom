@@ -948,6 +948,7 @@ mpl.rcParams["axes.spines.left"] = True
 mpl.rcParams["axes.spines.bottom"] = True
 mpl.rcParams["axes.linewidth"] = 0.6
 mpl.rcParams["axes.edgecolor"] = "#555555"
+mpl.rcParams["axes.grid"] = False
 
 mpl.rcParams["xtick.color"] = "#333333"
 mpl.rcParams["ytick.color"] = "#333333"
@@ -1006,6 +1007,7 @@ def setup_scanpy_figs(figdir: Path, formats: Sequence[str] | None = None) -> Non
         figsize=(6, 5),
         format=FIGURE_FORMATS[0],
     )
+    mpl.rcParams["axes.grid"] = False
 
     ROOT_FIGDIR.mkdir(parents=True, exist_ok=True)
 
@@ -1469,15 +1471,38 @@ def _finalize_categorical_x(
 
 
 def _clean_axes(ax):
-    ax.grid(False)
-    ax.xaxis.grid(False)
-    ax.yaxis.grid(False)
+    try:
+        ax.grid(False, which="both")
+    except Exception:
+        ax.grid(False)
+    try:
+        ax.xaxis.grid(False, which="both")
+        ax.yaxis.grid(False, which="both")
+    except Exception:
+        ax.xaxis.grid(False)
+        ax.yaxis.grid(False)
+    try:
+        ax.minorticks_off()
+    except Exception:
+        pass
     for spine in ["left", "bottom"]:
         ax.spines[spine].set_visible(True)
         ax.spines[spine].set_alpha(0.5)
     ax.spines["right"].set_visible(False)
     ax.spines["top"].set_visible(False)
     return ax
+
+
+def _clean_figure_axes(fig=None):
+    if fig is None:
+        fig = plt.gcf()
+    if fig is None:
+        return
+    for ax in getattr(fig, "axes", []):
+        try:
+            _clean_axes(ax)
+        except Exception:
+            pass
 
 
 def _reserve_bottom_for_xticklabels(
@@ -1676,7 +1701,7 @@ def qc_scatter(adata, groupby: str, cfg):
         color="pct_counts_mt",
         show=False,
     )
-    _clean_axes(plt.gca())
+    _clean_figure_axes(plt.gcf())
     record_plot_artifact("QC_scatter_mt", figdir)
 
 
@@ -1990,7 +2015,7 @@ def plot_hist_total_counts(adata, cfg, stage: str):
     plt.xlabel("Total UMI counts")
     plt.ylabel("Cell count")
     plt.title(f"total_counts ({stage})")
-    _clean_axes(plt.gca())
+    _clean_figure_axes(plt.gcf())
 
     record_plot_artifact(f"{stage}_QC_hist_total_counts", figdir_qc)
     close_plot()
@@ -2020,7 +2045,7 @@ def plot_hist_n_genes(adata, cfg, stage: str):
     plt.xlabel("Number of genes detected")
     plt.ylabel("Cell count")
     plt.title(f"n_genes_by_counts ({stage})")
-    _clean_axes(plt.gca())
+    _clean_figure_axes(plt.gcf())
 
     record_plot_artifact(f"{stage}_QC_hist_n_genes", figdir_qc)
     close_plot()
@@ -2145,7 +2170,7 @@ def qc_scatter_panels(adata, cfg, stage: str):
         color="pct_counts_mt",
         show=False,
     )
-    _clean_axes(plt.gca())
+    _clean_figure_axes(plt.gcf())
     record_plot_artifact(f"QC_complexity_{stage}", figdir)
     close_plot()
 
@@ -2158,7 +2183,7 @@ def qc_scatter_panels(adata, cfg, stage: str):
         y="pct_counts_mt",
         show=False,
     )
-    _clean_axes(plt.gca())
+    _clean_figure_axes(plt.gcf())
     record_plot_artifact(f"QC_scatter_mt_{stage}", figdir)
     close_plot()
 
