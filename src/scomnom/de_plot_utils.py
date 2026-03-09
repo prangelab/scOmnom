@@ -67,6 +67,27 @@ def _emit_figure_artifact(
     return artifact
 
 
+def _persist_artifacts_now(artifacts) -> None:
+    """
+    Persist artifacts immediately and drop figure references to keep memory bounded
+    during large plotting loops.
+    """
+    if artifacts is None:
+        return
+    if isinstance(artifacts, plot_utils.PlotArtifact):
+        artifacts = [artifacts]
+    if not isinstance(artifacts, list):
+        return
+    if len(artifacts) == 0:
+        return
+    plot_utils.persist_plot_artifacts(artifacts)
+    for art in artifacts:
+        try:
+            art.fig = None
+        except Exception:
+            pass
+
+
 def _normalize_levels_for_combo(series: pd.Series) -> pd.Series:
     s = series.astype(str)
     s = s.str.strip()
@@ -1875,7 +1896,6 @@ def umap_single(
     )
 
 
-@plot_utils.collect_plot_artifacts
 def plot_marker_genes_pseudobulk(
     adata,
     *,
@@ -1965,7 +1985,7 @@ def plot_marker_genes_pseudobulk(
             padj_thresh=float(alpha),
             top_n=int(top_label_n),
         )
-        volcano(
+        _persist_artifacts_now(volcano(
             df_de,
             padj_thresh=float(alpha),
             lfc_thresh=float(lfc_thresh),
@@ -1975,7 +1995,7 @@ def plot_marker_genes_pseudobulk(
             show=False,
             artifact_stem=f"volcano__{cl_stem}",
             artifact_figdir=d_volcano,
-        )
+        ))
 
         topg = _select_top_genes_with_fallback(
             df_plot,
@@ -1997,7 +2017,7 @@ def plot_marker_genes_pseudobulk(
         genes_by_cluster[str(key_name)] = topg
 
         if topg_dot:
-            dotplot_top_genes(
+            _persist_artifacts_now(dotplot_top_genes(
                 adata,
                 genes=topg_dot,
                 groupby=str(display_groupby or groupby),
@@ -2007,10 +2027,10 @@ def plot_marker_genes_pseudobulk(
                 show=False,
                 artifact_stem=f"dotplot__{cl_stem}",
                 artifact_figdir=d_dot,
-            )
+            ))
 
         if topg:
-            violin_grid_genes(
+            _persist_artifacts_now(violin_grid_genes(
                 adata,
                 genes=topg,
                 groupby=str(cnn_groupby or display_groupby or groupby),
@@ -2022,9 +2042,9 @@ def plot_marker_genes_pseudobulk(
                 show=False,
                 artifact_stem=f"violin__{cl_stem}",
                 artifact_figdir=d_violin,
-            )
+            ))
 
-            umap_features_grid(
+            _persist_artifacts_now(umap_features_grid(
                 adata,
                 genes=topg,
                 use_raw=bool(use_raw),
@@ -2033,11 +2053,11 @@ def plot_marker_genes_pseudobulk(
                 show=False,
                 artifact_stem=f"umap__{cl_stem}__top{int(top_n_genes)}",
                 artifact_figdir=d_umap,
-            )
+            ))
 
     # combined Seurat-style heatmap across clusters
     if any(v for v in genes_by_cluster.values()):
-        heatmap_top_genes(
+        _persist_artifacts_now(heatmap_top_genes(
             adata,
             genes_by_cluster=genes_by_cluster,
             groupby=str(cnn_groupby or display_groupby or groupby),
@@ -2048,21 +2068,20 @@ def plot_marker_genes_pseudobulk(
             show=False,
             artifact_stem="heatmap__marker_genes__all_clusters",
             artifact_figdir=d_heat,
-        )
+        ))
         if cnn_legend_map:
-            _save_cluster_label_legend(
+            _persist_artifacts_now(_save_cluster_label_legend(
                 d_heat,
                 cnn_legend_map,
                 stem="legend_cluster_labels",
                 color_map=_cnn_color_map(adata, str(cnn_groupby)),
-            )
+            ))
 
     if cnn_groupby is not None:
         adata.obs.drop(columns=[cnn_groupby], inplace=True, errors="ignore")
         adata.uns.pop(f"{cnn_groupby}_colors", None)
 
 
-@plot_utils.collect_plot_artifacts
 def plot_marker_genes_ranksum(
     adata,
     *,
@@ -2243,7 +2262,7 @@ def plot_marker_genes_ranksum(
         )
 
         # If df_v has no valid numeric rows, still save a placeholder volcano
-        volcano(
+        _persist_artifacts_now(volcano(
             df_v,
             gene_col="gene",
             padj_col="padj",
@@ -2256,7 +2275,7 @@ def plot_marker_genes_ranksum(
             show=False,
             artifact_stem=f"volcano__{cl_stem}",
             artifact_figdir=d_volcano,
-        )
+        ))
 
         # top genes for expression plots
         topg = _select_top_genes_with_fallback(
@@ -2280,7 +2299,7 @@ def plot_marker_genes_ranksum(
         )
 
         if topg_dot:
-            dotplot_top_genes(
+            _persist_artifacts_now(dotplot_top_genes(
                 adata,
                 genes=topg_dot,
                 groupby=str(display_groupby or groupby),
@@ -2290,10 +2309,10 @@ def plot_marker_genes_ranksum(
                 show=False,
                 artifact_stem=f"dotplot__{cl_stem}",
                 artifact_figdir=d_dot,
-            )
+            ))
 
         if topg:
-            violin_grid_genes(
+            _persist_artifacts_now(violin_grid_genes(
                 adata,
                 genes=topg,
                 groupby=str(cnn_groupby or display_groupby or groupby),
@@ -2305,9 +2324,9 @@ def plot_marker_genes_ranksum(
                 show=False,
                 artifact_stem=f"violin__{cl_stem}",
                 artifact_figdir=d_violin,
-            )
+            ))
 
-            umap_features_grid(
+            _persist_artifacts_now(umap_features_grid(
                 adata,
                 genes=topg,
                 use_raw=bool(use_raw),
@@ -2316,11 +2335,11 @@ def plot_marker_genes_ranksum(
                 show=False,
                 artifact_stem=f"umap__{cl_stem}__top{int(top_n_genes)}",
                 artifact_figdir=d_umap,
-            )
+            ))
 
     # combined Seurat-style heatmap across clusters
     if any(v for v in genes_by_cluster.values()):
-        heatmap_top_genes(
+        _persist_artifacts_now(heatmap_top_genes(
             adata,
             genes_by_cluster=genes_by_cluster,
             groupby=str(cnn_groupby or display_groupby or groupby),
@@ -2332,14 +2351,14 @@ def plot_marker_genes_ranksum(
             show=False,
             artifact_stem="heatmap__marker_genes__all_clusters",
             artifact_figdir=d_heat,
-        )
+        ))
         if cnn_legend_map:
-            _save_cluster_label_legend(
+            _persist_artifacts_now(_save_cluster_label_legend(
                 d_heat,
                 cnn_legend_map,
                 stem="legend_cluster_labels",
                 color_map=_cnn_color_map(adata, str(cnn_groupby)),
-            )
+            ))
 
     if cnn_groupby is not None:
         adata.obs.drop(columns=[cnn_groupby], inplace=True, errors="ignore")

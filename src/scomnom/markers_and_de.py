@@ -1066,7 +1066,7 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
             ncols = int(getattr(cfg, "plot_umap_ncols", 3))
 
             if run_cell_requested and markers_key:
-                artifacts = de_plot_utils.plot_marker_genes_ranksum(
+                de_plot_utils.plot_marker_genes_ranksum(
                     adata,
                     groupby=str(groupby),
                     display_groupby=str(display_key) if display_key else None,
@@ -1082,12 +1082,11 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
                     umap_ncols=ncols,
                     plot_gene_filter=getattr(cfg, "plot_gene_filter", ()),
                 )
-                plot_utils.persist_plot_artifacts(artifacts)
             else:
                 LOGGER.info("cluster-vs-rest: skipping cell-level marker plots (no markers computed).")
 
             if run_pb_requested:
-                artifacts = de_plot_utils.plot_marker_genes_pseudobulk(
+                de_plot_utils.plot_marker_genes_pseudobulk(
                     adata,
                     groupby=str(groupby),
                     display_groupby=str(display_key) if display_key else None,
@@ -1103,7 +1102,6 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
                     umap_ncols=ncols,
                     plot_gene_filter=getattr(cfg, "plot_gene_filter", ()),
                 )
-                plot_utils.persist_plot_artifacts(artifacts)
             else:
                 LOGGER.info("cluster-vs-rest: skipping pseudobulk plots (pseudobulk disabled or not requested).")
 
