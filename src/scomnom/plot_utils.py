@@ -1676,6 +1676,7 @@ def qc_scatter(adata, groupby: str, cfg):
         color="pct_counts_mt",
         show=False,
     )
+    _clean_axes(plt.gca())
     record_plot_artifact("QC_scatter_mt", figdir)
 
 
@@ -1989,6 +1990,7 @@ def plot_hist_total_counts(adata, cfg, stage: str):
     plt.xlabel("Total UMI counts")
     plt.ylabel("Cell count")
     plt.title(f"total_counts ({stage})")
+    _clean_axes(plt.gca())
 
     record_plot_artifact(f"{stage}_QC_hist_total_counts", figdir_qc)
     close_plot()
@@ -2018,6 +2020,7 @@ def plot_hist_n_genes(adata, cfg, stage: str):
     plt.xlabel("Number of genes detected")
     plt.ylabel("Cell count")
     plt.title(f"n_genes_by_counts ({stage})")
+    _clean_axes(plt.gca())
 
     record_plot_artifact(f"{stage}_QC_hist_n_genes", figdir_qc)
     close_plot()
@@ -2091,6 +2094,7 @@ def qc_violin_panels(adata, cfg, stage: str):
             ax=ax,
         )
 
+        _clean_axes(ax)
         ax.set_title(f"{metric} ({stage})")
 
         # --- reserve space for long sample names ---
@@ -2141,6 +2145,7 @@ def qc_scatter_panels(adata, cfg, stage: str):
         color="pct_counts_mt",
         show=False,
     )
+    _clean_axes(plt.gca())
     record_plot_artifact(f"QC_complexity_{stage}", figdir)
     close_plot()
 
@@ -2153,6 +2158,7 @@ def qc_scatter_panels(adata, cfg, stage: str):
         y="pct_counts_mt",
         show=False,
     )
+    _clean_axes(plt.gca())
     record_plot_artifact(f"QC_scatter_mt_{stage}", figdir)
     close_plot()
 
@@ -2411,6 +2417,7 @@ def plot_qc_filter_stack(
     )
 
     ax.set_xticklabels(plot_df.index, rotation=45, ha="right")
+    _clean_axes(ax)
 
     fig.tight_layout()
     record_plot_artifact("QC Filter effects", figdir, fig)
@@ -2485,6 +2492,7 @@ def doublet_plots(
     ax.set_xlabel("Doublet score")
     ax.set_ylabel("Cells")
     ax.set_title("SOLO doublet score distribution")
+    _clean_axes(ax)
     fig.tight_layout()
     record_plot_artifact("doublet_score_hist", figdir, fig)
     close_plot(fig)
@@ -2519,6 +2527,7 @@ def doublet_plots(
             max(thr_series.max() * 1.2, thr_series.max() + 0.05),
         )
         plt.xticks(rotation=45, ha="right")
+        _clean_axes(ax)
         fig.tight_layout()
         record_plot_artifact("doublet_inferred_threshold_per_sample", figdir, fig)
         close_plot(fig)
@@ -2539,6 +2548,7 @@ def doublet_plots(
     ax.set_title("Observed doublet fraction per sample")
     ax.set_ylim(0, max(0.05, frac.max() * 1.2))
     plt.xticks(rotation=45, ha="right")
+    _clean_axes(ax)
     fig.tight_layout()
     record_plot_artifact("doublet_fraction_per_sample", figdir, fig)
     close_plot(fig)
@@ -2562,6 +2572,7 @@ def doublet_plots(
     ax.set_xlabel("Total UMI counts (raw)")
     ax.set_ylabel("Doublet score")
     ax.set_title("Doublet score vs library size")
+    _clean_axes(ax)
     fig.tight_layout()
     record_plot_artifact("doublet_score_vs_total_counts", figdir, fig)
     close_plot(fig)
@@ -2602,6 +2613,7 @@ def doublet_plots(
     ax.set_xticklabels(samples, rotation=45, ha="right")
     ax.set_ylabel("Doublet score")
     ax.set_title("Doublet score distribution per sample")
+    _clean_axes(ax)
     fig.tight_layout()
     record_plot_artifact("doublet_score_violin_per_sample", figdir, fig)
     close_plot(fig)
@@ -2619,6 +2631,7 @@ def doublet_plots(
     ax.set_xlabel("Doublet score")
     ax.set_ylabel("Cumulative fraction")
     ax.set_title("ECDF of doublet scores")
+    _clean_axes(ax)
     fig.tight_layout()
     record_plot_artifact("doublet_score_ecdf", figdir, fig)
     close_plot(fig)
