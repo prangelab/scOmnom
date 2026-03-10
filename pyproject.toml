@@ -7,19 +7,20 @@ name = "scomnom"
 version = "0.2.0"
 description = "Modular scRNA-seq preprocessing and analysis pipeline built on the scVerse ecosystem."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [
   { name = "Koen Prange", email = "info@prangelab.org" }
 ]
 
 dependencies = [
-  "scanpy",
-  "anndata",
-  "zarr",
-  "numpy",
-  "pandas",
-  "scipy",
+  "scanpy>=1.11.5",
+  "anndata>=0.12.7",
+  "zarr>=3.1.5",
+  "numcodecs>=0.16.5",
+  "numpy>=2.3.5",
+  "pandas>=2.3.3",
+  "scipy>=1.15.3",
   "matplotlib",
   "seaborn",
   "typer",
@@ -29,7 +30,7 @@ dependencies = [
   "python-igraph",
   "joblib",
   "kneed",
-  "h5py",
+  "h5py>=3.15.1",
   "psutil",
   "umap-learn",
   "celltypist",

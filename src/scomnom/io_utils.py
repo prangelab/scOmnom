@@ -1596,6 +1596,61 @@ def load_dataset(path: Path) -> ad.AnnData:
 
         return obj
 
+    def _is_null_raw_registry_error(exc: Exception) -> bool:
+        msg = str(exc)
+        return (
+            "encoding_type='null'" in msg
+            and "Error raised while reading key 'raw'" in msg
+        )
+
+    def _drop_null_raw_key(zarr_dir: Path) -> bool:
+        try:
+            import zarr
+        except Exception:
+            return False
+        try:
+            root = zarr.open_group(str(zarr_dir), mode="a")
+        except Exception:
+            return False
+        if "raw" not in root:
+            return False
+        try:
+            raw_obj = root["raw"]
+            enc = raw_obj.attrs.get("encoding-type", raw_obj.attrs.get("encoding_type", None))
+        except Exception:
+            return False
+        if str(enc) != "null":
+            return False
+        try:
+            del root["raw"]
+            return True
+        except Exception:
+            return False
+
+    def _read_zarr_with_raw_fallback(zarr_dir: Path, *, allow_inplace_fix: bool) -> ad.AnnData:
+        try:
+            return ad.read_zarr(str(zarr_dir))
+        except Exception as e:
+            if not _is_null_raw_registry_error(e):
+                raise
+            LOGGER.warning(
+                "Encountered unsupported null-encoded raw slot while reading %s; retrying without raw.",
+                zarr_dir,
+            )
+            if allow_inplace_fix:
+                if not _drop_null_raw_key(zarr_dir):
+                    raise
+                return ad.read_zarr(str(zarr_dir))
+            fix_tmp = Path(tempfile.mkdtemp(prefix="scomnom_load_fix_"))
+            try:
+                patched = fix_tmp / zarr_dir.name
+                shutil.copytree(zarr_dir, patched)
+                if not _drop_null_raw_key(patched):
+                    raise
+                return ad.read_zarr(str(patched))
+            finally:
+                shutil.rmtree(fix_tmp, ignore_errors=True)
+
     path = Path(path)
 
     if not path.exists() and str(path).endswith(".zarr"):
@@ -1629,12 +1684,12 @@ def load_dataset(path: Path) -> ad.AnnData:
                 extracted = candidates[0]
 
             LOGGER.info("Loading archived Zarr dataset %s via extracted directory %s", path, extracted)
-            adata = ad.read_zarr(str(extracted))
+            adata = _read_zarr_with_raw_fallback(extracted, allow_inplace_fix=True)
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
     elif path.suffix == ".zarr" or path.is_dir():
         LOGGER.info(f"Loading Zarr dataset → {path}")
-        adata = ad.read_zarr(str(path))  # fully in-memory
+        adata = _read_zarr_with_raw_fallback(path, allow_inplace_fix=False)  # fully in-memory
     else:
         raise ValueError(
             f"Cannot load dataset from: {path}. Expected .zarr directory, .zarr.tar.zst archive, or .h5ad file."

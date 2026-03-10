@@ -1,5 +1,6 @@
 scanpy
 anndata
+zarr
 numpy
 pandas
 scipy
@@ -17,3 +18,9 @@ psutil
 umap-learn
 celltypist
 requests
+decoupler
+scvi-tools
+pydeseq2
+statsmodels
+pertpy
+pybiomart
