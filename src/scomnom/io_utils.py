@@ -1549,10 +1549,21 @@ def load_dataset(path: Path) -> ad.AnnData:
       - pandas.Series
       - numpy.ndarray
     """
+    import re
     import numpy as np
     import pandas as pd
 
     def _rehydrate(obj):
+        def _recover_stringified_legacy_array(s: str):
+            if "numpy.ndarray" not in s:
+                return None
+            # Legacy payloads can be stringified; recover color palettes encoded as hex values.
+            hex_colors = re.findall(r"#[0-9A-Fa-f]{6}", s)
+            if hex_colors:
+                uniq = list(dict.fromkeys(hex_colors))
+                return np.array(uniq, dtype=str)
+            return None
+
         def _tag_key_and_type(d: dict) -> tuple[str | None, str | None]:
             if "__type__" in d:
                 tval = d.get("__type__", None)
@@ -1629,6 +1640,10 @@ def load_dataset(path: Path) -> ad.AnnData:
             return [_rehydrate(v) for v in obj]
         if isinstance(obj, tuple):
             return tuple(_rehydrate(v) for v in obj)
+        if isinstance(obj, str):
+            recovered = _recover_stringified_legacy_array(obj)
+            if recovered is not None:
+                return recovered
 
         return obj
 
