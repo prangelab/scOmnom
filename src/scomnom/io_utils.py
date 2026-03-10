@@ -1407,6 +1407,9 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
                 return str(obj)
 
         if isinstance(obj, dict):
+            if "__type__" in obj:
+                # Preserve internal tag keys so load_dataset() can rehydrate payloads.
+                return {str(k): _sanitize(v) for k, v in obj.items()}
             out: dict[str, object] = {}
             for k, v in obj.items():
                 orig = str(k)
@@ -1542,8 +1545,24 @@ def load_dataset(path: Path) -> ad.AnnData:
     import pandas as pd
 
     def _rehydrate(obj):
-        if isinstance(obj, dict) and "__type__" in obj:
-            t = obj.get("__type__", None)
+        def _tag_key_and_type(d: dict) -> tuple[str | None, str | None]:
+            if "__type__" in d:
+                tval = d.get("__type__", None)
+                return "__type__", (str(tval) if tval is not None else None)
+            # Backward-compatible recovery for legacy keys that were sanitized
+            # from "__type__" to "type" (+ optional dedupe suffix).
+            for k, v in d.items():
+                ks = str(k)
+                if ks == "type" or ks.startswith("type__") or ks.startswith("type_"):
+                    if isinstance(v, str) and "." in v:
+                        return ks, v
+            return None, None
+
+        if isinstance(obj, dict):
+            _, t = _tag_key_and_type(obj)
+            if t is None:
+                # normal recursion
+                return {str(k): _rehydrate(v) for k, v in obj.items()}
 
             if t == "pandas.DataFrame":
                 orient = obj.get("orient", "split")
@@ -1586,9 +1605,6 @@ def load_dataset(path: Path) -> ad.AnnData:
                 except Exception:
                     return obj
 
-        # normal recursion
-        if isinstance(obj, dict):
-            return {str(k): _rehydrate(v) for k, v in obj.items()}
         if isinstance(obj, list):
             return [_rehydrate(v) for v in obj]
         if isinstance(obj, tuple):
