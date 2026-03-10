@@ -641,16 +641,13 @@ def heatmap_top_genes_by_sample(
         if color_rows:
             col_colors = color_rows
 
-    col_ratio = 0.02
+    col_ratio = 0.004
     if col_colors is not None:
         try:
             n_keys = len(col_colors) if isinstance(col_colors, list) else int(col_colors.shape[1])
-            if n_genes > 0:
-                col_ratio = max(0.003, 0.5 * float(n_keys) / float(n_genes))
-            else:
-                col_ratio = 0.02 * max(1, int(n_keys))
+            col_ratio = min(0.012, max(0.003, 0.0035 * float(max(1, int(n_keys)))))
         except Exception:
-            col_ratio = 0.02
+            col_ratio = 0.004
 
     g = sns.clustermap(
         data,
@@ -665,7 +662,7 @@ def heatmap_top_genes_by_sample(
         col_colors=col_colors,
         linewidths=0.4,
         linecolor="#b0b0b0",
-        colors_ratio=(0.02, col_ratio),
+        colors_ratio=(0.015, col_ratio),
     )
     g.ax_heatmap.tick_params(axis="y", labelsize=8)
     g.ax_heatmap.tick_params(axis="x", labelsize=7, rotation=45)
@@ -685,31 +682,27 @@ def heatmap_top_genes_by_sample(
             if lbl not in uniq:
                 uniq[lbl] = h
         handles = list(uniq.values())
-        ncol = min(4, len(handles))
+        max_rows = 12
+        ncol = max(1, int(np.ceil(len(handles) / float(max_rows))))
         title = str(condition_key) if (keys and len(keys) == 1) else "sample annotations"
-        g.ax_col_dendrogram.legend(
-            handles=handles,
-            title=title,
-            loc="upper center",
-            bbox_to_anchor=(0.5, 1.20),
-            ncol=ncol,
-            frameon=False,
-            fontsize=8,
-            title_fontsize=9,
-        )
+        # Keep legend out of the heatmap figure itself; use separate legend file.
         if legend_figdir is not None:
-            fig_leg_w = max(4.0, 1.6 * min(4, ncol))
-            fig_leg_h = max(2.0, 0.25 * (len(handles) / max(1, ncol)) + 1.2)
+            nrows = int(np.ceil(len(handles) / float(max(1, ncol))))
+            fig_leg_w = max(5.0, 2.6 * float(ncol))
+            fig_leg_h = max(2.0, 0.28 * float(nrows) + 1.2)
             fig_leg, ax_leg = plt.subplots(figsize=(fig_leg_w, fig_leg_h))
             ax_leg.axis("off")
             ax_leg.legend(
                 handles=handles,
                 title=title,
-                loc="center",
+                loc="upper left",
+                bbox_to_anchor=(0.0, 1.0),
                 ncol=ncol,
                 frameon=False,
                 fontsize=9,
                 title_fontsize=10,
+                columnspacing=1.1,
+                handletextpad=0.5,
             )
             plot_utils.record_plot_artifact(stem=str(legend_stem), figdir=legend_figdir, fig=fig_leg)
             plot_utils.close_plot(fig_leg)
