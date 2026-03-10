@@ -215,6 +215,15 @@ def _make_api_wrapper(public_name: str, plot_fn: Callable):
             _save_artifacts_to_file(artifacts, file=file)
         if bool(display):
             _display_figures(figs)
+            # In notebooks, open figures are auto-rendered at cell end.
+            # Close displayed figures when caller does not request figure returns
+            # to avoid duplicate output.
+            if not bool(return_fig):
+                for fig in figs:
+                    try:
+                        plot_utils.close_plot(fig)
+                    except Exception:
+                        pass
         return _format_api_return(figs, return_fig=bool(return_fig))
 
     _wrapped.__name__ = public_name

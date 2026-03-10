@@ -6,6 +6,8 @@ These rules are persistent for all threads and apply across the whole project.
 - All dataset loading must go through `load_dataset()` in `src/scomnom/io_utils.py`.
 - All dataset saving must go through `save_dataset()` in `src/scomnom/io_utils.py`.
 - Do not call `adata.write_zarr`, `adata.write_h5ad`, `ad.read_zarr`, or `ad.read_h5ad` directly in new or modified code.
+- Temporary compatibility note: `load_dataset()` currently includes a legacy `_rehydrate` compatibility section to recover historically corrupted/stringified tagged payloads in `adata.uns` (notably old palette payloads).
+- Once legacy affected datasets have been re-saved with the fixed serializer, remove that compatibility branch from `_rehydrate` to keep the loader minimal.
 
 ## Plot Saving (mandatory)
 - Plot functions should emit `PlotArtifact` objects (from `src/scomnom/plot_utils.py`) and must not do direct filesystem saving themselves.

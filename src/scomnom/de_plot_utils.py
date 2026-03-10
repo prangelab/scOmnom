@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from matplotlib import gridspec
+from matplotlib.collections import PathCollection
 
 from . import io_utils, plot_utils
 
@@ -442,6 +443,30 @@ def _get_fig_from_scanpy_return(ret) -> Figure:
     if not isinstance(fig, Figure):
         raise RuntimeError("Could not resolve a matplotlib Figure from scanpy return value.")
     return fig
+
+
+def _iter_umap_data_axes(fig: Figure) -> list[Axes]:
+    axes: list[Axes] = []
+    for ax in fig.get_axes():
+        try:
+            if any(isinstance(coll, PathCollection) for coll in ax.collections):
+                axes.append(ax)
+        except Exception:
+            continue
+    return axes
+
+
+def _hide_umap_default_axes(ax: Axes) -> None:
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.tick_params(which="both", left=False, bottom=False, labelleft=False, labelbottom=False)
+    for side in ("left", "bottom", "right", "top"):
+        try:
+            ax.spines[side].set_visible(False)
+        except Exception:
+            pass
 
 
 def _select_top_genes(
@@ -1777,8 +1802,9 @@ def umap_features_grid(
             except Exception:
                 pass
     if bool(show_umap_corner_axes):
-        for ax in fig.get_axes():
+        for ax in _iter_umap_data_axes(fig):
             try:
+                _hide_umap_default_axes(ax)
                 _add_umap_corner_axes(ax)
             except Exception:
                 pass
@@ -1799,12 +1825,29 @@ def _add_umap_corner_axes(ax, *, x_label: str = "UMAP 1", y_label: str = "UMAP 2
     Draw small orientation arrows and labels in the bottom-left corner of a UMAP panel.
     """
     x0, y0 = 0.06, 0.08
-    x1, y1 = 0.16, 0.18
-    arrow_kw = dict(arrowstyle="-|>", lw=0.9, color="black", mutation_scale=9)
+    x1, y1 = 0.17, 0.18
+    arrow_kw = dict(arrowstyle="-|>", lw=1.4, color="black", mutation_scale=10)
     ax.annotate("", xy=(x1, y0), xytext=(x0, y0), xycoords=ax.transAxes, arrowprops=arrow_kw)
     ax.annotate("", xy=(x0, y1), xytext=(x0, y0), xycoords=ax.transAxes, arrowprops=arrow_kw)
-    ax.text(x1 + 0.01, y0 - 0.005, str(x_label), transform=ax.transAxes, fontsize=8, ha="left", va="top")
-    ax.text(x0 - 0.005, y1 + 0.005, str(y_label), transform=ax.transAxes, fontsize=8, ha="right", va="bottom")
+    ax.text(
+        (x0 + x1) * 0.5,
+        y0 - 0.004,
+        str(x_label),
+        transform=ax.transAxes,
+        fontsize=8,
+        ha="center",
+        va="top",
+    )
+    ax.text(
+        x0 - 0.006,
+        (y0 + y1) * 0.5,
+        str(y_label),
+        transform=ax.transAxes,
+        fontsize=8,
+        ha="right",
+        va="center",
+        rotation=90,
+    )
 
 
 @plot_utils.collect_plot_artifacts
@@ -1849,7 +1892,7 @@ def umap_single(
 
     ret = sc.pl.umap(
         adata,
-        color=[str(color_key)],
+        color=str(color_key),
         use_raw=use_raw,
         layer=layer,
         palette=palette,
@@ -1872,8 +1915,10 @@ def umap_single(
                 pass
     if bool(show_umap_corner_axes):
         try:
-            ax = fig.axes[0] if getattr(fig, "axes", None) else None
-            if ax is not None:
+            data_axes = _iter_umap_data_axes(fig)
+            if data_axes:
+                ax = data_axes[0]
+                _hide_umap_default_axes(ax)
                 _add_umap_corner_axes(ax)
         except Exception:
             pass
