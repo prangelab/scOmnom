@@ -1222,18 +1222,19 @@ def _zstd_level() -> str:
 
 def _tar_create_zst(src_root: Path, item_name: str, out_archive: Path) -> None:
     if _use_system_tar_zstd():
-        zstd_prog = f"zstd -{_zstd_level()} -T{_zstd_threads_flag()}"
-        cmd = [
-            "tar",
-            "-I",
-            zstd_prog,
-            "-cf",
-            str(out_archive),
-            "-C",
-            str(src_root),
-            item_name,
-        ]
-        subprocess.run(cmd, check=True)
+        tar_cmd = ["tar", "-cf", "-", "-C", str(src_root), item_name]
+        zstd_cmd = ["zstd", f"-{_zstd_level()}", f"-T{_zstd_threads_flag()}", "-o", str(out_archive)]
+        with subprocess.Popen(tar_cmd, stdout=subprocess.PIPE) as tar_proc:
+            assert tar_proc.stdout is not None
+            zstd_res = subprocess.run(zstd_cmd, stdin=tar_proc.stdout, check=False, capture_output=True, text=True)
+            tar_proc.stdout.close()
+            tar_ret = tar_proc.wait()
+        if tar_ret != 0:
+            raise subprocess.CalledProcessError(tar_ret, tar_cmd)
+        if zstd_res.returncode != 0:
+            raise subprocess.CalledProcessError(
+                zstd_res.returncode, zstd_cmd, output=zstd_res.stdout, stderr=zstd_res.stderr
+            )
         return
 
     try:
@@ -1250,15 +1251,18 @@ def _tar_create_zst(src_root: Path, item_name: str, out_archive: Path) -> None:
 
 def _tar_list_zst(archive_path: Path) -> List[str]:
     if _use_system_tar_zstd():
-        zstd_prog = f"zstd -T{_zstd_threads_flag()}"
-        cmd = [
-            "tar",
-            "-I",
-            zstd_prog,
-            "-tf",
-            str(archive_path),
-        ]
-        out = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        zstd_cmd = ["zstd", "-d", "-c", str(archive_path)]
+        tar_cmd = ["tar", "-tf", "-"]
+        with subprocess.Popen(zstd_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False) as zstd_proc:
+            assert zstd_proc.stdout is not None
+            out = subprocess.run(tar_cmd, stdin=zstd_proc.stdout, check=False, capture_output=True, text=True)
+            zstd_proc.stdout.close()
+            zstd_stderr = zstd_proc.stderr.read().decode("utf-8", errors="replace") if zstd_proc.stderr else ""
+            zstd_ret = zstd_proc.wait()
+        if zstd_ret != 0:
+            raise subprocess.CalledProcessError(zstd_ret, zstd_cmd, stderr=zstd_stderr)
+        if out.returncode != 0:
+            raise subprocess.CalledProcessError(out.returncode, tar_cmd, output=out.stdout, stderr=out.stderr)
         return [line.strip() for line in out.stdout.splitlines() if line.strip()]
 
     try:
@@ -1278,17 +1282,20 @@ def _tar_list_zst(archive_path: Path) -> List[str]:
 
 def _tar_extract_zst(archive_path: Path, out_dir: Path) -> None:
     if _use_system_tar_zstd():
-        zstd_prog = f"zstd -T{_zstd_threads_flag()}"
-        cmd = [
-            "tar",
-            "-I",
-            zstd_prog,
-            "-xf",
-            str(archive_path),
-            "-C",
-            str(out_dir),
-        ]
-        subprocess.run(cmd, check=True)
+        zstd_cmd = ["zstd", "-d", "-c", str(archive_path)]
+        tar_cmd = ["tar", "-xf", "-", "-C", str(out_dir)]
+        with subprocess.Popen(zstd_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False) as zstd_proc:
+            assert zstd_proc.stdout is not None
+            tar_res = subprocess.run(tar_cmd, stdin=zstd_proc.stdout, check=False, capture_output=True, text=True)
+            zstd_proc.stdout.close()
+            zstd_stderr = zstd_proc.stderr.read().decode("utf-8", errors="replace") if zstd_proc.stderr else ""
+            zstd_ret = zstd_proc.wait()
+        if zstd_ret != 0:
+            raise subprocess.CalledProcessError(zstd_ret, zstd_cmd, stderr=zstd_stderr)
+        if tar_res.returncode != 0:
+            raise subprocess.CalledProcessError(
+                tar_res.returncode, tar_cmd, output=tar_res.stdout, stderr=tar_res.stderr
+            )
         return
 
     try:
