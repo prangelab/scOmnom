@@ -4,15 +4,16 @@ Version: 0.2.0
 Summary: Modular scRNA-seq preprocessing and analysis pipeline built on the scVerse ecosystem.
 Author-email: Koen Prange <info@prangelab.org>
 License: MIT
-Requires-Python: >=3.10
+Requires-Python: >=3.11
 Description-Content-Type: text/markdown
 License-File: LICENSE
-Requires-Dist: scanpy
-Requires-Dist: anndata
-Requires-Dist: zarr
-Requires-Dist: numpy
-Requires-Dist: pandas
-Requires-Dist: scipy
+Requires-Dist: scanpy>=1.11.5
+Requires-Dist: anndata>=0.12.7
+Requires-Dist: zarr>=3.1.5
+Requires-Dist: numcodecs>=0.16.5
+Requires-Dist: numpy>=2.3.5
+Requires-Dist: pandas>=2.3.3
+Requires-Dist: scipy>=1.15.3
 Requires-Dist: matplotlib
 Requires-Dist: seaborn
 Requires-Dist: typer
@@ -22,7 +23,7 @@ Requires-Dist: leidenalg
 Requires-Dist: python-igraph
 Requires-Dist: joblib
 Requires-Dist: kneed
-Requires-Dist: h5py
+Requires-Dist: h5py>=3.15.1
 Requires-Dist: psutil
 Requires-Dist: umap-learn
 Requires-Dist: celltypist
