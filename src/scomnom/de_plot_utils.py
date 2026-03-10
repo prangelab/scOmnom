@@ -1825,10 +1825,28 @@ def _add_umap_corner_axes(ax, *, x_label: str = "UMAP 1", y_label: str = "UMAP 2
     Draw small orientation arrows and labels in the bottom-left corner of a UMAP panel.
     """
     x0, y0 = 0.06, 0.08
-    x1, y1 = 0.17, 0.18
-    arrow_kw = dict(arrowstyle="-|>", lw=1.4, color="black", mutation_scale=10)
+    # Size corner arrows using actual data-axis geometry (not legend area).
+    # This keeps physical arrow lengths balanced across rectangular panels.
+    fig = ax.figure
+    pos = ax.get_position()
+    ax_w = max(1e-9, float(pos.width) * float(fig.get_size_inches()[0]))
+    ax_h = max(1e-9, float(pos.height) * float(fig.get_size_inches()[1]))
+    base_y_len = 0.10
+    x_len = base_y_len * (ax_h / ax_w)
+    y_len = base_y_len
+    x1, y1 = x0 + x_len, y0 + y_len
+    arrow_kw = dict(
+        arrowstyle="-|>",
+        lw=1.8,
+        color="black",
+        mutation_scale=11,
+        shrinkA=0.0,
+        shrinkB=0.0,
+    )
     ax.annotate("", xy=(x1, y0), xytext=(x0, y0), xycoords=ax.transAxes, arrowprops=arrow_kw)
     ax.annotate("", xy=(x0, y1), xytext=(x0, y0), xycoords=ax.transAxes, arrowprops=arrow_kw)
+    # Draw a tiny base point so both arrows are visibly connected at origin.
+    ax.plot([x0], [y0], marker="o", markersize=2.0, color="black", transform=ax.transAxes, clip_on=False)
     ax.text(
         (x0 + x1) * 0.5,
         y0 - 0.004,
