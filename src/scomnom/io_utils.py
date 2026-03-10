@@ -1640,6 +1640,17 @@ def load_dataset(path: Path) -> ad.AnnData:
             return [_rehydrate(v) for v in obj]
         if isinstance(obj, tuple):
             return tuple(_rehydrate(v) for v in obj)
+        if isinstance(obj, np.ndarray):
+            if obj.size == 1:
+                try:
+                    candidate = str(obj.reshape(-1)[0])
+                except Exception:
+                    candidate = None
+                if candidate:
+                    recovered = _recover_stringified_legacy_array(candidate)
+                    if recovered is not None:
+                        return recovered
+            return obj
         if isinstance(obj, str):
             recovered = _recover_stringified_legacy_array(obj)
             if recovered is not None:
