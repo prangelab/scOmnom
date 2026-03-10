@@ -5,6 +5,7 @@ import inspect
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable, Iterable
+import matplotlib.pyplot as plt
 
 from . import de_plot_utils, plot_utils
 
@@ -209,6 +210,7 @@ def _make_api_wrapper(public_name: str, plot_fn: Callable):
 
     @wraps(plot_fn)
     def _wrapped(*args, display: bool = True, file: str | Path | None = None, return_fig: bool = False, **kwargs):
+        pre_fignums = set(plt.get_fignums())
         artifacts = _run_plot_fn(plot_fn, *args, **kwargs)
         figs = _collect_figures(artifacts)
         if file is not None and str(file).strip() != "":
@@ -222,6 +224,14 @@ def _make_api_wrapper(public_name: str, plot_fn: Callable):
                 for fig in figs:
                     try:
                         plot_utils.close_plot(fig)
+                    except Exception:
+                        pass
+                # Also close any extra figures created by plotting internals that
+                # were not captured as artifacts (for example clustermap helpers).
+                post_fignums = set(plt.get_fignums())
+                for fnum in sorted(post_fignums - pre_fignums):
+                    try:
+                        plt.close(fnum)
                     except Exception:
                         pass
         return _format_api_return(figs, return_fig=bool(return_fig))
