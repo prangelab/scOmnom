@@ -1838,6 +1838,7 @@ def _add_umap_corner_axes(ax, *, x_label: str = "UMAP 1", y_label: str = "UMAP 2
     x_len = float(np.clip(x_len, 0.07, 0.18))
     y_len = base_y_len
     x1, y1 = x0 + x_len, y0 + y_len
+    y0_h = y0 - 0.0035
     arrow_kw = dict(
         arrowstyle="-|>",
         lw=1.8,
@@ -1846,13 +1847,13 @@ def _add_umap_corner_axes(ax, *, x_label: str = "UMAP 1", y_label: str = "UMAP 2
         shrinkA=0.0,
         shrinkB=0.0,
     )
-    ax.annotate("", xy=(x1, y0), xytext=(x0, y0), xycoords=ax.transAxes, arrowprops=arrow_kw)
+    ax.annotate("", xy=(x1, y0_h), xytext=(x0, y0_h), xycoords=ax.transAxes, arrowprops=arrow_kw)
     ax.annotate("", xy=(x0, y1), xytext=(x0, y0), xycoords=ax.transAxes, arrowprops=arrow_kw)
     # Draw a tiny base point so both arrows are visibly connected at origin.
     ax.plot([x0], [y0], marker="o", markersize=2.0, color="black", transform=ax.transAxes, clip_on=False)
     ax.text(
         (x0 + x1) * 0.5,
-        y0 - 0.014,
+        y0_h - 0.0105,
         str(x_label),
         transform=ax.transAxes,
         fontsize=8,

@@ -46,3 +46,6 @@ Fixed some cluster-and-annotate plots. DE module is now feature complete, but st
 
 ## 0.2.0 [06-03-2026]
 DE and DA modules are now finished and operational. Changed file output format to compressed and archived *.zarr.tar.zst format. This prevents inode exhaustion. Archives are auto detected at load. Implemented subsetting in the new adata-ops module. Subsetted modules can be reclustered by feeding them to cluster-and-annotate, which has been updated to always recalculate PCs and HVGs to mathc the subsetted data. Added rename mode to cluster-and-annotate: this allows to rename populations manually. Added plot-only modes to markers-and-de allowing to refresh plots (eg with the newly renamed idents) without redoing all the computations.
+
+## 0.2.1 [10-03-2026]
+Added API epxosure for plotting functions. Also added example notebooks for API usage. Changed plotting engine so that plots create plotArtifactgs, which th ecaller can choose to plot or save to disk. this separates output generation from the plottin gfuciotns and enbale API versus CLI usage of the same functions.
