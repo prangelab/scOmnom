@@ -1386,6 +1386,14 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
         }
 
     def _sanitize(obj):
+        def _has_legacy_type_marker(d: dict) -> bool:
+            for k, v in d.items():
+                ks = str(k)
+                if ks == "type" or ks.startswith("type__") or ks.startswith("type_"):
+                    if isinstance(v, str) and "." in v:
+                        return True
+            return False
+
         if isinstance(obj, pd.DataFrame):
             return _df_to_tagged_payload(obj)
 
@@ -1407,7 +1415,7 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
                 return str(obj)
 
         if isinstance(obj, dict):
-            if "__type__" in obj:
+            if "__type__" in obj or _has_legacy_type_marker(obj):
                 # Preserve internal tag keys so load_dataset() can rehydrate payloads.
                 return {str(k): _sanitize(v) for k, v in obj.items()}
             out: dict[str, object] = {}
@@ -1591,14 +1599,26 @@ def load_dataset(path: Path) -> ad.AnnData:
 
             if t == "numpy.ndarray":
                 try:
-                    data = obj.get("data", [])
+                    data = _rehydrate(obj.get("data", []))
                     dtype = obj.get("dtype", None)
-                    a = np.array(data, dtype=dtype)
+                    try:
+                        if isinstance(dtype, str) and "StringDType" in dtype:
+                            a = np.array(data, dtype=str)
+                        elif dtype is None:
+                            a = np.array(data)
+                        else:
+                            a = np.array(data, dtype=dtype)
+                    except Exception:
+                        a = np.array(data)
                     # shape is best-effort; only reshape if consistent
-                    shp = obj.get("shape", None)
+                    shp = _rehydrate(obj.get("shape", None))
                     if shp is not None:
                         try:
-                            a = a.reshape(tuple(shp))
+                            if isinstance(shp, np.ndarray):
+                                shp = shp.tolist()
+                            if isinstance(shp, (int, np.integer)):
+                                shp = [int(shp)]
+                            a = a.reshape(tuple(int(x) for x in shp))
                         except Exception:
                             pass
                     return a
