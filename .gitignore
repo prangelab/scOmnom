@@ -1,0 +1,18 @@
+# Python bytecode/cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Packaging/build artifacts
+*.egg-info/
+PKG-INFO
+build/
+dist/
+*.egg
+
+# Test/cache tooling
+.pytest_cache/
+.mypy_cache/
+
+# macOS Finder metadata
+.DS_Store
