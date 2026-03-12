@@ -1,0 +1,72 @@
+name: scOmnom_env
+
+channels:
+  - pytorch
+  - conda-forge
+  - bioconda
+  - defaults
+
+dependencies:
+  # Python / tooling
+  - python=3.11.14
+  - pip
+  - setuptools
+  - wheel
+  - cython
+  - pillow>=10.1
+
+  # Numeric stack
+  - numpy=2.3.5
+  - scipy=1.15.3
+  - pandas=2.3.3
+  - matplotlib
+  - seaborn
+  - joblib
+  - h5py=3.15.1
+  - scikit-learn
+  - psutil
+  - statsmodels
+  - xlsxwriter
+
+  # Scanpy ecosystem
+  - scanpy=1.11.5
+  - anndata=0.12.7
+  - zarr=3.1.5
+  - numcodecs=0.16.5
+  - zstandard
+  - igraph
+  - python-igraph
+  - leidenalg
+  - scrublet
+  - kneed
+  - typer
+  - pydantic
+  - bbknn
+  - gseapy
+
+  # PyTorch / Lightning
+  - pytorch=2.5.1
+  - torchvision=0.20.1
+  - torchaudio=2.5.1
+  - pytorch-lightning=2.6.0
+
+  # Testing
+  - pytest
+
+  # Pin pip packages to the working Linux/HPC stack where needed.
+  - pip:
+      - scvi-tools==1.4.1
+      - lightning==2.6.0
+      - jax==0.8.2
+      - jaxlib==0.8.2
+      - scanorama
+      - harmonypy
+      - scib-metrics
+      - celltypist
+      - decoupler
+      - umap-learn
+      - requests
+      - types-pytz
+      - pydeseq2
+      - pertpy
+      - pybiomart
