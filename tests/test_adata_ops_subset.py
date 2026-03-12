@@ -9,6 +9,7 @@ import pytest
 
 from scomnom.adata_ops import (
     _dataset_stem_for_outputs,
+    annotation_merge_datasets,
     load_subset_mapping_tsv,
     subset_adata_by_cluster_mapping,
     subset_dataset_from_tsv,
@@ -50,6 +51,40 @@ def _make_test_adata() -> ad.AnnData:
         }
     }
     adata.uns["active_cluster_round"] = "r0"
+    return adata
+
+
+def _make_child_subset(
+    obs_names: list[str],
+    labels_obs_key: str,
+    pretty_key: str,
+    labels: list[str],
+    pretty_labels: list[str],
+    round_id: str,
+) -> ad.AnnData:
+    X = np.random.default_rng(1).normal(size=(len(obs_names), 4))
+    adata = ad.AnnData(X=X)
+    adata.obs_names = obs_names
+    adata.var_names = [f"g{i}" for i in range(4)]
+    adata.obs[labels_obs_key] = pd.Categorical(labels)
+    adata.obs[pretty_key] = pd.Categorical(pretty_labels)
+    adata.obs["cluster_label"] = adata.obs[pretty_key]
+    adata.uns["cluster_rounds"] = {
+        round_id: {
+            "labels_obs_key": labels_obs_key,
+            "cluster_key": "leiden",
+            "cluster_sizes": dict(pd.Series(labels).value_counts()),
+            "cluster_order": sorted(set(labels)),
+            "cluster_display_map": {
+                str(lbl): str(pretty)
+                for lbl, pretty in zip(labels, pretty_labels)
+            },
+            "annotation": {"pretty_cluster_key": pretty_key},
+            "round_type": "manual_rename",
+            "decoupler": {},
+        }
+    }
+    adata.uns["active_cluster_round"] = round_id
     return adata
 
 
@@ -153,3 +188,207 @@ def test_subset_dataset_from_tsv_uses_archive_stem_for_output_names(tmp_path: Pa
     )
 
     assert any("input__subset_immune.zarr" in path for path, _ in calls)
+
+
+def test_annotation_merge_creates_new_subset_annotation_round(tmp_path: Path, monkeypatch) -> None:
+    parent = _make_test_adata()
+    child = _make_child_subset(
+        ["cell0", "cell1"],
+        "leiden__r1",
+        "cluster_label__r1",
+        ["0", "1"],
+        ["C00: T cell", "C01: B cell"],
+        "r1_manual_rename",
+    )
+
+    def _fake_load_dataset(path):
+        path = Path(path)
+        if path.name == "parent.zarr":
+            return parent
+        if path.name == "child1.zarr":
+            return child
+        raise AssertionError(f"Unexpected path {path}")
+
+    calls: list[tuple[str, str]] = []
+
+    def _fake_save_dataset(in_adata, out_path, fmt="zarr"):
+        calls.append((str(out_path), str(fmt)))
+
+    monkeypatch.setattr("scomnom.adata_ops.load_dataset", _fake_load_dataset)
+    monkeypatch.setattr("scomnom.adata_ops.save_dataset", _fake_save_dataset)
+
+    out_paths, summary = annotation_merge_datasets(
+        tmp_path / "parent.zarr",
+        child_paths=[tmp_path / "child1.zarr"],
+        output_root=tmp_path / "results",
+        output_format="zarr",
+    )
+
+    assert set(out_paths.keys()) == {"merged"}
+    assert len(calls) == 1
+    assert summary.loc[0, "n_children"] == 1
+
+    new_round_id = parent.uns["active_cluster_round"]
+    assert new_round_id.endswith("_subset_annotation")
+    round_info = parent.uns["cluster_rounds"][new_round_id]
+    assert round_info["round_type"] == "subset_annotation"
+    assert round_info["subset_annotation"]["base_round_id"] == "r0"
+    assert round_info["annotation"]["pretty_cluster_key"] == f"cluster_label__{new_round_id}"
+
+    merged_labels = parent.obs[f"cluster_label__{new_round_id}"].astype(str).to_dict()
+    assert merged_labels["cell2"] == "C00: Stromal"
+    assert merged_labels["cell1"] == "C01: B cell"
+    assert merged_labels["cell0"] == "C02: T cell"
+
+
+def test_annotation_merge_updates_existing_subset_annotation_round(tmp_path: Path, monkeypatch) -> None:
+    parent = _make_test_adata()
+    child1 = _make_child_subset(
+        ["cell0", "cell1"],
+        "leiden__r1",
+        "cluster_label__r1",
+        ["0", "1"],
+        ["C00: T cell", "C01: B cell"],
+        "r1_manual_rename",
+    )
+    child2 = _make_child_subset(
+        ["cell4", "cell5"],
+        "leiden__r2",
+        "cluster_label__r2",
+        ["0", "0"],
+        ["C00: Endothelial refined", "C00: Endothelial refined"],
+        "r2_manual_rename",
+    )
+
+    datasets = {
+        "parent.zarr": parent,
+        "child1.zarr": child1,
+        "child2.zarr": child2,
+    }
+
+    def _fake_load_dataset(path):
+        return datasets[Path(path).name]
+
+    monkeypatch.setattr("scomnom.adata_ops.load_dataset", _fake_load_dataset)
+    monkeypatch.setattr("scomnom.adata_ops.save_dataset", lambda *args, **kwargs: None)
+
+    annotation_merge_datasets(
+        tmp_path / "parent.zarr",
+        child_paths=[tmp_path / "child1.zarr"],
+        output_root=tmp_path / "results",
+        output_format="zarr",
+    )
+    created_round_id = str(parent.uns["active_cluster_round"])
+
+    annotation_merge_datasets(
+        tmp_path / "parent.zarr",
+        child_paths=[tmp_path / "child2.zarr"],
+        output_root=tmp_path / "results",
+        output_format="zarr",
+        target_round_id=created_round_id,
+        update_existing_round=True,
+    )
+
+    updated = parent.obs[f"cluster_label__{created_round_id}"].astype(str).to_dict()
+    assert updated["cell1"].endswith("B cell")
+    assert updated["cell5"].endswith("Endothelial refined")
+    assert parent.uns["cluster_rounds"][created_round_id]["round_type"] == "subset_annotation"
+
+
+def test_annotation_merge_rejects_overlapping_children(tmp_path: Path, monkeypatch) -> None:
+    parent = _make_test_adata()
+    child1 = _make_child_subset(
+        ["cell0", "cell1"],
+        "leiden__r1",
+        "cluster_label__r1",
+        ["0", "1"],
+        ["C00: T cell", "C01: B cell"],
+        "r1_manual_rename",
+    )
+    child2 = _make_child_subset(
+        ["cell1", "cell4"],
+        "leiden__r2",
+        "cluster_label__r2",
+        ["0", "1"],
+        ["C00: X", "C01: Y"],
+        "r2_manual_rename",
+    )
+
+    def _fake_load_dataset(path):
+        return {
+            "parent.zarr": parent,
+            "child1.zarr": child1,
+            "child2.zarr": child2,
+        }[Path(path).name]
+
+    monkeypatch.setattr("scomnom.adata_ops.load_dataset", _fake_load_dataset)
+
+    with pytest.raises(ValueError, match="overlap"):
+        annotation_merge_datasets(
+            tmp_path / "parent.zarr",
+            child_paths=[tmp_path / "child1.zarr", tmp_path / "child2.zarr"],
+            output_root=tmp_path / "results",
+            output_format="zarr",
+        )
+
+
+def test_annotation_merge_emits_plots_in_merge_annotation_subfolder(tmp_path: Path, monkeypatch) -> None:
+    parent = _make_test_adata()
+    parent.obsm["X_umap"] = np.random.default_rng(2).normal(size=(parent.n_obs, 2))
+    parent.obsm["X_pca"] = np.random.default_rng(3).normal(size=(parent.n_obs, 3))
+    parent.obs["sample"] = pd.Categorical(["s1", "s1", "s1", "s2", "s2", "s2"])
+    parent.obs["n_genes_by_counts"] = [100, 120, 110, 90, 95, 105]
+    parent.obs["total_counts"] = [1000, 1100, 1050, 900, 950, 980]
+    parent.obs["pct_counts_mt"] = [1.0, 2.0, 1.5, 3.0, 2.5, 1.8]
+    child = _make_child_subset(
+        ["cell0", "cell1"],
+        "leiden__r1",
+        "cluster_label__r1",
+        ["0", "1"],
+        ["C00: T cell", "C01: B cell"],
+        "r1_manual_rename",
+    )
+
+    def _fake_load_dataset(path):
+        return {"parent.zarr": parent, "child1.zarr": child}[Path(path).name]
+
+    monkeypatch.setattr("scomnom.adata_ops.load_dataset", _fake_load_dataset)
+    monkeypatch.setattr("scomnom.adata_ops.save_dataset", lambda *args, **kwargs: None)
+
+    setup_calls: list[Path] = []
+    persisted: list[object] = []
+    plot_calls: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        "scomnom.adata_ops.plot_utils.setup_scanpy_figs",
+        lambda figdir, formats=None: setup_calls.append(Path(figdir)),
+    )
+    monkeypatch.setattr(
+        "scomnom.adata_ops.plot_utils.persist_plot_artifacts",
+        lambda artifacts: persisted.extend(list(artifacts)),
+    )
+
+    def _record(name):
+        def _inner(*args, **kwargs):
+            plot_calls.append((name, str(kwargs.get("figdir", args[-1]))))
+            return [name]
+        return _inner
+
+    monkeypatch.setattr("scomnom.adata_ops.plot_utils.plot_cluster_umaps", _record("umap"))
+    monkeypatch.setattr("scomnom.adata_ops.plot_utils.umap_by_two_legend_styles", _record("pretty_umap"))
+    monkeypatch.setattr("scomnom.adata_ops.plot_utils.plot_cluster_sizes", _record("sizes"))
+    monkeypatch.setattr("scomnom.adata_ops.plot_utils.plot_cluster_qc_summary", _record("qc"))
+    monkeypatch.setattr("scomnom.adata_ops.plot_utils.plot_cluster_silhouette_by_cluster", _record("silhouette"))
+    monkeypatch.setattr("scomnom.adata_ops.plot_utils.plot_cluster_batch_composition", _record("batch"))
+
+    annotation_merge_datasets(
+        tmp_path / "parent.zarr",
+        child_paths=[tmp_path / "child1.zarr"],
+        output_root=tmp_path / "results",
+        output_format="zarr",
+    )
+
+    round_id = str(parent.uns["active_cluster_round"])
+    assert setup_calls == [tmp_path / "results" / "figures"]
+    assert len(persisted) == 6
+    assert all(figdir == f"merge-annotation/{round_id}/clustering" for _, figdir in plot_calls)

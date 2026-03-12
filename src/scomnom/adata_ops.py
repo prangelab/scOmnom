@@ -7,10 +7,19 @@ from typing import Any
 
 import anndata as ad
 import pandas as pd
+import scanpy as sc
 
 from .clustering_utils import CLUSTER_LABEL_KEY
+from .clustering_utils import (
+    _cluster_order_by_size,
+    _create_shallow_round_from_parent,
+    _make_round_id,
+    _next_round_index,
+    set_active_round,
+)
 from .config import AdataOpsConfig
 from .io_utils import load_dataset, save_dataset, sanitize_identifier
+from . import plot_utils
 from .rename_utils import rename_idents
 
 LOGGER = logging.getLogger(__name__)
@@ -47,15 +56,6 @@ def _extract_cnn(label: str) -> str | None:
     if m2:
         return m2.group(1)
     return None
-
-
-def _cluster_order_by_size(labels: pd.Series) -> list[str]:
-    s = labels.astype(str)
-    vc = s.value_counts(dropna=False)
-    df = pd.DataFrame({"cluster": vc.index.astype(str), "n": vc.values.astype(int)})
-    df["cluster_sort"] = df["cluster"].astype(str)
-    df = df.sort_values(["n", "cluster_sort"], ascending=[False, True], kind="mergesort")
-    return df["cluster"].astype(str).tolist()
 
 
 def _resolve_pretty_label_series(adata: ad.AnnData, round_id: str | None = None) -> tuple[pd.Series, str]:
@@ -95,6 +95,59 @@ def _resolve_pretty_label_series(adata: ad.AnnData, round_id: str | None = None)
         "Could not resolve a pretty cluster label series for Cnn parsing. "
         "Expected active round annotation pretty key or adata.obs['cluster_label']."
     )
+
+
+def _resolve_round_id(adata: ad.AnnData, round_id: str | None = None) -> str:
+    rid = str(round_id) if round_id else None
+    if rid is None:
+        active = adata.uns.get("active_cluster_round", None)
+        rid = str(active) if active else None
+    if rid is None:
+        raise KeyError("No round_id provided and adata.uns['active_cluster_round'] is None.")
+    rounds = adata.uns.get("cluster_rounds", {})
+    if not isinstance(rounds, dict) or rid not in rounds:
+        raise KeyError(f"Round {rid!r} not found in adata.uns['cluster_rounds'].")
+    return rid
+
+
+def _resolve_round_pretty_key(adata: ad.AnnData, round_id: str | None = None) -> str:
+    rid = _resolve_round_id(adata, round_id)
+    rounds = adata.uns["cluster_rounds"]
+    rinfo = rounds[rid]
+    ann = rinfo.get("annotation", {}) if isinstance(rinfo.get("annotation", {}), dict) else {}
+    pretty_key = ann.get("pretty_cluster_key", None)
+    if pretty_key and str(pretty_key) in adata.obs:
+        return str(pretty_key)
+    fallback = f"{CLUSTER_LABEL_KEY}__{rid}"
+    if fallback in adata.obs:
+        return fallback
+    if CLUSTER_LABEL_KEY in adata.obs:
+        return CLUSTER_LABEL_KEY
+    raise KeyError(f"Could not resolve pretty label key for round {rid!r}.")
+
+
+def _extract_label_part(label: str) -> str:
+    s = str(label or "").strip()
+    if not s:
+        return "Unknown"
+    s = re.sub(r"^\s*C\d+\s*:\s*", "", s)
+    return s.strip() or "Unknown"
+
+
+def _resolve_child_source_series(
+    adata: ad.AnnData,
+    *,
+    round_id: str | None = None,
+    source_field: str | None = None,
+) -> tuple[pd.Series, str, str]:
+    rid = _resolve_round_id(adata, round_id)
+    if source_field is not None:
+        key = str(source_field)
+        if key not in adata.obs:
+            raise KeyError(f"Child source field {key!r} not found in adata.obs.")
+    else:
+        key = _resolve_round_pretty_key(adata, rid)
+    return adata.obs[key].astype(str), key, rid
 
 
 def _refresh_round_metadata_after_subset(adata: ad.AnnData) -> None:
@@ -147,6 +200,342 @@ def _refresh_round_metadata_after_subset(adata: ad.AnnData) -> None:
         rounds[rid] = rinfo
 
     adata.uns["cluster_rounds"] = rounds
+
+
+def _rebuild_standard_round_columns(
+    adata: ad.AnnData,
+    *,
+    round_id: str,
+    label_parts: pd.Series,
+    merge_meta: dict[str, Any],
+) -> None:
+    rounds = adata.uns.get("cluster_rounds", {})
+    if not isinstance(rounds, dict) or round_id not in rounds:
+        raise KeyError(f"Round {round_id!r} not found in adata.uns['cluster_rounds'].")
+
+    rinfo = rounds[round_id]
+    cluster_key = str(rinfo.get("cluster_key", "leiden"))
+    labels_obs_key = str(rinfo.get("labels_obs_key", f"{cluster_key}__{round_id}"))
+    pretty_key = f"{CLUSTER_LABEL_KEY}__{round_id}"
+
+    parts = label_parts.reindex(adata.obs_names).fillna("Unknown").astype(str)
+    label_order = _cluster_order_by_size(parts)
+    raw_cluster_order = [str(i) for i in range(len(label_order))]
+    label_to_raw = {label: raw_id for raw_id, label in zip(raw_cluster_order, label_order)}
+    raw_to_ccode = {raw_id: f"C{i:02d}" for i, raw_id in enumerate(raw_cluster_order)}
+
+    raw_labels = parts.map(label_to_raw)
+    pretty_labels = raw_labels.map(
+        lambda raw_id: f"{raw_to_ccode[str(raw_id)]}: {label_order[int(str(raw_id))]}"
+    )
+    display_map = {
+        raw_id: f"{raw_to_ccode[raw_id]}: {label_order[int(raw_id)]}"
+        for raw_id in raw_cluster_order
+    }
+    cluster_sizes = {
+        raw_id: int((raw_labels == raw_id).sum())
+        for raw_id in raw_cluster_order
+    }
+
+    adata.obs[labels_obs_key] = pd.Categorical(raw_labels.astype(str), categories=raw_cluster_order)
+    adata.obs[pretty_key] = pd.Categorical(
+        pretty_labels.astype(str),
+        categories=[display_map[raw_id] for raw_id in raw_cluster_order],
+    )
+    adata.obs[CLUSTER_LABEL_KEY] = adata.obs[pretty_key]
+
+    try:
+        from scanpy.plotting.palettes import default_102
+
+        colors = list(default_102[: len(raw_cluster_order)])
+        adata.uns[f"{pretty_key}_colors"] = colors
+        adata.uns[f"{CLUSTER_LABEL_KEY}_colors"] = colors
+    except Exception as e:
+        LOGGER.warning("Could not set pretty-label palette for annotation merge: %s", e)
+
+    rinfo["labels_obs_key"] = labels_obs_key
+    rinfo["round_type"] = "subset_annotation"
+    rinfo["cluster_sizes"] = cluster_sizes
+    rinfo["cluster_order"] = list(raw_cluster_order)
+    rinfo["cluster_display_map"] = dict(display_map)
+    rinfo["cluster_id_map"] = {raw_id: raw_id for raw_id in raw_cluster_order}
+    rinfo["cluster_renumbering"] = {raw_id: raw_id for raw_id in raw_cluster_order}
+    rinfo["decoupler"] = {}
+    rinfo["qc"] = {}
+    rinfo["stability"] = {}
+    rinfo["diagnostics"] = {}
+    rinfo.setdefault("annotation", {})
+    rinfo["annotation"]["pretty_cluster_key"] = pretty_key
+    rinfo["annotation"]["cluster_key_used"] = labels_obs_key
+    rinfo["subset_annotation"] = dict(merge_meta)
+    rounds[round_id] = rinfo
+    adata.uns["cluster_rounds"] = rounds
+    set_active_round(adata, round_id, publish_decoupler=False)
+
+
+def _resolve_batch_key_for_plots(adata: ad.AnnData) -> str | None:
+    candidates: list[str] = []
+    uns_batch = adata.uns.get("batch_key", None)
+    if uns_batch is not None:
+        candidates.append(str(uns_batch))
+    candidates.extend(["sample_id", "sample", "batch", "donor"])
+    for key in candidates:
+        if key in adata.obs:
+            return str(key)
+    return None
+
+
+def _ensure_umap_for_annotation_merge(adata: ad.AnnData) -> None:
+    if "X_umap" in adata.obsm:
+        return
+    for embedding_key in ("X_integrated", "X_scANVI", "X_scVI", "X_pca", "Unintegrated"):
+        if embedding_key not in adata.obsm:
+            continue
+        try:
+            sc.pp.neighbors(adata, use_rep=embedding_key)
+            sc.tl.umap(adata)
+            LOGGER.info("annotation-merge: computed UMAP from %s", embedding_key)
+            return
+        except Exception as e:
+            LOGGER.warning("annotation-merge: failed to compute UMAP from %s (%s)", embedding_key, e)
+    LOGGER.info("annotation-merge: no usable embedding found for UMAP plot generation.")
+
+
+def _emit_annotation_merge_plots(
+    adata: ad.AnnData,
+    *,
+    output_root: Path,
+    round_id: str,
+) -> None:
+    figures_root = output_root / "figures"
+    plot_utils.setup_scanpy_figs(figures_root)
+    figdir = Path("merge-annotation") / round_id / "clustering"
+    pretty_key = f"{CLUSTER_LABEL_KEY}__{round_id}"
+    label_key = pretty_key if pretty_key in adata.obs else str(
+        adata.uns.get("cluster_rounds", {}).get(round_id, {}).get("labels_obs_key", CLUSTER_LABEL_KEY)
+    )
+    batch_key = _resolve_batch_key_for_plots(adata)
+
+    artifacts = []
+    _ensure_umap_for_annotation_merge(adata)
+    if "X_umap" in adata.obsm:
+        try:
+            artifacts.extend(
+                plot_utils.plot_cluster_umaps(
+                    adata=adata,
+                    label_key=label_key,
+                    batch_key=batch_key,
+                    figdir=figdir,
+                )
+            )
+        except Exception as e:
+            LOGGER.warning("annotation-merge: failed to create UMAP plots (%s)", e)
+        if pretty_key in adata.obs:
+            try:
+                artifacts.extend(
+                    plot_utils.umap_by_two_legend_styles(
+                        adata,
+                        key=pretty_key,
+                        figdir=figdir,
+                        stem="umap_pretty_cluster_label",
+                        title=pretty_key,
+                    )
+                )
+            except Exception as e:
+                LOGGER.warning("annotation-merge: failed to create pretty-label UMAP plots (%s)", e)
+
+    try:
+        artifacts.extend(plot_utils.plot_cluster_sizes(adata, label_key, figdir))
+    except Exception as e:
+        LOGGER.warning("annotation-merge: failed to create cluster size plot (%s)", e)
+
+    if all(col in adata.obs for col in ("n_genes_by_counts", "total_counts", "pct_counts_mt")):
+        try:
+            artifacts.extend(plot_utils.plot_cluster_qc_summary(adata, label_key, figdir))
+        except Exception as e:
+            LOGGER.warning("annotation-merge: failed to create cluster QC summary (%s)", e)
+
+    embedding_key = None
+    for candidate in ("X_integrated", "X_scANVI", "X_scVI", "X_pca", "Unintegrated", "X_umap"):
+        if candidate in adata.obsm:
+            embedding_key = candidate
+            break
+    if embedding_key is not None:
+        try:
+            artifacts.extend(
+                plot_utils.plot_cluster_silhouette_by_cluster(
+                    adata,
+                    label_key,
+                    embedding_key,
+                    figdir,
+                )
+            )
+        except Exception as e:
+            LOGGER.warning("annotation-merge: failed to create silhouette plot (%s)", e)
+
+    if batch_key is not None:
+        try:
+            artifacts.extend(plot_utils.plot_cluster_batch_composition(adata, label_key, batch_key, figdir))
+        except Exception as e:
+            LOGGER.warning("annotation-merge: failed to create batch composition plot (%s)", e)
+
+    plot_utils.persist_plot_artifacts(artifacts)
+
+
+def annotation_merge_datasets(
+    parent_or_path: ad.AnnData | Path | str,
+    *,
+    child_paths: Sequence[Path | str],
+    output_root: Path | str,
+    output_format: str | None = None,
+    round_id: str | None = None,
+    child_round_id: str | None = None,
+    child_source_field: str | None = None,
+    target_round_id: str | None = None,
+    update_existing_round: bool = False,
+    annotation_merge_round_name: str = "subset_annotation",
+) -> tuple[dict[str, Path], pd.DataFrame]:
+    source_path: Path | None = None
+    if isinstance(parent_or_path, ad.AnnData):
+        adata = parent_or_path
+        dataset_stem = "adata"
+    else:
+        source_path = Path(parent_or_path)
+        adata = load_dataset(source_path)
+        dataset_stem = _dataset_stem_for_outputs(source_path)
+
+    if not child_paths:
+        raise ValueError("annotation-merge requires at least one child dataset path.")
+
+    child_paths_resolved = [Path(p) for p in child_paths]
+    fmt = str(output_format).lower().strip() if output_format else None
+    if fmt is None:
+        if source_path is not None and source_path.suffix.lower() == ".h5ad":
+            fmt = "h5ad"
+        else:
+            fmt = "zarr"
+    if fmt not in {"zarr", "h5ad"}:
+        raise ValueError("output_format must be 'zarr' or 'h5ad'.")
+
+    if update_existing_round:
+        if not target_round_id:
+            raise ValueError("update_existing_round=True requires target_round_id.")
+        working_round_id = _resolve_round_id(adata, target_round_id)
+        rounds = adata.uns["cluster_rounds"]
+        rinfo = rounds[working_round_id]
+        if str(rinfo.get("round_type", "")) != "subset_annotation":
+            raise ValueError(f"target_round_id {working_round_id!r} is not a subset_annotation round.")
+        base_round_id = working_round_id
+    else:
+        base_round_id = _resolve_round_id(adata, round_id)
+        base_rinfo = adata.uns["cluster_rounds"][base_round_id]
+        if target_round_id is not None:
+            raise ValueError("target_round_id can only be used with update_existing_round=True.")
+        next_round_id = _make_round_id(_next_round_index(adata), annotation_merge_round_name)
+        labels_obs_key_new = f"{base_rinfo.get('cluster_key', 'leiden')}__{next_round_id}"
+        if labels_obs_key_new in adata.obs:
+            raise ValueError(f"labels_obs_key '{labels_obs_key_new}' already exists in adata.obs.")
+        parent_labels_obs_key = str(base_rinfo.get("labels_obs_key", base_rinfo.get("cluster_key", "leiden")))
+        adata.obs[labels_obs_key_new] = adata.obs[parent_labels_obs_key].astype(str).astype("category")
+        working_round_id = _create_shallow_round_from_parent(
+            adata,
+            parent_round_id=base_round_id,
+            round_name=annotation_merge_round_name,
+            new_round_id=next_round_id,
+            round_type="subset_annotation",
+            kind="SUBSET_ANNOTATION",
+            notes="Subset annotation overlay from child objects.",
+            set_active=False,
+            cluster_key=str(base_rinfo.get("cluster_key", "leiden")),
+            labels_obs_key=labels_obs_key_new,
+            inherit_fields=("annotation",),
+        )
+
+    base_pretty_series, base_pretty_key = _resolve_pretty_label_series(adata, round_id=base_round_id)
+    merged_parts = base_pretty_series.map(_extract_label_part).astype(str).copy()
+
+    child_rows: list[dict[str, Any]] = []
+    seen_cells: set[str] = set()
+
+    for child_path in child_paths_resolved:
+        child = load_dataset(child_path)
+        child_series, child_key_used, child_resolved_round_id = _resolve_child_source_series(
+            child,
+            round_id=child_round_id,
+            source_field=child_source_field,
+        )
+        child_cells = [str(x) for x in child.obs_names.tolist()]
+        child_cell_set = set(child_cells)
+        missing = sorted(child_cell_set - set(map(str, adata.obs_names.tolist())))
+        if missing:
+            raise ValueError(
+                f"Child dataset {child_path} contains cells absent from parent: {','.join(missing[:10])}"
+            )
+        overlap = sorted(seen_cells & child_cell_set)
+        if overlap:
+            raise ValueError(
+                f"Child datasets overlap on parent cells: {','.join(overlap[:10])}"
+            )
+        seen_cells.update(child_cell_set)
+        merged_parts.loc[child.obs_names] = child_series.map(_extract_label_part).astype(str).values
+        child_rows.append(
+            {
+                "child_path": str(child_path),
+                "child_round_id": str(child_resolved_round_id),
+                "child_source_field": str(child_key_used),
+                "n_cells": int(child.n_obs),
+            }
+        )
+
+    merge_meta = {
+        "base_round_id": str(base_round_id),
+        "child_round_id": None if child_round_id is None else str(child_round_id),
+        "child_source_field": (
+            str(child_source_field)
+            if child_source_field is not None
+            else "annotation.pretty_cluster_key"
+        ),
+        "n_children": int(len(child_rows)),
+        "n_overlay_cells": int(len(seen_cells)),
+        "children": child_rows,
+    }
+    _rebuild_standard_round_columns(
+        adata,
+        round_id=working_round_id,
+        label_parts=merged_parts,
+        merge_meta=merge_meta,
+    )
+
+    output_root = Path(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+    _emit_annotation_merge_plots(
+        adata,
+        output_root=output_root,
+        round_id=working_round_id,
+    )
+    safe_round = sanitize_identifier(working_round_id, max_len=80, allow_spaces=False)
+    out_path = output_root / f"{dataset_stem}__annotation_merge_{safe_round}.{fmt}"
+    save_dataset(adata, out_path, fmt=fmt)
+
+    summary_df = pd.DataFrame(
+        [
+            {
+                "round_id": str(working_round_id),
+                "base_round_id": str(base_round_id),
+                "n_children": int(len(child_rows)),
+                "n_overlay_cells": int(len(seen_cells)),
+                "output_path": str(out_path),
+            }
+        ]
+    )
+    LOGGER.info(
+        "annotation-merge: round=%s base=%s children=%d overlay_cells=%d",
+        working_round_id,
+        base_round_id,
+        len(child_rows),
+        len(seen_cells),
+    )
+    return {"merged": out_path}, summary_df
 
 
 def load_subset_mapping_tsv(path: Path | str) -> dict[str, list[str]]:
@@ -310,12 +699,27 @@ def subset_dataset_from_tsv(
 
 def run_adata_ops(cfg: AdataOpsConfig) -> tuple[dict[str, Path], pd.DataFrame]:
     op = str(cfg.operation).strip().lower()
-    if op != "subset":
-        raise ValueError(f"Unsupported adata-ops operation: {cfg.operation!r}")
-    return subset_dataset_from_tsv(
-        cfg.input_path,
-        cfg.subset_mapping_tsv,
-        output_root=cfg.resolved_output_dir,
-        output_format=cfg.output_format,
-        round_id=cfg.round_id,
-    )
+    if op == "subset":
+        if cfg.subset_mapping_tsv is None:
+            raise ValueError("subset operation requires subset_mapping_tsv.")
+        return subset_dataset_from_tsv(
+            cfg.input_path,
+            cfg.subset_mapping_tsv,
+            output_root=cfg.resolved_output_dir,
+            output_format=cfg.output_format,
+            round_id=cfg.round_id,
+        )
+    if op == "annotation_merge":
+        return annotation_merge_datasets(
+            cfg.input_path,
+            child_paths=cfg.child_paths,
+            output_root=cfg.resolved_output_dir,
+            output_format=cfg.output_format,
+            round_id=cfg.round_id,
+            child_round_id=cfg.child_round_id,
+            child_source_field=cfg.child_source_field,
+            target_round_id=cfg.target_round_id,
+            update_existing_round=cfg.update_existing_round,
+            annotation_merge_round_name=cfg.annotation_merge_round_name,
+        )
+    raise ValueError(f"Unsupported adata-ops operation: {cfg.operation!r}")

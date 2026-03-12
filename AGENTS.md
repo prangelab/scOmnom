@@ -52,3 +52,6 @@ These rules are persistent for all threads and apply across the whole project.
 
 ## Change Reporting (mandatory)
 - Always include file paths and line numbers for any code changes you make, so I can verify quickly.
+
+## Environment Notes
+- On the HPC, the project environment is managed with `micromamba` rather than `conda`. Keep that in mind when comparing or reproducing environments across HPC and local macOS setups.

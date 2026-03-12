@@ -211,6 +211,7 @@ def test_adata_ops_help():
     assert result.exit_code == 0
     assert "AnnData object operations" in result.output
     assert "subset" in result.output
+    assert "annotation-merge" in result.output
 
 
 def test_adata_ops_subset_requires_mapping():
@@ -244,3 +245,27 @@ def test_adata_ops_dispatch(mock_run):
     assert cfg.input_path == "adata.h5ad"
     assert cfg.subset_mapping_tsv == "mapping.tsv"
     assert cfg.output_format == "zarr"
+
+
+@patch("scomnom.cli.run_adata_ops")
+def test_adata_ops_annotation_merge_dispatch(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "adata-ops",
+            "annotation-merge",
+            "--input-path", "adata.h5ad",
+            "--child-path", "child1.h5ad",
+            "--child-path", "child2.h5ad",
+            "--update-existing-round",
+            "--target-round-id", "r4_subset_annotation",
+        ],
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert str(cfg.input_path) == "adata.h5ad"
+    assert cfg.operation == "annotation_merge"
+    assert tuple(map(str, cfg.child_paths)) == ("child1.h5ad", "child2.h5ad")
+    assert cfg.update_existing_round is True
+    assert cfg.target_round_id == "r4_subset_annotation"

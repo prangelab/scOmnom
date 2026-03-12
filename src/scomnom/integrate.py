@@ -465,11 +465,10 @@ def _create_projection_round_for_secondary_integration(
     """
     # local import to avoid circulars
     from .clustering_utils import (
+        _create_shallow_round_from_parent,
         _ensure_cluster_rounds,
-        _next_round_index,
         _make_round_id,
-        _register_round,
-        set_active_round,
+        _next_round_index,
     )
 
     _ensure_cluster_rounds(adata)
@@ -484,38 +483,23 @@ def _create_projection_round_for_secondary_integration(
     idx = _next_round_index(adata)
     new_round_id = _make_round_id(idx, "secondary_integration_projection")
 
-    # Register skeleton
-    _register_round(
+    _create_shallow_round_from_parent(
         adata,
-        round_id=new_round_id,
+        parent_round_id=str(parent_round_id),
+        round_name="secondary_integration_projection",
+        new_round_id=new_round_id,
+        round_type="projection",
+        kind="secondary_integration_projection",
+        notes=f"Projection round after secondary annotated integration; integration_key={integration_key}",
+        set_active=False,
         cluster_key=cluster_key,
         labels_obs_key=labels_obs_key,
-        kind="secondary_integration_projection",
-        best_resolution=parent.get("best_resolution", None),
-        sweep=parent.get("sweep", None),
-        cfg_snapshot=parent.get("cfg", None),
-        parent_round_id=str(parent_round_id),
-        notes=f"Projection round after secondary annotated integration; integration_key={integration_key}",
-        cluster_id_map=parent.get("cluster_id_map", None),
-        cluster_renumbering=parent.get("cluster_renumbering", None),
-        cache_labels=False,
-        compacting=parent.get("compacting", None),
     )
 
     # Overwrite the auto-created empty slots with inherited info
     rounds = adata.uns.get("cluster_rounds", {})
     if isinstance(rounds, dict) and new_round_id in rounds:
         rnew = rounds[new_round_id]
-        # inherit the rich payloads
-        for field in ("annotation", "decoupler", "qc", "stability", "diagnostics", "inputs", "bio_mask", "cluster_order", "cluster_display_map", "cluster_sizes"):
-            if field in parent:
-                try:
-                    rnew[field] = parent[field]
-                except Exception:
-                    pass
-
-        # mark as projection + record embedding linkage
-        rnew["round_type"] = "projection"
         rnew.setdefault("inputs", {})
         if isinstance(rnew["inputs"], dict):
             rnew["inputs"]["secondary_integration_embedding_key"] = str(integration_key)
@@ -523,7 +507,8 @@ def _create_projection_round_for_secondary_integration(
         rounds[new_round_id] = rnew
         adata.uns["cluster_rounds"] = rounds
 
-    # activate it so downstream tools "see" this as latest state
+    from .clustering_utils import set_active_round
+
     set_active_round(adata, new_round_id, publish_decoupler=False)
     return str(new_round_id)
 

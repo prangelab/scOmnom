@@ -69,6 +69,20 @@ def _make_round_id(idx: int, suffix: str) -> str:
     return f"r{idx}_{suffix}"
 
 
+def _cluster_order_by_size(labels: pd.Series) -> list[str]:
+    """
+    Return cluster ids ordered by:
+      1) descending size
+      2) stable tie-break by cluster id (string)
+    """
+    s = labels.astype(str)
+    vc = s.value_counts(dropna=False)
+    df = pd.DataFrame({"cluster": vc.index.astype(str), "n": vc.values.astype(int)})
+    df["cluster_sort"] = df["cluster"].astype(str)
+    df = df.sort_values(["n", "cluster_sort"], ascending=[False, True], kind="mergesort")
+    return df["cluster"].astype(str).tolist()
+
+
 def _register_round(
     adata: ad.AnnData,
     *,
@@ -156,6 +170,105 @@ def _register_round(
         adata.uns["cluster_round_order"].append(round_id)
 
     adata.uns["active_cluster_round"] = round_id
+
+
+def _create_shallow_round_from_parent(
+    adata: ad.AnnData,
+    *,
+    parent_round_id: str,
+    round_name: str,
+    new_round_id: str | None = None,
+    round_type: str,
+    kind: str,
+    notes: str | None = None,
+    set_active: bool = True,
+    cluster_key: str | None = None,
+    labels_obs_key: str | None = None,
+    best_resolution: float | None = None,
+    sweep: dict | None = None,
+    cfg_snapshot: dict | None = None,
+    cluster_id_map: dict[str, str] | None = None,
+    cluster_renumbering: dict[str, str] | None = None,
+    compacting: dict | None = None,
+    inherit_fields: Sequence[str] = (
+        "annotation",
+        "decoupler",
+        "qc",
+        "stability",
+        "diagnostics",
+        "inputs",
+        "bio_mask",
+        "cluster_order",
+        "cluster_display_map",
+        "cluster_sizes",
+    ),
+) -> str:
+    _ensure_cluster_rounds(adata)
+    rounds = adata.uns.get("cluster_rounds", {})
+    if not isinstance(rounds, dict) or parent_round_id not in rounds:
+        raise KeyError(f"Parent round {parent_round_id!r} not found in adata.uns['cluster_rounds'].")
+
+    parent = rounds[parent_round_id]
+    if not isinstance(parent, dict):
+        raise TypeError(f"Parent round {parent_round_id!r} must be a dict.")
+
+    cluster_key_use = str(cluster_key or parent.get("cluster_key", "leiden"))
+    labels_obs_key_use = str(labels_obs_key or parent.get("labels_obs_key", cluster_key_use))
+
+    if labels_obs_key_use not in adata.obs:
+        raise KeyError(f"labels_obs_key '{labels_obs_key_use}' not found in adata.obs.")
+
+    if new_round_id is None:
+        idx = _next_round_index(adata)
+        new_round_id = _make_round_id(idx, round_name)
+
+    prev_active_round = adata.uns.get("active_cluster_round", None)
+    _register_round(
+        adata,
+        round_id=str(new_round_id),
+        parent_round_id=str(parent_round_id),
+        cluster_key=cluster_key_use,
+        labels_obs_key=labels_obs_key_use,
+        kind=str(kind),
+        best_resolution=parent.get("best_resolution", None) if best_resolution is None else best_resolution,
+        sweep=parent.get("sweep", None) if sweep is None else sweep,
+        cfg_snapshot=parent.get("cfg", None) if cfg_snapshot is None else cfg_snapshot,
+        notes=notes,
+        cluster_id_map=parent.get("cluster_id_map", None) if cluster_id_map is None else cluster_id_map,
+        cluster_renumbering=(
+            parent.get("cluster_renumbering", None)
+            if cluster_renumbering is None
+            else cluster_renumbering
+        ),
+        compacting=parent.get("compacting", None) if compacting is None else compacting,
+        cache_labels=False,
+    )
+
+    rounds = adata.uns.get("cluster_rounds", {})
+    if isinstance(rounds, dict) and new_round_id in rounds and isinstance(rounds[new_round_id], dict):
+        rnew = rounds[new_round_id]
+        for field in inherit_fields:
+            if field in parent:
+                try:
+                    value = parent[field]
+                    if isinstance(value, dict):
+                        rnew[field] = dict(value)
+                    elif isinstance(value, list):
+                        rnew[field] = list(value)
+                    else:
+                        rnew[field] = value
+                except Exception:
+                    pass
+        rnew["round_type"] = str(round_type)
+        rounds[new_round_id] = rnew
+        adata.uns["cluster_rounds"] = rounds
+
+    if set_active:
+        set_active_round(adata, str(new_round_id), publish_decoupler=False)
+    else:
+        adata.uns["active_cluster_round"] = prev_active_round
+
+    return str(new_round_id)
 
 
 def set_active_round(
@@ -336,19 +449,6 @@ def _run_celltypist_annotation(
     # --------------------------------------------------------------
     # Helper: stable "Leiden-style" cluster ordering by size
     # --------------------------------------------------------------
-    def _cluster_order_by_size(labels: pd.Series) -> list[str]:
-        """
-        Return cluster ids ordered by:
-          1) descending size
-          2) stable tie-break by cluster id (string)
-        """
-        s = labels.astype(str)
-        vc = s.value_counts(dropna=False)  # desc by default
-        df = pd.DataFrame({"cluster": vc.index.astype(str), "n": vc.values.astype(int)})
-        df["cluster_sort"] = df["cluster"].astype(str)
-        df = df.sort_values(["n", "cluster_sort"], ascending=[False, True], kind="mergesort")
-        return df["cluster"].astype(str).tolist()
-
     # --------------------------------------------------------------
     # A) CellTypist predictions (cell-level + probabilities) - BEST EFFORT
     #    If unavailable, we fill cell_key with "Unknown".
@@ -1485,14 +1585,6 @@ def create_manual_rename_round(
         else:
             parent_pretty_key = None
 
-    def _cluster_order_by_size(labels: pd.Series) -> list[str]:
-        s = labels.astype(str)
-        vc = s.value_counts(dropna=False)
-        df = pd.DataFrame({"cluster": vc.index.astype(str), "n": vc.values.astype(int)})
-        df["cluster_sort"] = df["cluster"].astype(str)
-        df = df.sort_values(["n", "cluster_sort"], ascending=[False, True], kind="mergesort")
-        return df["cluster"].astype(str).tolist()
-
     clust_vals = adata.obs[labels_obs_key].astype(str)
 
     cluster_order = parent.get("cluster_order", None)
@@ -1562,21 +1654,24 @@ def create_manual_rename_round(
 
     identity_map = {str(c): str(c) for c in pd.unique(clust_vals.astype(str))}
 
-    _register_round(
+    new_round_id = _create_shallow_round_from_parent(
         adata,
-        round_id=str(new_round_id),
         parent_round_id=str(parent_round_id),
+        round_name=round_name,
+        new_round_id=new_round_id,
+        round_type="manual_rename",
+        kind="MANUAL_RENAME",
+        notes=notes,
+        set_active=False,
         cluster_key=str(parent.get("cluster_key", CLUSTER_LABEL_KEY)),
         labels_obs_key=labels_obs_key,
-        kind="MANUAL_RENAME",
         best_resolution=None,
         sweep=None,
         cfg_snapshot=None,
-        notes=notes,
         cluster_id_map=identity_map,
         cluster_renumbering={str(c): str(c) for c in sorted(set(identity_map.values()))},
-        compacting=None,
-        cache_labels=False,
+        compacting={},
+        inherit_fields=(),
     )
 
     rounds = adata.uns.get("cluster_rounds", {})

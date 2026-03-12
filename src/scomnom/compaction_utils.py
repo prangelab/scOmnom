@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 from scomnom.annotation_utils import ensure_round_msigdb_activity_by_gmt
-from .clustering_utils import _ensure_cluster_rounds, _register_round
+from .clustering_utils import _create_shallow_round_from_parent, _ensure_cluster_rounds
 
 LOGGER = logging.getLogger(__name__)
 
@@ -694,19 +694,22 @@ def create_compacted_round_from_parent_round(
     except Exception:
         cfg_snapshot = None
 
-    _register_round(
+    _create_shallow_round_from_parent(
         adata,
-        round_id=new_round_id,
-        parent_round_id=parent_round_id,
+        parent_round_id=str(parent_round_id),
+        round_name=str(new_round_id).split("_", 1)[1] if "_" in str(new_round_id) else "compacted",
+        new_round_id=str(new_round_id),
+        round_type="compaction",
+        kind="COMPACTED",
+        notes=notes,
+        set_active=True,
         cluster_key=str(parent_cluster_key),
         labels_obs_key=str(labels_obs_key_new),
-        kind="COMPACTED",
         best_resolution=None,
         sweep=None,
         cfg_snapshot=cfg_snapshot,
-        notes=notes,
         cluster_id_map=dict(outputs.cluster_id_map),
         cluster_renumbering=dict(outputs.cluster_renumbering),
         compacting=compacting_payload,
-        cache_labels=False,
+        inherit_fields=(),
     )

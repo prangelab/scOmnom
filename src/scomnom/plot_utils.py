@@ -151,7 +151,9 @@ def _normalize_color(value) -> str | tuple:
 
 def _cluster_color_map(adata, label_key: str) -> dict[str, str | tuple]:
     palette = adata.uns.get(f"{label_key}_colors", None)
-    if not palette:
+    if palette is None:
+        return {}
+    if isinstance(palette, (list, tuple, np.ndarray, pd.Series, pd.Index)) and len(palette) == 0:
         return {}
     if isinstance(palette, dict):
         return {str(k): _normalize_color(v) for k, v in palette.items()}

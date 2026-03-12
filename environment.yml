@@ -52,9 +52,7 @@ dependencies:
   - torchaudio
   - pytorch-lightning
 
-  # GPU acceleration:
-  # On macOS: Metal/MPS enabled automatically. Comment out or remove the next line (pytorch-cuda)
-  # On Linux (NVIDIA GPU) keep the next line to install pytorch-cuda. (adjust version as needed)
+  # GPU acceleration for Linux/NVIDIA environments
   - pytorch-cuda=12.4
 
   # Testing

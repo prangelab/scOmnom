@@ -16,16 +16,33 @@ At its current stage, `scOmnom` provides a multi-stage pipeline:
 
 ## Installation
 
-`scOmnom` is installed into a dedicated conda environment defined in `environment.yml`.
+`scOmnom` is installed into a dedicated environment defined in a platform-specific YAML file.
 
-### 1) Create the conda environment
+### 1) Create the environment
 
-Before creating the environment, **Linux users with NVIDIA GPUs should inspect `environment.yml` and uncomment the `pytorch-cuda` line**, adjusting the CUDA version if needed to match their driver.
+Use the YAML that matches your platform:
+
+- Linux/HPC: `environment_linux.yml`
+- macOS (Apple Silicon / MPS): `environment_macos.yml`
 
 From the repository root:
 
 ```bash
-conda env create -f environment.yml
+conda env create -f environment_linux.yml
+conda activate scOmnom_env
+```
+
+On the HPC, the equivalent `micromamba` flow is:
+
+```bash
+micromamba create -f environment_linux.yml
+micromamba activate scOmnom_env
+```
+
+On macOS, create the environment with:
+
+```bash
+conda env create -f environment_macos.yml
 conda activate scOmnom_env
 ```
 

@@ -679,6 +679,87 @@ def adata_ops_subset(
     run_adata_ops(cfg)
 
 
+@adata_ops_app.command(
+    "annotation-merge",
+    help="Overlay one or more subset child annotation rounds back into a parent dataset.",
+)
+def adata_ops_annotation_merge(
+    input_path: Path = typer.Option(
+        ...,
+        "--input-path",
+        "-i",
+        help="[I/O] Parent dataset (.zarr, .zarr.tar.zst, or .h5ad).",
+    ),
+    child_paths: List[Path] = typer.Option(
+        ...,
+        "--child-path",
+        help="[Merge] Child subset dataset path. Repeat for multiple children.",
+    ),
+    output_dir: Optional[Path] = typer.Option(
+        None,
+        "--output-dir",
+        "-o",
+        help="[I/O] Output directory (default: input parent).",
+    ),
+    output_format: Optional[Literal["zarr", "h5ad"]] = typer.Option(
+        None,
+        "--output-format",
+        help="[I/O] Output format for merged dataset. Default: match input when possible.",
+    ),
+    round_id: Optional[str] = typer.Option(
+        None,
+        "--round-id",
+        help="[Merge] Base parent round id. Default: active_cluster_round.",
+    ),
+    child_round_id: Optional[str] = typer.Option(
+        None,
+        "--child-round-id",
+        help="[Merge] Child round id to read from each child dataset. Default: active_cluster_round.",
+    ),
+    child_source_field: Optional[str] = typer.Option(
+        None,
+        "--child-source-field",
+        help="[Merge] Explicit child obs field to overlay. Default: child round pretty_cluster_key.",
+    ),
+    target_round_id: Optional[str] = typer.Option(
+        None,
+        "--target-round-id",
+        help="[Merge] Existing subset_annotation round to update.",
+    ),
+    update_existing_round: bool = typer.Option(
+        False,
+        "--update-existing-round",
+        help="[Merge] Update an existing subset_annotation round instead of creating a new one.",
+    ),
+    annotation_merge_round_name: str = typer.Option(
+        "subset_annotation",
+        "--annotation-merge-round-name",
+        help="[Merge] Suffix for a newly created annotation-merge round.",
+    ),
+):
+    out_dir = output_dir or input_path.parent
+    log_dir = out_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    logfile = log_dir / "adata-ops.log"
+    init_logging(logfile)
+
+    cfg = AdataOpsConfig(
+        input_path=input_path,
+        output_dir=out_dir,
+        operation="annotation_merge",
+        output_format=output_format,
+        round_id=round_id,
+        child_paths=tuple(child_paths),
+        child_round_id=child_round_id,
+        child_source_field=child_source_field,
+        target_round_id=target_round_id,
+        update_existing_round=update_existing_round,
+        annotation_merge_round_name=annotation_merge_round_name,
+        logfile=logfile,
+    )
+    run_adata_ops(cfg)
+
+
 # ======================================================================
 #  cluster-and-annotate
 # ======================================================================

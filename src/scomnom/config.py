@@ -260,10 +260,16 @@ class IntegrateConfig(BaseModel):
 class AdataOpsConfig(BaseModel):
     input_path: Path
     output_dir: Optional[Path] = None
-    operation: Literal["subset"] = "subset"
-    subset_mapping_tsv: Path
+    operation: Literal["subset", "annotation_merge"] = "subset"
+    subset_mapping_tsv: Optional[Path] = None
     output_format: Optional[Literal["zarr", "h5ad"]] = None
     round_id: Optional[str] = None
+    child_paths: Tuple[Path, ...] = ()
+    child_round_id: Optional[str] = None
+    child_source_field: Optional[str] = None
+    target_round_id: Optional[str] = None
+    update_existing_round: bool = False
+    annotation_merge_round_name: str = "subset_annotation"
     logfile: Optional[Path] = None
 
     @property
