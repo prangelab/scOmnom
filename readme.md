@@ -58,6 +58,20 @@ pip install -e .
 
 This registers the `scomnom` command-line interface and ensures local code changes take effect immediately.
 
+### Optional: run with a memory guard on macOS
+
+For large local runs on macOS, you can wrap `scomnom` with [`scripts/run_with_mem_limit.py`](/Users/k.h.prange/Library/CloudStorage/OneDrive-AmsterdamUMC/Documenten/Tech/scOmnom/scripts/run_with_mem_limit.py) to kill the full process tree if combined RSS grows beyond a threshold.
+
+```bash
+python scripts/run_with_mem_limit.py \
+  --rss-limit-gb 28 \
+  --poll-seconds 5 \
+  -- scomnom load-and-filter -c data/cellbender -r data/raw -o results -m metadata.tsv
+```
+
+The threshold is user-defined via `--rss-limit-gb` and is summed across the parent process plus worker subprocesses.
+The wrapper also reports the peak combined RSS it observed for the full process tree.
+
 ---
 
 ## Usage
