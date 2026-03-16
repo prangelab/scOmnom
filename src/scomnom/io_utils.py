@@ -1322,7 +1322,6 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
       - sanitizing ALL dict keys using sanitize_identifier()
       - stabilizing key collisions with a hash suffix
     """
-    import copy
     import sys
     import numpy as np
     import pandas as pd
@@ -1487,13 +1486,19 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
         )
 
     # ------------------------------------------------------------
-    # Work on a copy so we don't mutate the user's adata in memory
+    # Prepare lightweight metadata replacements for write-out only.
+    # Avoid adata.copy() here: duplicating X/layers/obsm can OOM on large runs.
     # ------------------------------------------------------------
-    adata_to_write = adata.copy()
+    orig_uns = adata.uns
+    orig_obs = adata.obs
+    orig_var = adata.var
+    sanitized_uns = orig_uns
+    downgraded_obs = orig_obs
+    downgraded_var = orig_var
     try:
-        adata_to_write.uns = _sanitize(copy.deepcopy(adata_to_write.uns))
+        sanitized_uns = _sanitize(orig_uns)
         if _keymap:
-            adata_to_write.uns["__scomnom_keymap__"] = {
+            sanitized_uns["__scomnom_keymap__"] = {
                 "__type__": "scomnom.keymap.v1",
                 "safe_to_original": _keymap,
             }
@@ -1502,39 +1507,58 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
             "Failed to fully sanitize adata.uns; attempting best-effort write anyway. (%s)",
             e,
         )
+        sanitized_uns = orig_uns
 
-    adata_to_write.var = _downgrade_nullable_strings(adata_to_write.var)
-    adata_to_write.obs = _downgrade_nullable_strings(adata_to_write.obs)
+    try:
+        downgraded_var = _downgrade_nullable_strings(orig_var)
+    except Exception as e:
+        LOGGER.warning("Failed to downgrade nullable string columns in adata.var; writing original var. (%s)", e)
+        downgraded_var = orig_var
+
+    try:
+        downgraded_obs = _downgrade_nullable_strings(orig_obs)
+    except Exception as e:
+        LOGGER.warning("Failed to downgrade nullable string columns in adata.obs; writing original obs. (%s)", e)
+        downgraded_obs = orig_obs
+
+    adata.uns = sanitized_uns
+    adata.var = downgraded_var
+    adata.obs = downgraded_obs
 
     # ------------------------------------------------------------
     # Write dataset
     # ------------------------------------------------------------
-    if fmt == "zarr":
-        if archive:
-            archive_path = _default_zarr_archive_path(out_path)
-            zarr_dir_name = _archive_to_zarr_dir_name(archive_path)
-            tmp_root = Path(tempfile.mkdtemp(prefix="scomnom_save_", dir=str(archive_path.parent)))
-            tmp_archive = archive_path.parent / f".{archive_path.name}.{os.getpid()}.tmp"
-            try:
-                tmp_zarr_dir = tmp_root / zarr_dir_name
-                LOGGER.debug("save_dataset: staging zarr write at %s", tmp_zarr_dir)
-                adata_to_write.write_zarr(str(tmp_zarr_dir), chunks=None)
+    try:
+        if fmt == "zarr":
+            if archive:
+                archive_path = _default_zarr_archive_path(out_path)
+                zarr_dir_name = _archive_to_zarr_dir_name(archive_path)
+                tmp_root = Path(tempfile.mkdtemp(prefix="scomnom_save_", dir=str(archive_path.parent)))
+                tmp_archive = archive_path.parent / f".{archive_path.name}.{os.getpid()}.tmp"
+                try:
+                    tmp_zarr_dir = tmp_root / zarr_dir_name
+                    LOGGER.debug("save_dataset: staging zarr write at %s", tmp_zarr_dir)
+                    adata.write_zarr(str(tmp_zarr_dir), chunks=None)
 
-                LOGGER.debug("save_dataset: archiving staged zarr to %s", archive_path)
-                _tar_create_zst(tmp_root, zarr_dir_name, tmp_archive)
-                tmp_archive.replace(archive_path)
-            finally:
-                shutil.rmtree(tmp_root, ignore_errors=True)
-                if tmp_archive.exists():
-                    tmp_archive.unlink(missing_ok=True)
+                    LOGGER.debug("save_dataset: archiving staged zarr to %s", archive_path)
+                    _tar_create_zst(tmp_root, zarr_dir_name, tmp_archive)
+                    tmp_archive.replace(archive_path)
+                finally:
+                    shutil.rmtree(tmp_root, ignore_errors=True)
+                    if tmp_archive.exists():
+                        tmp_archive.unlink(missing_ok=True)
+            else:
+                LOGGER.debug("save_dataset: writing zarr directory %s", out_path)
+                adata.write_zarr(str(out_path), chunks=None)
+        elif fmt == "h5ad":
+            LOGGER.debug("save_dataset: writing h5ad %s", out_path)
+            adata.write_h5ad(str(out_path), compression="gzip")
         else:
-            LOGGER.debug("save_dataset: writing zarr directory %s", out_path)
-            adata_to_write.write_zarr(str(out_path), chunks=None)
-    elif fmt == "h5ad":
-        LOGGER.debug("save_dataset: writing h5ad %s", out_path)
-        adata_to_write.write_h5ad(str(out_path), compression="gzip")
-    else:
-        raise ValueError(f"Unknown dataset format '{fmt}'. Expected 'zarr' or 'h5ad'.")
+            raise ValueError(f"Unknown dataset format '{fmt}'. Expected 'zarr' or 'h5ad'.")
+    finally:
+        adata.uns = orig_uns
+        adata.var = orig_var
+        adata.obs = orig_obs
 
     # Intentionally silent at INFO level to avoid duplicate save-path chatter.
 
