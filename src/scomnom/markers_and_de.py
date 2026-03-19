@@ -687,7 +687,17 @@ def _prepare_display_groupby(
         key = f"{base}_{i}"
         i += 1
 
-    adata.obs[key] = pd.Categorical(display.astype(str))
+    labels = adata.obs[stable_key].astype(str)
+    seen = set(labels.tolist())
+    ordered_display = [str(display_map[k]) for k in display_map.keys() if str(k) in seen]
+    if not ordered_display:
+        ordered_display = list(dict.fromkeys(display.astype(str).tolist()))
+    else:
+        for v in display.astype(str).tolist():
+            if v not in ordered_display:
+                ordered_display.append(v)
+
+    adata.obs[key] = pd.Categorical(display.astype(str), categories=ordered_display, ordered=False)
 
     color_map = plot_utils._cluster_color_map(adata, stable_key)
     if color_map:

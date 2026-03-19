@@ -1114,8 +1114,45 @@ def _build_cnn_groupby(
     if groupby not in adata.obs:
         raise KeyError(f"groupby={groupby!r} not found in adata.obs")
 
-    labels = adata.obs[groupby].astype(str)
-    groups = pd.Index(pd.unique(labels)).astype(str).tolist()
+    labels_raw = adata.obs[groupby]
+    labels = labels_raw.astype(str)
+
+    def _groups_in_preferred_order() -> list[str]:
+        seen = set(labels.astype(str).tolist())
+
+        if display_groupby and display_groupby in adata.obs:
+            disp_raw = adata.obs[display_groupby]
+            if pd.api.types.is_categorical_dtype(disp_raw):
+                tmp = pd.DataFrame(
+                    {"group": labels.to_numpy(), "disp": disp_raw.astype(str).to_numpy()},
+                    index=adata.obs_names,
+                )
+                ordered = []
+                for disp in disp_raw.cat.categories.astype(str).tolist():
+                    sub = tmp.loc[tmp["disp"].astype(str) == str(disp), "group"]
+                    if not sub.empty:
+                        g = str(sub.iloc[0])
+                        if g in seen and g not in ordered:
+                            ordered.append(g)
+                if ordered:
+                    return ordered
+
+        if isinstance(display_map, Mapping) and display_map:
+            ordered = [str(g) for g in display_map.keys() if str(g) in seen]
+            if ordered:
+                for g in pd.Index(pd.unique(labels)).astype(str).tolist():
+                    if g in seen and g not in ordered:
+                        ordered.append(g)
+                return ordered
+
+        if pd.api.types.is_categorical_dtype(labels_raw):
+            ordered = [str(g) for g in labels_raw.cat.categories.astype(str).tolist() if str(g) in seen]
+            if ordered:
+                return ordered
+
+        return pd.Index(pd.unique(labels)).astype(str).tolist()
+
+    groups = _groups_in_preferred_order()
 
     full_by_group: dict[str, str] = {}
     if display_groupby and display_groupby in adata.obs:
@@ -1630,6 +1667,9 @@ def violin_genes(
     """
     import scanpy as sc
     import matplotlib.pyplot as plt
+
+    display_map = kwargs.pop("display_map", None)
+    display_groupby = kwargs.pop("display_groupby", None)
 
     _normalize_scanpy_groupby_colors(adata, str(groupby))
     cnn_groupby = None
