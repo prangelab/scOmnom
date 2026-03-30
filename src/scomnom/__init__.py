@@ -1,4 +1,4 @@
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 
 from .io_utils import load_dataset, save_dataset  # noqa: F401
 from . import plotting  # noqa: F401

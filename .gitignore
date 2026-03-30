@@ -16,3 +16,6 @@ dist/
 
 # macOS Finder metadata
 .DS_Store
+
+# Local private design notes
+DESIGNGOALS.md
