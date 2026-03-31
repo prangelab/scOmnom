@@ -50,8 +50,8 @@ DE and DA modules are now finished and operational. Changed file output format t
 ## 0.2.1 [10-03-2026]
 Added API epxosure for plotting functions. Also added example notebooks for API usage. Changed plotting engine so that plots create plotArtifactgs, which th ecaller can choose to plot or save to disk. this separates output generation from the plottin gfuciotns and enbale API versus CLI usage of the same functions.
 
-## 0.3.1 [31-03-2026]
-Moved manual renaming from cluster-and-annotate into adata-ops as `adata-ops rename`, so subset refinement now lives fully under adata-ops. Fixed rename logging and summaries so they report the correct parent round id.
-
 ## 0.3.0 [30-03-2026]
 Extended adata-ops with annotation-merge, allowing refined subset annotations to be written back into a parent object as a new subset_annotation round or merged into an existing one. Standardized shallow round creation across rename, compaction, projection, and annotation-merge. Added merge-annotation UMAP and cluster QC plots. Split environment files by platform/architecture, fixed an out-of-memory issue in save_dataset, and fixed cluster ordering in violin plots.
+
+## 0.3.1 [31-03-2026]
+Moved manual renaming from cluster-and-annotate into adata-ops as `adata-ops rename`, so subset refinement now lives fully under adata-ops. Fixed rename logging and summaries so they report the correct parent round id.
