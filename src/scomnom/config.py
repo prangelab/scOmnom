@@ -260,10 +260,13 @@ class IntegrateConfig(BaseModel):
 class AdataOpsConfig(BaseModel):
     input_path: Path
     output_dir: Optional[Path] = None
-    operation: Literal["subset", "annotation_merge"] = "subset"
+    operation: Literal["subset", "rename", "annotation_merge"] = "subset"
+    output_name: Optional[str] = None
     subset_mapping_tsv: Optional[Path] = None
     output_format: Optional[Literal["zarr", "h5ad"]] = None
     round_id: Optional[str] = None
+    rename_idents_file: Optional[Path] = None
+    rename_round_name: str = "manual_rename"
     child_paths: Tuple[Path, ...] = ()
     child_round_id: Optional[str] = None
     child_source_field: Optional[str] = None
@@ -534,14 +537,6 @@ class ClusterAnnotateConfig(BaseModel):
     # Logging
     # ------------------------------------------------------------------
     logfile: Optional[Path] = None
-
-    # ------------------------------------------------------------------
-    # Manual rename (pretty labels only)
-    # ------------------------------------------------------------------
-    rename_idents_file: Optional[Path] = None
-    rename_idents_only: bool = False
-    rename_idents_round: Optional[str] = None
-    rename_idents_round_name: str = "manual_rename"
 
     # ------------------------------------------------------------------
     # Derived paths (same pattern as IntegrateConfig)

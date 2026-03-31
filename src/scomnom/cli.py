@@ -680,6 +680,69 @@ def adata_ops_subset(
 
 
 @adata_ops_app.command(
+    "rename",
+    help="Rename pretty cluster labels by creating a new derived round.",
+)
+def adata_ops_rename(
+    input_path: Path = typer.Option(
+        ...,
+        "--input-path",
+        "-i",
+        help="[I/O] Input dataset (.zarr, .zarr.tar.zst, or .h5ad).",
+    ),
+    output_dir: Optional[Path] = typer.Option(
+        None,
+        "--output-dir",
+        "-o",
+        help="[I/O] Output directory (default: input parent).",
+    ),
+    output_name: Optional[str] = typer.Option(
+        None,
+        "--output-name",
+        help="[I/O] Base name for renamed output dataset.",
+    ),
+    rename_idents_file: Path = typer.Option(
+        ...,
+        "--rename-idents-file",
+        help="[Rename] Two-column, tab-delimited file (no header): Cnn<tab>New Label.",
+    ),
+    output_format: Optional[Literal["zarr", "h5ad"]] = typer.Option(
+        None,
+        "--output-format",
+        help="[I/O] Output format for renamed dataset. Default: match input when possible.",
+    ),
+    round_id: Optional[str] = typer.Option(
+        None,
+        "--round-id",
+        help="[Rename] Parent cluster round id (default: active_cluster_round).",
+    ),
+    rename_round_name: str = typer.Option(
+        "manual_rename",
+        "--rename-round-name",
+        help="[Rename] Name for the new manual rename round id.",
+    ),
+):
+    out_dir = output_dir or input_path.parent
+    log_dir = out_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    logfile = log_dir / "adata-ops.log"
+    init_logging(logfile)
+
+    cfg = AdataOpsConfig(
+        input_path=input_path,
+        output_dir=out_dir,
+        operation="rename",
+        output_name=output_name,
+        rename_idents_file=rename_idents_file,
+        output_format=output_format,
+        round_id=round_id,
+        rename_round_name=rename_round_name,
+        logfile=logfile,
+    )
+    run_adata_ops(cfg)
+
+
+@adata_ops_app.command(
     "annotation-merge",
     help="Overlay one or more subset child annotation rounds back into a parent dataset.",
 )
@@ -836,31 +899,6 @@ def cluster_and_annotate(
         help="[Clustering] Final cluster key stored in adata.obs.",
     ),
 
-    # -----------------------------
-    # Manual rename (pretty labels only)
-    # -----------------------------
-    rename_idents_file: Optional[Path] = typer.Option(
-        None,
-        "--rename-idents-file",
-        help="[Rename] Two-column, tab-delimited file (no header): Cnn<tab>New Label.",
-    ),
-    rename_idents_only: bool = typer.Option(
-        False,
-        "--rename-idents-only",
-        help="[Rename] If set, only rename pretty labels and exit.",
-    ),
-    rename_idents_round: Optional[str] = typer.Option(
-        None,
-        "--rename-idents-round",
-        help="[Rename] Parent cluster round id (default: active_cluster_round).",
-    ),
-    rename_idents_round_name: str = typer.Option(
-        "manual_rename",
-        "--rename-idents-round-name",
-        help="[Rename] Name for the new manual rename round id.",
-    ),
-
-    # -----------------------------
     # Bio-guided clustering weights
     # -----------------------------
     bio_guided_clustering: bool = typer.Option(
@@ -1183,11 +1221,6 @@ def cluster_and_annotate(
         embedding_key=embedding_key,
         batch_key=batch_key,
         label_key=label_key,
-
-        rename_idents_file=rename_idents_file,
-        rename_idents_only=rename_idents_only,
-        rename_idents_round=rename_idents_round,
-        rename_idents_round_name=rename_idents_round_name,
 
         bio_guided_clustering=bio_guided_clustering,
         w_hom=w_hom,

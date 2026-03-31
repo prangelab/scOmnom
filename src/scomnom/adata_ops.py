@@ -20,6 +20,7 @@ from .clustering_utils import (
 from .config import AdataOpsConfig
 from .io_utils import load_dataset, save_dataset, sanitize_identifier
 from . import plot_utils
+from . import rename_utils
 from .rename_utils import rename_idents
 
 LOGGER = logging.getLogger(__name__)
@@ -29,6 +30,7 @@ __all__ = [
     "load_subset_mapping_tsv",
     "subset_adata_by_cluster_mapping",
     "subset_dataset_from_tsv",
+    "rename_dataset_idents",
     "run_adata_ops",
 ]
 
@@ -148,6 +150,182 @@ def _resolve_child_source_series(
     else:
         key = _resolve_round_pretty_key(adata, rid)
     return adata.obs[key].astype(str), key, rid
+
+
+def _emit_rename_round_plots(
+    adata: ad.AnnData,
+    *,
+    output_root: Path,
+    round_id: str,
+) -> None:
+    plot_utils.setup_scanpy_figs(output_root / "figures")
+    try:
+        if "X_umap" not in adata.obsm:
+            for embedding_key in ("X_integrated", "X_scANVI", "X_scVI", "X_pca", "Unintegrated"):
+                if embedding_key not in adata.obsm:
+                    continue
+                sc.pp.neighbors(adata, use_rep=embedding_key)
+                sc.tl.umap(adata)
+                break
+    except Exception as e:
+        LOGGER.warning("Rename-only: failed to ensure UMAP; skipping UMAP plots. (%s)", e)
+        return
+
+    rounds = adata.uns.get("cluster_rounds", {})
+    pretty_key = f"{CLUSTER_LABEL_KEY}__{round_id}"
+    try:
+        if isinstance(rounds, dict) and round_id in rounds:
+            ann = rounds[round_id].get("annotation", {})
+            if isinstance(ann, dict):
+                pk = ann.get("pretty_cluster_key", None)
+                if pk and str(pk) in adata.obs:
+                    pretty_key = str(pk)
+    except Exception:
+        pass
+
+    if pretty_key not in adata.obs or "X_umap" not in adata.obsm:
+        LOGGER.warning("Rename-only: pretty label key '%s' not found; skipping UMAP plots.", pretty_key)
+        return
+
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    def _unique_stable(arr: np.ndarray) -> list[str]:
+        seen = set()
+        out: list[str] = []
+        for v in arr.tolist():
+            if v not in seen:
+                seen.add(v)
+                out.append(v)
+        return out
+
+    def _annotate_cnn(ax, X, labels) -> None:
+        if X.ndim != 2 or X.shape[1] != 2:
+            return
+        for lab in _unique_stable(labels):
+            m = labels == lab
+            if not np.any(m):
+                continue
+            cx = float(np.median(X[m, 0]))
+            cy = float(np.median(X[m, 1]))
+            ax.text(
+                cx,
+                cy,
+                _extract_cnn(str(lab)) or "C?",
+                ha="center",
+                va="center",
+                fontsize=9,
+                fontweight="bold",
+                color="black",
+                bbox=dict(boxstyle="round,pad=0.18", fc="white", ec="none", alpha=0.65),
+                zorder=10,
+            )
+
+    figdir_cluster = Path("adata-ops") / str(round_id) / "clustering"
+    cats = None
+    try:
+        cats = list(adata.obs[pretty_key].astype(str).unique())
+    except Exception:
+        cats = None
+    max_len = max([len(str(x)) for x in cats], default=0) if cats else 0
+    base_w = 6.0
+    base_h = 6.0
+    extra_w = min(max(0.0, (max_len - 30) * 0.12), 8.0)
+
+    artifacts = []
+    fig_full, ax_full = plt.subplots(figsize=(base_w + extra_w, base_h))
+    sc.pl.umap(
+        adata,
+        color=pretty_key,
+        title=pretty_key,
+        show=False,
+        legend_loc="right margin",
+        ax=ax_full,
+    )
+    artifacts.extend(plot_utils.save_umap_multi("umap_pretty_cluster_label__fulllegend", figdir_cluster, fig_full))
+
+    fig_overlay, ax_overlay = plt.subplots(figsize=(base_w, base_h))
+    sc.pl.umap(
+        adata,
+        color=pretty_key,
+        title=pretty_key,
+        show=False,
+        legend_loc="none",
+        ax=ax_overlay,
+    )
+    _annotate_cnn(ax_overlay, np.asarray(adata.obsm["X_umap"]), adata.obs[pretty_key].astype(str).to_numpy())
+    artifacts.extend(plot_utils.save_umap_multi("umap_pretty_cluster_label__overlay_cnn", figdir_cluster, fig_overlay))
+    plot_utils.persist_plot_artifacts(artifacts)
+
+
+def rename_dataset_idents(
+    adata_or_path: ad.AnnData | Path | str,
+    rename_mapping_tsv: Path | str,
+    *,
+    output_root: Path | str,
+    output_name: str | None = None,
+    output_format: str | None = None,
+    round_id: str | None = None,
+    round_name: str = "manual_rename",
+) -> tuple[dict[str, Path], pd.DataFrame]:
+    source_path: Path | None = None
+    if isinstance(adata_or_path, ad.AnnData):
+        adata = adata_or_path
+        dataset_stem = "adata"
+    else:
+        source_path = Path(adata_or_path)
+        adata = load_dataset(source_path)
+        dataset_stem = _dataset_stem_for_outputs(source_path)
+
+    mapping = rename_utils.load_rename_mapping(Path(rename_mapping_tsv))
+    parent_round_id = _resolve_round_id(adata, round_id)
+    new_round_id = rename_idents(
+        adata,
+        mapping=mapping,
+        parent_round_id=parent_round_id,
+        round_name=str(round_name),
+        set_active=True,
+        notes="Manual rename of pretty labels.",
+    )
+
+    output_root = Path(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+    _emit_rename_round_plots(
+        adata,
+        output_root=output_root,
+        round_id=new_round_id,
+    )
+
+    fmt = str(output_format).lower().strip() if output_format else None
+    if fmt is None:
+        if source_path is not None and source_path.suffix.lower() == ".h5ad":
+            fmt = "h5ad"
+        else:
+            fmt = "zarr"
+    if fmt not in {"zarr", "h5ad"}:
+        raise ValueError("output_format must be 'zarr' or 'h5ad'.")
+
+    stem = str(output_name).strip() if output_name else f"{dataset_stem}.renamed"
+    out_path = output_root / f"{stem}.{fmt}"
+    save_dataset(adata, out_path, fmt=fmt)
+
+    summary_df = pd.DataFrame(
+        [
+            {
+                "new_round_id": str(new_round_id),
+                "parent_round_id": str(parent_round_id),
+                "n_renamed_clusters": int(len(mapping)),
+                "output_path": str(out_path),
+            }
+        ]
+    )
+    LOGGER.info(
+        "rename: new_round_id=%s parent_round_id=%s renamed_clusters=%d",
+        new_round_id,
+        parent_round_id,
+        len(mapping),
+    )
+    return {"renamed": out_path}, summary_df
 
 
 def _refresh_round_metadata_after_subset(adata: ad.AnnData) -> None:
@@ -708,6 +886,18 @@ def run_adata_ops(cfg: AdataOpsConfig) -> tuple[dict[str, Path], pd.DataFrame]:
             output_root=cfg.resolved_output_dir,
             output_format=cfg.output_format,
             round_id=cfg.round_id,
+        )
+    if op == "rename":
+        if cfg.rename_idents_file is None:
+            raise ValueError("rename operation requires rename_idents_file.")
+        return rename_dataset_idents(
+            cfg.input_path,
+            cfg.rename_idents_file,
+            output_root=cfg.resolved_output_dir,
+            output_name=cfg.output_name,
+            output_format=cfg.output_format,
+            round_id=cfg.round_id,
+            round_name=cfg.rename_round_name,
         )
     if op == "annotation_merge":
         return annotation_merge_datasets(

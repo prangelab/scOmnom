@@ -634,7 +634,7 @@ This design ensures that clustering results are fully reproducible, auditable, a
 
 ### Manual renaming of cluster labels
 
-If you want to override the automatic cluster labels with curated names, use the rename-only mode.
+If you want to override the automatic cluster labels with curated names, use `adata-ops rename`.
 
 This creates a new clustering round that reuses the existing cluster ids, but replaces the labels
 with your manual names. The original labels remain intact and you can switch between rounds by setting
@@ -644,10 +644,10 @@ The mapping file must be a two-column, tab-delimited text file with no header. T
 cluster code (`Cnn`), the second column is the new label.
 
 ```bash
-scomnom cluster-and-annotate \
+scomnom adata-ops rename \
   --input-path results/adata.clustered.annotated.projected.markers.zarr \
+  --output-dir results \
   --output-name adata.clustered.annotated.projected.markers.renamed \
-  --rename-idents-only \
   --rename-idents-file rename.tsv
 ```
 
@@ -660,8 +660,8 @@ C07	TREM1hi PLIN2hi iLAMs
 
 You can control the new manual label round name with:
 
-```
---rename-idents-round-name refined_idents
+```bash
+--rename-round-name refined_idents
 ```
 
 This will create a new round id like `r5_refined_idents`. Default suffix is `manual_rename`

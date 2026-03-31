@@ -210,8 +210,22 @@ def test_adata_ops_help():
     result = runner.invoke(app, ["adata-ops", "--help"])
     assert result.exit_code == 0
     assert "AnnData object operations" in result.output
+    assert "rename" in result.output
     assert "subset" in result.output
     assert "annotation-merge" in result.output
+
+
+def test_adata_ops_rename_requires_mapping():
+    result = runner.invoke(
+        app,
+        [
+            "adata-ops",
+            "rename",
+            "--input-path", "adata.h5ad",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "rename-idents-file" in result.output
 
 
 def test_adata_ops_subset_requires_mapping():
@@ -245,6 +259,29 @@ def test_adata_ops_dispatch(mock_run):
     assert cfg.input_path == "adata.h5ad"
     assert cfg.subset_mapping_tsv == "mapping.tsv"
     assert cfg.output_format == "zarr"
+
+
+@patch("scomnom.cli.run_adata_ops")
+def test_adata_ops_rename_dispatch(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "adata-ops",
+            "rename",
+            "--input-path", "adata.h5ad",
+            "--rename-idents-file", "mapping.tsv",
+            "--output-name", "adata.renamed",
+            "--rename-round-name", "refined_idents",
+        ],
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert str(cfg.input_path) == "adata.h5ad"
+    assert cfg.operation == "rename"
+    assert str(cfg.rename_idents_file) == "mapping.tsv"
+    assert cfg.output_name == "adata.renamed"
+    assert cfg.rename_round_name == "refined_idents"
 
 
 @patch("scomnom.cli.run_adata_ops")

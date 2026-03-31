@@ -11,6 +11,7 @@ from scomnom.adata_ops import (
     _dataset_stem_for_outputs,
     annotation_merge_datasets,
     load_subset_mapping_tsv,
+    rename_dataset_idents,
     subset_adata_by_cluster_mapping,
     subset_dataset_from_tsv,
 )
@@ -188,6 +189,50 @@ def test_subset_dataset_from_tsv_uses_archive_stem_for_output_names(tmp_path: Pa
     )
 
     assert any("input__subset_immune.zarr" in path for path, _ in calls)
+
+
+def test_rename_dataset_idents_creates_new_round_and_saves_output(tmp_path: Path, monkeypatch) -> None:
+    adata = _make_test_adata()
+    mapping = tmp_path / "rename.tsv"
+    mapping.write_text("C00\tT cells\nC01\tStromal refined\n")
+
+    saved: list[tuple[str, str]] = []
+    plotted: list[str] = []
+
+    def _fake_save_dataset(in_adata, out_path, fmt="zarr"):
+        saved.append((str(out_path), str(fmt)))
+
+    def _fake_emit_rename_round_plots(in_adata, *, output_root, round_id):
+        plotted.append(str(round_id))
+
+    monkeypatch.setattr("scomnom.adata_ops.save_dataset", _fake_save_dataset)
+    monkeypatch.setattr("scomnom.adata_ops._emit_rename_round_plots", _fake_emit_rename_round_plots)
+
+    out_paths, summary = rename_dataset_idents(
+        adata,
+        mapping,
+        output_root=tmp_path / "results",
+        output_format="zarr",
+        round_name="refined_idents",
+    )
+
+    assert set(out_paths.keys()) == {"renamed"}
+    assert saved == [(str(tmp_path / "results" / "adata.renamed.zarr"), "zarr")]
+    assert len(plotted) == 1
+
+    new_round_id = plotted[0]
+    assert new_round_id.endswith("_refined_idents")
+    assert adata.uns["active_cluster_round"] == new_round_id
+
+    pretty_key = adata.uns["cluster_rounds"][new_round_id]["annotation"]["pretty_cluster_key"]
+    assert pretty_key == f"cluster_label__{new_round_id}"
+    renamed = adata.obs[pretty_key].astype(str).tolist()
+    assert renamed[:2] == ["C00: T cells", "C00: T cells"]
+    assert renamed[2:4] == ["C01: Stromal refined", "C01: Stromal refined"]
+
+    assert summary.loc[0, "new_round_id"] == new_round_id
+    assert summary.loc[0, "parent_round_id"] == "r0"
+    assert summary.loc[0, "n_renamed_clusters"] == 2
 
 
 def test_annotation_merge_creates_new_subset_annotation_round(tmp_path: Path, monkeypatch) -> None:
