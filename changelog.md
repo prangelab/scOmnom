@@ -45,10 +45,13 @@ Changed reporting behaviour. It now saves a report per round and for each format
 Fixed some cluster-and-annotate plots. DE module is now feature complete, but still in testing phase.
 
 ## 0.2.0 [06-03-2026]
-DE and DA modules are now finished and operational. Changed file output format to compressed and archived *.zarr.tar.zst format. This prevents inode exhaustion. Archives are auto detected at load. Implemented subsetting in the new adata-ops module. Subsetted modules can be reclustered by feeding them to cluster-and-annotate, which has been updated to always recalculate PCs and HVGs to mathc the subsetted data. Added rename mode to cluster-and-annotate: this allows to rename populations manually. Added plot-only modes to markers-and-de allowing to refresh plots (eg with the newly renamed idents) without redoing all the computations.
+DE and DA modules are now finished and operational. Changed file output format to compressed and archived *.zarr.tar.zst format. This prevents inode exhaustion. Archives are auto detected at load. Implemented subsetting in the new adata-ops module. Subsetted modules can be reclustered by feeding them to cluster-and-annotate, which has been updated to always recalculate PCs and HVGs to mathc the subsetted data. Added manual cluster renaming support, later moved to `adata-ops rename` in 0.3.1. Added plot-only modes to markers-and-de allowing to refresh plots (eg with the newly renamed idents) without redoing all the computations.
 
 ## 0.2.1 [10-03-2026]
 Added API epxosure for plotting functions. Also added example notebooks for API usage. Changed plotting engine so that plots create plotArtifactgs, which th ecaller can choose to plot or save to disk. this separates output generation from the plottin gfuciotns and enbale API versus CLI usage of the same functions.
+
+## 0.3.1 [31-03-2026]
+Moved manual renaming from cluster-and-annotate into adata-ops as `adata-ops rename`, so subset refinement now lives fully under adata-ops. Fixed rename logging and summaries so they report the correct parent round id.
 
 ## 0.3.0 [30-03-2026]
 Extended adata-ops with annotation-merge, allowing refined subset annotations to be written back into a parent object as a new subset_annotation round or merged into an existing one. Standardized shallow round creation across rename, compaction, projection, and annotation-merge. Added merge-annotation UMAP and cluster QC plots. Split environment files by platform/architecture, fixed an out-of-memory issue in save_dataset, and fixed cluster ordering in violin plots.
