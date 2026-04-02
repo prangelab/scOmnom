@@ -15,7 +15,7 @@ from .clustering_utils import (
     _create_shallow_round_from_parent,
     _make_round_id,
     _next_round_index,
-    set_active_round,
+    rebuild_round_from_label_parts,
 )
 from .config import AdataOpsConfig
 from .io_utils import load_dataset, save_dataset, sanitize_identifier
@@ -267,6 +267,8 @@ def rename_dataset_idents(
     output_format: str | None = None,
     round_id: str | None = None,
     round_name: str = "manual_rename",
+    collapse_same_labels: bool = False,
+    set_active: bool = True,
 ) -> tuple[dict[str, Path], pd.DataFrame]:
     source_path: Path | None = None
     if isinstance(adata_or_path, ad.AnnData):
@@ -284,7 +286,8 @@ def rename_dataset_idents(
         mapping=mapping,
         parent_round_id=parent_round_id,
         round_name=str(round_name),
-        set_active=True,
+        collapse_same_labels=collapse_same_labels,
+        set_active=set_active,
         notes="Manual rename of pretty labels.",
     )
 
@@ -315,15 +318,18 @@ def rename_dataset_idents(
                 "new_round_id": str(new_round_id),
                 "parent_round_id": str(parent_round_id),
                 "n_renamed_clusters": int(len(mapping)),
+                "collapse_same_labels": bool(collapse_same_labels),
                 "output_path": str(out_path),
             }
         ]
     )
     LOGGER.info(
-        "rename: new_round_id=%s parent_round_id=%s renamed_clusters=%d",
+        "rename: new_round_id=%s parent_round_id=%s renamed_clusters=%d collapse_same_labels=%s set_active=%s",
         new_round_id,
         parent_round_id,
         len(mapping),
+        collapse_same_labels,
+        set_active,
     )
     return {"renamed": out_path}, summary_df
 
@@ -378,77 +384,6 @@ def _refresh_round_metadata_after_subset(adata: ad.AnnData) -> None:
         rounds[rid] = rinfo
 
     adata.uns["cluster_rounds"] = rounds
-
-
-def _rebuild_standard_round_columns(
-    adata: ad.AnnData,
-    *,
-    round_id: str,
-    label_parts: pd.Series,
-    merge_meta: dict[str, Any],
-) -> None:
-    rounds = adata.uns.get("cluster_rounds", {})
-    if not isinstance(rounds, dict) or round_id not in rounds:
-        raise KeyError(f"Round {round_id!r} not found in adata.uns['cluster_rounds'].")
-
-    rinfo = rounds[round_id]
-    cluster_key = str(rinfo.get("cluster_key", "leiden"))
-    labels_obs_key = str(rinfo.get("labels_obs_key", f"{cluster_key}__{round_id}"))
-    pretty_key = f"{CLUSTER_LABEL_KEY}__{round_id}"
-
-    parts = label_parts.reindex(adata.obs_names).fillna("Unknown").astype(str)
-    label_order = _cluster_order_by_size(parts)
-    raw_cluster_order = [str(i) for i in range(len(label_order))]
-    label_to_raw = {label: raw_id for raw_id, label in zip(raw_cluster_order, label_order)}
-    raw_to_ccode = {raw_id: f"C{i:02d}" for i, raw_id in enumerate(raw_cluster_order)}
-
-    raw_labels = parts.map(label_to_raw)
-    pretty_labels = raw_labels.map(
-        lambda raw_id: f"{raw_to_ccode[str(raw_id)]}: {label_order[int(str(raw_id))]}"
-    )
-    display_map = {
-        raw_id: f"{raw_to_ccode[raw_id]}: {label_order[int(raw_id)]}"
-        for raw_id in raw_cluster_order
-    }
-    cluster_sizes = {
-        raw_id: int((raw_labels == raw_id).sum())
-        for raw_id in raw_cluster_order
-    }
-
-    adata.obs[labels_obs_key] = pd.Categorical(raw_labels.astype(str), categories=raw_cluster_order)
-    adata.obs[pretty_key] = pd.Categorical(
-        pretty_labels.astype(str),
-        categories=[display_map[raw_id] for raw_id in raw_cluster_order],
-    )
-    adata.obs[CLUSTER_LABEL_KEY] = adata.obs[pretty_key]
-
-    try:
-        from scanpy.plotting.palettes import default_102
-
-        colors = list(default_102[: len(raw_cluster_order)])
-        adata.uns[f"{pretty_key}_colors"] = colors
-        adata.uns[f"{CLUSTER_LABEL_KEY}_colors"] = colors
-    except Exception as e:
-        LOGGER.warning("Could not set pretty-label palette for annotation merge: %s", e)
-
-    rinfo["labels_obs_key"] = labels_obs_key
-    rinfo["round_type"] = "subset_annotation"
-    rinfo["cluster_sizes"] = cluster_sizes
-    rinfo["cluster_order"] = list(raw_cluster_order)
-    rinfo["cluster_display_map"] = dict(display_map)
-    rinfo["cluster_id_map"] = {raw_id: raw_id for raw_id in raw_cluster_order}
-    rinfo["cluster_renumbering"] = {raw_id: raw_id for raw_id in raw_cluster_order}
-    rinfo["decoupler"] = {}
-    rinfo["qc"] = {}
-    rinfo["stability"] = {}
-    rinfo["diagnostics"] = {}
-    rinfo.setdefault("annotation", {})
-    rinfo["annotation"]["pretty_cluster_key"] = pretty_key
-    rinfo["annotation"]["cluster_key_used"] = labels_obs_key
-    rinfo["subset_annotation"] = dict(merge_meta)
-    rounds[round_id] = rinfo
-    adata.uns["cluster_rounds"] = rounds
-    set_active_round(adata, round_id, publish_decoupler=False)
 
 
 def _resolve_batch_key_for_plots(adata: ad.AnnData) -> str | None:
@@ -677,11 +612,14 @@ def annotation_merge_datasets(
         "n_overlay_cells": int(len(seen_cells)),
         "children": child_rows,
     }
-    _rebuild_standard_round_columns(
+    rebuild_round_from_label_parts(
         adata,
         round_id=working_round_id,
         label_parts=merged_parts,
-        merge_meta=merge_meta,
+        round_type="subset_annotation",
+        metadata_key="subset_annotation",
+        metadata_value=merge_meta,
+        set_active=True,
     )
 
     output_root = Path(output_root)
@@ -898,6 +836,8 @@ def run_adata_ops(cfg: AdataOpsConfig) -> tuple[dict[str, Path], pd.DataFrame]:
             output_format=cfg.output_format,
             round_id=cfg.round_id,
             round_name=cfg.rename_round_name,
+            collapse_same_labels=cfg.rename_collapse_same_labels,
+            set_active=cfg.rename_set_active,
         )
     if op == "annotation_merge":
         return annotation_merge_datasets(

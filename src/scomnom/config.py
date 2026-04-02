@@ -267,6 +267,8 @@ class AdataOpsConfig(BaseModel):
     round_id: Optional[str] = None
     rename_idents_file: Optional[Path] = None
     rename_round_name: str = "manual_rename"
+    rename_collapse_same_labels: bool = False
+    rename_set_active: bool = True
     child_paths: Tuple[Path, ...] = ()
     child_round_id: Optional[str] = None
     child_source_field: Optional[str] = None

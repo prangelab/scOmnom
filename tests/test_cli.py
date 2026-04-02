@@ -272,6 +272,8 @@ def test_adata_ops_rename_dispatch(mock_run):
             "--rename-idents-file", "mapping.tsv",
             "--output-name", "adata.renamed",
             "--rename-round-name", "refined_idents",
+            "--collapse-same-labels",
+            "--no-set-active",
         ],
     )
     assert result.exit_code == 0
@@ -282,6 +284,8 @@ def test_adata_ops_rename_dispatch(mock_run):
     assert str(cfg.rename_idents_file) == "mapping.tsv"
     assert cfg.output_name == "adata.renamed"
     assert cfg.rename_round_name == "refined_idents"
+    assert cfg.rename_collapse_same_labels is True
+    assert cfg.rename_set_active is False
 
 
 @patch("scomnom.cli.run_adata_ops")
