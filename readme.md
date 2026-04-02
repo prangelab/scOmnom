@@ -60,17 +60,21 @@ This registers the `scomnom` command-line interface and ensures local code chang
 
 ### Optional: run with a memory guard on macOS
 
-For large local runs on macOS, you can wrap `scomnom` with [`scripts/run_with_mem_limit.py`](/Users/k.h.prange/Library/CloudStorage/OneDrive-AmsterdamUMC/Documenten/Tech/scOmnom/scripts/run_with_mem_limit.py) to kill the full process tree if combined RSS grows beyond a threshold.
+For large local runs on macOS, you can wrap `scomnom` with [`scripts/run_with_mem_limit.py`](/Users/k.h.prange/Library/CloudStorage/OneDrive-AmsterdamUMC/Documenten/Tech/scOmnom/scripts/run_with_mem_limit.py) to kill the run if either the combined process-tree RSS or macOS system pressure indicators grow too far.
 
 ```bash
 python scripts/run_with_mem_limit.py \
   --rss-limit-gb 28 \
+  --compressed-limit-gb 12 \
+  --compressed-delta-limit-gb 4 \
+  --swap-used-limit-gb 8 \
+  --swap-used-delta-limit-gb 3 \
+  --pressure-consecutive-breaches 2 \
   --poll-seconds 5 \
   -- scomnom load-and-filter -c data/cellbender -r data/raw -o results -m metadata.tsv
 ```
 
-The threshold is user-defined via `--rss-limit-gb` and is summed across the parent process plus worker subprocesses.
-The wrapper also reports the peak combined RSS it observed for the full process tree.
+The RSS threshold is summed across the parent process plus worker subprocesses. On macOS, the wrapper also samples system compressed memory and swap usage, records a baseline at startup, and prints both current values and their deltas. Swap is treated as the primary kill signal; compressed-memory thresholds are only allowed to trigger when swap is also in use.
 
 ---
 
