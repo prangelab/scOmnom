@@ -27,6 +27,7 @@ def rename_idents(
     *,
     parent_round_id: str | None = None,
     round_name: str = "manual_rename",
+    collapse_same_labels: bool = False,
     set_active: bool = True,
     notes: str | None = "Manual rename of pretty labels.",
 ) -> str:
@@ -37,6 +38,7 @@ def rename_idents(
         mapping=mapping,
         parent_round_id=parent_round_id,
         round_name=round_name,
+        collapse_same_labels=collapse_same_labels,
         set_active=set_active,
         notes=notes,
     )

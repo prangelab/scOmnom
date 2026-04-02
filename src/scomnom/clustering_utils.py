@@ -318,6 +318,88 @@ def set_active_round(
     _ = publish_decoupler
 
 
+def rebuild_round_from_label_parts(
+    adata: ad.AnnData,
+    *,
+    round_id: str,
+    label_parts: pd.Series,
+    round_type: str | None = None,
+    metadata_key: str | None = None,
+    metadata_value: dict[str, Any] | None = None,
+    annotation_updates: dict[str, Any] | None = None,
+    set_active: bool = True,
+) -> None:
+    rounds = adata.uns.get("cluster_rounds", {})
+    if not isinstance(rounds, dict) or round_id not in rounds:
+        raise KeyError(f"Round {round_id!r} not found in adata.uns['cluster_rounds'].")
+
+    rinfo = rounds[round_id]
+    cluster_key = str(rinfo.get("cluster_key", "leiden"))
+    labels_obs_key = str(rinfo.get("labels_obs_key", f"{cluster_key}__{round_id}"))
+    pretty_key = f"{CLUSTER_LABEL_KEY}__{round_id}"
+
+    parts = label_parts.reindex(adata.obs_names).fillna("Unknown").astype(str)
+    label_order = _cluster_order_by_size(parts)
+    raw_cluster_order = [str(i) for i in range(len(label_order))]
+    label_to_raw = {label: raw_id for raw_id, label in zip(raw_cluster_order, label_order)}
+    raw_to_ccode = {raw_id: f"C{i:02d}" for i, raw_id in enumerate(raw_cluster_order)}
+
+    raw_labels = parts.map(label_to_raw)
+    pretty_labels = raw_labels.map(
+        lambda raw_id: f"{raw_to_ccode[str(raw_id)]}: {label_order[int(str(raw_id))]}"
+    )
+    display_map = {
+        raw_id: f"{raw_to_ccode[raw_id]}: {label_order[int(raw_id)]}"
+        for raw_id in raw_cluster_order
+    }
+    cluster_sizes = {
+        raw_id: int((raw_labels == raw_id).sum())
+        for raw_id in raw_cluster_order
+    }
+
+    adata.obs[labels_obs_key] = pd.Categorical(raw_labels.astype(str), categories=raw_cluster_order)
+    adata.obs[pretty_key] = pd.Categorical(
+        pretty_labels.astype(str),
+        categories=[display_map[raw_id] for raw_id in raw_cluster_order],
+    )
+    if set_active:
+        adata.obs[CLUSTER_LABEL_KEY] = adata.obs[pretty_key]
+
+    try:
+        from scanpy.plotting.palettes import default_102
+
+        colors = list(default_102[: len(raw_cluster_order)])
+        adata.uns[f"{pretty_key}_colors"] = colors
+        if set_active:
+            adata.uns[f"{CLUSTER_LABEL_KEY}_colors"] = colors
+    except Exception as e:
+        LOGGER.warning("Could not set pretty-label palette for round rebuild: %s", e)
+
+    rinfo["labels_obs_key"] = labels_obs_key
+    if round_type is not None:
+        rinfo["round_type"] = str(round_type)
+    rinfo["cluster_sizes"] = cluster_sizes
+    rinfo["cluster_order"] = list(raw_cluster_order)
+    rinfo["cluster_display_map"] = dict(display_map)
+    rinfo["cluster_id_map"] = {raw_id: raw_id for raw_id in raw_cluster_order}
+    rinfo["cluster_renumbering"] = {raw_id: raw_id for raw_id in raw_cluster_order}
+    rinfo["decoupler"] = {}
+    rinfo["qc"] = {}
+    rinfo["stability"] = {}
+    rinfo["diagnostics"] = {}
+    rinfo.setdefault("annotation", {})
+    rinfo["annotation"]["pretty_cluster_key"] = pretty_key
+    rinfo["annotation"]["cluster_key_used"] = labels_obs_key
+    if isinstance(annotation_updates, dict):
+        rinfo["annotation"].update(annotation_updates)
+    if metadata_key is not None and metadata_value is not None:
+        rinfo[str(metadata_key)] = dict(metadata_value)
+    rounds[round_id] = rinfo
+    adata.uns["cluster_rounds"] = rounds
+    if set_active:
+        set_active_round(adata, round_id, publish_decoupler=False)
+
+
 # -------------------------------------------------------------------------
 # Embedding + clustering helpers
 # -------------------------------------------------------------------------
@@ -1532,6 +1614,7 @@ def create_manual_rename_round(
     new_round_id: str | None = None,
     round_name: str = "manual_rename",
     notes: str | None = None,
+    collapse_same_labels: bool = False,
     set_active: bool = True,
 ) -> str:
     _ensure_cluster_rounds(adata)
@@ -1639,20 +1722,37 @@ def create_manual_rename_round(
     if pretty_key in adata.obs:
         raise ValueError(f"pretty_key '{pretty_key}' already exists in adata.obs.")
 
-    pretty_series = clust_vals.map(lambda c: _pretty_for_cluster(str(c)))
-    pretty_categories = [_pretty_for_cluster(str(c)) for c in cluster_order]
-    adata.obs[pretty_key] = pd.Categorical(pretty_series.astype(str), categories=pretty_categories, ordered=False)
-    adata.obs[CLUSTER_LABEL_KEY] = adata.obs[pretty_key]
-
-    try:
-        from scanpy.plotting.palettes import default_102
-        cats_pretty = list(adata.obs[pretty_key].cat.categories)
-        adata.uns[f"{pretty_key}_colors"] = list(default_102[: len(cats_pretty)])
-        adata.uns[f"{CLUSTER_LABEL_KEY}_colors"] = adata.uns[f"{pretty_key}_colors"]
-    except Exception as e:
-        LOGGER.warning("Could not set pretty-label palette for manual rename: %s", e)
-
+    labels_obs_key_new = labels_obs_key
     identity_map = {str(c): str(c) for c in pd.unique(clust_vals.astype(str))}
+    cluster_renumbering = {str(c): str(c) for c in sorted(set(identity_map.values()))}
+    if collapse_same_labels:
+        labels_obs_key_new = f"{parent.get('cluster_key', 'leiden')}__{new_round_id}"
+        if labels_obs_key_new in adata.obs:
+            raise ValueError(f"labels_obs_key '{labels_obs_key_new}' already exists in adata.obs.")
+        adata.obs[labels_obs_key_new] = adata.obs[labels_obs_key].astype(str).astype("category")
+        pretty_series = clust_vals.map(lambda c: _pretty_for_cluster(str(c)))
+        label_parts = pretty_series.astype(str).map(
+            lambda val: val.split(": ", 1)[1] if ": " in val else str(val)
+        )
+    else:
+        pretty_series = clust_vals.map(lambda c: _pretty_for_cluster(str(c)))
+        pretty_categories = [_pretty_for_cluster(str(c)) for c in cluster_order]
+        adata.obs[pretty_key] = pd.Categorical(
+            pretty_series.astype(str),
+            categories=pretty_categories,
+            ordered=False,
+        )
+        if set_active:
+            adata.obs[CLUSTER_LABEL_KEY] = adata.obs[pretty_key]
+
+        try:
+            from scanpy.plotting.palettes import default_102
+            cats_pretty = list(adata.obs[pretty_key].cat.categories)
+            adata.uns[f"{pretty_key}_colors"] = list(default_102[: len(cats_pretty)])
+            if set_active:
+                adata.uns[f"{CLUSTER_LABEL_KEY}_colors"] = adata.uns[f"{pretty_key}_colors"]
+        except Exception as e:
+            LOGGER.warning("Could not set pretty-label palette for manual rename: %s", e)
 
     new_round_id = _create_shallow_round_from_parent(
         adata,
@@ -1664,12 +1764,12 @@ def create_manual_rename_round(
         notes=notes,
         set_active=False,
         cluster_key=str(parent.get("cluster_key", CLUSTER_LABEL_KEY)),
-        labels_obs_key=labels_obs_key,
+        labels_obs_key=labels_obs_key_new,
         best_resolution=None,
         sweep=None,
         cfg_snapshot=None,
         cluster_id_map=identity_map,
-        cluster_renumbering={str(c): str(c) for c in sorted(set(identity_map.values()))},
+        cluster_renumbering=cluster_renumbering,
         compacting={},
         inherit_fields=(),
     )
@@ -1687,13 +1787,37 @@ def create_manual_rename_round(
             for k in ("celltypist_cell_key", "celltypist_cluster_key"):
                 if k in ann:
                     rounds[new_round_id]["annotation"][k] = ann[k]
-        rounds[new_round_id]["cluster_order"] = list(map(str, cluster_order))
-        rounds[new_round_id]["cluster_display_map"] = {
-            str(c): _pretty_for_cluster(str(c)) for c in cluster_order
-        }
         rounds[new_round_id]["manual_rename"] = {
             "parent_round_id": str(parent_round_id),
             "mapping": dict(mapping_norm),
+            "collapse_same_labels": bool(collapse_same_labels),
+        }
+        adata.uns["cluster_rounds"] = rounds
+
+    if collapse_same_labels:
+        annotation_updates = {}
+        if isinstance(ann, dict):
+            for k in ("celltypist_cell_key", "celltypist_cluster_key"):
+                if k in ann:
+                    annotation_updates[k] = ann[k]
+        rebuild_round_from_label_parts(
+            adata,
+            round_id=str(new_round_id),
+            label_parts=label_parts,
+            round_type="manual_rename",
+            metadata_key="manual_rename",
+            metadata_value={
+                "parent_round_id": str(parent_round_id),
+                "mapping": dict(mapping_norm),
+                "collapse_same_labels": True,
+            },
+            annotation_updates=annotation_updates,
+            set_active=set_active,
+        )
+    elif isinstance(rounds, dict) and new_round_id in rounds and isinstance(rounds[new_round_id], dict):
+        rounds[new_round_id]["cluster_order"] = list(map(str, cluster_order))
+        rounds[new_round_id]["cluster_display_map"] = {
+            str(c): _pretty_for_cluster(str(c)) for c in cluster_order
         }
         adata.uns["cluster_rounds"] = rounds
 

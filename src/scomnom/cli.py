@@ -721,6 +721,16 @@ def adata_ops_rename(
         "--rename-round-name",
         help="[Rename] Name for the new manual rename round id.",
     ),
+    rename_collapse_same_labels: bool = typer.Option(
+        False,
+        "--collapse-same-labels/--no-collapse-same-labels",
+        help="[Rename] Merge renamed clusters that share the same target label and renumber by size.",
+    ),
+    rename_set_active: bool = typer.Option(
+        True,
+        "--set-active/--no-set-active",
+        help="[Rename] Make the new rename round the active round.",
+    ),
 ):
     out_dir = output_dir or input_path.parent
     log_dir = out_dir / "logs"
@@ -737,6 +747,8 @@ def adata_ops_rename(
         output_format=output_format,
         round_id=round_id,
         rename_round_name=rename_round_name,
+        rename_collapse_same_labels=rename_collapse_same_labels,
+        rename_set_active=rename_set_active,
         logfile=logfile,
     )
     run_adata_ops(cfg)
