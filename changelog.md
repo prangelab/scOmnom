@@ -55,3 +55,6 @@ Extended adata-ops with annotation-merge, allowing refined subset annotations to
 
 ## 0.3.1 [31-03-2026]
 Moved manual renaming from cluster-and-annotate into adata-ops as `adata-ops rename`, so subset refinement now lives fully under adata-ops. Fixed rename logging and summaries so they report the correct parent round id.
+
+## 0.3.2 [02-04-2026]
+Added an option to rename to collapse same nam eclusters into broader categories.
