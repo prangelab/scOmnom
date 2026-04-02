@@ -2714,10 +2714,12 @@ def umap_by_two_legend_styles(
     figdir,
     stem: str,
     title: str | None = None,
+    base_figsize: tuple[float, float] = (6.0, 6.0),
 ) -> None:
     """
-    Emit two UMAPs for a categorical key:
+    Emit three UMAPs for a categorical key:
       - fulllegend: standard right-side legend with full labels
+      - nolegend: no legend and no cluster text overlays
       - shortlegend: no legend; Cnn overlaid at cluster centroids
 
     Respects Scanpy colors in adata.uns[f"{key}_colors"] if present.
@@ -2739,6 +2741,15 @@ def umap_by_two_legend_styles(
     X = np.asarray(adata.obsm["X_umap"])
     labels = adata.obs[key].astype(str).to_numpy()
     ttl = title if title is not None else key
+    cats = list(adata.obs[key].astype(str).unique())
+    max_len = max((len(str(x)) for x in cats), default=0)
+    n_cats = len(cats)
+    base_w, base_h = float(base_figsize[0]), float(base_figsize[1])
+    extra_w = min(max(0.0, (max_len - 24) * 0.11), 10.0)
+    if n_cats >= 10:
+        extra_w += min((n_cats - 9) * 0.18, 3.0)
+    full_w = base_w + extra_w
+    full_right = 0.64 if extra_w > 0.0 else 0.78
 
     def _extract_cnn(x: str) -> str:
         s = str(x or "")
@@ -2782,27 +2793,40 @@ def umap_by_two_legend_styles(
             )
 
     # 1) full legend
-    fig_full = sc.pl.umap(
+    fig_full, ax_full = plt.subplots(figsize=(full_w, base_h))
+    sc.pl.umap(
         adata,
         color=key,
         title=ttl,
         show=False,
-        return_fig=True,
         legend_loc="right margin",
+        ax=ax_full,
     )
-    save_umap_multi(f"{stem}__fulllegend", figdir=base, fig=fig_full)
+    save_umap_multi(f"{stem}__fulllegend", figdir=base, fig=fig_full, right=full_right)
 
-    # 2) short legend (no legend; Cnn on clusters)
-    fig_short = sc.pl.umap(
+    # 2) no legend
+    fig_nolegend, ax_nolegend = plt.subplots(figsize=(base_w, base_h))
+    sc.pl.umap(
         adata,
         color=key,
         title=ttl,
         show=False,
-        return_fig=True,
         legend_loc=None,
+        ax=ax_nolegend,
     )
-    ax = fig_short.axes[0] if getattr(fig_short, "axes", None) else plt.gca()
-    _annotate_cnn(ax)
+    save_umap_multi(f"{stem}__nolegend", figdir=base, fig=fig_nolegend)
+
+    # 3) short legend (no legend; Cnn on clusters)
+    fig_short, ax_short = plt.subplots(figsize=(base_w, base_h))
+    sc.pl.umap(
+        adata,
+        color=key,
+        title=ttl,
+        show=False,
+        legend_loc=None,
+        ax=ax_short,
+    )
+    _annotate_cnn(ax_short)
     save_umap_multi(f"{stem}__shortlegend", figdir=base, fig=fig_short)
 
 

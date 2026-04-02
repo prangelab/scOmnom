@@ -187,74 +187,15 @@ def _emit_rename_round_plots(
         LOGGER.warning("Rename-only: pretty label key '%s' not found; skipping UMAP plots.", pretty_key)
         return
 
-    import matplotlib.pyplot as plt
-    import numpy as np
-
-    def _unique_stable(arr: np.ndarray) -> list[str]:
-        seen = set()
-        out: list[str] = []
-        for v in arr.tolist():
-            if v not in seen:
-                seen.add(v)
-                out.append(v)
-        return out
-
-    def _annotate_cnn(ax, X, labels) -> None:
-        if X.ndim != 2 or X.shape[1] != 2:
-            return
-        for lab in _unique_stable(labels):
-            m = labels == lab
-            if not np.any(m):
-                continue
-            cx = float(np.median(X[m, 0]))
-            cy = float(np.median(X[m, 1]))
-            ax.text(
-                cx,
-                cy,
-                _extract_cnn(str(lab)) or "C?",
-                ha="center",
-                va="center",
-                fontsize=9,
-                fontweight="bold",
-                color="black",
-                bbox=dict(boxstyle="round,pad=0.18", fc="white", ec="none", alpha=0.65),
-                zorder=10,
-            )
-
     figdir_cluster = Path("rename") / str(round_id) / "clustering"
-    cats = None
-    try:
-        cats = list(adata.obs[pretty_key].astype(str).unique())
-    except Exception:
-        cats = None
-    max_len = max([len(str(x)) for x in cats], default=0) if cats else 0
-    base_w = 6.0
-    base_h = 6.0
-    extra_w = min(max(0.0, (max_len - 30) * 0.12), 8.0)
-
-    artifacts = []
-    fig_full, ax_full = plt.subplots(figsize=(base_w + extra_w, base_h))
-    sc.pl.umap(
+    artifacts = plot_utils.umap_by_two_legend_styles(
         adata,
-        color=pretty_key,
+        key=pretty_key,
+        figdir=figdir_cluster,
+        stem="umap_pretty_cluster_label",
         title=pretty_key,
-        show=False,
-        legend_loc="right margin",
-        ax=ax_full,
+        base_figsize=(6.0, 6.0),
     )
-    artifacts.extend(plot_utils.save_umap_multi("umap_pretty_cluster_label__fulllegend", figdir_cluster, fig_full))
-
-    fig_overlay, ax_overlay = plt.subplots(figsize=(base_w, base_h))
-    sc.pl.umap(
-        adata,
-        color=pretty_key,
-        title=pretty_key,
-        show=False,
-        legend_loc="none",
-        ax=ax_overlay,
-    )
-    _annotate_cnn(ax_overlay, np.asarray(adata.obsm["X_umap"]), adata.obs[pretty_key].astype(str).to_numpy())
-    artifacts.extend(plot_utils.save_umap_multi("umap_pretty_cluster_label__overlay_cnn", figdir_cluster, fig_overlay))
     plot_utils.persist_plot_artifacts(artifacts)
 
 
