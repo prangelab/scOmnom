@@ -716,6 +716,16 @@ def adata_ops_rename(
         "--round-id",
         help="[Rename] Parent cluster round id (default: active_cluster_round).",
     ),
+    target_round_id: Optional[str] = typer.Option(
+        None,
+        "--target-round-id",
+        help="[Rename] Existing manual_rename round to update.",
+    ),
+    update_existing_round: bool = typer.Option(
+        False,
+        "--update-existing-round",
+        help="[Rename] Update an existing manual_rename round instead of creating a new one.",
+    ),
     rename_round_name: str = typer.Option(
         "manual_rename",
         "--rename-round-name",
@@ -746,6 +756,8 @@ def adata_ops_rename(
         rename_idents_file=rename_idents_file,
         output_format=output_format,
         round_id=round_id,
+        target_round_id=target_round_id,
+        update_existing_round=update_existing_round,
         rename_round_name=rename_round_name,
         rename_collapse_same_labels=rename_collapse_same_labels,
         rename_set_active=rename_set_active,

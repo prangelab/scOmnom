@@ -207,6 +207,8 @@ def rename_dataset_idents(
     output_name: str | None = None,
     output_format: str | None = None,
     round_id: str | None = None,
+    target_round_id: str | None = None,
+    update_existing_round: bool = False,
     round_name: str = "manual_rename",
     collapse_same_labels: bool = False,
     set_active: bool = True,
@@ -221,13 +223,38 @@ def rename_dataset_idents(
         dataset_stem = _dataset_stem_for_outputs(source_path)
 
     mapping = rename_utils.load_rename_mapping(Path(rename_mapping_tsv))
-    parent_round_id = _resolve_round_id(adata, round_id)
+    if update_existing_round:
+        if not target_round_id:
+            raise ValueError("update_existing_round=True requires target_round_id.")
+        if round_id is not None:
+            raise ValueError("round_id cannot be used with update_existing_round=True.")
+        target_round_id = _resolve_round_id(adata, target_round_id)
+        target_round = adata.uns.get("cluster_rounds", {}).get(target_round_id, None)
+        if not isinstance(target_round, dict):
+            raise KeyError(f"Target round {target_round_id!r} not found.")
+        if str(target_round.get("round_type", "")) != "manual_rename":
+            raise ValueError(f"target_round_id {target_round_id!r} is not a manual_rename round.")
+        parent_round_id = None
+        manual_rename_payload = target_round.get("manual_rename", None)
+        if isinstance(manual_rename_payload, dict):
+            parent_round_id = manual_rename_payload.get("parent_round_id", None)
+        if parent_round_id is None:
+            parent_round_id = target_round.get("parent_round_id", None)
+        if parent_round_id is None:
+            raise KeyError(f"Target round {target_round_id!r} is missing parent_round_id metadata.")
+        parent_round_id = str(parent_round_id)
+    else:
+        if target_round_id is not None:
+            raise ValueError("target_round_id can only be used with update_existing_round=True.")
+        parent_round_id = _resolve_round_id(adata, round_id)
     new_round_id = rename_idents(
         adata,
         mapping=mapping,
         parent_round_id=parent_round_id,
+        new_round_id=target_round_id,
         round_name=str(round_name),
         collapse_same_labels=collapse_same_labels,
+        update_existing_round=update_existing_round,
         set_active=set_active,
         notes="Manual rename of pretty labels.",
     )
@@ -260,16 +287,18 @@ def rename_dataset_idents(
                 "parent_round_id": str(parent_round_id),
                 "n_renamed_clusters": int(len(mapping)),
                 "collapse_same_labels": bool(collapse_same_labels),
+                "update_existing_round": bool(update_existing_round),
                 "output_path": str(out_path),
             }
         ]
     )
     LOGGER.info(
-        "rename: new_round_id=%s parent_round_id=%s renamed_clusters=%d collapse_same_labels=%s set_active=%s",
+        "rename: new_round_id=%s parent_round_id=%s renamed_clusters=%d collapse_same_labels=%s update_existing_round=%s set_active=%s",
         new_round_id,
         parent_round_id,
         len(mapping),
         collapse_same_labels,
+        update_existing_round,
         set_active,
     )
     return {"renamed": out_path}, summary_df
@@ -776,6 +805,8 @@ def run_adata_ops(cfg: AdataOpsConfig) -> tuple[dict[str, Path], pd.DataFrame]:
             output_name=cfg.output_name,
             output_format=cfg.output_format,
             round_id=cfg.round_id,
+            target_round_id=cfg.target_round_id,
+            update_existing_round=cfg.update_existing_round,
             round_name=cfg.rename_round_name,
             collapse_same_labels=cfg.rename_collapse_same_labels,
             set_active=cfg.rename_set_active,

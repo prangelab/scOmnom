@@ -682,9 +682,25 @@ scomnom adata-ops rename \
 
 Use `--set-active/--no-set-active` to control whether the new rename round becomes the default active round.
 
-Two UMAPs are emitted for the renamed labels:
+If you want to revise an existing manual rename round in place rather than creating a new numbered round,
+use `--update-existing-round` together with an explicit `--target-round-id`:
 
-* one with a right-side legend only
+```bash
+scomnom adata-ops rename \
+  --input-path results/adata.clustered.annotated.projected.markers.renamed__annotation_merge_r4_subset_annotation.zarr.tar.zst \
+  --output-dir results \
+  --output-name adata.clustered.annotated.projected.markers.renamed__annotation_merge_r4_subset_annotation \
+  --rename-idents-file archetypes_rename.tsv \
+  --target-round-id r5_archetypes \
+  --update-existing-round \
+  --collapse-same-labels \
+  --no-set-active
+```
+
+Three UMAPs are emitted for the renamed labels:
+
+* one with the full right-side legend
+* one with no legend
 * one with a right-side legend plus `Cnn` overlaid on clusters
 
 ---

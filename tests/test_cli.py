@@ -273,6 +273,8 @@ def test_adata_ops_rename_dispatch(mock_run):
             "--output-name", "adata.renamed",
             "--rename-round-name", "refined_idents",
             "--collapse-same-labels",
+            "--update-existing-round",
+            "--target-round-id", "r5_refined_idents",
             "--no-set-active",
         ],
     )
@@ -285,6 +287,8 @@ def test_adata_ops_rename_dispatch(mock_run):
     assert cfg.output_name == "adata.renamed"
     assert cfg.rename_round_name == "refined_idents"
     assert cfg.rename_collapse_same_labels is True
+    assert cfg.update_existing_round is True
+    assert cfg.target_round_id == "r5_refined_idents"
     assert cfg.rename_set_active is False
 
 

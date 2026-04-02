@@ -43,7 +43,7 @@ Returns:
 
 Signature:
 ```python
-rename_idents(adata: ad.AnnData, mapping: Dict[str, str], parent_round_id: str | None = None, round_name: str = "manual_rename", collapse_same_labels: bool = False, set_active: bool = True, notes: str | None = "Manual rename of pretty labels.") -> str
+rename_idents(adata: ad.AnnData, mapping: Dict[str, str], parent_round_id: str | None = None, new_round_id: str | None = None, round_name: str = "manual_rename", collapse_same_labels: bool = False, update_existing_round: bool = False, set_active: bool = True, notes: str | None = "Manual rename of pretty labels.") -> str
 ```
 
 What it does:
@@ -53,8 +53,10 @@ Parameters:
 - `adata`: AnnData with cluster-round metadata.
 - `mapping`: Map from strict `Cnn` IDs (for example `"C01"`) to new label text.
 - `parent_round_id`: Source round ID; if omitted, active round is used.
+- `new_round_id`: Explicit target round ID. Primarily useful together with `update_existing_round=True`.
 - `round_name`: Name assigned to the new round.
 - `collapse_same_labels`: If `True`, merge clusters that share the same renamed label into one new cluster state.
+- `update_existing_round`: If `True`, update the explicitly targeted existing `manual_rename` round instead of creating a new one.
 - `set_active`: Whether to set the new round as active.
 - `notes`: Optional notes stored with round metadata.
 

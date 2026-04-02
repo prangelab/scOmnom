@@ -311,6 +311,67 @@ def test_rename_dataset_idents_can_leave_active_round_unchanged(tmp_path: Path, 
     assert adata.obs["cluster_label"].astype(str).tolist() == adata.obs["cluster_label__r0"].astype(str).tolist()
 
 
+def test_rename_dataset_idents_can_update_existing_round(tmp_path: Path, monkeypatch) -> None:
+    adata = _make_test_adata()
+    mapping_initial = tmp_path / "rename_initial.tsv"
+    mapping_initial.write_text("C00\tImmune archetype\nC01\tStromal archetype\nC02\tImmune archetype\n")
+    mapping_updated = tmp_path / "rename_updated.tsv"
+    mapping_updated.write_text("C00\tMyeloid\nC01\tStructural\nC02\tMyeloid\n")
+
+    def _fake_save_dataset(in_adata, out_path, fmt="zarr"):
+        return None
+
+    def _fake_emit_rename_round_plots(in_adata, *, output_root, round_id):
+        return None
+
+    monkeypatch.setattr("scomnom.adata_ops.save_dataset", _fake_save_dataset)
+    monkeypatch.setattr("scomnom.adata_ops._emit_rename_round_plots", _fake_emit_rename_round_plots)
+
+    _, initial_summary = rename_dataset_idents(
+        adata,
+        mapping_initial,
+        output_root=tmp_path / "results",
+        output_format="zarr",
+        round_name="archetypes",
+        collapse_same_labels=True,
+    )
+    target_round_id = str(initial_summary.loc[0, "new_round_id"])
+
+    _, updated_summary = rename_dataset_idents(
+        adata,
+        mapping_updated,
+        output_root=tmp_path / "results",
+        output_format="zarr",
+        target_round_id=target_round_id,
+        update_existing_round=True,
+        collapse_same_labels=True,
+        set_active=False,
+    )
+
+    assert str(updated_summary.loc[0, "new_round_id"]) == target_round_id
+    assert bool(updated_summary.loc[0, "update_existing_round"]) is True
+    assert target_round_id in adata.uns["cluster_rounds"]
+
+    round_info = adata.uns["cluster_rounds"][target_round_id]
+    labels_obs_key = round_info["labels_obs_key"]
+    pretty_key = round_info["annotation"]["pretty_cluster_key"]
+
+    assert round_info["manual_rename"]["mapping"] == {
+        "C00": "Myeloid",
+        "C01": "Structural",
+        "C02": "Myeloid",
+    }
+    assert round_info["cluster_display_map"] == {
+        "0": "C00: Myeloid",
+        "1": "C01: Structural",
+    }
+    assert list(adata.obs[pretty_key].astype(str).cat.categories) == [
+        "C00: Myeloid",
+        "C01: Structural",
+    ]
+    assert set(adata.obs[labels_obs_key].astype(str).unique()) == {"0", "1"}
+
+
 def test_annotation_merge_creates_new_subset_annotation_round(tmp_path: Path, monkeypatch) -> None:
     parent = _make_test_adata()
     child = _make_child_subset(

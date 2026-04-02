@@ -26,8 +26,10 @@ def rename_idents(
     mapping: Dict[str, str],
     *,
     parent_round_id: str | None = None,
+    new_round_id: str | None = None,
     round_name: str = "manual_rename",
     collapse_same_labels: bool = False,
+    update_existing_round: bool = False,
     set_active: bool = True,
     notes: str | None = "Manual rename of pretty labels.",
 ) -> str:
@@ -37,8 +39,10 @@ def rename_idents(
         adata,
         mapping=mapping,
         parent_round_id=parent_round_id,
+        new_round_id=new_round_id,
         round_name=round_name,
         collapse_same_labels=collapse_same_labels,
+        update_existing_round=update_existing_round,
         set_active=set_active,
         notes=notes,
     )
