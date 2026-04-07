@@ -3,6 +3,7 @@ from typing import Optional, List, Literal, Dict, Sequence, Tuple
 import typer
 from pathlib import Path
 import warnings
+import re
 from enum import Enum
 from pandas.errors import PerformanceWarning
 
@@ -1622,12 +1623,15 @@ def _build_cfg_composition(
     )
 
 
-def _default_output_name(input_path: Path, suffix: str) -> str:
+def _default_output_name(input_path: Path, suffix: str, round_id: Optional[str] = None) -> str:
     name = input_path.name
-    for ext in (".zarr", ".h5ad", ".h5", ".hdf5"):
+    for ext in (".zarr.tar.zst", ".zarr", ".h5ad", ".h5", ".hdf5"):
         if name.endswith(ext):
             name = name[: -len(ext)]
             break
+    if round_id:
+        round_token = re.sub(r"[^A-Za-z0-9._-]+", "_", str(round_id).strip())
+        suffix = f"{suffix}_{round_token}"
     return f"{name}.{suffix}"
 
 
@@ -1740,7 +1744,7 @@ def cluster_vs_rest(
     ),
 ):
     if output_name is None:
-        output_name = _default_output_name(input_path, "markers")
+        output_name = _default_output_name(input_path, "markers", round_id=round_id)
     de_source = str(de_decoupler_source or "auto").lower()
     if de_source not in ("auto", "all", "pseudobulk", "cell", "none"):
         raise typer.BadParameter("Invalid --de-decoupler-source. Use: auto, all, pseudobulk, cell, none.")
@@ -1876,7 +1880,7 @@ def composition(
     graph_effect_shrink_k: float = typer.Option(10.0, "--graph-effect-shrink-k"),
 ):
     if output_name is None:
-        output_name = _default_output_name(input_path, "da")
+        output_name = _default_output_name(input_path, "da", round_id=round_id)
     if not condition_keys:
         raise typer.BadParameter("--condition-keys is required.")
 
@@ -2028,7 +2032,7 @@ def within_cluster(
     # fix typo from signature (keep CLI option stable)
     group_key = None if group_key is None else str(group_key)
     if output_name is None:
-        output_name = _default_output_name(input_path, "de")
+        output_name = _default_output_name(input_path, "de", round_id=round_id)
 
     if msigdb_gene_sets_cli is None:
         msigdb_gene_sets = None

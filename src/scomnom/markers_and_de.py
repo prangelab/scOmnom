@@ -336,6 +336,21 @@ def _safe_combo_token(x: object) -> str:
     return s
 
 
+def _run_namespace_for_round(
+    adata: ad.AnnData,
+    *,
+    prefix: str,
+    round_id: Optional[str],
+) -> str:
+    rid = round_id
+    if rid is None:
+        rid0 = adata.uns.get("active_cluster_round", None)
+        rid = str(rid0) if rid0 else None
+    if rid:
+        return f"{str(prefix)}_{_safe_combo_token(str(rid))}"
+    return str(prefix)
+
+
 def _resolve_condition_key(adata: ad.AnnData, key: str) -> str:
     raw = str(key).strip()
     if ":" not in raw:
@@ -955,7 +970,12 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
     # ----------------------------
     results_dir = output_dir
     results_dir.mkdir(parents=True, exist_ok=True)
-    run_round = plot_utils.get_run_round_tag("markers")
+    run_namespace = _run_namespace_for_round(
+        adata,
+        prefix="markers",
+        round_id=getattr(cfg, "round_id", None),
+    )
+    run_round = str(plot_utils.get_run_subdir(run_namespace))
     marker_cell_dir = results_dir / "tables" / f"marker_tables_{run_round}" / "cell_based"
     marker_pb_dir = results_dir / "tables" / f"marker_tables_{run_round}" / "pseudobulk_based"
 
@@ -1231,7 +1251,12 @@ def run_composition(cfg) -> ad.AnnData:
 
     n_iterations = int(getattr(cfg, "composition_n_iterations", 10000) or 10000)
     n_warmup = int(getattr(cfg, "composition_n_warmup", max(1000, n_iterations // 10)) or max(1000, n_iterations // 10))
-    run_round = plot_utils.get_run_round_tag("DA")
+    run_namespace = _run_namespace_for_round(
+        adata,
+        prefix="da",
+        round_id=getattr(cfg, "round_id", None),
+    )
+    run_round = str(plot_utils.get_run_subdir(run_namespace))
 
     from .de_utils import _set_blas_threads
 
@@ -1954,7 +1979,12 @@ def run_within_cluster(cfg) -> ad.AnnData:
 
     results_dir = output_dir
     results_dir.mkdir(parents=True, exist_ok=True)
-    run_round = plot_utils.get_run_round_tag("DE")
+    run_namespace = _run_namespace_for_round(
+        adata,
+        prefix="de",
+        round_id=getattr(cfg, "round_id", None),
+    )
+    run_round = str(plot_utils.get_run_subdir(run_namespace))
     de_cell_dir = results_dir / "tables" / f"DE_tables_{run_round}" / "cell_based"
     de_pb_dir = results_dir / "tables" / f"DE_tables_{run_round}" / "pseudobulk_based"
 

@@ -314,3 +314,56 @@ def test_adata_ops_annotation_merge_dispatch(mock_run):
     assert tuple(map(str, cfg.child_paths)) == ("child1.h5ad", "child2.h5ad")
     assert cfg.update_existing_round is True
     assert cfg.target_round_id == "r4_subset_annotation"
+
+
+@patch("scomnom.cli.run_cluster_vs_rest")
+def test_markers_default_output_name_includes_round_id(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "markers-and-de",
+            "markers",
+            "--input-path", "adata.zarr.tar.zst",
+            "--round-id", "r4_subset_annotation",
+        ],
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.output_name == "adata.markers_r4_subset_annotation"
+
+
+@patch("scomnom.cli.run_within_cluster")
+def test_de_default_output_name_includes_round_id(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "markers-and-de",
+            "de",
+            "--input-path", "adata.zarr.tar.zst",
+            "--round-id", "r5_archetypes",
+            "--condition-keys", "timepoint",
+        ],
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.output_name == "adata.de_r5_archetypes"
+
+
+@patch("scomnom.cli.run_composition")
+def test_da_default_output_name_includes_round_id(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "markers-and-de",
+            "da",
+            "--input-path", "adata.zarr.tar.zst",
+            "--round-id", "r6_myawesomecustomround",
+            "--condition-keys", "timepoint",
+        ],
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.output_name == "adata.da_r6_myawesomecustomround"
