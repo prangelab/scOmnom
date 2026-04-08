@@ -976,8 +976,8 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
         round_id=getattr(cfg, "round_id", None),
     )
     run_round = str(plot_utils.get_run_subdir(run_namespace))
-    marker_cell_dir = results_dir / "tables" / f"marker_tables_{run_round}" / "cell_based"
-    marker_pb_dir = results_dir / "tables" / f"marker_tables_{run_round}" / "pseudobulk_based"
+    marker_cell_dir = results_dir / "tables" / run_round / "cell_based"
+    marker_pb_dir = results_dir / "tables" / run_round / "pseudobulk_based"
 
     if run_cell and markers_key and not regenerate_figures:
         io_utils.export_rank_genes_groups_tables(
@@ -1444,9 +1444,9 @@ def run_composition(cfg) -> ad.AnnData:
         }
 
         cond_tag = _safe_combo_token(str(condition_label))
-        results_dir = output_dir / "tables" / f"DA_tables_{run_round}" / cond_tag
+        results_dir = output_dir / "tables" / run_round / cond_tag
         results_dir.mkdir(parents=True, exist_ok=True)
-        fig_subdir = Path("DA") / cond_tag
+        fig_subdir = Path(cond_tag)
 
         def _cnnize_df(df: pd.DataFrame) -> pd.DataFrame:
             if df is None or getattr(df, "empty", False):
@@ -1985,8 +1985,8 @@ def run_within_cluster(cfg) -> ad.AnnData:
         round_id=getattr(cfg, "round_id", None),
     )
     run_round = str(plot_utils.get_run_subdir(run_namespace))
-    de_cell_dir = results_dir / "tables" / f"DE_tables_{run_round}" / "cell_based"
-    de_pb_dir = results_dir / "tables" / f"DE_tables_{run_round}" / "pseudobulk_based"
+    de_cell_dir = results_dir / "tables" / run_round / "cell_based"
+    de_pb_dir = results_dir / "tables" / run_round / "pseudobulk_based"
 
     # ----------------------------
     # Resolve stable groupby + display labels
@@ -2989,7 +2989,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                                 if not isinstance(nets, dict) or not nets:
                                     continue
 
-                                base = Path("DE")
+                                base = Path()
                                 if str(source) == "cell":
                                     base = base / "cell_level_DE" / str(condition_key) / str(contrast)
                                 else:

@@ -22,10 +22,14 @@ def _resolve_active_cluster_key(adata: ad.AnnData, *, round_id: Optional[str]) -
             f"Resolved round_id={rid!r}, active_round={adata.uns.get('active_cluster_round', None)!r}."
         )
     rinfo = rounds[rid]
+    labels_obs_key = rinfo.get("labels_obs_key", None)
+    if labels_obs_key and str(labels_obs_key) in adata.obs:
+        return str(labels_obs_key)
+
     cluster_key = rinfo.get("cluster_key", None)
     if not cluster_key or str(cluster_key) not in adata.obs:
         raise RuntimeError(
-            f"composition: cluster_key not found in adata.obs for round_id={rid!r}."
+            f"composition: labels_obs_key/cluster_key not found in adata.obs for round_id={rid!r}."
         )
     return str(cluster_key)
 

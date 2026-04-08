@@ -2038,7 +2038,7 @@ def plot_marker_genes_pseudobulk(
         cnn_legend_map = {}
     dot_n = int(dotplot_top_n_genes) if dotplot_top_n_genes is not None else int(top_n_genes)
 
-    figroot = Path("markers") / "pseudobulk_markers"
+    figroot = Path("pseudobulk_markers")
     d_volcano = figroot / "volcano"
     d_dot = figroot / "dotplot"
     d_violin = figroot / "violin"
@@ -2231,7 +2231,7 @@ def plot_marker_genes_ranksum(
         cnn_legend_map = {}
     dot_n = int(dotplot_top_n_genes) if dotplot_top_n_genes is not None else int(top_n_genes)
 
-    figroot = Path("markers") / "cell_level_markers"
+    figroot = Path("cell_level_markers")
     d_volcano = figroot / "volcano"
     d_dot = figroot / "dotplot"
     d_violin = figroot / "violin"
@@ -2513,7 +2513,7 @@ def plot_condition_within_cluster(
     if not isinstance(block, dict) or not block:
         return
 
-    base_default = Path("DE") / "pseudobulk_DE" / f"{condition_key}"
+    base_default = Path("pseudobulk_DE") / f"{condition_key}"
 
     for k, payload in block.items():
         if not isinstance(payload, dict):
@@ -2545,7 +2545,7 @@ def plot_condition_within_cluster(
         is_interaction = bool(payload.get("interaction", False)) or ("^" in str(condition_key))
         if is_interaction:
             pair_dir = "interaction"
-            base = Path("DE") / "pseudobulk_DE" / f"{condition_key}__interaction"
+            base = Path("pseudobulk_DE") / f"{condition_key}__interaction"
         else:
             base = base_default
             if test and ref:
@@ -2808,7 +2808,7 @@ def plot_condition_umaps(
     import matplotlib.colors as mcolors
     import seaborn as sns
 
-    outroot = Path("DE") / "UMAP"
+    outroot = Path("UMAP")
     for ck in [str(k) for k in condition_keys]:
         plot_key = ck
         if plot_key not in adata.obs and "^" in ck:
@@ -2891,7 +2891,7 @@ def plot_contrast_conditional_markers(
     if not isinstance(results, dict) or not results:
         return
 
-    figroot = Path("DE") / "cell_level_DE" / str(contrast_key)
+    figroot = Path("cell_level_DE") / str(contrast_key)
     if sample_key is None:
         try:
             sample_key = io_utils.infer_batch_key(adata, None)
