@@ -375,13 +375,14 @@ def test_da_default_output_name_includes_round_id(mock_run):
     assert cfg.output_name == "adata.da_r6_myawesomecustomround"
 
 
-@patch("scomnom.cli.run_enrichment")
-def test_enrichment_default_output_name_includes_round_id(mock_run):
+@patch("scomnom.cli.run_enrichment_cluster")
+def test_enrichment_cluster_default_output_name_includes_round_id(mock_run):
     result = runner.invoke(
         app,
         [
             "markers-and-de",
             "enrichment",
+            "cluster",
             "--input-path", "adata.zarr.tar.zst",
             "--round-id", "r5_archetypes",
         ],
@@ -392,13 +393,14 @@ def test_enrichment_default_output_name_includes_round_id(mock_run):
     assert cfg.output_name == "adata.enrichment_r5_archetypes"
 
 
-@patch("scomnom.cli.run_enrichment")
-def test_enrichment_gene_filter_propagates_to_config(mock_run):
+@patch("scomnom.cli.run_enrichment_cluster")
+def test_enrichment_cluster_gene_filter_propagates_to_config(mock_run):
     result = runner.invoke(
         app,
         [
             "markers-and-de",
             "enrichment",
+            "cluster",
             "--input-path", "adata.zarr.tar.zst",
             "--gene-filter", "not gene.str.startswith('MT-')",
             "--gene-filter", "expr=not gene.str.startswith('RPL')",
@@ -413,13 +415,14 @@ def test_enrichment_gene_filter_propagates_to_config(mock_run):
     )
 
 
-@patch("scomnom.cli.run_enrichment")
-def test_enrichment_condition_key_propagates_to_config(mock_run):
+@patch("scomnom.cli.run_enrichment_cluster")
+def test_enrichment_cluster_condition_key_propagates_to_config(mock_run):
     result = runner.invoke(
         app,
         [
             "markers-and-de",
             "enrichment",
+            "cluster",
             "--input-path", "adata.zarr.tar.zst",
             "--round-id", "r5_archetypes",
             "--condition-key", "sex",
@@ -429,6 +432,44 @@ def test_enrichment_condition_key_propagates_to_config(mock_run):
     mock_run.assert_called_once()
     cfg = mock_run.call_args[0][0]
     assert cfg.condition_key == "sex"
+
+
+@patch("scomnom.cli.run_enrichment_de_from_tables")
+def test_enrichment_de_default_output_name_uses_input_dir_name(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "markers-and-de",
+            "enrichment",
+            "de",
+            "--input-dir", "de_r5_archetypes_round1",
+        ],
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.output_name == "enrichment_de_de_r5_archetypes_round1"
+    assert cfg.input_dir.name == "de_r5_archetypes_round1"
+
+
+@patch("scomnom.cli.run_enrichment_de_from_tables")
+def test_enrichment_de_gene_filter_propagates_to_config(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "markers-and-de",
+            "enrichment",
+            "de",
+            "--input-dir", "de_r5_archetypes_round1",
+            "--gene-filter", "not gene.str.startswith('MT-')",
+            "--de-decoupler-source", "cell",
+        ],
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.gene_filter == ("not gene.str.startswith('MT-')",)
+    assert cfg.de_decoupler_source == "cell"
 
 
 @patch("scomnom.cli.run_within_cluster")

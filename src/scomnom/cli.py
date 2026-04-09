@@ -11,7 +11,13 @@ from .load_and_filter import run_load_and_filter
 from .integrate import run_integrate
 from .adata_ops import run_adata_ops
 from .cluster_and_annotate import run_clustering
-from .markers_and_de import run_cluster_vs_rest, run_within_cluster, run_composition, run_enrichment
+from .markers_and_de import (
+    run_cluster_vs_rest,
+    run_within_cluster,
+    run_composition,
+    run_enrichment_cluster,
+    run_enrichment_de as run_enrichment_de_from_tables,
+)
 
 from .config import (
     LoadAndFilterConfig,
@@ -1363,7 +1369,11 @@ markers_and_de_app = typer.Typer(
     help="Discovery markers + DE (cluster-vs-rest and within-cluster contrasts).",
     invoke_without_command=True,
 )
+enrichment_app = typer.Typer(
+    help="Pathway and TF enrichment from either clustering rounds or DE result tables.",
+)
 app.add_typer(markers_and_de_app, name="markers-and-de")
+markers_and_de_app.add_typer(enrichment_app, name="enrichment")
 
 
 @markers_and_de_app.callback()
@@ -1626,7 +1636,7 @@ def _build_cfg_composition(
     )
 
 
-def _build_cfg_enrichment(
+def _build_cfg_enrichment_cluster(
     *,
     input_path: Path,
     output_dir: Optional[Path],
@@ -1674,6 +1684,7 @@ def _build_cfg_enrichment(
 
     return MarkersAndDEConfig(
         input_path=input_path,
+        input_dir=None,
         output_dir=out_dir,
         output_name=output_name,
         save_h5ad=save_h5ad,
@@ -1690,6 +1701,87 @@ def _build_cfg_enrichment(
         run_decoupler=True,
         decoupler_pseudobulk_agg=str(decoupler_pseudobulk_agg),
         decoupler_use_raw=bool(decoupler_use_raw),
+        decoupler_method=str(decoupler_method),
+        decoupler_consensus_methods=decoupler_consensus_methods,
+        decoupler_min_n_targets=int(decoupler_min_n_targets),
+        decoupler_bar_split_signed=bool(decoupler_bar_split_signed),
+        decoupler_bar_top_n_up=decoupler_bar_top_n_up,
+        decoupler_bar_top_n_down=decoupler_bar_top_n_down,
+        msigdb_gene_sets=msigdb_sets if msigdb_sets is not None else ["HALLMARK", "REACTOME"],
+        msigdb_method=str(msigdb_method),
+        msigdb_min_n_targets=int(msigdb_min_n_targets),
+        run_progeny=bool(run_progeny),
+        progeny_method=str(progeny_method),
+        progeny_min_n_targets=int(progeny_min_n_targets),
+        progeny_top_n=int(progeny_top_n),
+        progeny_organism=str(progeny_organism),
+        run_dorothea=bool(run_dorothea),
+        dorothea_method=str(dorothea_method),
+        dorothea_min_n_targets=int(dorothea_min_n_targets),
+        dorothea_confidence=doro_conf if doro_conf is not None else ["A", "B", "C"],
+        dorothea_organism=str(dorothea_organism),
+    )
+
+
+def _build_cfg_enrichment_de(
+    *,
+    input_dir: Path,
+    output_dir: Optional[Path],
+    output_name: str,
+    n_jobs: int,
+    make_figures: bool,
+    figdir_name: str,
+    figure_formats: Sequence[str],
+    gene_filter: Optional[List[str]],
+    de_decoupler_source: str,
+    de_decoupler_stat_col: str,
+    decoupler_method: str,
+    decoupler_consensus_methods: Optional[List[str]],
+    decoupler_min_n_targets: int,
+    decoupler_bar_split_signed: bool,
+    decoupler_bar_top_n_up: Optional[int],
+    decoupler_bar_top_n_down: Optional[int],
+    msigdb_gene_sets: Optional[List[str]],
+    msigdb_method: str,
+    msigdb_min_n_targets: int,
+    run_progeny: bool,
+    progeny_method: str,
+    progeny_min_n_targets: int,
+    progeny_top_n: int,
+    progeny_organism: str,
+    run_dorothea: bool,
+    dorothea_method: str,
+    dorothea_min_n_targets: int,
+    dorothea_confidence: Optional[List[str]],
+    dorothea_organism: str,
+) -> MarkersAndDEConfig:
+    out_dir = output_dir or input_dir.parent
+    log_dir = out_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "markers-and-de.enrichment-de.log"
+    init_logging(log_path)
+
+    msigdb_sets = list(msigdb_gene_sets) if msigdb_gene_sets else None
+    doro_conf = list(dorothea_confidence) if dorothea_confidence else None
+    gene_filters = tuple(gene_filter or ())
+
+    return MarkersAndDEConfig(
+        input_path=input_dir,
+        input_dir=input_dir,
+        output_dir=out_dir,
+        output_name=output_name,
+        save_h5ad=False,
+        run="pseudobulk",
+        n_jobs=n_jobs,
+        logfile=log_path,
+        make_figures=make_figures,
+        regenerate_figures=False,
+        figdir_name=figdir_name,
+        figure_formats=figure_formats,
+        gene_filter=gene_filters,
+        run_decoupler=True,
+        de_decoupler_source=str(de_decoupler_source),
+        de_decoupler_stat_col=str(de_decoupler_stat_col),
         decoupler_method=str(decoupler_method),
         decoupler_consensus_methods=decoupler_consensus_methods,
         decoupler_min_n_targets=int(decoupler_min_n_targets),
@@ -1921,11 +2013,11 @@ def cluster_vs_rest(
     run_cluster_vs_rest(cfg)
 
 
-@markers_and_de_app.command(
-    "enrichment",
+@enrichment_app.command(
+    "cluster",
     help="Run round-native enrichment scoring (MSigDB, PROGENy, DoRothEA) on an existing AnnData.",
 )
-def enrichment(
+def enrichment_cluster(
     input_path: Path = typer.Option(..., "--input-path", "-i"),
     output_dir: Optional[Path] = typer.Option(None, "--output-dir", "-o"),
     output_name: Optional[str] = typer.Option(None, "--output-name"),
@@ -1995,7 +2087,7 @@ def enrichment(
     else:
         msigdb_gene_sets = [x.strip() for x in msigdb_gene_sets_cli.split(",") if x.strip()]
 
-    cfg = _build_cfg_enrichment(
+    cfg = _build_cfg_enrichment_cluster(
         input_path=input_path,
         output_dir=output_dir,
         output_name=str(output_name),
@@ -2031,7 +2123,101 @@ def enrichment(
         dorothea_organism=dorothea_organism,
     )
 
-    run_enrichment(cfg)
+    run_enrichment_cluster(cfg)
+
+
+@enrichment_app.command(
+    "de",
+    help="Run pathway and TF enrichment from exported DE result tables without loading AnnData.",
+)
+def enrichment_de(
+    input_dir: Path = typer.Option(..., "--input-dir", "-i"),
+    output_dir: Optional[Path] = typer.Option(None, "--output-dir", "-o"),
+    output_name: Optional[str] = typer.Option(None, "--output-name"),
+    n_jobs: int = typer.Option(1, "--n-jobs"),
+    make_figures: bool = typer.Option(True, "--make-figures/--no-make-figures"),
+    figdir_name: str = typer.Option("figures", "--figdir-name"),
+    figure_formats: List[str] = typer.Option(["png", "pdf"], "--figure-formats", "-F"),
+    gene_filter: List[str] = typer.Option(
+        [],
+        "--gene-filter",
+        help="[Enrichment] Filter genes before decoupler using pandas-query expressions against the DE gene table metadata, e.g. \"not gene.str.startswith('MT-')\".",
+    ),
+    de_decoupler_source: str = typer.Option("auto", "--de-decoupler-source"),
+    de_decoupler_stat_col: str = typer.Option("stat", "--de-decoupler-stat-col"),
+    decoupler_method: str = typer.Option("consensus", "--decoupler-method"),
+    decoupler_consensus_methods: Optional[List[str]] = typer.Option(
+        None,
+        "--decoupler-consensus-methods",
+        callback=validate_decoupler_consensus_methods,
+    ),
+    decoupler_min_n_targets: int = typer.Option(5, "--decoupler-min-n-targets"),
+    decoupler_bar_split_signed: bool = typer.Option(
+        True,
+        "--decoupler-bar-split-signed/--no-decoupler-bar-split-signed",
+    ),
+    decoupler_bar_top_n_up: Optional[int] = typer.Option(None, "--decoupler-bar-top-n-up"),
+    decoupler_bar_top_n_down: Optional[int] = typer.Option(None, "--decoupler-bar-top-n-down"),
+    msigdb_gene_sets_cli: Optional[str] = typer.Option(
+        None,
+        "--msigdb-gene-sets",
+        help="[MSigDB] Comma-separated MSigDB keywords or paths to .gmt files.",
+        autocompletion=_gene_sets_completion,
+    ),
+    msigdb_method: str = typer.Option("consensus", "--msigdb-method"),
+    msigdb_min_n_targets: int = typer.Option(5, "--msigdb-min-n-targets"),
+    run_dorothea: bool = typer.Option(True, "--run-dorothea/--no-run-dorothea"),
+    dorothea_method: str = typer.Option("consensus", "--dorothea-method"),
+    dorothea_min_n_targets: int = typer.Option(5, "--dorothea-min-n-targets"),
+    dorothea_confidence: str = typer.Option("A,B,C", "--dorothea-confidence"),
+    dorothea_organism: str = typer.Option("human", "--dorothea-organism"),
+    run_progeny: bool = typer.Option(True, "--run-progeny/--no-run-progeny"),
+    progeny_method: str = typer.Option("consensus", "--progeny-method"),
+    progeny_min_n_targets: int = typer.Option(5, "--progeny-min-n-targets"),
+    progeny_top_n: int = typer.Option(100, "--progeny-top-n"),
+    progeny_organism: str = typer.Option("human", "--progeny-organism"),
+):
+    if output_name is None:
+        output_name = f"enrichment_de_{re.sub(r'[^A-Za-z0-9._-]+', '_', input_dir.name.strip())}"
+
+    if msigdb_gene_sets_cli is None:
+        msigdb_gene_sets = None
+    else:
+        msigdb_gene_sets = [x.strip() for x in msigdb_gene_sets_cli.split(",") if x.strip()]
+
+    cfg = _build_cfg_enrichment_de(
+        input_dir=input_dir,
+        output_dir=output_dir,
+        output_name=str(output_name),
+        n_jobs=n_jobs,
+        make_figures=make_figures,
+        figdir_name=figdir_name,
+        figure_formats=figure_formats,
+        gene_filter=gene_filter,
+        de_decoupler_source=de_decoupler_source,
+        de_decoupler_stat_col=de_decoupler_stat_col,
+        decoupler_method=decoupler_method,
+        decoupler_consensus_methods=decoupler_consensus_methods,
+        decoupler_min_n_targets=decoupler_min_n_targets,
+        decoupler_bar_split_signed=decoupler_bar_split_signed,
+        decoupler_bar_top_n_up=decoupler_bar_top_n_up,
+        decoupler_bar_top_n_down=decoupler_bar_top_n_down,
+        msigdb_gene_sets=msigdb_gene_sets,
+        msigdb_method=msigdb_method,
+        msigdb_min_n_targets=msigdb_min_n_targets,
+        run_progeny=run_progeny,
+        progeny_method=progeny_method,
+        progeny_min_n_targets=progeny_min_n_targets,
+        progeny_top_n=progeny_top_n,
+        progeny_organism=progeny_organism,
+        run_dorothea=run_dorothea,
+        dorothea_method=dorothea_method,
+        dorothea_min_n_targets=dorothea_min_n_targets,
+        dorothea_confidence=[x.strip() for x in dorothea_confidence.split(",") if x.strip()],
+        dorothea_organism=dorothea_organism,
+    )
+
+    run_enrichment_de_from_tables(cfg)
 
 
 @markers_and_de_app.command(

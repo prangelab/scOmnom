@@ -43,6 +43,7 @@ from .annotation_utils import (
     run_decoupler_for_round,
     _publish_decoupler_from_round_to_top_level,
     _apply_gene_filters_to_var_names,
+    _parse_gene_filter_entry,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -1321,6 +1322,328 @@ def run_enrichment(cfg) -> ad.AnnData:
 
     LOGGER.info("Finished markers-and-de (enrichment).")
     return adata
+
+
+def run_enrichment_cluster(cfg) -> ad.AnnData:
+    return run_enrichment(cfg)
+
+
+def _build_gene_meta_from_de_tables(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    for df in tables.values():
+        if df is None or getattr(df, "empty", True):
+            continue
+        meta = df.copy()
+        if "gene" in meta.columns:
+            meta["gene"] = meta["gene"].astype(str)
+        else:
+            meta.insert(0, "gene", meta.index.astype(str))
+        meta = meta.drop_duplicates(subset=["gene"], keep="first")
+        frames.append(meta)
+
+    if not frames:
+        return pd.DataFrame(columns=["gene"]).set_index("gene", drop=False)
+
+    meta = pd.concat(frames, axis=0, ignore_index=True)
+    meta["gene"] = meta["gene"].astype(str)
+    meta = meta.drop_duplicates(subset=["gene"], keep="first")
+    return meta.set_index("gene", drop=False)
+
+
+def _apply_gene_filters_to_de_stats(
+    stats: pd.DataFrame,
+    *,
+    gene_meta: pd.DataFrame,
+    gene_filter: Optional[Sequence[str]],
+    resource_name: str,
+) -> tuple[pd.DataFrame, Optional[dict[str, object]]]:
+    if stats.empty or not gene_filter:
+        return stats, None
+
+    exprs: list[str] = []
+    for raw in gene_filter:
+        parsed = _parse_gene_filter_entry(raw)
+        if parsed:
+            exprs.append(parsed)
+    if not exprs:
+        return stats, None
+
+    meta = gene_meta.copy()
+    if "gene" not in meta.columns:
+        meta["gene"] = meta.index.astype(str)
+    meta = meta.reindex(stats.index.astype(str))
+
+    keep = pd.Series(True, index=meta.index)
+    for expr_raw in exprs:
+        expr_norm = re.sub(r"\bnot_in\b", "not in", str(expr_raw))
+        try:
+            matched = meta.query(expr_norm, engine="python")
+            keep &= meta.index.isin(matched.index)
+        except Exception as e:
+            LOGGER.warning("%s: gene_filter failed for expr=%r: %s", resource_name, str(expr_raw), e)
+
+    kept_genes = keep[keep].index.astype(str).tolist()
+    filtered = stats.loc[kept_genes].copy()
+    info = {
+        "gene_filter": tuple(str(x) for x in exprs),
+        "n_genes_input": int(stats.shape[0]),
+        "n_genes_retained": int(filtered.shape[0]),
+    }
+    LOGGER.info(
+        "%s: gene_filter retained %d/%d genes.",
+        resource_name,
+        int(filtered.shape[0]),
+        int(stats.shape[0]),
+    )
+    return filtered, info
+
+
+def _collect_pseudobulk_de_tables_from_dir(
+    input_dir: Path,
+) -> dict[str, dict[str, dict[str, pd.DataFrame]]]:
+    out: dict[str, dict[str, dict[str, pd.DataFrame]]] = {}
+    for cond_dir in sorted(input_dir.glob("condition_within_cluster__*")):
+        if not cond_dir.is_dir():
+            continue
+        condition_key = cond_dir.name.removeprefix("condition_within_cluster__")
+        for csv_path in sorted(cond_dir.glob("condition_within_cluster__*.csv")):
+            if csv_path.name == "__summary.csv":
+                continue
+            stem = csv_path.stem.removeprefix("condition_within_cluster__")
+            if "__" in stem:
+                cluster_label, contrast = stem.split("__", 1)
+            else:
+                cluster_label, contrast = stem, "contrast"
+            out.setdefault(str(condition_key), {}).setdefault(str(contrast), {})[str(cluster_label)] = pd.read_csv(csv_path)
+    return out
+
+
+def _collect_cell_contrast_tables_from_dir(
+    input_dir: Path,
+) -> dict[str, dict[str, dict[str, pd.DataFrame]]]:
+    raw: dict[str, dict[str, dict[str, dict[str, pd.DataFrame]]]] = {}
+    for pair_dir in sorted(input_dir.glob("*_DE")):
+        if not pair_dir.is_dir():
+            continue
+        prefix = pair_dir.name[:-3] if pair_dir.name.endswith("_DE") else pair_dir.name
+        for csv_path in sorted(pair_dir.rglob("cluster__*__*.csv")):
+            stem = csv_path.stem
+            if not stem.startswith("cluster__"):
+                continue
+            rest = stem.removeprefix("cluster__")
+            if "__" not in rest:
+                continue
+            cluster_label, remainder = rest.split("__", 1)
+            if "__" not in remainder:
+                continue
+            pair_key, kind = remainder.rsplit("__", 1)
+            contrast_key = prefix
+            suffix = f"_{pair_key}"
+            if contrast_key.endswith(suffix):
+                contrast_key = contrast_key[: -len(suffix)]
+            raw.setdefault(str(contrast_key), {}).setdefault(str(pair_key), {}).setdefault(str(cluster_label), {})[str(kind)] = pd.read_csv(csv_path)
+
+    out: dict[str, dict[str, dict[str, pd.DataFrame]]] = {}
+    for contrast_key, per_pair in raw.items():
+        for pair_key, per_cluster in per_pair.items():
+            chosen: dict[str, pd.DataFrame] = {}
+            for cluster_label, per_kind in per_cluster.items():
+                for kind in ("combined", "wilcoxon", "logreg", "pseudobulk_effect"):
+                    df = per_kind.get(kind)
+                    if df is not None and not getattr(df, "empty", True):
+                        chosen[str(cluster_label)] = df
+                        break
+            if chosen:
+                out.setdefault(str(contrast_key), {})[str(pair_key)] = chosen
+    return out
+
+
+def _write_de_enrichment_tables(
+    payloads: Mapping[str, dict],
+    *,
+    tables_root: Path,
+) -> None:
+    tables_root.mkdir(parents=True, exist_ok=True)
+    for net_name, payload in payloads.items():
+        if not isinstance(payload, dict):
+            continue
+        net_dir = tables_root / io_utils.sanitize_identifier(str(net_name), allow_spaces=False)
+        net_dir.mkdir(parents=True, exist_ok=True)
+        activity = payload.get("activity")
+        if isinstance(activity, pd.DataFrame) and not activity.empty:
+            activity.to_csv(net_dir / "activity.tsv", sep="\t")
+        activity_by_gmt = payload.get("activity_by_gmt")
+        if isinstance(activity_by_gmt, dict):
+            for gmt_key, gmt_df in activity_by_gmt.items():
+                if isinstance(gmt_df, pd.DataFrame) and not gmt_df.empty:
+                    gmt_name = io_utils.sanitize_identifier(str(gmt_key), allow_spaces=False)
+                    gmt_df.to_csv(net_dir / f"activity_{gmt_name}.tsv", sep="\t")
+
+
+def run_enrichment_de(cfg) -> None:
+    init_logging(getattr(cfg, "logfile", None))
+    LOGGER.info("Starting markers-and-de (DE enrichment)...")
+
+    output_dir = Path(getattr(cfg, "output_dir"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    figdir = output_dir / str(getattr(cfg, "figdir_name", "figures"))
+    plot_utils.setup_scanpy_figs(figdir, getattr(cfg, "figure_formats", ["png", "pdf"]))
+
+    input_dir = Path(getattr(cfg, "input_dir", None) or getattr(cfg, "input_path"))
+    if not input_dir.exists() or not input_dir.is_dir():
+        raise RuntimeError(f"enrichment de: input_dir not found or not a directory: {input_dir}")
+
+    de_source = str(getattr(cfg, "de_decoupler_source", "auto") or "auto").lower()
+    if de_source not in ("auto", "all", "pseudobulk", "cell", "none"):
+        raise RuntimeError(f"enrichment de: invalid de_decoupler_source={de_source!r}")
+    if de_source == "none":
+        LOGGER.info("enrichment de: de_decoupler_source='none'; nothing to do.")
+        return None
+
+    from .annotation_utils import (
+        _run_msigdb_from_stats,
+        _run_progeny_from_stats,
+        _run_dorothea_from_stats,
+    )
+    from . import de_plot_utils
+
+    pb_tables = _collect_pseudobulk_de_tables_from_dir(input_dir)
+    cell_tables = _collect_cell_contrast_tables_from_dir(input_dir)
+    if not pb_tables and not cell_tables:
+        raise RuntimeError(f"enrichment de: no DE CSV tables found under {input_dir}")
+
+    run_key = io_utils.sanitize_identifier(
+        str(getattr(cfg, "output_name", f"{input_dir.name}.enrichment_de")).replace(".", "_"),
+        allow_spaces=False,
+    )
+    run_round = str(plot_utils.get_run_subdir(run_key))
+    tables_root = output_dir / "tables" / run_round
+    stat_col = str(getattr(cfg, "de_decoupler_stat_col", "stat") or "stat")
+    total_runs = 0
+
+    if bool(getattr(cfg, "make_figures", True)):
+        figdir_round = Path(run_round)
+    else:
+        figdir_round = None
+
+    _write_settings(
+        tables_root,
+        "__settings.txt",
+        [
+            f"input_dir={input_dir}",
+            f"de_decoupler_source={de_source}",
+            f"de_decoupler_stat_col={stat_col}",
+            f"gene_filter={list(getattr(cfg, 'gene_filter', ()))}",
+        ],
+    )
+
+    condition_keys = sorted(set(pb_tables.keys()) | set(cell_tables.keys()))
+    for condition_key in condition_keys:
+        sources: list[tuple[str, dict[str, dict[str, pd.DataFrame]]]] = []
+        if de_source in ("auto", "all", "pseudobulk") and condition_key in pb_tables:
+            sources.append(("pseudobulk", pb_tables[condition_key]))
+        if de_source in ("auto", "all", "cell") and condition_key in cell_tables:
+            sources.append(("cell", cell_tables[condition_key]))
+
+        for source, tables_by_contrast in sources:
+            for contrast, tables in tables_by_contrast.items():
+                stats = _build_stats_matrix_from_tables(
+                    tables,
+                    preferred_col=stat_col,
+                    fallback_cols=("log2FoldChange", "cell_wilcoxon_logfc", "cell_logreg_coef"),
+                )
+                if stats is None or stats.empty:
+                    continue
+
+                gene_meta = _build_gene_meta_from_de_tables(tables)
+                stats, gene_filter_info = _apply_gene_filters_to_de_stats(
+                    stats,
+                    gene_meta=gene_meta,
+                    gene_filter=getattr(cfg, "gene_filter", ()),
+                    resource_name=f"enrichment de [{source}:{condition_key}:{contrast}]",
+                )
+                if stats.empty:
+                    LOGGER.info(
+                        "enrichment de: gene_filter removed all genes for source=%r condition_key=%r contrast=%r; skipping.",
+                        str(source),
+                        str(condition_key),
+                        str(contrast),
+                    )
+                    continue
+
+                input_label = f"{source}:{condition_key}:{contrast}:{stat_col}"
+                payloads: dict[str, dict] = {}
+                msigdb_payload = _run_msigdb_from_stats(stats, cfg, input_label=input_label)
+                if msigdb_payload is not None:
+                    payloads["msigdb"] = msigdb_payload
+                if bool(getattr(cfg, "run_progeny", True)):
+                    prog = _run_progeny_from_stats(stats, cfg, input_label=input_label)
+                    if prog is not None:
+                        payloads["progeny"] = prog
+                if bool(getattr(cfg, "run_dorothea", True)):
+                    doro = _run_dorothea_from_stats(stats, cfg, input_label=input_label)
+                    if doro is not None:
+                        payloads["dorothea"] = doro
+                if not payloads:
+                    continue
+
+                total_runs += 1
+                if str(source) == "cell":
+                    base = Path("cell_level_DE") / str(condition_key) / str(contrast)
+                else:
+                    if str(contrast) == "interaction" or "^" in str(condition_key):
+                        base = Path("pseudobulk_DE") / f"{condition_key}__interaction" / "interaction"
+                    else:
+                        base = Path("pseudobulk_DE") / str(condition_key) / str(contrast)
+
+                run_tables_dir = tables_root / base
+                _write_de_enrichment_tables(payloads, tables_root=run_tables_dir)
+                if gene_filter_info:
+                    _write_settings(
+                        run_tables_dir,
+                        "__settings.txt",
+                        [
+                            f"source={source}",
+                            f"condition_key={condition_key}",
+                            f"contrast={contrast}",
+                            f"stat_col={stat_col}",
+                            f"gene_filter={list(gene_filter_info['gene_filter'])}",
+                            f"gene_filter_n_genes_input={int(gene_filter_info['n_genes_input'])}",
+                            f"gene_filter_n_genes_retained={int(gene_filter_info['n_genes_retained'])}",
+                        ],
+                    )
+
+                if figdir_round is not None:
+                    pos_label = None
+                    neg_label = None
+                    if "_vs_" in str(contrast):
+                        parts = str(contrast).split("_vs_", 1)
+                        if len(parts) == 2:
+                            pos_label, neg_label = parts[0], parts[1]
+
+                    for net_name, net_payload in payloads.items():
+                        artifacts = de_plot_utils.plot_de_decoupler_payload(
+                            net_payload,
+                            net_name=str(net_name),
+                            figdir=base,
+                            heatmap_top_k=int(getattr(cfg, "plot_max_genes_total", 80)),
+                            bar_top_n=10,
+                            bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
+                            bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
+                            bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
+                            dotplot_top_k=25,
+                            title_prefix=f"{condition_key} {contrast}",
+                            pos_label=pos_label,
+                            neg_label=neg_label,
+                        )
+                        plot_utils.persist_plot_artifacts(artifacts)
+
+    if total_runs == 0:
+        raise RuntimeError(f"enrichment de: no enrichment payloads were produced from DE tables in {input_dir}")
+
+    LOGGER.info("Finished markers-and-de (DE enrichment); runs=%d", int(total_runs))
+    return None
 
 
 def run_composition(cfg) -> ad.AnnData:

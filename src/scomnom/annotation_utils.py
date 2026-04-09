@@ -1593,7 +1593,7 @@ def run_decoupler_for_round(
         )
     finally:
         if cleanup_key is not None:
-            adata.obs.pop(str(cleanup_key), None)
+            adata.obs.drop(columns=[str(cleanup_key)], inplace=True, errors="ignore")
 
     # Ensure round decoupler dict
     rinfo.setdefault("decoupler", {})

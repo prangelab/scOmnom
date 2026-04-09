@@ -654,6 +654,7 @@ class MarkersAndDEConfig(BaseModel):
     # IO / run scaffolding
     # ------------------------------------------------------------------
     input_path: Path
+    input_dir: Optional[Path] = None
     output_dir: Path
     output_name: str = "adata.markers_and_de"
     logfile: Optional[Path] = None

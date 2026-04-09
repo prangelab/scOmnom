@@ -8,11 +8,17 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from scomnom.composition_utils import _resolve_active_cluster_key
-from scomnom.markers_and_de import _run_namespace_for_round, run_enrichment
+from scomnom.markers_and_de import (
+    _run_namespace_for_round,
+    _collect_pseudobulk_de_tables_from_dir,
+    _collect_cell_contrast_tables_from_dir,
+    run_enrichment_cluster,
+)
 from scomnom.annotation_utils import (
     _apply_gene_filters_to_expr,
     _apply_gene_filters_to_var_names,
     _prepare_decoupler_grouping,
+    run_decoupler_for_round,
 )
 from scomnom.reporting import _de_report_summary_rows
 
@@ -69,7 +75,7 @@ def test_resolve_active_cluster_key_prefers_round_labels_obs_key() -> None:
 @patch("scomnom.markers_and_de.plot_utils.setup_scanpy_figs")
 @patch("scomnom.markers_and_de.run_decoupler_for_round")
 @patch("scomnom.markers_and_de.io_utils.load_dataset")
-def test_run_enrichment_uses_requested_round_id(
+def test_run_enrichment_cluster_uses_requested_round_id(
     mock_load_dataset,
     mock_run_decoupler_for_round,
     _mock_setup_scanpy_figs,
@@ -102,7 +108,7 @@ def test_run_enrichment_uses_requested_round_id(
         decoupler_bar_split_signed=True,
     )
 
-    got = run_enrichment(cfg)
+    got = run_enrichment_cluster(cfg)
 
     assert got is adata
     mock_run_decoupler_for_round.assert_called_once_with(adata, cfg, round_id="r5_archetypes")
@@ -110,6 +116,41 @@ def test_run_enrichment_uses_requested_round_id(
     assert mock_save_dataset.call_args.args[0] is adata
     assert mock_save_dataset.call_args.args[1] == Path("/tmp/enrichment-out/adata.enrichment_r5_archetypes.zarr")
     assert mock_save_dataset.call_args.kwargs["fmt"] == "zarr"
+
+
+def test_collect_pseudobulk_de_tables_from_dir_reads_exported_csvs(tmp_path: Path) -> None:
+    cond_dir = tmp_path / "condition_within_cluster__sex"
+    cond_dir.mkdir(parents=True)
+    pd.DataFrame({"gene": ["CXCL8"], "stat": [3.0]}).to_csv(
+        cond_dir / "condition_within_cluster__C00__female_vs_male.csv",
+        index=False,
+    )
+
+    got = _collect_pseudobulk_de_tables_from_dir(tmp_path)
+
+    assert sorted(got.keys()) == ["sex"]
+    assert sorted(got["sex"].keys()) == ["female_vs_male"]
+    assert sorted(got["sex"]["female_vs_male"].keys()) == ["C00"]
+
+
+def test_collect_cell_contrast_tables_from_dir_prefers_combined_csv(tmp_path: Path) -> None:
+    pair_dir = tmp_path / "sex_female_vs_male_DE" / "cluster__C00__female_vs_male"
+    pair_dir.mkdir(parents=True)
+    pd.DataFrame({"gene": ["CXCL8"], "stat": [1.0]}).to_csv(
+        pair_dir / "cluster__C00__female_vs_male__combined.csv",
+        index=False,
+    )
+    pd.DataFrame({"gene": ["CXCL8"], "cell_wilcoxon_logfc": [2.0]}).to_csv(
+        pair_dir / "cluster__C00__female_vs_male__wilcoxon.csv",
+        index=False,
+    )
+
+    got = _collect_cell_contrast_tables_from_dir(tmp_path)
+
+    assert sorted(got.keys()) == ["sex"]
+    assert sorted(got["sex"].keys()) == ["female_vs_male"]
+    df = got["sex"]["female_vs_male"]["C00"]
+    assert list(df.columns) == ["gene", "stat"]
 
 
 def test_apply_gene_filters_to_expr_filters_pseudobulk_genes() -> None:
@@ -234,9 +275,38 @@ def test_prepare_decoupler_grouping_builds_cluster_condition_groups() -> None:
         "C01: T cells | female",
         "C01: T cells | male",
     ]
-    assert list(adata.obs["__decoupler_group__r5_archetypes_sex"].astype(str)) == [
-        "C00__female",
-        "C00__male",
-        "C01__female",
-        "C01__male",
+
+
+@patch("scomnom.annotation_utils._store_cluster_pseudobulk")
+def test_run_decoupler_for_round_drops_temporary_condition_group_key(mock_store_cluster_pseudobulk) -> None:
+    adata = ad.AnnData(X=np.zeros((4, 2)))
+    adata.var_names = ["CXCL8", "LST1"]
+    adata.obs["leiden__r4_subset_annotation"] = ["C00", "C00", "C01", "C01"]
+    adata.obs["cluster_label__r4_subset_annotation"] = [
+        "C00: Macrophages",
+        "C00: Macrophages",
+        "C01: T cells",
+        "C01: T cells",
     ]
+    adata.obs["sex"] = ["female", "male", "female", "male"]
+    adata.obs["MASLD"] = ["yes", "yes", "no", "no"]
+    adata.uns["cluster_rounds"] = {
+        "r4_subset_annotation": {
+            "labels_obs_key": "leiden__r4_subset_annotation",
+            "cluster_order": ["C00", "C01"],
+            "decoupler": {},
+        }
+    }
+
+    cfg = SimpleNamespace(
+        condition_key="sex:MASLD",
+        decoupler_pseudobulk_agg="mean",
+        decoupler_use_raw=False,
+        msigdb_gene_sets=[],
+        run_progeny=False,
+        run_dorothea=False,
+    )
+
+    run_decoupler_for_round(adata, cfg, round_id="r4_subset_annotation")
+
+    assert "__decoupler_group__r4_subset_annotation_sex.MASLD" not in adata.obs.columns
