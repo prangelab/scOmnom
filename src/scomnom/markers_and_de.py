@@ -39,6 +39,11 @@ from .composition_utils import (
     _build_composition_consensus_summary,
     _MIN_GLM_SAMPLES_PER_LEVEL,
 )
+from .annotation_utils import (
+    run_decoupler_for_round,
+    _publish_decoupler_from_round_to_top_level,
+    _apply_gene_filters_to_var_names,
+)
 
 LOGGER = logging.getLogger(__name__)
 _SCCODA_LOCK = threading.Lock()
@@ -349,6 +354,31 @@ def _run_namespace_for_round(
     if rid:
         return f"{str(prefix)}_{_safe_combo_token(str(rid))}"
     return str(prefix)
+
+
+def _snapshot_top_level_decoupler_state(
+    adata: ad.AnnData,
+    *,
+    keys: Sequence[str] = ("msigdb", "progeny", "dorothea", "pseudobulk"),
+) -> dict[str, object]:
+    snapshot: dict[str, object] = {}
+    for key in keys:
+        if key in adata.uns:
+            snapshot[str(key)] = adata.uns[str(key)]
+    return snapshot
+
+
+def _restore_top_level_decoupler_state(
+    adata: ad.AnnData,
+    snapshot: Mapping[str, object],
+    *,
+    keys: Sequence[str] = ("msigdb", "progeny", "dorothea", "pseudobulk"),
+) -> None:
+    for key in keys:
+        if key in snapshot:
+            adata.uns[str(key)] = snapshot[str(key)]
+        else:
+            adata.uns.pop(str(key), None)
 
 
 def _resolve_condition_key(adata: ad.AnnData, key: str) -> str:
@@ -1173,6 +1203,123 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
             io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
 
     LOGGER.info("Finished markers-and-de (cluster-vs-rest).")
+    return adata
+
+
+def run_enrichment(cfg) -> ad.AnnData:
+    init_logging(getattr(cfg, "logfile", None))
+    LOGGER.info("Starting markers-and-de (enrichment)...")
+
+    output_dir = Path(getattr(cfg, "output_dir"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    figdir = output_dir / str(getattr(cfg, "figdir_name", "figures"))
+    plot_utils.setup_scanpy_figs(figdir, getattr(cfg, "figure_formats", ["png", "pdf"]))
+
+    adata = io_utils.load_dataset(getattr(cfg, "input_path"))
+    rounds = adata.uns.get("cluster_rounds", {})
+    target_round_id = getattr(cfg, "round_id", None)
+    if target_round_id is None:
+        active_round_id = adata.uns.get("active_cluster_round", None)
+        target_round_id = str(active_round_id) if active_round_id is not None else None
+    if not target_round_id or not isinstance(rounds, dict) or str(target_round_id) not in rounds:
+        raise RuntimeError(
+            "enrichment: target round not resolved. "
+            f"Resolved round_id={target_round_id!r}, active_round={adata.uns.get('active_cluster_round', None)!r}."
+        )
+    target_round_id = str(target_round_id)
+
+    regenerate_figures = bool(getattr(cfg, "regenerate_figures", False))
+    if regenerate_figures:
+        round_dec = rounds[target_round_id].get("decoupler", {})
+        if not isinstance(round_dec, dict) or not round_dec:
+            raise RuntimeError(
+                f"enrichment: no stored decoupler payload found for round_id={target_round_id!r}."
+            )
+    else:
+        run_decoupler_for_round(adata, cfg, round_id=target_round_id)
+
+    if bool(getattr(cfg, "make_figures", True)):
+        run_namespace = _run_namespace_for_round(
+            adata,
+            prefix="enrichment",
+            round_id=target_round_id,
+        )
+        run_round = str(plot_utils.get_run_subdir(run_namespace))
+        figdir_round = Path(run_round)
+
+        snapshot = _snapshot_top_level_decoupler_state(adata)
+        try:
+            _publish_decoupler_from_round_to_top_level(
+                adata,
+                round_id=target_round_id,
+                resources=("msigdb", "progeny", "dorothea"),
+                publish_pseudobulk=True,
+                clear_missing=True,
+            )
+            artifacts = []
+            if "msigdb" in adata.uns:
+                artifacts.extend(
+                    plot_utils.plot_decoupler_all_styles(
+                        adata,
+                        net_key="msigdb",
+                        net_name="MSigDB",
+                        figdir=figdir_round,
+                        heatmap_top_k=30,
+                        bar_top_n=15,
+                        bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
+                        bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
+                        bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
+                        dotplot_top_k=25,
+                    )
+                )
+            if "progeny" in adata.uns:
+                artifacts.extend(
+                    plot_utils.plot_decoupler_all_styles(
+                        adata,
+                        net_key="progeny",
+                        net_name="PROGENy",
+                        figdir=figdir_round,
+                        heatmap_top_k=30,
+                        bar_top_n=15,
+                        bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
+                        bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
+                        bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
+                        dotplot_top_k=25,
+                    )
+                )
+            if "dorothea" in adata.uns:
+                artifacts.extend(
+                    plot_utils.plot_decoupler_all_styles(
+                        adata,
+                        net_key="dorothea",
+                        net_name="DoRothEA",
+                        figdir=figdir_round,
+                        heatmap_top_k=30,
+                        bar_top_n=15,
+                        bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
+                        bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
+                        bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
+                        dotplot_top_k=25,
+                    )
+                )
+            plot_utils.persist_plot_artifacts(artifacts)
+        finally:
+            _restore_top_level_decoupler_state(adata, snapshot)
+
+    if regenerate_figures:
+        LOGGER.info("enrichment: regenerate_figures=True; skipping dataset save.")
+    else:
+        out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.enrichment")) + ".zarr")
+        LOGGER.info("Saving dataset → %s", out_zarr)
+        io_utils.save_dataset(adata, out_zarr, fmt="zarr")
+
+        if bool(getattr(cfg, "save_h5ad", False)):
+            out_h5ad = output_dir / (str(getattr(cfg, "output_name", "adata.enrichment")) + ".h5ad")
+            LOGGER.warning("Writing additional H5AD output (loads full matrix into RAM): %s", out_h5ad)
+            io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
+
+    LOGGER.info("Finished markers-and-de (enrichment).")
     return adata
 
 
@@ -2067,6 +2214,20 @@ def run_within_cluster(cfg) -> ad.AnnData:
     if regenerate_figures and not bool(getattr(cfg, "make_figures", True)):
         raise RuntimeError("regenerate_figures=True requires make_figures=True.")
 
+    gene_filter = tuple(getattr(cfg, "gene_filter", ()) or ())
+    gene_var_mask: Optional[np.ndarray] = None
+    gene_names_for_de: Optional[list[str]] = None
+    gene_filter_info: Optional[dict[str, object]] = None
+    if not regenerate_figures and gene_filter:
+        gene_var_mask, gene_filter_info = _apply_gene_filters_to_var_names(
+            adata,
+            gene_filter=gene_filter,
+            resource_name="DE",
+        )
+        if int(gene_filter_info["n_genes_retained"]) == 0:
+            raise RuntimeError("within-cluster: gene_filter removed all genes; aborting DE.")
+        gene_names_for_de = adata.var_names[gene_var_mask].astype(str).tolist()
+
     # ----------------------------
     # Mode decoding
     # ----------------------------
@@ -2295,6 +2456,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                         ref_b=str(task.get("ref_b", "")) if task.get("ref_b") else None,
                         spec=pb_spec,
                         opts=pb_opts,
+                        gene_names=gene_names_for_de,
                         store_key=None,
                         store=False,
                         n_cpus=1,
@@ -2308,6 +2470,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                     condition_key=str(task["cond_key"]),
                     spec=pb_spec,
                     opts=pb_opts,
+                    gene_names=gene_names_for_de,
                     contrasts=[f"{task['A']}_vs_{task['B']}"],
                     store_key=None,
                     store=False,
@@ -2581,6 +2744,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
             round_id=getattr(cfg, "round_id", None),
             specs=specs,
             pb_spec=pb_spec,
+            gene_var_mask=gene_var_mask,
             n_jobs=total_cpus,
         )
 
@@ -2644,6 +2808,9 @@ def run_within_cluster(cfg) -> ad.AnnData:
                     f"contrast_pb_min_abs_log2fc={getattr(cfg, 'contrast_pb_min_abs_log2fc', None)}",
                     f"min_pct={getattr(cfg, 'min_pct', None)}",
                     f"min_diff_pct={getattr(cfg, 'min_diff_pct', None)}",
+                    f"gene_filter={list(gene_filter)}",
+                    f"gene_filter_n_genes_input={int(gene_filter_info['n_genes_input']) if gene_filter_info else int(adata.n_vars)}",
+                    f"gene_filter_n_genes_retained={int(gene_filter_info['n_genes_retained']) if gene_filter_info else int(adata.n_vars)}",
                     f"de_decoupler_source={getattr(cfg, 'de_decoupler_source', None)}",
                     f"de_decoupler_stat_col={getattr(cfg, 'de_decoupler_stat_col', None)}",
                     f"decoupler_method={getattr(cfg, 'decoupler_method', None)}",
@@ -2803,6 +2970,9 @@ def run_within_cluster(cfg) -> ad.AnnData:
             "pseudobulk_n_unique_samples": int(n_samples_total),
             "counts_layers_candidates": list(layer_candidates),
             "counts_layer_used": counts_layer_used,
+            "gene_filter": list(gene_filter),
+            "gene_filter_n_genes_input": int(gene_filter_info["n_genes_input"]) if gene_filter_info else int(adata.n_vars),
+            "gene_filter_n_genes_retained": int(gene_filter_info["n_genes_retained"]) if gene_filter_info else int(adata.n_vars),
             "alpha": float(getattr(cfg, "alpha", 0.05)),
             "positive_only_markers": bool(positive_only),
             "de_decoupler_ran": bool(de_decoupler_ran),
@@ -2854,6 +3024,9 @@ def run_within_cluster(cfg) -> ad.AnnData:
                     f"counts_layer={counts_layer_used}",
                     f"min_cells_per_sample_group={getattr(cfg, 'min_cells_condition', None)}",
                     f"min_samples_per_level={getattr(cfg, 'min_samples_per_level', None)}",
+                    f"gene_filter={list(gene_filter)}",
+                    f"gene_filter_n_genes_input={int(gene_filter_info['n_genes_input']) if gene_filter_info else int(adata.n_vars)}",
+                    f"gene_filter_n_genes_retained={int(gene_filter_info['n_genes_retained']) if gene_filter_info else int(adata.n_vars)}",
                     f"alpha={getattr(cfg, 'alpha', None)}",
                     f"shrink_lfc={getattr(cfg, 'shrink_lfc', None)}",
                     f"min_total_counts={getattr(cfg, 'pb_min_total_counts', None)}",

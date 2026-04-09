@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import anndata as ad
@@ -55,6 +56,228 @@ def _get_cluster_pseudobulk_df(
         index=pd.Index(genes, name="gene"),
         columns=pd.Index(clusters, name="cluster"),
     )
+
+
+def _parse_gene_filter_entry(raw: str) -> Optional[str]:
+    s = str(raw).strip()
+    if not s:
+        return None
+    parts = [p.strip() for p in s.split(";") if p.strip()]
+    expr = None
+    for p in parts:
+        low = p.lower()
+        if low.startswith("expr="):
+            expr = p.split("=", 1)[1].strip()
+        elif low.startswith("condition_key=") or low.startswith("condition=") or low.startswith("cond="):
+            continue
+        elif expr is None:
+            expr = p
+    return expr or None
+
+
+def _apply_gene_filters_to_expr(
+    adata: ad.AnnData,
+    expr: pd.DataFrame,
+    *,
+    gene_filter: Optional[Sequence[str]],
+    resource_name: str,
+) -> tuple[pd.DataFrame, Optional[dict[str, object]]]:
+    if expr.empty or not gene_filter:
+        return expr, None
+
+    exprs: list[str] = []
+    for raw in gene_filter:
+        parsed = _parse_gene_filter_entry(raw)
+        if parsed:
+            exprs.append(parsed)
+    if not exprs:
+        return expr, None
+
+    meta = adata.var.copy()
+    meta["gene"] = meta.index.astype(str)
+    meta = meta.set_index("gene", drop=False)
+    meta = meta.reindex(expr.index.astype(str))
+
+    keep = pd.Series(True, index=meta.index)
+    for expr_raw in exprs:
+        expr_norm = re.sub(r"\bnot_in\b", "not in", str(expr_raw))
+        try:
+            matched = meta.query(expr_norm, engine="python")
+            keep &= meta.index.isin(matched.index)
+        except Exception as e:
+            LOGGER.warning("%s: gene_filter failed for expr=%r: %s", resource_name, str(expr_raw), e)
+
+    kept_genes = keep[keep].index.astype(str).tolist()
+    filtered = expr.loc[kept_genes].copy()
+    info = {
+        "gene_filter": tuple(str(x) for x in exprs),
+        "n_genes_input": int(expr.shape[0]),
+        "n_genes_retained": int(filtered.shape[0]),
+    }
+    LOGGER.info(
+        "%s: gene_filter retained %d/%d genes.",
+        resource_name,
+        int(filtered.shape[0]),
+        int(expr.shape[0]),
+    )
+    return filtered, info
+
+
+def _apply_gene_filters_to_var_names(
+    adata: ad.AnnData,
+    *,
+    gene_filter: Optional[Sequence[str]],
+    resource_name: str,
+) -> tuple[np.ndarray, Optional[dict[str, object]]]:
+    if not gene_filter:
+        return np.ones(adata.n_vars, dtype=bool), None
+
+    exprs: list[str] = []
+    for raw in gene_filter:
+        parsed = _parse_gene_filter_entry(raw)
+        if parsed:
+            exprs.append(parsed)
+    if not exprs:
+        return np.ones(adata.n_vars, dtype=bool), None
+
+    meta = adata.var.copy()
+    meta["gene"] = meta.index.astype(str)
+    meta = meta.set_index("gene", drop=False)
+
+    keep = pd.Series(True, index=meta.index)
+    for expr_raw in exprs:
+        expr_norm = re.sub(r"\bnot_in\b", "not in", str(expr_raw))
+        try:
+            matched = meta.query(expr_norm, engine="python")
+            keep &= meta.index.isin(matched.index)
+        except Exception as e:
+            LOGGER.warning("%s: gene_filter failed for expr=%r: %s", resource_name, str(expr_raw), e)
+
+    keep_mask = keep.reindex(adata.var_names.astype(str)).fillna(False).to_numpy(dtype=bool, copy=False)
+    info = {
+        "gene_filter": tuple(str(x) for x in exprs),
+        "n_genes_input": int(adata.n_vars),
+        "n_genes_retained": int(keep_mask.sum()),
+    }
+    LOGGER.info(
+        "%s: gene_filter retained %d/%d genes.",
+        resource_name,
+        int(keep_mask.sum()),
+        int(adata.n_vars),
+    )
+    return keep_mask, info
+
+
+def _normalize_condition_levels(series: pd.Series) -> pd.Series:
+    return series.astype(str).str.strip().str.replace(r"\s+", " ", regex=True)
+
+
+def _safe_condition_token(x: object) -> str:
+    return io_utils.sanitize_identifier(str(x), max_len=80, allow_spaces=False)
+
+
+def _resolve_enrichment_condition_key(adata: ad.AnnData, key: str) -> str:
+    raw = str(key).strip()
+    if ":" not in raw:
+        return raw
+
+    parts = [p.strip() for p in raw.split(":") if p.strip()]
+    if len(parts) < 2:
+        return raw
+
+    missing = [p for p in parts if p not in adata.obs]
+    if missing:
+        raise RuntimeError(f"condition_key parts not in adata.obs: {missing}")
+
+    combo_key = ".".join(parts)
+    if combo_key not in adata.obs:
+        comp = _normalize_condition_levels(adata.obs[parts[0]]).map(_safe_condition_token)
+        for p in parts[1:]:
+            comp = comp + "." + _normalize_condition_levels(adata.obs[p]).map(_safe_condition_token)
+        adata.obs[combo_key] = comp
+        LOGGER.info("enrichment: created composite condition_key=%r from %s", combo_key, parts)
+
+    return combo_key
+
+
+def _prepare_decoupler_grouping(
+    adata: ad.AnnData,
+    *,
+    round_id: str,
+    labels_obs_key: str,
+    condition_key: str | None,
+) -> dict[str, object]:
+    base_display_map = _round_cluster_display_map(
+        adata,
+        round_id=round_id,
+        labels_obs_key=labels_obs_key,
+        cluster_label_key=CLUSTER_LABEL_KEY,
+    )
+
+    if not condition_key:
+        return {
+            "group_key": labels_obs_key,
+            "cleanup_key": None,
+            "condition_key": None,
+            "display_map": dict(base_display_map),
+            "display_order": None,
+        }
+
+    cond_key = _resolve_enrichment_condition_key(adata, condition_key)
+    if cond_key not in adata.obs:
+        raise RuntimeError(f"enrichment: condition_key={cond_key!r} not found in adata.obs")
+
+    cluster_vals = adata.obs[labels_obs_key].astype(str)
+    cond_vals = _normalize_condition_levels(adata.obs[cond_key])
+    cond_tokens = cond_vals.map(_safe_condition_token)
+    combo_vals = cluster_vals + "__" + cond_tokens
+
+    temp_key = f"__decoupler_group__{io_utils.sanitize_identifier(f'{round_id}_{cond_key}', allow_spaces=False)}"
+    adata.obs[temp_key] = combo_vals.to_numpy()
+
+    combo_df = pd.DataFrame(
+        {
+            "combo": combo_vals.to_numpy(),
+            "cluster_id": cluster_vals.to_numpy(),
+            "condition_label": cond_vals.to_numpy(),
+            "condition_token": cond_tokens.to_numpy(),
+        },
+        index=adata.obs_names,
+    )
+    combo_df = combo_df.drop_duplicates(subset=["combo"])
+
+    display_map = {
+        str(row.combo): f"{base_display_map.get(str(row.cluster_id), str(row.cluster_id))} | {str(row.condition_label)}"
+        for row in combo_df.itertuples(index=False)
+    }
+
+    cluster_order_raw = adata.uns.get("cluster_rounds", {}).get(round_id, {}).get("cluster_order", None)
+    if isinstance(cluster_order_raw, (list, tuple, np.ndarray)) and len(cluster_order_raw):
+        cluster_order = [str(x) for x in cluster_order_raw]
+    else:
+        cluster_order = [str(x) for x in pd.unique(cluster_vals)]
+
+    cond_series = adata.obs[cond_key]
+    if isinstance(cond_series.dtype, pd.CategoricalDtype):
+        cond_order = [str(x).strip() for x in cond_series.cat.categories.astype(str).tolist()]
+    else:
+        cond_order = sorted(pd.unique(cond_vals).astype(str).tolist())
+
+    available = set(combo_df["combo"].astype(str).tolist())
+    display_order: list[str] = []
+    for cid in cluster_order:
+        for cond_label in cond_order:
+            combo = f"{cid}__{_safe_condition_token(cond_label)}"
+            if combo in available:
+                display_order.append(display_map[combo])
+
+    return {
+        "group_key": temp_key,
+        "cleanup_key": temp_key,
+        "condition_key": cond_key,
+        "display_map": display_map,
+        "display_order": display_order if display_order else None,
+    }
 
 
 def _store_cluster_pseudobulk(
@@ -755,6 +978,15 @@ def _run_msigdb(
     if expr.empty:
         LOGGER.warning("MSigDB: pseudobulk expr is empty; skipping.")
         return
+    expr, filter_info = _apply_gene_filters_to_expr(
+        adata,
+        expr,
+        gene_filter=getattr(cfg, "gene_filter", ()),
+        resource_name="MSigDB",
+    )
+    if expr.empty:
+        LOGGER.warning("MSigDB: pseudobulk expr empty after gene_filter; skipping.")
+        return
 
     gene_sets = getattr(cfg, "msigdb_gene_sets", None) or ["HALLMARK", "REACTOME"]
 
@@ -839,6 +1071,9 @@ def _run_msigdb(
             "input": f"{store_key}:pseudobulk_expr(genes_x_clusters)",
             "resource": "msigdb_gmt",
             "round_id": rid,
+            "gene_filter": list(filter_info["gene_filter"]) if filter_info else [],
+            "n_genes_input": int(filter_info["n_genes_input"]) if filter_info else int(expr.shape[0]),
+            "n_genes_retained": int(filter_info["n_genes_retained"]) if filter_info else int(expr.shape[0]),
         },
         "activity_by_gmt": activity_by_gmt,
         "feature_meta": feature_meta,
@@ -875,6 +1110,15 @@ def _run_progeny(
         return
     if expr.empty:
         LOGGER.warning("PROGENy: pseudobulk expr is empty; skipping.")
+        return
+    expr, filter_info = _apply_gene_filters_to_expr(
+        adata,
+        expr,
+        gene_filter=getattr(cfg, "gene_filter", ()),
+        resource_name="PROGENy",
+    )
+    if expr.empty:
+        LOGGER.warning("PROGENy: pseudobulk expr empty after gene_filter; skipping.")
         return
 
     method = (
@@ -929,6 +1173,9 @@ def _run_progeny(
             "resource": "progeny",
             "organism": str(organism),
             "round_id": rid,
+            "gene_filter": list(filter_info["gene_filter"]) if filter_info else [],
+            "n_genes_input": int(filter_info["n_genes_input"]) if filter_info else int(expr.shape[0]),
+            "n_genes_retained": int(filter_info["n_genes_retained"]) if filter_info else int(expr.shape[0]),
         },
         "feature_meta": None,
     }
@@ -964,6 +1211,15 @@ def _run_dorothea(
         return
     if expr.empty:
         LOGGER.warning("DoRothEA: pseudobulk expr is empty; skipping.")
+        return
+    expr, filter_info = _apply_gene_filters_to_expr(
+        adata,
+        expr,
+        gene_filter=getattr(cfg, "gene_filter", ()),
+        resource_name="DoRothEA",
+    )
+    if expr.empty:
+        LOGGER.warning("DoRothEA: pseudobulk expr empty after gene_filter; skipping.")
         return
 
     method = (
@@ -1025,6 +1281,9 @@ def _run_dorothea(
             "input": f"{store_key}:pseudobulk_expr(genes_x_clusters)",
             "resource": "dorothea",
             "round_id": rid,
+            "gene_filter": list(filter_info["gene_filter"]) if filter_info else [],
+            "n_genes_input": int(filter_info["n_genes_input"]) if filter_info else int(expr.shape[0]),
+            "n_genes_retained": int(filter_info["n_genes_retained"]) if filter_info else int(expr.shape[0]),
         },
         "feature_meta": None,
     }
@@ -1306,23 +1565,35 @@ def run_decoupler_for_round(
         )
     labels_obs_key = str(labels_obs_key)
 
+    grouping = _prepare_decoupler_grouping(
+        adata,
+        round_id=rid,
+        labels_obs_key=labels_obs_key,
+        condition_key=getattr(cfg, "condition_key", None),
+    )
+    group_key = str(grouping["group_key"])
+    cleanup_key = grouping["cleanup_key"]
+
     # 1) Pseudobulk
     pb_key = f"pseudobulk__{rid}"
     LOGGER.info(
-        "Decoupler[%s]: computing pseudobulk using labels_obs_key=%r -> store_key=%r",
+        "Decoupler[%s]: computing pseudobulk using group_key=%r -> store_key=%r",
         rid,
-        labels_obs_key,
+        group_key,
         pb_key,
     )
-
-    _store_cluster_pseudobulk(
-        adata,
-        cluster_key=labels_obs_key,
-        agg=getattr(cfg, "decoupler_pseudobulk_agg", "mean"),
-        use_raw_like=bool(getattr(cfg, "decoupler_use_raw", True)),
-        prefer_layers=("counts_cb", "counts_raw"),
-        store_key=pb_key,
-    )
+    try:
+        _store_cluster_pseudobulk(
+            adata,
+            cluster_key=group_key,
+            agg=getattr(cfg, "decoupler_pseudobulk_agg", "mean"),
+            use_raw_like=bool(getattr(cfg, "decoupler_use_raw", True)),
+            prefer_layers=("counts_cb", "counts_raw"),
+            store_key=pb_key,
+        )
+    finally:
+        if cleanup_key is not None:
+            adata.obs.pop(str(cleanup_key), None)
 
     # Ensure round decoupler dict
     rinfo.setdefault("decoupler", {})
@@ -1332,13 +1603,9 @@ def run_decoupler_for_round(
     rinfo["decoupler"]["pseudobulk_store_key"] = pb_key
 
     # 2) Display metadata
-    display_map = _round_cluster_display_map(
-        adata,
-        round_id=rid,
-        labels_obs_key=labels_obs_key,
-        cluster_label_key=CLUSTER_LABEL_KEY,
-    )
+    display_map = dict(grouping["display_map"])
     rinfo["decoupler"]["cluster_display_map"] = dict(display_map)
+    rinfo["decoupler"]["condition_key"] = grouping["condition_key"]
 
     # Authoritative cluster order for plots (prefer round["cluster_order"] if present)
     clusters: list[str] = []
@@ -1355,9 +1622,13 @@ def run_decoupler_for_round(
     except Exception:
         clusters = []
 
-    rinfo["decoupler"]["cluster_display_labels"] = (
-        [display_map.get(str(c), str(c)) for c in clusters] if clusters else None
-    )
+    display_order = grouping.get("display_order", None)
+    if isinstance(display_order, list) and display_order:
+        rinfo["decoupler"]["cluster_display_labels"] = [str(x) for x in display_order]
+    else:
+        rinfo["decoupler"]["cluster_display_labels"] = (
+            [display_map.get(str(c), str(c)) for c in clusters] if clusters else None
+        )
     rinfo["decoupler"]["cluster_order"] = clusters if clusters else None
 
     # 3) Resources

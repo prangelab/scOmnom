@@ -1000,13 +1000,14 @@ figures/<MODULE>/<MODULE>_report.html
 
 ## Markers and DE (markers-and-de)
 
-The `markers-and-de` module covers three related analyses:
+The `markers-and-de` module covers four related analyses:
 
 * **Markers**: cluster-vs-rest marker discovery
 * **DE**: within-cluster differential expression across condition levels
 * **DA**: differential abundance (compositional shifts of cell types)
+* **Enrichment**: round-native pathway and TF activity scoring on an existing clustering round
 
-All three subcommands are CLI-first and store results in tables plus a self-contained report.
+All four subcommands are CLI-first and store results in tables plus a self-contained report.
 
 ### Quick entry points
 
@@ -1024,6 +1025,13 @@ scomnom markers-and-de de \
 scomnom markers-and-de da \
   --input-path results/adata.clustered.annotated.projected.markers.de.zarr \
   --condition-key condition
+
+# Round-native enrichment
+scomnom markers-and-de enrichment \
+  --input-path results/adata.clustered.annotated.projected.markers.zarr \
+  --round-id r4_subset_annotation \
+  --condition-key sex \
+  --gene-filter "not gene.str.startswith('MT-')"
 ```
 
 ---
@@ -1049,6 +1057,63 @@ Markers are computed per cluster against all other cells. The module supports **
 
 * Tables: `tables/marker_tables_<run>/cell_based/` and `tables/marker_tables_<run>/pseudobulk_based/`
 * Reports: `figures/markers/markers_report.html` (plus PDFs/PNGs under `figures/markers/`)
+
+---
+
+### Enrichment (round-native pathway / TF activity)
+
+The enrichment submodule runs decoupler directly on an existing clustering round without rerunning clustering or DE. It uses round-native pseudobulk expression built from the selected round labels, then computes pathway / TF activity using MSigDB, PROGENy, and DoRothEA.
+
+**Round selection**
+
+* `--round-id` selects which round to score.
+* If omitted, the active round is used.
+* Enrichment is stored back into that round; it does not create a new round.
+
+**Supported resources**
+
+* `MSigDB` from built-in keywords or custom `.gmt` files via `--msigdb-gene-sets`
+* `PROGENy`
+* `DoRothEA`
+
+These use the same decoupler method settings as the clustering and DE workflows.
+
+**Condition key syntax (enrichment)**
+
+Enrichment supports either cluster-only pseudobulk or cluster-by-condition pseudobulk:
+
+| Syntax | Meaning | Resulting behavior |
+| --- | --- | --- |
+| omitted | Round only | One enrichment profile per cluster |
+| `A` | Single obs key | One enrichment profile per `cluster × A level` |
+| `A:B` | Composite key | One enrichment profile per `cluster × all combinations of A and B` |
+
+Examples:
+
+* `--round-id r5_archetypes`  
+  Enrichment per archetype cluster.
+* `--round-id r5_archetypes --condition-key sex`  
+  Enrichment per `cluster × sex`.
+* `--round-id r5_archetypes --condition-key sex:masld_status`  
+  Enrichment per `cluster × sex × masld_status` combination.
+
+**Gene filtering**
+
+* `--gene-filter` filters genes before enrichment is computed, using pandas-query expressions against `adata.var`.
+* Filters are combined with logical AND.
+* This changes the enrichment input universe, unlike `--plot-gene-filter`, which is plot-only in DE.
+
+Example:
+
+* `--gene-filter "not gene.str.startswith('MT-')"`
+* `--gene-filter "not gene.str.startswith('RPL')"`
+* `--gene-filter "not gene.str.startswith('RPS')"`
+
+**Outputs**
+
+* Figures: `figures/<fmt>/enrichment_<round>_roundN/`
+* Default AnnData output name: `adata.enrichment_<round>.zarr.tar.zst`
+* Stored round payload includes the selected condition key, applied gene filters, and retained gene counts for provenance
 
 ---
 
@@ -1088,6 +1153,13 @@ Within-cluster DE compares **condition levels inside each cluster**, e.g. `treat
 * Requires at least **6 unique samples** (guarded).
 * Supports sample-level covariates and minimum cells per sample-cluster.
 
+**Gene filtering**
+
+* `--gene-filter` filters genes before DE is calculated.
+* Filters are applied to both the cell-level and pseudobulk DE inputs.
+* Filters are combined with logical AND and evaluated against `adata.var`.
+* `--plot-gene-filter` remains plot-only and does not change the DE statistics.
+
 **DE → pathway/TF activity (decoupler)**
 
 * Optional activity inference from DE statistics for each contrast.
@@ -1096,8 +1168,9 @@ Within-cluster DE compares **condition levels inside each cluster**, e.g. `treat
 
 **Outputs**
 
-* Tables: `tables/de_tables_<run>/cell_based/` and `tables/de_tables_<run>/pseudobulk_based/`
-* Reports: `figures/DE/DE_report.html` (plus PDFs/PNGs under `figures/DE/`)
+* Tables: `tables/de_<round>_roundN/cell_based/` and `tables/de_<round>_roundN/pseudobulk_based/`
+* Figures: `figures/<fmt>/de_<round>_roundN/`
+* Default AnnData output name: `adata.de_<round>.zarr.tar.zst`
 
 ---
 

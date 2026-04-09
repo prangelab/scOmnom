@@ -215,6 +215,12 @@ def test_adata_ops_help():
     assert "annotation-merge" in result.output
 
 
+def test_markers_and_de_help_includes_enrichment():
+    result = runner.invoke(app, ["markers-and-de", "--help"])
+    assert result.exit_code == 0
+    assert "enrichment" in result.output
+
+
 def test_adata_ops_rename_requires_mapping():
     result = runner.invoke(
         app,
@@ -367,3 +373,81 @@ def test_da_default_output_name_includes_round_id(mock_run):
     mock_run.assert_called_once()
     cfg = mock_run.call_args[0][0]
     assert cfg.output_name == "adata.da_r6_myawesomecustomround"
+
+
+@patch("scomnom.cli.run_enrichment")
+def test_enrichment_default_output_name_includes_round_id(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "markers-and-de",
+            "enrichment",
+            "--input-path", "adata.zarr.tar.zst",
+            "--round-id", "r5_archetypes",
+        ],
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.output_name == "adata.enrichment_r5_archetypes"
+
+
+@patch("scomnom.cli.run_enrichment")
+def test_enrichment_gene_filter_propagates_to_config(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "markers-and-de",
+            "enrichment",
+            "--input-path", "adata.zarr.tar.zst",
+            "--gene-filter", "not gene.str.startswith('MT-')",
+            "--gene-filter", "expr=not gene.str.startswith('RPL')",
+        ],
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.gene_filter == (
+        "not gene.str.startswith('MT-')",
+        "expr=not gene.str.startswith('RPL')",
+    )
+
+
+@patch("scomnom.cli.run_enrichment")
+def test_enrichment_condition_key_propagates_to_config(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "markers-and-de",
+            "enrichment",
+            "--input-path", "adata.zarr.tar.zst",
+            "--round-id", "r5_archetypes",
+            "--condition-key", "sex",
+        ],
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.condition_key == "sex"
+
+
+@patch("scomnom.cli.run_within_cluster")
+def test_de_gene_filter_propagates_to_config(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "markers-and-de",
+            "de",
+            "--input-path", "adata.zarr.tar.zst",
+            "--condition-keys", "sex",
+            "--gene-filter", "not gene.str.startswith('MT-')",
+            "--gene-filter", "expr=gene_biotype == 'protein_coding'",
+        ],
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.gene_filter == (
+        "not gene.str.startswith('MT-')",
+        "expr=gene_biotype == 'protein_coding'",
+    )

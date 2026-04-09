@@ -99,6 +99,20 @@ class PseudobulkDEOptions:
     min_lib_pct: float = 0.0
 
 
+def _restrict_counts_df_genes(
+    counts_df: pd.DataFrame,
+    *,
+    gene_names: Optional[Sequence[str]],
+) -> pd.DataFrame:
+    if gene_names is None:
+        return counts_df
+    gene_idx = pd.Index([str(g) for g in gene_names])
+    keep = counts_df.columns.astype(str).isin(gene_idx)
+    if not bool(np.any(keep)):
+        return counts_df.iloc[:, 0:0]
+    return counts_df.loc[:, keep]
+
+
 def _collect_sample_covariates(
     adata: ad.AnnData,
     *,
@@ -1592,6 +1606,8 @@ def de_condition_within_group_pseudobulk(
     reference: str,
     spec: PseudobulkSpec = PseudobulkSpec(),
     opts: PseudobulkDEOptions = PseudobulkDEOptions(),
+    gene_names: Optional[Sequence[str]] = None,
+    restrict_cells_mask: Optional[np.ndarray] = None,
     store_key: Optional[str] = "scomnom_de",
     store: bool = True,
     n_cpus: int = 1,
@@ -1608,6 +1624,11 @@ def de_condition_within_group_pseudobulk(
         raise KeyError(f"condition_key={condition_key!r} not in adata.obs")
 
     mask = adata.obs[group_key].astype(str).to_numpy() == str(group_value)
+    if restrict_cells_mask is not None:
+        restrict_cells_mask = np.asarray(restrict_cells_mask, dtype=bool)
+        if restrict_cells_mask.shape != (adata.n_obs,):
+            raise ValueError("restrict_cells_mask has wrong shape")
+        mask &= restrict_cells_mask
     if mask.sum() == 0:
         return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
 
@@ -1619,6 +1640,7 @@ def de_condition_within_group_pseudobulk(
         min_cells_per_sample_group=int(opts.min_cells_per_sample_group),
         restrict_cells_mask=mask,
     )
+    counts_df = _restrict_counts_df_genes(counts_df, gene_names=gene_names)
 
     if meta_df.empty:
         return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
@@ -1854,6 +1876,7 @@ def de_condition_within_group_pseudobulk_interaction(
     ref_b: Optional[str] = None,
     spec: PseudobulkSpec = PseudobulkSpec(),
     opts: PseudobulkDEOptions = PseudobulkDEOptions(),
+    gene_names: Optional[Sequence[str]] = None,
     store_key: Optional[str] = "scomnom_de",
     store: bool = True,
     n_cpus: int = 1,
@@ -1882,6 +1905,7 @@ def de_condition_within_group_pseudobulk_interaction(
         min_cells_per_sample_group=int(opts.min_cells_per_sample_group),
         restrict_cells_mask=mask,
     )
+    counts_df = _restrict_counts_df_genes(counts_df, gene_names=gene_names)
     if meta_df.empty:
         return pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"]), {}
 
@@ -2310,6 +2334,7 @@ def _downsample_two_level_subset(
     *,
     max_per_level: int,
     random_state: int = 0,
+    var_mask: Optional[np.ndarray] = None,
 ) -> Tuple[ad.AnnData, Dict[str, Any]]:
     """
     Returns (adata_subset, meta) where meta has counts and downsampling info.
@@ -2344,6 +2369,11 @@ def _downsample_two_level_subset(
         downsampled=bool(downsampled),
     )
 
+    if var_mask is not None:
+        var_mask = np.asarray(var_mask, dtype=bool)
+        if var_mask.shape != (adata.n_vars,):
+            raise ValueError("var_mask has wrong shape")
+        return adata[idx, var_mask].copy(), meta
     return adata[idx].copy(), meta
 
 
@@ -2355,6 +2385,7 @@ def _pb_effect_log2fc(
     level_A: str,
     level_B: str,
     counts_layer: Optional[str],
+    gene_names: Optional[Sequence[str]] = None,
     min_total_counts: int = 10,
     pseudocount: float = 1.0,
 ) -> pd.DataFrame:
@@ -2371,6 +2402,7 @@ def _pb_effect_log2fc(
         min_cells_per_sample_group=1,
         restrict_cells_mask=cluster_mask,
     )
+    counts_df = _restrict_counts_df_genes(counts_df, gene_names=gene_names)
     if meta_df.empty or counts_df.shape[0] == 0:
         return pd.DataFrame(columns=["gene", "pb_log2fc", "pb_sum_A", "pb_sum_B", "pb_cpm_A", "pb_cpm_B"])
 
@@ -2575,6 +2607,7 @@ def contrast_conditional_markers(
     round_id: Optional[str] = None,
     spec: ContrastConditionalSpec,
     pb_spec: Optional[PseudobulkSpec] = None,
+    gene_var_mask: Optional[np.ndarray] = None,
     store_key: str = "scomnom_de",
     store: bool = True,
     n_jobs: int = 1,
@@ -2698,6 +2731,7 @@ def contrast_conditional_markers(
                 maskB,
                 max_per_level=int(spec.max_cells_per_level_in_cluster),
                 random_state=int(spec.random_state),
+                var_mask=gene_var_mask,
             )
 
             adata_sub = adata_sub[
@@ -2707,6 +2741,23 @@ def contrast_conditional_markers(
                 .str.replace(r"\s+", " ", regex=True)
                 .isin([A, B])
             ].copy()
+        if adata_sub.n_vars == 0:
+            row = dict(
+                cluster=str(cl_val),
+                contrast_key=contrast_key,
+                A=A,
+                B=B,
+                status="skipped",
+                reason="gene_filter",
+                n_cells_A=nA,
+                n_cells_B=nB,
+            )
+            return str(cl_val), pair_key, {
+                "wilcoxon": pd.DataFrame(),
+                "logreg": pd.DataFrame(),
+                "pseudobulk_effect": pd.DataFrame(),
+                "combined": pd.DataFrame(),
+            }, row
 
         cl_mask = np.zeros(adata.n_obs, dtype=bool)
         cl_mask[global_idx] = True
@@ -2719,6 +2770,7 @@ def contrast_conditional_markers(
                 level_A=A,
                 level_B=B,
                 counts_layer=counts_layer,
+                gene_names=adata.var_names[gene_var_mask].astype(str).tolist() if gene_var_mask is not None else None,
                 min_total_counts=int(spec.min_total_counts),
                 pseudocount=float(spec.pseudocount),
             )
@@ -3079,6 +3131,7 @@ def contrast_conditional_markers_multi(
     round_id: Optional[str] = None,
     specs: Sequence[ContrastConditionalSpec],
     pb_spec: Optional[PseudobulkSpec] = None,
+    gene_var_mask: Optional[np.ndarray] = None,
     n_jobs: int = 1,
 ) -> tuple[dict[str, dict[str, dict[str, dict[str, pd.DataFrame]]]], dict[str, pd.DataFrame]]:
     """
@@ -3255,6 +3308,7 @@ def contrast_conditional_markers_multi(
                 maskB,
                 max_per_level=int(spec.max_cells_per_level_in_cluster),
                 random_state=int(spec.random_state),
+                var_mask=gene_var_mask,
             )
 
             adata_sub = adata_sub[
@@ -3264,6 +3318,23 @@ def contrast_conditional_markers_multi(
                 .str.replace(r"\s+", " ", regex=True)
                 .isin([A, B])
             ].copy()
+        if adata_sub.n_vars == 0:
+            row = dict(
+                cluster=str(cl_val),
+                contrast_key=str(ck),
+                A=A,
+                B=B,
+                status="skipped",
+                reason="gene_filter",
+                n_cells_A=nA,
+                n_cells_B=nB,
+            )
+            return ck, cl_val, pair_key, {
+                "wilcoxon": pd.DataFrame(),
+                "logreg": pd.DataFrame(),
+                "pseudobulk_effect": pd.DataFrame(),
+                "combined": pd.DataFrame(),
+            }, row
 
         cl_mask = np.zeros(adata.n_obs, dtype=bool)
         cl_mask[global_idx] = True
@@ -3276,6 +3347,7 @@ def contrast_conditional_markers_multi(
                 level_A=A,
                 level_B=B,
                 counts_layer=counts_layer,
+                gene_names=adata.var_names[gene_var_mask].astype(str).tolist() if gene_var_mask is not None else None,
                 min_total_counts=int(spec.min_total_counts),
                 pseudocount=float(spec.pseudocount),
             )
@@ -3594,6 +3666,7 @@ def de_condition_within_group_pseudobulk_multi(
     condition_key: str,
     spec: PseudobulkSpec = PseudobulkSpec(),
     opts: PseudobulkDEOptions = PseudobulkDEOptions(),
+    gene_names: Optional[Sequence[str]] = None,
     contrasts: Sequence[str] | None = None,   # "A_vs_B"
     store_key: Optional[str] = "scomnom_de",
     store: bool = True,
@@ -3632,14 +3705,16 @@ def de_condition_within_group_pseudobulk_multi(
         # Call a slightly refactored internal helper that accepts restrict mask,
         # OR easiest: duplicate the aggregation logic here (small).
         res = de_condition_within_group_pseudobulk(
-            adata[m2].copy(),
+            adata,
             group_value=str(group_value),
-            groupby=groupby,          # group_key resolution still OK, but now only one cluster present
+            groupby=groupby,
             round_id=round_id,
             condition_key=condition_key,
             reference=str(B),
             spec=spec,
             opts=opts,
+            gene_names=gene_names,
+            restrict_cells_mask=m2,
             store_key=None,           # store ourselves with a better key
             store=False,
             n_cpus=n_cpus,

@@ -671,6 +671,7 @@ class MarkersAndDEConfig(BaseModel):
     make_figures: bool = True
     regenerate_figures: bool = False
     plot_gene_filter: Tuple[str, ...] = ()
+    gene_filter: Tuple[str, ...] = ()
     plot_sample_annotation_keys: Tuple[str, ...] = ()
 
     # outputs
@@ -760,6 +761,13 @@ class MarkersAndDEConfig(BaseModel):
     composition_graph_min_nonzero_samples_per_level: int = 3
     composition_graph_n_permutations: int = 0
     composition_graph_effect_shrink_k: float = 10.0
+
+    # ------------------------------------------------------------------
+    # Round-native enrichment (cluster-level decoupler)
+    # ------------------------------------------------------------------
+    run_decoupler: bool = True
+    decoupler_pseudobulk_agg: str = "mean"
+    decoupler_use_raw: bool = True
 
     # ------------------------------------------------------------------
     # DE-based decoupler (pathway/TF activity from DE stats)

@@ -11,7 +11,7 @@ from .load_and_filter import run_load_and_filter
 from .integrate import run_integrate
 from .adata_ops import run_adata_ops
 from .cluster_and_annotate import run_clustering
-from .markers_and_de import run_cluster_vs_rest, run_within_cluster, run_composition
+from .markers_and_de import run_cluster_vs_rest, run_within_cluster, run_composition, run_enrichment
 
 from .config import (
     LoadAndFilterConfig,
@@ -1446,6 +1446,7 @@ def _build_cfg(
     plot_use_raw: bool,
     plot_layer: Optional[str],
     plot_umap_ncols: int,
+    gene_filter: Optional[List[str]] = None,
     plot_gene_filter: Optional[List[str]],
     plot_sample_annotation_keys: Optional[List[str]],
     regenerate_figures: bool,
@@ -1459,6 +1460,7 @@ def _build_cfg(
     layers = _parse_csv_repeat(pb_counts_layer) or ["counts_cb", "counts_raw"]
     covariates = tuple(_parse_csv_repeat(pb_covariates) or ())
     cond_keys = tuple(_parse_csv_repeat(condition_keys) or ())
+    gene_filters = tuple(gene_filter or ())
     plot_filters = tuple(plot_gene_filter or ())
     plot_annot_keys = tuple(plot_sample_annotation_keys or ())
     msigdb_sets = list(msigdb_gene_sets) if msigdb_gene_sets else None
@@ -1476,6 +1478,7 @@ def _build_cfg(
         regenerate_figures=regenerate_figures,
         figdir_name=figdir_name,
         figure_formats=figure_formats,
+        gene_filter=gene_filters,
         plot_gene_filter=plot_filters,
         plot_sample_annotation_keys=plot_annot_keys,
         # grouping
@@ -1623,6 +1626,92 @@ def _build_cfg_composition(
     )
 
 
+def _build_cfg_enrichment(
+    *,
+    input_path: Path,
+    output_dir: Optional[Path],
+    output_name: str,
+    save_h5ad: bool,
+    n_jobs: int,
+    make_figures: bool,
+    regenerate_figures: bool,
+    figdir_name: str,
+    figure_formats: Sequence[str],
+    round_id: Optional[str],
+    condition_key: Optional[str],
+    gene_filter: Optional[List[str]],
+    decoupler_pseudobulk_agg: str,
+    decoupler_use_raw: bool,
+    decoupler_method: str,
+    decoupler_consensus_methods: Optional[List[str]],
+    decoupler_min_n_targets: int,
+    decoupler_bar_split_signed: bool,
+    decoupler_bar_top_n_up: Optional[int],
+    decoupler_bar_top_n_down: Optional[int],
+    msigdb_gene_sets: Optional[List[str]],
+    msigdb_method: str,
+    msigdb_min_n_targets: int,
+    run_progeny: bool,
+    progeny_method: str,
+    progeny_min_n_targets: int,
+    progeny_top_n: int,
+    progeny_organism: str,
+    run_dorothea: bool,
+    dorothea_method: str,
+    dorothea_min_n_targets: int,
+    dorothea_confidence: Optional[List[str]],
+    dorothea_organism: str,
+) -> MarkersAndDEConfig:
+    out_dir = output_dir or input_path.parent
+    log_dir = out_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "markers-and-de.enrichment.log"
+    init_logging(log_path)
+
+    msigdb_sets = list(msigdb_gene_sets) if msigdb_gene_sets else None
+    doro_conf = list(dorothea_confidence) if dorothea_confidence else None
+    gene_filters = tuple(gene_filter or ())
+
+    return MarkersAndDEConfig(
+        input_path=input_path,
+        output_dir=out_dir,
+        output_name=output_name,
+        save_h5ad=save_h5ad,
+        run="pseudobulk",
+        n_jobs=n_jobs,
+        logfile=log_path,
+        make_figures=make_figures,
+        regenerate_figures=regenerate_figures,
+        figdir_name=figdir_name,
+        figure_formats=figure_formats,
+        round_id=round_id,
+        condition_key=condition_key,
+        gene_filter=gene_filters,
+        run_decoupler=True,
+        decoupler_pseudobulk_agg=str(decoupler_pseudobulk_agg),
+        decoupler_use_raw=bool(decoupler_use_raw),
+        decoupler_method=str(decoupler_method),
+        decoupler_consensus_methods=decoupler_consensus_methods,
+        decoupler_min_n_targets=int(decoupler_min_n_targets),
+        decoupler_bar_split_signed=bool(decoupler_bar_split_signed),
+        decoupler_bar_top_n_up=decoupler_bar_top_n_up,
+        decoupler_bar_top_n_down=decoupler_bar_top_n_down,
+        msigdb_gene_sets=msigdb_sets if msigdb_sets is not None else ["HALLMARK", "REACTOME"],
+        msigdb_method=str(msigdb_method),
+        msigdb_min_n_targets=int(msigdb_min_n_targets),
+        run_progeny=bool(run_progeny),
+        progeny_method=str(progeny_method),
+        progeny_min_n_targets=int(progeny_min_n_targets),
+        progeny_top_n=int(progeny_top_n),
+        progeny_organism=str(progeny_organism),
+        run_dorothea=bool(run_dorothea),
+        dorothea_method=str(dorothea_method),
+        dorothea_min_n_targets=int(dorothea_min_n_targets),
+        dorothea_confidence=doro_conf if doro_conf is not None else ["A", "B", "C"],
+        dorothea_organism=str(dorothea_organism),
+    )
+
+
 def _default_output_name(input_path: Path, suffix: str, round_id: Optional[str] = None) -> str:
     name = input_path.name
     for ext in (".zarr.tar.zst", ".zarr", ".h5ad", ".h5", ".hdf5"):
@@ -1732,6 +1821,11 @@ def cluster_vs_rest(
     plot_use_raw: bool = typer.Option(False, "--plot-use-raw/--no-plot-use-raw"),
     plot_layer: Optional[str] = typer.Option(None, "--plot-layer"),
     plot_umap_ncols: int = typer.Option(3, "--plot-umap-ncols"),
+    gene_filter: List[str] = typer.Option(
+        [],
+        "--gene-filter",
+        help="Filter genes before DE computation (repeatable).",
+    ),
     plot_gene_filter: List[str] = typer.Option(
         [],
         "--plot-gene-filter",
@@ -1825,6 +1919,119 @@ def cluster_vs_rest(
     cfg.contrast_conditional_de = False
 
     run_cluster_vs_rest(cfg)
+
+
+@markers_and_de_app.command(
+    "enrichment",
+    help="Run round-native enrichment scoring (MSigDB, PROGENy, DoRothEA) on an existing AnnData.",
+)
+def enrichment(
+    input_path: Path = typer.Option(..., "--input-path", "-i"),
+    output_dir: Optional[Path] = typer.Option(None, "--output-dir", "-o"),
+    output_name: Optional[str] = typer.Option(None, "--output-name"),
+    save_h5ad: bool = typer.Option(False, "--save-h5ad/--no-save-h5ad"),
+    n_jobs: int = typer.Option(1, "--n-jobs"),
+    make_figures: bool = typer.Option(True, "--make-figures/--no-make-figures"),
+    regenerate_figures: bool = typer.Option(
+        False,
+        "--regenerate-figures",
+        help="[Plots] Regenerate enrichment figures from stored round payloads only (no recomputation).",
+    ),
+    figdir_name: str = typer.Option("figures", "--figdir-name"),
+    figure_formats: List[str] = typer.Option(["png", "pdf"], "--figure-formats", "-F"),
+    round_id: Optional[str] = typer.Option(None, "--round-id"),
+    condition_key: Optional[str] = typer.Option(
+        None,
+        "--condition-key",
+        help="[Enrichment] Aggregate cluster-by-condition instead of cluster-only, e.g. 'sex' or 'timepoint:masld_status'.",
+    ),
+    gene_filter: List[str] = typer.Option(
+        [],
+        "--gene-filter",
+        help="[Enrichment] Filter genes before decoupler using pandas-query expressions against adata.var, e.g. \"not gene.str.startswith('MT-')\".",
+    ),
+    decoupler_pseudobulk_agg: str = typer.Option("mean", "--decoupler-pseudobulk-agg"),
+    decoupler_use_raw: bool = typer.Option(
+        True,
+        "--decoupler-use-raw/--no-decoupler-use-raw",
+    ),
+    decoupler_method: str = typer.Option("consensus", "--decoupler-method"),
+    decoupler_consensus_methods: Optional[List[str]] = typer.Option(
+        None,
+        "--decoupler-consensus-methods",
+        callback=validate_decoupler_consensus_methods,
+    ),
+    decoupler_min_n_targets: int = typer.Option(5, "--decoupler-min-n-targets"),
+    decoupler_bar_split_signed: bool = typer.Option(
+        True,
+        "--decoupler-bar-split-signed/--no-decoupler-bar-split-signed",
+    ),
+    decoupler_bar_top_n_up: Optional[int] = typer.Option(None, "--decoupler-bar-top-n-up"),
+    decoupler_bar_top_n_down: Optional[int] = typer.Option(None, "--decoupler-bar-top-n-down"),
+    msigdb_gene_sets_cli: Optional[str] = typer.Option(
+        None,
+        "--msigdb-gene-sets",
+        help="[MSigDB] Comma-separated MSigDB keywords or paths to .gmt files.",
+        autocompletion=_gene_sets_completion,
+    ),
+    msigdb_method: str = typer.Option("consensus", "--msigdb-method"),
+    msigdb_min_n_targets: int = typer.Option(5, "--msigdb-min-n-targets"),
+    run_dorothea: bool = typer.Option(True, "--run-dorothea/--no-run-dorothea"),
+    dorothea_method: str = typer.Option("consensus", "--dorothea-method"),
+    dorothea_min_n_targets: int = typer.Option(5, "--dorothea-min-n-targets"),
+    dorothea_confidence: str = typer.Option("A,B,C", "--dorothea-confidence"),
+    dorothea_organism: str = typer.Option("human", "--dorothea-organism"),
+    run_progeny: bool = typer.Option(True, "--run-progeny/--no-run-progeny"),
+    progeny_method: str = typer.Option("consensus", "--progeny-method"),
+    progeny_min_n_targets: int = typer.Option(5, "--progeny-min-n-targets"),
+    progeny_top_n: int = typer.Option(100, "--progeny-top-n"),
+    progeny_organism: str = typer.Option("human", "--progeny-organism"),
+):
+    if output_name is None:
+        output_name = _default_output_name(input_path, "enrichment", round_id=round_id)
+
+    if msigdb_gene_sets_cli is None:
+        msigdb_gene_sets = None
+    else:
+        msigdb_gene_sets = [x.strip() for x in msigdb_gene_sets_cli.split(",") if x.strip()]
+
+    cfg = _build_cfg_enrichment(
+        input_path=input_path,
+        output_dir=output_dir,
+        output_name=str(output_name),
+        save_h5ad=save_h5ad,
+        n_jobs=n_jobs,
+        make_figures=make_figures,
+        regenerate_figures=regenerate_figures,
+        figdir_name=figdir_name,
+        figure_formats=figure_formats,
+        round_id=round_id,
+        condition_key=condition_key,
+        gene_filter=gene_filter,
+        decoupler_pseudobulk_agg=decoupler_pseudobulk_agg,
+        decoupler_use_raw=decoupler_use_raw,
+        decoupler_method=decoupler_method,
+        decoupler_consensus_methods=decoupler_consensus_methods,
+        decoupler_min_n_targets=decoupler_min_n_targets,
+        decoupler_bar_split_signed=decoupler_bar_split_signed,
+        decoupler_bar_top_n_up=decoupler_bar_top_n_up,
+        decoupler_bar_top_n_down=decoupler_bar_top_n_down,
+        msigdb_gene_sets=msigdb_gene_sets,
+        msigdb_method=msigdb_method,
+        msigdb_min_n_targets=msigdb_min_n_targets,
+        run_progeny=run_progeny,
+        progeny_method=progeny_method,
+        progeny_min_n_targets=progeny_min_n_targets,
+        progeny_top_n=progeny_top_n,
+        progeny_organism=progeny_organism,
+        run_dorothea=run_dorothea,
+        dorothea_method=dorothea_method,
+        dorothea_min_n_targets=dorothea_min_n_targets,
+        dorothea_confidence=[x.strip() for x in dorothea_confidence.split(",") if x.strip()],
+        dorothea_organism=dorothea_organism,
+    )
+
+    run_enrichment(cfg)
 
 
 @markers_and_de_app.command(
@@ -2018,6 +2225,11 @@ def within_cluster(
     plot_use_raw: bool = typer.Option(False, "--plot-use-raw/--no-plot-use-raw"),
     plot_layer: Optional[str] = typer.Option(None, "--plot-layer"),
     plot_umap_ncols: int = typer.Option(3, "--plot-umap-ncols"),
+    gene_filter: List[str] = typer.Option(
+        [],
+        "--gene-filter",
+        help="Filter genes before DE computation (repeatable).",
+    ),
     plot_gene_filter: List[str] = typer.Option(
         [],
         "--plot-gene-filter",
@@ -2106,6 +2318,7 @@ def within_cluster(
         plot_use_raw=plot_use_raw,
         plot_layer=plot_layer,
         plot_umap_ncols=plot_umap_ncols,
+        gene_filter=gene_filter,
         plot_gene_filter=plot_gene_filter,
         plot_sample_annotation_keys=plot_sample_annotation_keys,
         regenerate_figures=regenerate_figures,
