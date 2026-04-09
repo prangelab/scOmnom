@@ -14,6 +14,7 @@ from scomnom.annotation_utils import (
     _apply_gene_filters_to_var_names,
     _prepare_decoupler_grouping,
 )
+from scomnom.reporting import _de_report_summary_rows
 
 
 def _make_adata_with_round(round_id: str | None) -> ad.AnnData:
@@ -173,6 +174,25 @@ def test_apply_gene_filters_to_var_names_filters_de_genes() -> None:
         "n_genes_input": 4,
         "n_genes_retained": 2,
     }
+
+
+def test_de_report_summary_rows_include_gene_filter_metadata() -> None:
+    adata = ad.AnnData(X=np.zeros((2, 2)))
+    adata.uns["markers_and_de"] = {
+        "gene_filter": ["not gene.str.startswith('MT-')"],
+        "gene_filter_n_genes_input": 20000,
+        "gene_filter_n_genes_retained": 18321,
+    }
+    cfg = SimpleNamespace(gene_filter=("not gene.str.startswith('MT-')",))
+
+    rows = _de_report_summary_rows(rel_imgs=[Path("a.png"), Path("b.png")], cfg=cfg, adata=adata)
+
+    assert rows == [
+        ("n_plots_total", "2"),
+        ("gene_filter", "not gene.str.startswith('MT-')"),
+        ("gene_filter_n_genes_input", "20000"),
+        ("gene_filter_n_genes_retained", "18321"),
+    ]
 
 
 def test_prepare_decoupler_grouping_builds_cluster_condition_groups() -> None:

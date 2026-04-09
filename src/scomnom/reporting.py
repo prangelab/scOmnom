@@ -64,6 +64,31 @@ def _toc(sections: List[Tuple[str, str]]) -> str:
     )
 
 
+def _de_report_summary_rows(*, rel_imgs: List[Path], cfg, adata) -> List[tuple[str, str]]:
+    rows: List[tuple[str, str]] = [("n_plots_total", str(len(rel_imgs)))]
+
+    md = adata.uns.get("markers_and_de", {}) if hasattr(adata, "uns") else {}
+    if not isinstance(md, dict):
+        md = {}
+
+    gene_filter = md.get("gene_filter", None)
+    if gene_filter is None:
+        gene_filter = getattr(cfg, "gene_filter", None)
+    if gene_filter:
+        rows.append(("gene_filter", ", ".join(str(x) for x in gene_filter)))
+    else:
+        rows.append(("gene_filter", "none"))
+
+    n_input = md.get("gene_filter_n_genes_input", None)
+    n_retained = md.get("gene_filter_n_genes_retained", None)
+    if n_input is not None:
+        rows.append(("gene_filter_n_genes_input", str(n_input)))
+    if n_retained is not None:
+        rows.append(("gene_filter_n_genes_retained", str(n_retained)))
+
+    return rows
+
+
 # =============================================================================
 # Plot classification + descriptions
 # =============================================================================
@@ -1567,10 +1592,15 @@ def generate_de_report(*, fig_root: Path, fmt: str, cfg, version: str, adata, ru
 
     blocks: List[str] = [header]
 
+    summary_rows = _de_report_summary_rows(rel_imgs=rel_imgs, cfg=cfg, adata=adata)
+    summary_rows_html = "".join(
+        f"<tr><td>{_safe(field)}</td><td>{_safe(value)}</td></tr>"
+        for field, value in summary_rows
+    )
     summary_inner = (
         "<p class='note'>Summary of DE plots discovered in this run folder.</p>"
         '<table class="summary-table"><thead><tr><th>Field</th><th>Value</th></tr></thead><tbody>'
-        f"<tr><td>n_plots_total</td><td>{len(rel_imgs)}</td></tr>"
+        f"{summary_rows_html}"
         "</tbody></table>"
     )
     blocks.append('<div id="summary"></div>')
