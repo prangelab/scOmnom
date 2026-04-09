@@ -17,6 +17,7 @@ from .markers_and_de import (
     run_composition,
     run_enrichment_cluster,
     run_enrichment_de as run_enrichment_de_from_tables,
+    run_module_score,
 )
 
 from .config import (
@@ -1804,6 +1805,61 @@ def _build_cfg_enrichment_de(
     )
 
 
+def _build_cfg_module_score(
+    *,
+    input_path: Path,
+    output_dir: Optional[Path],
+    output_name: str,
+    save_h5ad: bool,
+    n_jobs: int,
+    make_figures: bool,
+    figdir_name: str,
+    figure_formats: Sequence[str],
+    round_id: Optional[str],
+    condition_key: Optional[str],
+    module_files: Sequence[Path],
+    module_set_name: Optional[str],
+    module_score_method: str,
+    module_score_use_raw: bool,
+    module_score_layer: Optional[str],
+    module_score_ctrl_size: int,
+    module_score_n_bins: int,
+    module_score_random_state: int,
+    module_score_max_umaps: int,
+) -> MarkersAndDEConfig:
+    out_dir = output_dir or input_path.parent
+    log_dir = out_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "markers-and-de.module-score.log"
+    init_logging(log_path)
+
+    return MarkersAndDEConfig(
+        input_path=input_path,
+        input_dir=None,
+        output_dir=out_dir,
+        output_name=output_name,
+        save_h5ad=save_h5ad,
+        run="pseudobulk",
+        n_jobs=n_jobs,
+        logfile=log_path,
+        make_figures=make_figures,
+        regenerate_figures=False,
+        figdir_name=figdir_name,
+        figure_formats=figure_formats,
+        round_id=round_id,
+        condition_key=condition_key,
+        module_files=tuple(str(Path(p)) for p in module_files),
+        module_set_name=(str(module_set_name).strip() if module_set_name else None),
+        module_score_method=str(module_score_method),
+        module_score_use_raw=bool(module_score_use_raw),
+        module_score_layer=(str(module_score_layer) if module_score_layer else None),
+        module_score_ctrl_size=int(module_score_ctrl_size),
+        module_score_n_bins=int(module_score_n_bins),
+        module_score_random_state=int(module_score_random_state),
+        module_score_max_umaps=int(module_score_max_umaps),
+    )
+
+
 def _default_output_name(input_path: Path, suffix: str, round_id: Optional[str] = None) -> str:
     name = input_path.name
     for ext in (".zarr.tar.zst", ".zarr", ".h5ad", ".h5", ".hdf5"):
@@ -2218,6 +2274,91 @@ def enrichment_de(
     )
 
     run_enrichment_de_from_tables(cfg)
+
+
+@enrichment_app.command(
+    "module-score",
+    help="Score user-defined gene modules per cell, then summarize by cluster or cluster-condition.",
+)
+def enrichment_module_score(
+    input_path: Path = typer.Option(..., "--input-path", "-i"),
+    output_dir: Optional[Path] = typer.Option(None, "--output-dir", "-o"),
+    output_name: Optional[str] = typer.Option(None, "--output-name"),
+    save_h5ad: bool = typer.Option(False, "--save-h5ad/--no-save-h5ad"),
+    n_jobs: int = typer.Option(1, "--n-jobs"),
+    make_figures: bool = typer.Option(True, "--make-figures/--no-make-figures"),
+    figdir_name: str = typer.Option("figures", "--figdir-name"),
+    figure_formats: List[str] = typer.Option(["png", "pdf"], "--figure-formats", "-F"),
+    round_id: Optional[str] = typer.Option(None, "--round-id"),
+    condition_key: Optional[str] = typer.Option(
+        None,
+        "--condition-key",
+        help="[Module score] Aggregate cluster-by-condition instead of cluster-only, e.g. 'sex' or 'sex:MASLD'.",
+    ),
+    module_files: List[Path] = typer.Option(
+        ...,
+        "--module-file",
+        help="[Module score] Module definition file(s). Supports .gmt, .tsv, .csv, and single-module .txt.",
+    ),
+    module_set_name: Optional[str] = typer.Option(
+        None,
+        "--module-set-name",
+        help="[Module score] Optional stable name for this module collection. Defaults to the first module file stem.",
+    ),
+    module_score_method: str = typer.Option(
+        "scanpy",
+        "--module-score-method",
+        help="[Module score] Backend. 'scanpy' is implemented; 'aucell' is reserved for a future backend.",
+    ),
+    module_score_use_raw: bool = typer.Option(
+        False,
+        "--module-score-use-raw/--no-module-score-use-raw",
+    ),
+    module_score_layer: Optional[str] = typer.Option(None, "--module-score-layer"),
+    module_score_ctrl_size: int = typer.Option(50, "--module-score-ctrl-size"),
+    module_score_n_bins: int = typer.Option(25, "--module-score-n-bins"),
+    module_score_random_state: int = typer.Option(0, "--module-score-random-state"),
+    module_score_max_umaps: int = typer.Option(12, "--module-score-max-umaps"),
+):
+    if not module_files:
+        raise typer.BadParameter("Provide at least one --module-file.")
+    method = str(module_score_method or "scanpy").strip().lower()
+    if method not in {"scanpy", "aucell"}:
+        raise typer.BadParameter("Invalid --module-score-method. Use: scanpy, aucell.")
+    if module_score_use_raw and module_score_layer:
+        raise typer.BadParameter("Cannot use both --module-score-use-raw and --module-score-layer.")
+
+    inferred_set_name = str(module_set_name).strip() if module_set_name else Path(module_files[0]).stem
+    if output_name is None:
+        output_name = _default_output_name(
+            input_path,
+            f"module_score_{re.sub(r'[^A-Za-z0-9._-]+', '_', inferred_set_name)}",
+            round_id=round_id,
+        )
+
+    cfg = _build_cfg_module_score(
+        input_path=input_path,
+        output_dir=output_dir,
+        output_name=str(output_name),
+        save_h5ad=save_h5ad,
+        n_jobs=n_jobs,
+        make_figures=make_figures,
+        figdir_name=figdir_name,
+        figure_formats=figure_formats,
+        round_id=round_id,
+        condition_key=condition_key,
+        module_files=module_files,
+        module_set_name=inferred_set_name,
+        module_score_method=method,
+        module_score_use_raw=module_score_use_raw,
+        module_score_layer=module_score_layer,
+        module_score_ctrl_size=module_score_ctrl_size,
+        module_score_n_bins=module_score_n_bins,
+        module_score_random_state=module_score_random_state,
+        module_score_max_umaps=module_score_max_umaps,
+    )
+
+    run_module_score(cfg)
 
 
 @markers_and_de_app.command(

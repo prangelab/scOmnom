@@ -472,6 +472,50 @@ def test_enrichment_de_gene_filter_propagates_to_config(mock_run):
     assert cfg.de_decoupler_source == "cell"
 
 
+@patch("scomnom.cli.run_module_score")
+def test_enrichment_module_score_default_output_name_includes_round_and_set_name(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "markers-and-de",
+            "enrichment",
+            "module-score",
+            "--input-path", "adata.zarr.tar.zst",
+            "--round-id", "r5_archetypes",
+            "--module-file", "archetypes.gmt",
+        ],
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.output_name == "adata.module_score_archetypes_r5_archetypes"
+    assert cfg.module_set_name == "archetypes"
+    assert cfg.module_files == ("archetypes.gmt",)
+
+
+@patch("scomnom.cli.run_module_score")
+def test_enrichment_module_score_method_and_gene_filter_propagate_to_config(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "markers-and-de",
+            "enrichment",
+            "module-score",
+            "--input-path", "adata.zarr.tar.zst",
+            "--module-file", "custom.tsv",
+            "--module-set-name", "my_modules",
+            "--module-score-method", "scanpy",
+            "--condition-key", "sex:MASLD",
+        ],
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.module_set_name == "my_modules"
+    assert cfg.module_score_method == "scanpy"
+    assert cfg.condition_key == "sex:MASLD"
+
+
 @patch("scomnom.cli.run_within_cluster")
 def test_de_gene_filter_propagates_to_config(mock_run):
     result = runner.invoke(

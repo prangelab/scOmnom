@@ -5419,6 +5419,234 @@ def plot_decoupler_all_styles(
     )
 
 
+@collect_plot_artifacts
+def plot_decoupler_payload(
+    payload: dict,
+    *,
+    net_name: str,
+    figdir: Path | None,
+    heatmap_top_k: int = 30,
+    bar_top_n: int = 10,
+    bar_top_n_up: int | None = None,
+    bar_top_n_down: int | None = None,
+    bar_split_signed: bool = True,
+    dotplot_top_k: int = 30,
+    title_prefix: str | None = None,
+    round_id: str | None = None,
+    cluster_display_map: Mapping[str, str] | None = None,
+    cluster_display_labels: Sequence[str] | None = None,
+) -> None:
+    """
+    Plot decoupler activity payloads without requiring adata.uns routing.
+
+    Accepts either:
+    - a single network payload containing ``activity`` / ``activity_by_gmt``
+    - the full round decoupler bundle returned by ``enrichment_cluster(...)``,
+      in which case ``net_name`` is used to extract the requested network payload
+      and sibling display metadata.
+    """
+    if not isinstance(payload, dict):
+        return
+
+    outer_payload = payload
+    if "activity" not in payload and str(net_name) in payload and isinstance(payload[str(net_name)], dict):
+        payload = payload[str(net_name)]
+
+    if not isinstance(payload, dict):
+        return
+
+    activity = payload.get("activity", None)
+    if activity is None or not isinstance(activity, pd.DataFrame) or activity.empty:
+        return
+
+    cfg = payload.get("config", {})
+    cfg = cfg if isinstance(cfg, dict) else {}
+
+    display_map = (
+        dict(cluster_display_map)
+        if isinstance(cluster_display_map, Mapping) and cluster_display_map
+        else (
+            {
+                str(k): str(v)
+                for k, v in outer_payload.get("cluster_display_map", {}).items()
+            }
+            if isinstance(outer_payload.get("cluster_display_map", None), dict) and outer_payload.get("cluster_display_map")
+            else (
+                {
+                    str(k): str(v)
+                    for k, v in cfg.get("cluster_display_map", {}).items()
+                }
+                if isinstance(cfg.get("cluster_display_map", None), dict) and cfg.get("cluster_display_map")
+                else {}
+            )
+        )
+    )
+    display_order = (
+        [str(x) for x in cluster_display_labels]
+        if isinstance(cluster_display_labels, Sequence) and not isinstance(cluster_display_labels, (str, bytes)) and cluster_display_labels
+        else (
+            [str(x) for x in outer_payload.get("cluster_display_labels", [])]
+            if isinstance(outer_payload.get("cluster_display_labels", None), (list, tuple)) and outer_payload.get("cluster_display_labels")
+            else (
+                [str(x) for x in cfg.get("cluster_display_labels", [])]
+                if isinstance(cfg.get("cluster_display_labels", None), (list, tuple)) and cfg.get("cluster_display_labels")
+                else []
+            )
+        )
+    )
+
+    def _apply_display_index(df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        if display_map:
+            old = out.index.astype(str)
+            new = old.map(lambda x: display_map.get(str(x), str(x)))
+            if pd.Index(new).has_duplicates:
+                new = [f"{lbl} [{cid}]" for lbl, cid in zip(new, old)]
+            out.index = pd.Index(new, name=out.index.name)
+        if display_order:
+            want = [x for x in display_order if x in out.index]
+            if want:
+                out = out.reindex(want)
+        return out
+
+    rid_full = str(round_id or cfg.get("round_id") or "").strip() or None
+    rid_short = rid_full.split("_", 1)[0] if rid_full else None
+    stem_prefix = f"{rid_short}_" if rid_short else ""
+
+    def _title(*parts: str | None) -> str | None:
+        cleaned = [str(x) for x in parts if str(x or "").strip()]
+        return " ".join(cleaned) if cleaned else None
+
+    if str(net_name).lower().strip() == "msigdb":
+        splits = payload.get("activity_by_gmt", None)
+        if isinstance(splits, dict) and splits:
+            splits = {str(k): v for k, v in splits.items() if isinstance(v, pd.DataFrame) and not v.empty}
+        else:
+            splits = _split_activity_for_msigdb(activity)
+
+        if not splits:
+            return
+
+        ordered = sorted(
+            splits.keys(),
+            key=lambda x: (0 if str(x).upper() == "HALLMARK" else 1, str(x).upper()),
+        )
+        for pfx in ordered:
+            sub = splits[pfx]
+            if sub is None or not isinstance(sub, pd.DataFrame) or sub.empty:
+                continue
+            sub_plot = _apply_display_index(sub)
+            sub_title = _title(str(pfx).upper(), f"[{rid_full}]" if rid_full else None, f"[{title_prefix}]" if title_prefix else None)
+            plot_decoupler_activity_heatmap(
+                sub_plot,
+                net_name=net_name,
+                figdir=figdir,
+                top_k=heatmap_top_k,
+                rank_mode="var",
+                use_zscore=True,
+                wrap_labels=True,
+                stem=f"{stem_prefix}heatmap_top_{str(pfx).lower()}_",
+                title_prefix=sub_title,
+            )
+            plot_decoupler_cluster_topn_barplots(
+                sub_plot,
+                net_name=net_name,
+                figdir=figdir,
+                n=bar_top_n,
+                use_abs=False,
+                split_signed=bool(bar_split_signed),
+                n_pos=int(bar_top_n_up) if bar_top_n_up is not None else int(bar_top_n),
+                n_neg=int(bar_top_n_down) if bar_top_n_down is not None else int(bar_top_n),
+                stem_prefix=f"{stem_prefix}cluster_{str(pfx).lower()}",
+                title_prefix=sub_title,
+            )
+            plot_decoupler_dotplot(
+                sub_plot,
+                net_name=net_name,
+                figdir=figdir,
+                top_k=dotplot_top_k,
+                rank_mode="var",
+                color_by="z",
+                size_by="abs_raw",
+                wrap_labels=True,
+                stem=f"{stem_prefix}dotplot_top_{str(pfx).lower()}_",
+                title_prefix=sub_title,
+            )
+        return
+
+    activity_plot = _apply_display_index(activity)
+    main_title = _title(str(net_name), f"[{rid_full}]" if rid_full else None, f"[{title_prefix}]" if title_prefix else None)
+    plot_decoupler_activity_heatmap(
+        activity_plot,
+        net_name=net_name,
+        figdir=figdir,
+        top_k=heatmap_top_k,
+        rank_mode="var",
+        use_zscore=True,
+        wrap_labels=True,
+        stem=f"{stem_prefix}heatmap_top_",
+        title_prefix=main_title,
+    )
+    plot_decoupler_cluster_topn_barplots(
+        activity_plot,
+        net_name=net_name,
+        figdir=figdir,
+        n=bar_top_n,
+        use_abs=False,
+        split_signed=bool(bar_split_signed) and str(net_name).lower() in ("dorothea", "msigdb"),
+        n_pos=int(bar_top_n_up) if bar_top_n_up is not None else int(bar_top_n),
+        n_neg=int(bar_top_n_down) if bar_top_n_down is not None else int(bar_top_n),
+        stem_prefix=f"{stem_prefix}cluster",
+        title_prefix=main_title,
+    )
+    plot_decoupler_dotplot(
+        activity_plot,
+        net_name=net_name,
+        figdir=figdir,
+        top_k=dotplot_top_k,
+        rank_mode="var",
+        color_by="z",
+        size_by="abs_raw",
+        wrap_labels=True,
+        stem=f"{stem_prefix}dotplot_top_",
+        title_prefix=main_title,
+    )
+
+
+@collect_plot_artifacts
+def plot_module_score_summary_heatmap(
+    summary: pd.DataFrame,
+    figdir: Path,
+    *,
+    stem: str = "module_score_summary_mean_z",
+    title: str | None = None,
+    cmap: str = "vlag",
+) -> None:
+    if summary is None or getattr(summary, "empty", True):
+        LOGGER.warning("plot_module_score_summary_heatmap: summary is empty; skipping.")
+        return
+
+    n_rows, n_cols = summary.shape
+    fig_w = min(24.0, max(6.0, 1.2 + 0.55 * float(n_cols)))
+    fig_h = min(24.0, max(4.0, 1.2 + 0.28 * float(n_rows)))
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    sns.heatmap(
+        summary,
+        cmap=cmap,
+        center=0.0,
+        linewidths=0.2,
+        linecolor="white",
+        cbar_kws={"label": "Module score (z)"},
+        ax=ax,
+    )
+    ax.set_xlabel("Module")
+    ax.set_ylabel("Group")
+    ax.set_title(title or "Module score summary")
+    fig.tight_layout()
+    record_plot_artifact(stem, figdir, fig)
+    close_plot(fig)
+
+
 def _round_display_map(round_snapshot: dict) -> dict[str, str]:
     """
     Best-effort fetch of cluster pretty labels for a round.

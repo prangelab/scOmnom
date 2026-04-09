@@ -11,6 +11,7 @@ mpl.use("Agg")  # headless backend for tests
 import matplotlib.pyplot as plt
 
 import scomnom.plot_utils as pu
+import scomnom.plotting as plotting
 
 
 # ---------------------------------------------------------------------
@@ -157,6 +158,85 @@ def test_plot_read_comparison(tmp_path, reset_root_figdir, mock_save_multi):
     other = {"A": 50, "B": 300}
     pu.plot_read_comparison(ref, other, "ref", "other", figdir=figdir, stem="reads")
     assert ("reads", figdir) in mock_save_multi
+
+
+def test_plotting_api_plot_decoupler_payload_returns_figures():
+    activity = pd.DataFrame(
+        [[1.0, 0.2, -0.4], [0.3, -1.2, 0.7]],
+        index=["C00", "C01"],
+        columns=["PATH_A", "PATH_B", "PATH_C"],
+    )
+    payload = {
+        "cluster_display_map": {
+            "C00": "C00: Alpha",
+            "C01": "C01: Beta",
+        },
+        "cluster_display_labels": ["C00: Alpha", "C01: Beta"],
+        "progeny": {
+            "activity": activity,
+            "config": {"round_id": "r5_archetypes"},
+        },
+    }
+
+    figs = plotting.plot_decoupler_payload(
+        payload,
+        net_name="progeny",
+        display=False,
+        return_fig=True,
+    )
+
+    assert isinstance(figs, list)
+    assert len(figs) >= 1
+    for fig in figs:
+        plt.close(fig)
+
+
+def test_plotting_api_plot_de_decoupler_payload_accepts_source_payload():
+    activity = pd.DataFrame(
+        [[1.0, -0.5], [-0.4, 0.8]],
+        index=["C00", "C01"],
+        columns=["PATH_A", "PATH_B"],
+    )
+    payload = {
+        "source": "pseudobulk",
+        "condition_key": "sex",
+        "contrast": "female_vs_male",
+        "nets": {
+            "progeny": {
+                "activity": activity,
+                "config": {"input": "pseudobulk:sex:female_vs_male:stat"},
+            }
+        },
+    }
+
+    figs = plotting.plot_de_decoupler_payload(
+        payload,
+        net_name="progeny",
+        display=False,
+        return_fig=True,
+    )
+
+    assert isinstance(figs, list)
+    assert len(figs) >= 1
+    for fig in figs:
+        plt.close(fig)
+
+
+def test_plotting_api_plot_module_score_summary_heatmap_returns_figure():
+    summary = pd.DataFrame(
+        [[1.2, -0.3], [-0.8, 0.9]],
+        index=["C00: Alpha", "C01: Beta"],
+        columns=["Inflammation", "Stress"],
+    )
+
+    fig = plotting.plot_module_score_summary_heatmap(
+        summary,
+        display=False,
+        return_fig=True,
+    )
+
+    assert fig is not None
+    plt.close(fig)
 
 
 def test_plot_final_cell_counts_missing_batch(tmp_path, reset_root_figdir, mock_save_multi):

@@ -44,6 +44,8 @@ from .annotation_utils import (
     _publish_decoupler_from_round_to_top_level,
     _apply_gene_filters_to_var_names,
     _parse_gene_filter_entry,
+    _prepare_decoupler_grouping,
+    clear_top_level_decoupler_state,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -1303,14 +1305,29 @@ def run_enrichment(cfg) -> ad.AnnData:
                         bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
                         dotplot_top_k=25,
                     )
-                )
+            )
             plot_utils.persist_plot_artifacts(artifacts)
         finally:
             _restore_top_level_decoupler_state(adata, snapshot)
 
+        try:
+            LOGGER.info("enrichment: generating enrichment report...")
+            for fmt in getattr(cfg, "figure_formats", ["png", "pdf"]):
+                reporting.generate_enrichment_cluster_report(
+                    fig_root=figdir,
+                    fmt=fmt,
+                    cfg=cfg,
+                    version=__version__,
+                    run_dir=figdir / str(fmt).lower().lstrip(".") / run_round,
+                )
+            LOGGER.info("Wrote enrichment report.")
+        except Exception as e:
+            LOGGER.warning("Failed to generate enrichment report: %s", e)
+
     if regenerate_figures:
         LOGGER.info("enrichment: regenerate_figures=True; skipping dataset save.")
     else:
+        clear_top_level_decoupler_state(adata)
         out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.enrichment")) + ".zarr")
         LOGGER.info("Saving dataset → %s", out_zarr)
         io_utils.save_dataset(adata, out_zarr, fmt="zarr")
@@ -1326,6 +1343,399 @@ def run_enrichment(cfg) -> ad.AnnData:
 
 def run_enrichment_cluster(cfg) -> ad.AnnData:
     return run_enrichment(cfg)
+
+
+def _sanitize_module_name(name: str) -> str:
+    token = io_utils.sanitize_identifier(str(name).strip(), allow_spaces=False)
+    return token or "module"
+
+
+def _load_modules_from_gmt(path: Path) -> dict[str, list[str]]:
+    modules: dict[str, list[str]] = {}
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            raw = line.strip()
+            if not raw:
+                continue
+            parts = raw.split("\t")
+            if len(parts) < 3:
+                continue
+            module_name = str(parts[0]).strip()
+            genes = [str(g).strip() for g in parts[2:] if str(g).strip()]
+            if module_name and genes:
+                modules.setdefault(module_name, [])
+                modules[module_name].extend(genes)
+    return modules
+
+
+def _load_modules_from_delimited(path: Path) -> dict[str, list[str]]:
+    sep = "\t" if path.suffix.lower() == ".tsv" else ","
+    df = pd.read_csv(path, sep=sep, dtype=str, keep_default_na=False)
+    if df.empty:
+        return {}
+    cols_lower = {str(c).strip().lower(): str(c) for c in df.columns}
+    module_col = cols_lower.get("module") or cols_lower.get("set") or cols_lower.get("signature")
+    gene_col = cols_lower.get("gene") or cols_lower.get("genes") or cols_lower.get("symbol")
+
+    modules: dict[str, list[str]] = {}
+    if module_col and gene_col:
+        for row in df[[module_col, gene_col]].itertuples(index=False):
+            module_name = str(row[0]).strip()
+            gene = str(row[1]).strip()
+            if module_name and gene:
+                modules.setdefault(module_name, []).append(gene)
+        return modules
+
+    if df.shape[1] >= 2:
+        first, second = list(df.columns[:2])
+        for row in df[[first, second]].itertuples(index=False):
+            module_name = str(row[0]).strip()
+            gene = str(row[1]).strip()
+            if module_name and gene:
+                modules.setdefault(module_name, []).append(gene)
+        if modules:
+            return modules
+
+    genes = [str(x).strip() for x in df.iloc[:, 0].tolist() if str(x).strip()]
+    if genes:
+        return {path.stem: genes}
+    return {}
+
+
+def _load_modules_from_txt(path: Path) -> dict[str, list[str]]:
+    genes = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not genes:
+        return {}
+    return {path.stem: genes}
+
+
+def _load_module_definitions(module_files: Sequence[str | Path]) -> dict[str, list[str]]:
+    modules: dict[str, list[str]] = {}
+    for raw_path in module_files:
+        path = Path(raw_path).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"module-score: module file not found: {path}")
+        suffix = path.suffix.lower()
+        if suffix == ".gmt":
+            loaded = _load_modules_from_gmt(path)
+        elif suffix in {".tsv", ".csv"}:
+            loaded = _load_modules_from_delimited(path)
+        elif suffix in {".txt", ".list"}:
+            loaded = _load_modules_from_txt(path)
+        else:
+            raise RuntimeError(
+                f"module-score: unsupported module file format for {path.name!r}. "
+                "Use .gmt, .tsv, .csv, or single-module .txt."
+            )
+
+        for module_name, genes in loaded.items():
+            bucket = modules.setdefault(str(module_name).strip(), [])
+            bucket.extend(str(g).strip() for g in genes if str(g).strip())
+
+    cleaned: dict[str, list[str]] = {}
+    for module_name, genes in modules.items():
+        deduped = list(dict.fromkeys(str(g).strip() for g in genes if str(g).strip()))
+        if deduped:
+            cleaned[str(module_name)] = deduped
+    if not cleaned:
+        raise RuntimeError("module-score: no module definitions could be loaded from the supplied files.")
+    return cleaned
+
+
+def _module_score_gene_pool(
+    adata: ad.AnnData,
+    *,
+    use_raw: bool,
+) -> list[str]:
+    if use_raw and adata.raw is not None:
+        gene_index = adata.raw.var_names.astype(str)
+    else:
+        gene_index = adata.var_names.astype(str)
+    return list(gene_index.astype(str))
+
+
+def _zscore_module_summary(summary: pd.DataFrame) -> pd.DataFrame:
+    if summary.empty:
+        return summary.copy()
+    centered = summary - summary.mean(axis=0)
+    scale = summary.std(axis=0, ddof=0).replace(0.0, np.nan)
+    z = centered.divide(scale, axis=1).fillna(0.0)
+    return z.astype(np.float32, copy=False)
+
+
+def _store_module_score_payload(
+    adata: ad.AnnData,
+    *,
+    round_id: str,
+    module_set_name: str,
+    payload: Mapping[str, object],
+) -> None:
+    rounds = adata.uns.get("cluster_rounds", {})
+    if not isinstance(rounds, dict) or round_id not in rounds:
+        raise RuntimeError(f"module-score: round_id={round_id!r} missing from adata.uns['cluster_rounds'].")
+    round_info = rounds[str(round_id)]
+    module_block = round_info.setdefault("module_scores", {})
+    if not isinstance(module_block, dict):
+        module_block = {}
+        round_info["module_scores"] = module_block
+    module_block[str(module_set_name)] = dict(payload)
+
+
+def _compute_module_score_on_adata(
+    adata: ad.AnnData,
+    cfg,
+) -> tuple[dict[str, object], list[str], str]:
+    import scanpy as sc
+    rounds = adata.uns.get("cluster_rounds", {})
+    target_round_id = getattr(cfg, "round_id", None)
+    if target_round_id is None:
+        active_round_id = adata.uns.get("active_cluster_round", None)
+        target_round_id = str(active_round_id) if active_round_id is not None else None
+    if not target_round_id or not isinstance(rounds, dict) or str(target_round_id) not in rounds:
+        raise RuntimeError(
+            "module-score: target round not resolved. "
+            f"Resolved round_id={target_round_id!r}, active_round={adata.uns.get('active_cluster_round', None)!r}."
+        )
+    target_round_id = str(target_round_id)
+
+    method = str(getattr(cfg, "module_score_method", "scanpy") or "scanpy").strip().lower()
+    if method == "aucell":
+        raise NotImplementedError(
+            "module-score: backend 'aucell' is reserved but not implemented yet. Use --module-score-method scanpy."
+        )
+    if method != "scanpy":
+        raise RuntimeError(f"module-score: unsupported module_score_method={method!r}")
+
+    use_raw = bool(getattr(cfg, "module_score_use_raw", False))
+    layer = getattr(cfg, "module_score_layer", None)
+    if use_raw and layer:
+        raise RuntimeError("module-score: cannot use both module_score_use_raw and module_score_layer.")
+    if use_raw and adata.raw is None:
+        raise RuntimeError("module-score: module_score_use_raw=True but adata.raw is not available.")
+    if layer and str(layer) not in adata.layers:
+        raise RuntimeError(f"module-score: module_score_layer={layer!r} not found in adata.layers.")
+
+    module_set_name = str(getattr(cfg, "module_set_name", None) or "module_score").strip()
+    module_set_token = _sanitize_module_name(module_set_name)
+    modules = _load_module_definitions(getattr(cfg, "module_files", ()))
+
+    gene_pool = _module_score_gene_pool(adata, use_raw=use_raw)
+    gene_pool_set = set(gene_pool)
+    if not gene_pool:
+        raise RuntimeError("module-score: no genes are available in the selected expression source.")
+
+    round_info = rounds[target_round_id]
+    labels_obs_key = str(round_info.get("labels_obs_key") or round_info.get("cluster_key") or "leiden")
+    grouping = _prepare_decoupler_grouping(
+        adata,
+        round_id=target_round_id,
+        labels_obs_key=labels_obs_key,
+        condition_key=getattr(cfg, "condition_key", None),
+    )
+    group_key = str(grouping["group_key"])
+    cleanup_key = grouping.get("cleanup_key", None)
+    display_map = dict(grouping.get("display_map", {}) or {})
+    display_order = grouping.get("display_order", None)
+
+    score_keys: list[str] = []
+    score_key_to_module: dict[str, str] = {}
+    module_records: list[dict[str, object]] = []
+    ctrl_size = int(getattr(cfg, "module_score_ctrl_size", 50))
+    n_bins = int(getattr(cfg, "module_score_n_bins", 25))
+    random_state = int(getattr(cfg, "module_score_random_state", 0))
+
+    for module_name, genes in modules.items():
+        retained = [str(g) for g in genes if str(g) in gene_pool_set]
+        module_records.append(
+            {
+                "module": str(module_name),
+                "n_genes_input": int(len(genes)),
+                "n_genes_retained": int(len(retained)),
+                "genes_retained": ",".join(retained),
+            }
+        )
+        if not retained:
+            LOGGER.warning("module-score: module %r retained no genes after filtering; skipping.", str(module_name))
+            continue
+
+        score_key = (
+            f"module_score__{_sanitize_module_name(target_round_id)}__"
+            f"{module_set_token}__{_sanitize_module_name(module_name)}"
+        )
+        sc.tl.score_genes(
+            adata,
+            gene_list=retained,
+            score_name=score_key,
+            ctrl_size=ctrl_size,
+            n_bins=n_bins,
+            random_state=random_state,
+            gene_pool=gene_pool,
+            use_raw=use_raw,
+            layer=layer,
+            copy=False,
+        )
+        adata.obs[score_key] = pd.to_numeric(adata.obs[score_key], errors="coerce").astype(np.float32)
+        score_keys.append(score_key)
+        score_key_to_module[str(score_key)] = str(module_name)
+        module_records[-1]["score_key"] = str(score_key)
+
+    if not score_keys:
+        raise RuntimeError("module-score: no modules retained any genes after filtering.")
+
+    score_frame = adata.obs[[group_key] + score_keys].copy()
+    summary_mean = score_frame.groupby(group_key, observed=False)[score_keys].mean()
+    summary_median = score_frame.groupby(group_key, observed=False)[score_keys].median()
+    n_cells = score_frame.groupby(group_key, observed=False).size().rename("n_cells").to_frame()
+
+    if display_map:
+        summary_mean.index = [display_map.get(str(x), str(x)) for x in summary_mean.index]
+        summary_median.index = [display_map.get(str(x), str(x)) for x in summary_median.index]
+        n_cells.index = [display_map.get(str(x), str(x)) for x in n_cells.index]
+
+    if display_order:
+        order = [str(x) for x in display_order if str(x) in summary_mean.index]
+        if order:
+            summary_mean = summary_mean.reindex(order)
+            summary_median = summary_median.reindex(order)
+            n_cells = n_cells.reindex(order)
+
+    summary_mean = summary_mean.rename(columns=score_key_to_module).astype(np.float32)
+    summary_median = summary_median.rename(columns=score_key_to_module).astype(np.float32)
+    summary_mean_z = _zscore_module_summary(summary_mean)
+
+    module_meta = pd.DataFrame(module_records)
+    payload = {
+        "module_set_name": module_set_name,
+        "method": method,
+        "round_id": target_round_id,
+        "condition_key": grouping.get("condition_key", None),
+        "module_files": [str(Path(p)) for p in getattr(cfg, "module_files", ())],
+        "module_score_use_raw": bool(use_raw),
+        "module_score_layer": str(layer) if layer else None,
+        "module_score_ctrl_size": int(ctrl_size),
+        "module_score_n_bins": int(n_bins),
+        "module_score_random_state": int(random_state),
+        "score_keys": list(score_keys),
+        "score_key_to_module": dict(score_key_to_module),
+        "group_display_map": display_map,
+        "group_display_order": list(display_order) if isinstance(display_order, list) else display_order,
+        "module_meta": module_meta,
+        "summary_mean": summary_mean,
+        "summary_median": summary_median,
+        "summary_mean_z": summary_mean_z,
+        "n_cells": n_cells,
+    }
+    _store_module_score_payload(
+        adata,
+        round_id=target_round_id,
+        module_set_name=module_set_name,
+        payload=payload,
+    )
+
+    return payload, score_keys, target_round_id
+
+
+def run_module_score(cfg) -> ad.AnnData:
+    init_logging(getattr(cfg, "logfile", None))
+    LOGGER.info("Starting markers-and-de (module-score)...")
+
+    output_dir = Path(getattr(cfg, "output_dir"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    figdir = output_dir / str(getattr(cfg, "figdir_name", "figures"))
+    plot_utils.setup_scanpy_figs(figdir, getattr(cfg, "figure_formats", ["png", "pdf"]))
+
+    adata = io_utils.load_dataset(getattr(cfg, "input_path"))
+    payload, score_keys, target_round_id = _compute_module_score_on_adata(adata, cfg)
+
+    run_namespace = _run_namespace_for_round(
+        adata,
+        prefix=f"module_score_{_sanitize_module_name(str(payload['module_set_name']))}",
+        round_id=target_round_id,
+    )
+    run_round = str(plot_utils.get_run_subdir(run_namespace))
+    tables_root = output_dir / "tables" / run_round
+    tables_root.mkdir(parents=True, exist_ok=True)
+    module_meta = payload["module_meta"]
+    summary_mean = payload["summary_mean"]
+    summary_median = payload["summary_median"]
+    summary_mean_z = payload["summary_mean_z"]
+    n_cells = payload["n_cells"]
+    module_meta.to_csv(tables_root / "module_meta.tsv", sep="\t", index=False)
+    summary_mean.to_csv(tables_root / "module_score_summary_mean.tsv", sep="\t")
+    summary_median.to_csv(tables_root / "module_score_summary_median.tsv", sep="\t")
+    summary_mean_z.to_csv(tables_root / "module_score_summary_mean_z.tsv", sep="\t")
+    n_cells.to_csv(tables_root / "module_score_group_sizes.tsv", sep="\t")
+    _write_settings(
+        tables_root,
+        "__settings.txt",
+        [
+            f"round_id={target_round_id}",
+            f"module_set_name={payload['module_set_name']}",
+            f"module_score_method={payload['method']}",
+            f"module_score_use_raw={payload['module_score_use_raw']}",
+            f"module_score_layer={payload['module_score_layer']}",
+            f"condition_key={payload['condition_key']}",
+            f"module_files={payload['module_files']}",
+        ],
+    )
+
+    if bool(getattr(cfg, "make_figures", True)):
+        artifacts = []
+        artifacts.extend(
+            plot_utils.plot_module_score_summary_heatmap(
+                payload["summary_mean_z"],
+                figdir=Path(run_round),
+                stem="module_score_summary_mean_z",
+                title=f"Module score summary ({payload['module_set_name']})",
+            )
+        )
+        max_umaps = int(getattr(cfg, "module_score_max_umaps", 12))
+        umap_keys = list(score_keys[:max(0, max_umaps)])
+        if umap_keys:
+            artifacts.extend(
+                plot_utils.umap_by(
+                    adata,
+                    umap_keys,
+                    figdir=Path(run_round) / "umaps",
+                    stem="module_score",
+                )
+            )
+        plot_utils.persist_plot_artifacts(artifacts)
+
+        try:
+            LOGGER.info("module-score: generating report...")
+            for fmt in getattr(cfg, "figure_formats", ["png", "pdf"]):
+                reporting.generate_module_score_report(
+                    fig_root=figdir,
+                    fmt=fmt,
+                    cfg=cfg,
+                    version=__version__,
+                    adata=adata,
+                    run_dir=figdir / str(fmt).lower().lstrip(".") / run_round,
+                )
+            LOGGER.info("Wrote module-score report.")
+        except Exception as e:
+            LOGGER.warning("Failed to generate module-score report: %s", e)
+
+    if cleanup_key:
+        adata.obs.drop(columns=[str(cleanup_key)], inplace=True, errors="ignore")
+
+    out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.module_score")) + ".zarr")
+    LOGGER.info("Saving dataset → %s", out_zarr)
+    io_utils.save_dataset(adata, out_zarr, fmt="zarr")
+
+    if bool(getattr(cfg, "save_h5ad", False)):
+        out_h5ad = output_dir / (str(getattr(cfg, "output_name", "adata.module_score")) + ".h5ad")
+        LOGGER.warning("Writing additional H5AD output (loads full matrix into RAM): %s", out_h5ad)
+        io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
+
+    LOGGER.info(
+        "Finished markers-and-de (module-score); modules=%d retained=%d.",
+        int(len(payload["module_meta"])),
+        int(len(score_keys)),
+    )
+    return adata
 
 
 def _build_gene_meta_from_de_tables(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -1480,63 +1890,30 @@ def _write_de_enrichment_tables(
                     gmt_df.to_csv(net_dir / f"activity_{gmt_name}.tsv", sep="\t")
 
 
-def run_enrichment_de(cfg) -> None:
-    init_logging(getattr(cfg, "logfile", None))
-    LOGGER.info("Starting markers-and-de (DE enrichment)...")
-
-    output_dir = Path(getattr(cfg, "output_dir"))
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    figdir = output_dir / str(getattr(cfg, "figdir_name", "figures"))
-    plot_utils.setup_scanpy_figs(figdir, getattr(cfg, "figure_formats", ["png", "pdf"]))
-
-    input_dir = Path(getattr(cfg, "input_dir", None) or getattr(cfg, "input_path"))
-    if not input_dir.exists() or not input_dir.is_dir():
-        raise RuntimeError(f"enrichment de: input_dir not found or not a directory: {input_dir}")
-
-    de_source = str(getattr(cfg, "de_decoupler_source", "auto") or "auto").lower()
-    if de_source not in ("auto", "all", "pseudobulk", "cell", "none"):
-        raise RuntimeError(f"enrichment de: invalid de_decoupler_source={de_source!r}")
-    if de_source == "none":
-        LOGGER.info("enrichment de: de_decoupler_source='none'; nothing to do.")
-        return None
-
+def _compute_de_enrichment_from_dir(
+    input_dir: Path,
+    *,
+    cfg,
+) -> dict[str, dict[str, dict[str, dict[str, object]]]]:
     from .annotation_utils import (
         _run_msigdb_from_stats,
         _run_progeny_from_stats,
         _run_dorothea_from_stats,
     )
-    from . import de_plot_utils
 
     pb_tables = _collect_pseudobulk_de_tables_from_dir(input_dir)
     cell_tables = _collect_cell_contrast_tables_from_dir(input_dir)
     if not pb_tables and not cell_tables:
         raise RuntimeError(f"enrichment de: no DE CSV tables found under {input_dir}")
 
-    run_key = io_utils.sanitize_identifier(
-        str(getattr(cfg, "output_name", f"{input_dir.name}.enrichment_de")).replace(".", "_"),
-        allow_spaces=False,
-    )
-    run_round = str(plot_utils.get_run_subdir(run_key))
-    tables_root = output_dir / "tables" / run_round
+    de_source = str(getattr(cfg, "de_decoupler_source", "auto") or "auto").lower()
+    if de_source not in ("auto", "all", "pseudobulk", "cell", "none"):
+        raise RuntimeError(f"enrichment de: invalid de_decoupler_source={de_source!r}")
+    if de_source == "none":
+        return {}
+
     stat_col = str(getattr(cfg, "de_decoupler_stat_col", "stat") or "stat")
-    total_runs = 0
-
-    if bool(getattr(cfg, "make_figures", True)):
-        figdir_round = Path(run_round)
-    else:
-        figdir_round = None
-
-    _write_settings(
-        tables_root,
-        "__settings.txt",
-        [
-            f"input_dir={input_dir}",
-            f"de_decoupler_source={de_source}",
-            f"de_decoupler_stat_col={stat_col}",
-            f"gene_filter={list(getattr(cfg, 'gene_filter', ()))}",
-        ],
-    )
+    results: dict[str, dict[str, dict[str, dict[str, object]]]] = {}
 
     condition_keys = sorted(set(pb_tables.keys()) | set(cell_tables.keys()))
     for condition_key in condition_keys:
@@ -1588,6 +1965,70 @@ def run_enrichment_de(cfg) -> None:
                 if not payloads:
                     continue
 
+                results.setdefault(str(condition_key), {}).setdefault(str(contrast), {})[str(source)] = {
+                    "source": str(source),
+                    "condition_key": str(condition_key),
+                    "contrast": str(contrast),
+                    "stat_col": str(stat_col),
+                    "gene_filter": gene_filter_info,
+                    "nets": payloads,
+                }
+
+    return results
+
+
+def run_enrichment_de(cfg) -> None:
+    init_logging(getattr(cfg, "logfile", None))
+    LOGGER.info("Starting markers-and-de (DE enrichment)...")
+
+    output_dir = Path(getattr(cfg, "output_dir"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    figdir = output_dir / str(getattr(cfg, "figdir_name", "figures"))
+    plot_utils.setup_scanpy_figs(figdir, getattr(cfg, "figure_formats", ["png", "pdf"]))
+
+    input_dir = Path(getattr(cfg, "input_dir", None) or getattr(cfg, "input_path"))
+    if not input_dir.exists() or not input_dir.is_dir():
+        raise RuntimeError(f"enrichment de: input_dir not found or not a directory: {input_dir}")
+
+    from . import de_plot_utils
+
+    de_source = str(getattr(cfg, "de_decoupler_source", "auto") or "auto").lower()
+    results = _compute_de_enrichment_from_dir(input_dir, cfg=cfg)
+    if not results:
+        LOGGER.info("enrichment de: no enrichment payloads produced; nothing to write.")
+        return None
+
+    run_key = io_utils.sanitize_identifier(
+        str(getattr(cfg, "output_name", f"{input_dir.name}.enrichment_de")).replace(".", "_"),
+        allow_spaces=False,
+    )
+    run_round = str(plot_utils.get_run_subdir(run_key))
+    tables_root = output_dir / "tables" / run_round
+    stat_col = str(getattr(cfg, "de_decoupler_stat_col", "stat") or "stat")
+    total_runs = 0
+
+    if bool(getattr(cfg, "make_figures", True)):
+        figdir_round = Path(run_round)
+    else:
+        figdir_round = None
+
+    _write_settings(
+        tables_root,
+        "__settings.txt",
+        [
+            f"input_dir={input_dir}",
+            f"de_decoupler_source={de_source}",
+            f"de_decoupler_stat_col={stat_col}",
+            f"gene_filter={list(getattr(cfg, 'gene_filter', ()))}",
+        ],
+    )
+
+    for condition_key, per_contrast in results.items():
+        for contrast, payload_by_source in per_contrast.items():
+            for source, payload in payload_by_source.items():
+                payloads = payload.get("nets", {})
+                gene_filter_info = payload.get("gene_filter", None)
                 total_runs += 1
                 if str(source) == "cell":
                     base = Path("cell_level_DE") / str(condition_key) / str(contrast)
@@ -1641,6 +2082,21 @@ def run_enrichment_de(cfg) -> None:
 
     if total_runs == 0:
         raise RuntimeError(f"enrichment de: no enrichment payloads were produced from DE tables in {input_dir}")
+
+    if figdir_round is not None:
+        try:
+            LOGGER.info("enrichment de: generating report...")
+            for fmt in getattr(cfg, "figure_formats", ["png", "pdf"]):
+                reporting.generate_enrichment_de_report(
+                    fig_root=figdir,
+                    fmt=fmt,
+                    cfg=cfg,
+                    version=__version__,
+                    run_dir=figdir / str(fmt).lower().lstrip(".") / run_round,
+                )
+            LOGGER.info("Wrote enrichment de report.")
+        except Exception as e:
+            LOGGER.warning("Failed to generate enrichment de report: %s", e)
 
     LOGGER.info("Finished markers-and-de (DE enrichment); runs=%d", int(total_runs))
     return None

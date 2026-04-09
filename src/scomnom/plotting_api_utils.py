@@ -247,6 +247,9 @@ def _make_api_wrapper(public_name: str, plot_fn: Callable):
 
 
 _WRAPPER_SPECS: list[tuple[str, Callable]] = [
+    ("plot_decoupler_payload", plot_utils.plot_decoupler_payload),
+    ("plot_module_score_summary_heatmap", plot_utils.plot_module_score_summary_heatmap),
+    ("plot_de_decoupler_payload", de_plot_utils.plot_de_decoupler_payload),
     ("plot_de_heatmap_top_genes_by_sample", de_plot_utils.heatmap_top_genes_by_sample),
     ("plot_de_volcano", de_plot_utils.volcano),
     ("plot_de_dotplot_top_genes", de_plot_utils.dotplot_top_genes),

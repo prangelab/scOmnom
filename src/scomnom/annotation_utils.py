@@ -873,6 +873,15 @@ def _publish_decoupler_from_round_to_top_level(
                 del adata.uns[res]
 
 
+def clear_top_level_decoupler_state(
+    adata: ad.AnnData,
+    *,
+    keys: Sequence[str] = ("msigdb", "progeny", "dorothea", "pseudobulk"),
+) -> None:
+    for key in keys:
+        adata.uns.pop(str(key), None)
+
+
 def _round_cluster_display_map(
     adata: ad.AnnData,
     *,
@@ -1664,5 +1673,7 @@ def run_decoupler_for_round(
                         adata.uns[res]["config"]["cluster_display_labels"] = dl
         except Exception:
             pass
-
         LOGGER.info("Decoupler[%s]: published to top-level adata.uns for forward compatibility.", rid)
+
+    adata.uns.pop(pb_key, None)
+    rinfo.get("decoupler", {}).pop("pseudobulk_store_key", None)

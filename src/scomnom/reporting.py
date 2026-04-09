@@ -89,6 +89,13 @@ def _de_report_summary_rows(*, rel_imgs: List[Path], cfg, adata) -> List[tuple[s
     return rows
 
 
+def _simple_summary_rows(*, rel_imgs: List[Path], cfg, extras: List[tuple[str, str]] | None = None) -> List[tuple[str, str]]:
+    rows: List[tuple[str, str]] = [("n_plots_total", str(len(rel_imgs)))]
+    if extras:
+        rows.extend([(str(k), str(v)) for k, v in extras if v is not None])
+    return rows
+
+
 # =============================================================================
 # Plot classification + descriptions
 # =============================================================================
@@ -1694,6 +1701,309 @@ def generate_de_report(*, fig_root: Path, fmt: str, cfg, version: str, adata, ru
         "<!DOCTYPE html><html><head>"
         '<meta charset="utf-8">'
         "<title>scOmnom DE report</title>"
+        f"<style>{_css()}</style>"
+        "</head><body>"
+        f'<div class="wrap">{toc_html}<main class="content">{"".join(blocks)}</main></div>'
+        "</body></html>"
+    )
+    out_html.write_text(html_doc, encoding="utf-8")
+
+
+def generate_enrichment_cluster_report(
+    *,
+    fig_root: Path,
+    fmt: str,
+    cfg,
+    version: str,
+    run_dir: Path,
+) -> None:
+    fig_root = Path(fig_root).resolve()
+    fmt = fmt.lower().lstrip(".")
+    run_dir = Path(run_dir).resolve()
+    if not run_dir.exists():
+        raise RuntimeError(f"Could not locate enrichment cluster run dir: {run_dir}")
+
+    out_html = run_dir / "enrichment_report.html"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    rel_imgs = _collect_images_in_dir(run_dir, fmt, recursive=True)
+
+    cfg_dict = getattr(cfg, "__dict__", {})
+    cfg_json = _safe(json.dumps(cfg_dict, indent=2, default=str))
+
+    header = (
+        '<h1 id="top">scOmnom enrichment report</h1>'
+        '<div class="meta">'
+        f"Version:   {_safe(version)}\n"
+        f"Timestamp: {_safe(timestamp)}\n\n"
+        "Parameters:\n"
+        f"{cfg_json}"
+        "</div>"
+        "<p class='note'>This report summarizes round-native enrichment plots for the selected clustering round.</p>"
+    )
+
+    summary_rows = _simple_summary_rows(
+        rel_imgs=rel_imgs,
+        cfg=cfg,
+        extras=[
+            ("round_id", getattr(cfg, "round_id", None)),
+            ("condition_key", getattr(cfg, "condition_key", None) or "none"),
+            ("gene_filter", ", ".join(str(x) for x in getattr(cfg, "gene_filter", ()) or ()) or "none"),
+        ],
+    )
+    summary_rows_html = "".join(
+        f"<tr><td>{_safe(field)}</td><td>{_safe(value)}</td></tr>"
+        for field, value in summary_rows
+    )
+    summary_inner = (
+        "<p class='note'>Summary of enrichment plots discovered in this run folder.</p>"
+        '<table class="summary-table"><thead><tr><th>Field</th><th>Value</th></tr></thead><tbody>'
+        f"{summary_rows_html}"
+        "</tbody></table>"
+    )
+
+    by_kind: Dict[str, List[Path]] = {}
+    for p in rel_imgs:
+        by_kind.setdefault(_classify_plot_type(p), []).append(p)
+
+    toc_sections: List[Tuple[str, str]] = [("summary", "Summary")]
+    for kind in sorted(by_kind):
+        toc_sections.append((_slug(kind), kind.replace("_", " ").title()))
+    toc_html = _toc(toc_sections)
+
+    blocks: List[str] = [header, '<div id="summary"></div>', _details_block("Summary", summary_inner, open_by_default=True)]
+    for kind in sorted(by_kind):
+        imgs = by_kind[kind]
+        if not imgs:
+            continue
+        title = kind.replace("_", " ").title()
+        blocks.append(f'<div id="{_safe(_slug(kind))}"></div>')
+        inner = _grid_block([_render_image_card_from_run_dir(p) for p in imgs])
+        blocks.append(_details_block(f"{_safe(title)} <span class='pill'>{len(imgs)} plots</span>", inner, open_by_default=False))
+
+    html_doc = (
+        "<!DOCTYPE html><html><head>"
+        '<meta charset="utf-8">'
+        "<title>scOmnom enrichment report</title>"
+        f"<style>{_css()}</style>"
+        "</head><body>"
+        f'<div class="wrap">{toc_html}<main class="content">{"".join(blocks)}</main></div>'
+        "</body></html>"
+    )
+    out_html.write_text(html_doc, encoding="utf-8")
+
+
+def generate_enrichment_de_report(
+    *,
+    fig_root: Path,
+    fmt: str,
+    cfg,
+    version: str,
+    run_dir: Path,
+) -> None:
+    fig_root = Path(fig_root).resolve()
+    fmt = fmt.lower().lstrip(".")
+    run_dir = Path(run_dir).resolve()
+    if not run_dir.exists():
+        raise RuntimeError(f"Could not locate enrichment DE run dir: {run_dir}")
+
+    out_html = run_dir / "enrichment_de_report.html"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    rel_imgs = _collect_images_in_dir(run_dir, fmt, recursive=True)
+
+    cfg_dict = getattr(cfg, "__dict__", {})
+    cfg_json = _safe(json.dumps(cfg_dict, indent=2, default=str))
+
+    header = (
+        '<h1 id="top">scOmnom enrichment-from-DE report</h1>'
+        '<div class="meta">'
+        f"Version:   {_safe(version)}\n"
+        f"Timestamp: {_safe(timestamp)}\n\n"
+        "Parameters:\n"
+        f"{cfg_json}"
+        "</div>"
+        "<p class='note'>This report is organized by analysis source, condition, and contrast for enrichment derived from DE tables.</p>"
+    )
+
+    summary_rows = _simple_summary_rows(
+        rel_imgs=rel_imgs,
+        cfg=cfg,
+        extras=[
+            ("input_dir", getattr(cfg, "input_dir", None)),
+            ("de_decoupler_source", getattr(cfg, "de_decoupler_source", None)),
+            ("gene_filter", ", ".join(str(x) for x in getattr(cfg, "gene_filter", ()) or ()) or "none"),
+        ],
+    )
+    summary_rows_html = "".join(
+        f"<tr><td>{_safe(field)}</td><td>{_safe(value)}</td></tr>"
+        for field, value in summary_rows
+    )
+    summary_inner = (
+        "<p class='note'>Summary of enrichment plots discovered in this run folder.</p>"
+        '<table class="summary-table"><thead><tr><th>Field</th><th>Value</th></tr></thead><tbody>'
+        f"{summary_rows_html}"
+        "</tbody></table>"
+    )
+
+    grouped: Dict[str, Dict[str, Dict[str, List[Path]]]] = {}
+    for p in rel_imgs:
+        parts = list(p.parts)
+        source = parts[0] if len(parts) > 0 else "other"
+        condition_key = parts[1] if len(parts) > 1 else "other"
+        contrast = parts[2] if len(parts) > 2 else "other"
+        grouped.setdefault(source, {}).setdefault(condition_key, {}).setdefault(contrast, []).append(p)
+
+    toc_sections: List[Tuple[str, str]] = [("summary", "Summary")]
+    for source in sorted(grouped):
+        toc_sections.append((_slug(source), source.replace("_", " ").title()))
+    toc_html = _toc(toc_sections)
+
+    blocks: List[str] = [header, '<div id="summary"></div>', _details_block("Summary", summary_inner, open_by_default=True)]
+    for source in sorted(grouped):
+        blocks.append(f'<div id="{_safe(_slug(source))}"></div>')
+        source_inner: List[str] = []
+        for condition_key in sorted(grouped[source]):
+            condition_inner: List[str] = []
+            for contrast in sorted(grouped[source][condition_key]):
+                imgs = grouped[source][condition_key][contrast]
+                inner = _grid_block([_render_image_card_from_run_dir(p) for p in imgs])
+                condition_inner.append(
+                    _details_block(
+                        f"{_safe(contrast)} <span class='pill'>{len(imgs)} plots</span>",
+                        inner,
+                        open_by_default=False,
+                        extra_class="subsection",
+                    )
+                )
+            source_inner.append(
+                _details_block(
+                    f"{_safe(condition_key)} <span class='pill'>{sum(len(v) for v in grouped[source][condition_key].values())} plots</span>",
+                    "".join(condition_inner),
+                    open_by_default=False,
+                    extra_class="subsection",
+                )
+            )
+        blocks.append(
+            _details_block(
+                f"{_safe(source.replace('_', ' ').title())} <span class='pill'>{sum(len(v) for cond in grouped[source].values() for v in cond.values())} plots</span>",
+                "".join(source_inner),
+                open_by_default=False,
+            )
+        )
+
+    html_doc = (
+        "<!DOCTYPE html><html><head>"
+        '<meta charset="utf-8">'
+        "<title>scOmnom enrichment-from-DE report</title>"
+        f"<style>{_css()}</style>"
+        "</head><body>"
+        f'<div class="wrap">{toc_html}<main class="content">{"".join(blocks)}</main></div>'
+        "</body></html>"
+    )
+    out_html.write_text(html_doc, encoding="utf-8")
+
+
+def generate_module_score_report(
+    *,
+    fig_root: Path,
+    fmt: str,
+    cfg,
+    version: str,
+    adata,
+    run_dir: Path,
+) -> None:
+    fig_root = Path(fig_root).resolve()
+    fmt = fmt.lower().lstrip(".")
+    run_dir = Path(run_dir).resolve()
+    if not run_dir.exists():
+        raise RuntimeError(f"Could not locate module-score run dir: {run_dir}")
+
+    out_html = run_dir / "module_score_report.html"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    rel_imgs = _collect_images_in_dir(run_dir, fmt, recursive=True)
+
+    cfg_dict = getattr(cfg, "__dict__", {})
+    cfg_json = _safe(json.dumps(cfg_dict, indent=2, default=str))
+
+    payload = None
+    try:
+        rid = str(getattr(cfg, "round_id", None) or adata.uns.get("active_cluster_round", "") or "")
+        module_set_name = str(getattr(cfg, "module_set_name", None) or "")
+        rounds = adata.uns.get("cluster_rounds", {})
+        if rid and isinstance(rounds, dict) and rid in rounds:
+            module_scores = rounds[rid].get("module_scores", {})
+            if isinstance(module_scores, dict) and module_set_name in module_scores:
+                payload = module_scores[module_set_name]
+    except Exception:
+        payload = None
+
+    header = (
+        '<h1 id="top">scOmnom module-score report</h1>'
+        '<div class="meta">'
+        f"Version:   {_safe(version)}\n"
+        f"Timestamp: {_safe(timestamp)}\n\n"
+        "Parameters:\n"
+        f"{cfg_json}"
+        "</div>"
+        "<p class='note'>This report summarizes user-defined module scoring and the corresponding UMAP and summary plots.</p>"
+    )
+
+    n_modules = None
+    if isinstance(payload, dict):
+        module_meta = payload.get("module_meta", None)
+        if isinstance(module_meta, pd.DataFrame):
+            n_modules = int(module_meta.shape[0])
+
+    summary_rows = _simple_summary_rows(
+        rel_imgs=rel_imgs,
+        cfg=cfg,
+        extras=[
+            ("round_id", getattr(cfg, "round_id", None)),
+            ("module_set_name", getattr(cfg, "module_set_name", None)),
+            ("condition_key", getattr(cfg, "condition_key", None) or "none"),
+            ("module_score_method", getattr(cfg, "module_score_method", None)),
+            ("n_modules", n_modules),
+        ],
+    )
+    summary_rows_html = "".join(
+        f"<tr><td>{_safe(field)}</td><td>{_safe(value)}</td></tr>"
+        for field, value in summary_rows
+    )
+    summary_inner = (
+        "<p class='note'>Summary of module-score plots discovered in this run folder.</p>"
+        '<table class="summary-table"><thead><tr><th>Field</th><th>Value</th></tr></thead><tbody>'
+        f"{summary_rows_html}"
+        "</tbody></table>"
+    )
+
+    by_section: Dict[str, List[Path]] = {}
+    for p in rel_imgs:
+        section = p.parts[0] if len(p.parts) > 1 else "summary"
+        by_section.setdefault(section, []).append(p)
+
+    toc_sections: List[Tuple[str, str]] = [("summary", "Summary")]
+    for section in sorted(by_section):
+        toc_sections.append((_slug(section), section.replace("_", " ").title()))
+    toc_html = _toc(toc_sections)
+
+    blocks: List[str] = [header, '<div id="summary"></div>', _details_block("Summary", summary_inner, open_by_default=True)]
+    for section in sorted(by_section):
+        imgs = by_section[section]
+        if not imgs:
+            continue
+        blocks.append(f'<div id="{_safe(_slug(section))}"></div>')
+        inner = _grid_block([_render_image_card_from_run_dir(p) for p in imgs])
+        blocks.append(
+            _details_block(
+                f"{_safe(section.replace('_', ' ').title())} <span class='pill'>{len(imgs)} plots</span>",
+                inner,
+                open_by_default=False,
+            )
+        )
+
+    html_doc = (
+        "<!DOCTYPE html><html><head>"
+        '<meta charset="utf-8">'
+        "<title>scOmnom module-score report</title>"
         f"<style>{_css()}</style>"
         "</head><body>"
         f'<div class="wrap">{toc_html}<main class="content">{"".join(blocks)}</main></div>'

@@ -3179,6 +3179,10 @@ def plot_de_decoupler_payload(
     """
     if not isinstance(payload, dict):
         return
+    if "activity" not in payload and isinstance(payload.get("nets", None), dict):
+        payload = payload["nets"].get(str(net_name), {})
+        if not isinstance(payload, dict):
+            return
     activity = payload.get("activity", None)
     if activity is None or not isinstance(activity, pd.DataFrame) or activity.empty:
         return

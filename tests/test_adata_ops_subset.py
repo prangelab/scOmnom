@@ -6,6 +6,7 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
+import scomnom as om
 
 from scomnom.adata_ops import (
     _dataset_stem_for_outputs,
@@ -129,6 +130,95 @@ def test_subset_adata_by_cluster_mapping_rejects_missing_requested_clusters() ->
 
     with pytest.raises(ValueError, match="Requested Cnn clusters were not found"):
         _ = subset_adata_by_cluster_mapping(adata, subset_map)
+
+
+def test_enrichment_cluster_runs_on_in_memory_adata(monkeypatch) -> None:
+    adata = _make_test_adata()
+
+    def _fake_run_decoupler_for_round(in_adata, cfg, round_id):
+        in_adata.uns["cluster_rounds"][round_id]["decoupler"] = {
+            "pseudobulk_store_key": f"pseudobulk__{round_id}",
+            "msigdb": {"config": {"gene_filter": list(cfg.gene_filter)}},
+        }
+
+    monkeypatch.setattr("scomnom.adata_public.run_decoupler_for_round", _fake_run_decoupler_for_round)
+
+    payload = om.adata_ops.enrichment_cluster(
+        adata,
+        round_id="r0",
+        condition_key="sex",
+        gene_filter=("not gene.str.startswith('MT-')",),
+        run_progeny=False,
+        run_dorothea=False,
+    )
+
+    assert payload["pseudobulk_store_key"] == "pseudobulk__r0"
+    assert payload["msigdb"]["config"]["gene_filter"] == ["not gene.str.startswith('MT-')"]
+
+
+def test_enrichment_de_from_tables_returns_nested_payloads(tmp_path: Path, monkeypatch) -> None:
+    expected = {
+        "sex": {
+            "female_vs_male": {
+                "pseudobulk": {
+                    "nets": {"msigdb": {"activity": pd.DataFrame([[1.0]], index=["C00"], columns=["TERM"])}}
+                }
+            }
+        }
+    }
+
+    def _fake_compute(input_dir, *, cfg):
+        assert Path(input_dir) == tmp_path
+        assert cfg.gene_filter == ("not gene.str.startswith('MT-')",)
+        return expected
+
+    monkeypatch.setattr("scomnom.adata_public._compute_de_enrichment_from_dir", _fake_compute)
+
+    got = om.adata_ops.enrichment_de_from_tables(
+        tmp_path,
+        gene_filter=("not gene.str.startswith('MT-')",),
+        run_progeny=False,
+        run_dorothea=False,
+    )
+
+    assert got is expected
+
+
+def test_module_score_runs_on_in_memory_adata(monkeypatch, tmp_path: Path) -> None:
+    adata = _make_test_adata()
+    module_file = tmp_path / "mini.txt"
+    module_file.write_text("g0\ng1\n")
+
+    def _fake_compute_module_score(in_adata, cfg):
+        assert in_adata is adata
+        assert cfg.round_id == "r0"
+        assert cfg.module_set_name == "mini"
+        in_adata.uns["cluster_rounds"]["r0"]["module_scores"] = {
+            "mini": {
+                "module_set_name": "mini",
+                "round_id": "r0",
+                "summary_mean_z": pd.DataFrame([[1.0]], index=["C00: Immune"], columns=["mini"]),
+            }
+        }
+        return in_adata.uns["cluster_rounds"]["r0"]["module_scores"]["mini"], ["module_score__r0__mini__mini"], "r0"
+
+    monkeypatch.setattr("scomnom.adata_public._compute_module_score_on_adata", _fake_compute_module_score)
+
+    payload = om.adata_ops.module_score(
+        adata,
+        module_files=(module_file,),
+        module_set_name="mini",
+        round_id="r0",
+    )
+
+    assert payload["module_set_name"] == "mini"
+    assert payload["round_id"] == "r0"
+
+
+def test_markers_and_de_namespace_exposes_enrichment_helpers() -> None:
+    assert om.markers_and_de.enrichment_cluster is om.adata_ops.enrichment_cluster
+    assert om.markers_and_de.enrichment_de_from_tables is om.adata_ops.enrichment_de_from_tables
+    assert om.markers_and_de.module_score is om.adata_ops.module_score
 
 
 def test_dataset_stem_for_outputs_normalizes_archives() -> None:

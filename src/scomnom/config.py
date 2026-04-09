@@ -802,6 +802,19 @@ class MarkersAndDEConfig(BaseModel):
     dorothea_organism: str = "human"
 
     # ------------------------------------------------------------------
+    # Module scoring
+    # ------------------------------------------------------------------
+    module_files: Tuple[str, ...] = ()
+    module_set_name: Optional[str] = None
+    module_score_method: str = "scanpy"
+    module_score_use_raw: bool = False
+    module_score_layer: Optional[str] = None
+    module_score_ctrl_size: int = 50
+    module_score_n_bins: int = 25
+    module_score_random_state: int = 0
+    module_score_max_umaps: int = 12
+
+    # ------------------------------------------------------------------
     # Optional contrast-conditional mode
     # ------------------------------------------------------------------
     contrast_conditional_de: bool = False

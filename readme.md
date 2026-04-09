@@ -1037,6 +1037,13 @@ scomnom markers-and-de enrichment cluster \
 scomnom markers-and-de enrichment de \
   --input-dir results/tables/de_r5_archetypes_round1 \
   --gene-filter "not gene.str.startswith('MT-')"
+
+# Module scoring from user-defined signatures
+scomnom markers-and-de enrichment module-score \
+  --input-path results/adata.clustered.annotated.projected.markers.zarr \
+  --round-id r5_archetypes \
+  --module-file signatures.gmt \
+  --module-set-name curated_programs
 ```
 
 ---
@@ -1067,12 +1074,13 @@ Markers are computed per cluster against all other cells. The module supports **
 
 ### Enrichment
 
-The enrichment submodule has two entry points:
+The enrichment submodule has three entry points:
 
 * `scomnom markers-and-de enrichment cluster`: run decoupler directly on an existing clustering round
 * `scomnom markers-and-de enrichment de`: run decoupler from exported DE result tables without loading AnnData
+* `scomnom markers-and-de enrichment module-score`: score user-defined gene programs per cell and summarize them by cluster or cluster-condition
 
-Both modes support MSigDB, custom `.gmt` files, PROGENy, and DoRothEA.
+The first two modes support MSigDB, custom `.gmt` files, PROGENy, and DoRothEA. The third mode uses user-defined module definitions with per-cell module scoring.
 
 #### Enrichment cluster (round-native pathway / TF activity)
 
@@ -1126,6 +1134,7 @@ Example:
 **Outputs**
 
 * Figures: `figures/<fmt>/enrichment_<round>_roundN/`
+* Report: `figures/<fmt>/enrichment_<round>_roundN/enrichment_report.html`
 * Default AnnData output name: `adata.enrichment_<round>.zarr.tar.zst`
 * Stored round payload includes the selected condition key, applied gene filters, and retained gene counts for provenance
 
@@ -1153,6 +1162,44 @@ This mode reads exported DE CSV tables from a DE results folder and runs the sam
 
 * Figures: `figures/<fmt>/enrichment_de_<inputdir>_roundN/`
 * Tables: `tables/enrichment_de_<inputdir>_roundN/`
+* Report: `figures/<fmt>/enrichment_de_<inputdir>_roundN/enrichment_de_report.html`
+
+#### Enrichment module-score (user-defined signatures)
+
+This mode scores custom gene modules per cell, then summarizes those scores by cluster or by `cluster × condition`.
+
+**Backend**
+
+* `--module-score-method scanpy` uses `scanpy.tl.score_genes`
+* `--module-score-method aucell` is reserved for a future backend and currently raises a clear not-implemented error
+
+**Module inputs**
+
+* `--module-file` is repeatable
+* supported formats:
+  * `.gmt`: one or more modules per file
+  * `.tsv` / `.csv`: either `module,gene` style two-column tables or a single-column gene list
+  * `.txt`: one gene per line, interpreted as a single module named after the file stem
+* `--module-set-name` gives a stable name to the scored module collection and is used in output naming
+
+**Condition key syntax**
+
+Module scoring uses the same grouped-state syntax as `enrichment cluster`:
+
+| Syntax | Meaning | Resulting behavior |
+| --- | --- | --- |
+| omitted | Round only | One summary profile per cluster |
+| `A` | Single obs key | One summary profile per `cluster × A level` |
+| `A:B` | Composite key | One summary profile per `cluster × all combinations of A and B` |
+
+**Outputs**
+
+* Figures: `figures/<fmt>/module_score_<set>_<round>_roundN/`
+* Tables: `tables/module_score_<set>_<round>_roundN/`
+* Report: `figures/<fmt>/module_score_<set>_<round>_roundN/module_score_report.html`
+* Default AnnData output name: `adata.module_score_<set>_<round>.zarr.tar.zst`
+* The selected round stores summary tables and score metadata under `adata.uns["cluster_rounds"][round_id]["module_scores"]`
+* Per-cell score columns are written to round-specific `adata.obs` columns as `module_score__<round>__<set>__<module>`
 
 ---
 

@@ -37,7 +37,10 @@ Parameters:
 Returns:
 - `None`.
 
-## Module `scomnom.adata_ops`
+## Namespaces `scomnom.adata_ops` and `scomnom.markers_and_de`
+
+`scomnom.adata_ops` remains the compatibility namespace for AnnData-oriented helpers.
+The enrichment helpers are also exposed under `scomnom.markers_and_de` for notebook workflows.
 
 ### `rename_idents`
 
@@ -81,7 +84,187 @@ Parameters:
 Returns:
 - `tuple[dict[str, AnnData], DataFrame]`: subset objects and summary table.
 
+### `enrichment_cluster`
+
+Signature:
+```python
+enrichment_cluster(adata: ad.AnnData, *, round_id: str | None = None, condition_key: str | None = None, gene_filter: Sequence[str] = (), decoupler_pseudobulk_agg: str = "mean", decoupler_use_raw: bool = True, decoupler_method: str = "consensus", decoupler_consensus_methods: Sequence[str] | None = ("ulm", "mlm", "wsum"), decoupler_min_n_targets: int = 5, msigdb_gene_sets: Sequence[str] | None = ("HALLMARK", "REACTOME"), msigdb_method: str = "consensus", msigdb_min_n_targets: int = 5, run_progeny: bool = True, progeny_method: str = "consensus", progeny_min_n_targets: int = 5, progeny_top_n: int = 100, progeny_organism: str = "human", run_dorothea: bool = True, dorothea_method: str = "consensus", dorothea_min_n_targets: int = 5, dorothea_confidence: Sequence[str] | None = ("A", "B", "C"), dorothea_organism: str = "human") -> dict
+```
+
+What it does:
+- Runs round-native enrichment on an in-memory AnnData object and stores the decoupler payload on the selected round.
+
+Parameters:
+- `adata`: AnnData with cluster-round metadata and expression data.
+- `round_id`: Optional target round. If omitted, the active round is used.
+- `condition_key`: Optional condition key for cluster-by-condition enrichment. Composite `A:B` syntax is supported.
+- `gene_filter`: Optional gene filter expressions applied before enrichment.
+- `decoupler_pseudobulk_agg`: Aggregation for round-native pseudobulk (`"mean"` or `"median"`).
+- `decoupler_use_raw`: Whether to prefer raw-like counts for pseudobulk.
+- `decoupler_method`: Decoupler scoring method.
+- `decoupler_consensus_methods`: Methods combined when `decoupler_method="consensus"`.
+- `decoupler_min_n_targets`: Minimum targets per pathway/TF set.
+- `msigdb_gene_sets`: MSigDB keywords and/or `.gmt` files.
+- `msigdb_method`: Decoupler method for MSigDB.
+- `msigdb_min_n_targets`: Minimum MSigDB targets retained.
+- `run_progeny`: Whether to compute PROGENy.
+- `progeny_method`: Decoupler method for PROGENy.
+- `progeny_min_n_targets`: Minimum PROGENy targets retained.
+- `progeny_top_n`: PROGENy top-N footprint size.
+- `progeny_organism`: PROGENy organism.
+- `run_dorothea`: Whether to compute DoRothEA.
+- `dorothea_method`: Decoupler method for DoRothEA.
+- `dorothea_min_n_targets`: Minimum DoRothEA targets retained.
+- `dorothea_confidence`: DoRothEA confidence levels.
+- `dorothea_organism`: DoRothEA organism.
+
+Returns:
+- `dict`: The selected round's stored decoupler payload.
+
+### `enrichment_de_from_tables`
+
+Signature:
+```python
+enrichment_de_from_tables(input_dir: str | Path, *, gene_filter: Sequence[str] = (), de_decoupler_source: str = "auto", de_decoupler_stat_col: str = "stat", decoupler_method: str = "consensus", decoupler_consensus_methods: Sequence[str] | None = ("ulm", "mlm", "wsum"), decoupler_min_n_targets: int = 5, msigdb_gene_sets: Sequence[str] | None = ("HALLMARK", "REACTOME"), msigdb_method: str = "consensus", msigdb_min_n_targets: int = 5, run_progeny: bool = True, progeny_method: str = "consensus", progeny_min_n_targets: int = 5, progeny_top_n: int = 100, progeny_organism: str = "human", run_dorothea: bool = True, dorothea_method: str = "consensus", dorothea_min_n_targets: int = 5, dorothea_confidence: Sequence[str] | None = ("A", "B", "C"), dorothea_organism: str = "human") -> dict[str, dict[str, dict[str, dict[str, object]]]]
+```
+
+What it does:
+- Runs enrichment directly from exported DE CSV tables on disk, without loading AnnData.
+
+Parameters:
+- `input_dir`: Folder containing exported DE result tables.
+- `gene_filter`: Optional gene filter expressions applied before enrichment.
+- `de_decoupler_source`: Which DE table source to use (`"auto"`, `"all"`, `"pseudobulk"`, `"cell"`, `"none"`).
+- `de_decoupler_stat_col`: Preferred statistic column used to build the enrichment matrix.
+- `decoupler_method`: Decoupler scoring method.
+- `decoupler_consensus_methods`: Methods combined when `decoupler_method="consensus"`.
+- `decoupler_min_n_targets`: Minimum targets per pathway/TF set.
+- `msigdb_gene_sets`: MSigDB keywords and/or `.gmt` files.
+- `msigdb_method`: Decoupler method for MSigDB.
+- `msigdb_min_n_targets`: Minimum MSigDB targets retained.
+- `run_progeny`: Whether to compute PROGENy.
+- `progeny_method`: Decoupler method for PROGENy.
+- `progeny_min_n_targets`: Minimum PROGENy targets retained.
+- `progeny_top_n`: PROGENy top-N footprint size.
+- `progeny_organism`: PROGENy organism.
+- `run_dorothea`: Whether to compute DoRothEA.
+- `dorothea_method`: Decoupler method for DoRothEA.
+- `dorothea_min_n_targets`: Minimum DoRothEA targets retained.
+- `dorothea_confidence`: DoRothEA confidence levels.
+- `dorothea_organism`: DoRothEA organism.
+
+Returns:
+- `dict[str, dict[str, dict[str, dict[str, object]]]]`: Nested payload bundle keyed as `condition_key -> contrast -> source -> payload`.
+
+### `module_score`
+
+Signature:
+```python
+module_score(adata: ad.AnnData, *, module_files: Sequence[str | Path], module_set_name: str | None = None, round_id: str | None = None, condition_key: str | None = None, module_score_method: str = "scanpy", module_score_use_raw: bool = False, module_score_layer: str | None = None, module_score_ctrl_size: int = 50, module_score_n_bins: int = 25, module_score_random_state: int = 0, module_score_max_umaps: int = 12) -> dict
+```
+
+What it does:
+- Runs user-defined module scoring on an in-memory AnnData object and stores the payload on the selected round.
+
+Parameters:
+- `adata`: AnnData with cluster-round metadata and expression data.
+- `module_files`: Module definition files (`.gmt`, `.tsv`, `.csv`, or single-module `.txt`).
+- `module_set_name`: Optional stable name for the module collection. Defaults to the first file stem.
+- `round_id`: Optional target round. If omitted, the active round is used.
+- `condition_key`: Optional condition key for cluster-by-condition summaries. Composite `A:B` syntax is supported.
+- `module_score_method`: Module-scoring backend. `"scanpy"` is implemented; `"aucell"` is reserved for future support.
+- `module_score_use_raw`: Whether to score using `adata.raw`.
+- `module_score_layer`: Optional AnnData layer to score from.
+- `module_score_ctrl_size`: Control gene set size for `scanpy.tl.score_genes`.
+- `module_score_n_bins`: Number of expression bins for control gene sampling.
+- `module_score_random_state`: Random seed for control gene sampling.
+- `module_score_max_umaps`: Stored for CLI parity; does not affect in-memory computation.
+
+Returns:
+- `dict`: The selected round's stored module-score payload.
+
 ## Module `scomnom.plotting`
+
+### `plot_decoupler_payload`
+
+Signature:
+```python
+plot_decoupler_payload(payload: dict, net_name: str, heatmap_top_k: int = 30, bar_top_n: int = 10, bar_top_n_up: int | None = None, bar_top_n_down: int | None = None, bar_split_signed: bool = True, dotplot_top_k: int = 30, title_prefix: str | None = None, round_id: str | None = None, cluster_display_map: Mapping[str, str] | None = None, cluster_display_labels: Sequence[str] | None = None, display: bool = True, file: str | Path | None = None, return_fig: bool = False)
+```
+
+What it plots:
+- Cluster-style enrichment payloads returned by `scomnom.markers_and_de.enrichment_cluster(...)`.
+
+Parameters:
+- `payload`: Either a single network payload (for example `decoupler_payload["msigdb"]`) or the full round decoupler bundle returned by `enrichment_cluster(...)`.
+- `net_name`: Network name to plot (`"msigdb"`, `"progeny"`, or `"dorothea"`).
+- `heatmap_top_k`: Number of features in the heatmap.
+- `bar_top_n`: Number of features in the per-cluster barplots.
+- `bar_top_n_up`: Optional positive-feature cap for signed barplots.
+- `bar_top_n_down`: Optional negative-feature cap for signed barplots.
+- `bar_split_signed`: Whether to split signed barplots into positive and negative blocks.
+- `dotplot_top_k`: Number of features in the dotplot.
+- `title_prefix`: Optional title prefix added to plots.
+- `round_id`: Optional round label added to titles and stems when the payload itself does not carry one.
+- `cluster_display_map`: Optional explicit cluster display mapping override.
+- `cluster_display_labels`: Optional explicit display order override.
+- `display`: Whether to display figures inline.
+- `file`: Optional explicit output file path.
+- `return_fig`: Whether to return figure handles.
+
+Returns:
+- `None`, one `matplotlib.figure.Figure`, or a list of figures depending on `return_fig`.
+
+### `plot_de_decoupler_payload`
+
+Signature:
+```python
+plot_de_decoupler_payload(payload: dict, net_name: str, heatmap_top_k: int = 30, bar_top_n: int = 10, bar_top_n_up: int | None = None, bar_top_n_down: int | None = None, bar_split_signed: bool = True, dotplot_top_k: int = 30, title_prefix: str | None = None, pos_label: str | None = None, neg_label: str | None = None, display: bool = True, file: str | Path | None = None, return_fig: bool = False)
+```
+
+What it plots:
+- DE-derived enrichment payloads returned by `scomnom.markers_and_de.enrichment_de_from_tables(...)`.
+
+Parameters:
+- `payload`: Either a single network payload (for example `source_payload["nets"]["msigdb"]`) or a full source payload containing a `nets` block.
+- `net_name`: Network name to plot (`"msigdb"`, `"progeny"`, or `"dorothea"`).
+- `heatmap_top_k`: Number of features in the heatmap.
+- `bar_top_n`: Number of features in the barplots.
+- `bar_top_n_up`: Optional positive-feature cap for signed barplots.
+- `bar_top_n_down`: Optional negative-feature cap for signed barplots.
+- `bar_split_signed`: Whether to split signed barplots into positive and negative blocks.
+- `dotplot_top_k`: Number of features in the dotplot.
+- `title_prefix`: Optional title prefix added to plots.
+- `pos_label`: Optional label for the positive direction.
+- `neg_label`: Optional label for the negative direction.
+- `display`: Whether to display figures inline.
+- `file`: Optional explicit output file path.
+- `return_fig`: Whether to return figure handles.
+
+Returns:
+- `None`, one `matplotlib.figure.Figure`, or a list of figures depending on `return_fig`.
+
+### `plot_module_score_summary_heatmap`
+
+Signature:
+```python
+plot_module_score_summary_heatmap(summary: pd.DataFrame, stem: str = "module_score_summary_mean_z", title: str | None = None, cmap: str = "vlag", display: bool = True, file: str | Path | None = None, return_fig: bool = False)
+```
+
+What it plots:
+- Heatmap of summarized module-score values, typically the `summary_mean_z` block returned by `scomnom.markers_and_de.module_score(...)`.
+
+Parameters:
+- `summary`: Module-score summary matrix with groups on rows and modules on columns.
+- `stem`: Output stem when saving through the API wrapper.
+- `title`: Optional plot title.
+- `cmap`: Heatmap colormap.
+- `display`: Whether to display figures inline.
+- `file`: Optional explicit output file path.
+- `return_fig`: Whether to return figure handles.
+
+Returns:
+- `None` or a `matplotlib.figure.Figure` depending on `return_fig`.
 
 ### `plot_de_heatmap_top_genes_by_sample`
 

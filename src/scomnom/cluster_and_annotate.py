@@ -29,6 +29,7 @@ from .clustering_utils import (
 )
 from .annotation_utils import (
     run_decoupler_for_round,
+    clear_top_level_decoupler_state,
 )
 from .compaction_utils import create_compacted_round_from_parent_round
 
@@ -767,6 +768,7 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
     # ------------------------------------------------------------------
     # Save outputs
     # ------------------------------------------------------------------
+    clear_top_level_decoupler_state(adata)
     out_zarr = cfg.resolved_output_dir / (cfg.output_name + ".zarr")
     LOGGER.info("Saving clustered/annotated dataset as Zarr → %s", out_zarr)
     io_utils.save_dataset(adata, out_zarr, fmt="zarr")
