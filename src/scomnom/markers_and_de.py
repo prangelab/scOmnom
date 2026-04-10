@@ -44,6 +44,7 @@ from .annotation_utils import (
     _publish_decoupler_from_round_to_top_level,
     _apply_gene_filters_to_var_names,
     _parse_gene_filter_entry,
+    _normalize_gene_filter_expr,
     _prepare_decoupler_grouping,
     clear_top_level_decoupler_state,
 )
@@ -1897,7 +1898,7 @@ def _apply_gene_filters_to_de_stats(
 
     keep = pd.Series(True, index=meta.index)
     for expr_raw in exprs:
-        expr_norm = re.sub(r"\bnot_in\b", "not in", str(expr_raw))
+        expr_norm = _normalize_gene_filter_expr(str(expr_raw))
         try:
             matched = meta.query(expr_norm, engine="python")
             keep &= meta.index.isin(matched.index)

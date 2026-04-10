@@ -222,6 +222,25 @@ def test_apply_gene_filters_to_var_names_filters_de_genes() -> None:
     }
 
 
+def test_apply_gene_filters_to_var_names_accepts_protein_coding_hyphen_alias() -> None:
+    adata = ad.AnnData(X=np.zeros((2, 4)))
+    adata.var_names = ["XIST", "RPL13", "CXCL8", "LST1"]
+    adata.var["gene_type"] = ["lncrna", "protein_coding", "protein_coding", "protein_coding"]
+
+    keep_mask, info = _apply_gene_filters_to_var_names(
+        adata,
+        gene_filter=("gene_type == 'protein-coding'",),
+        resource_name="test",
+    )
+
+    assert keep_mask.tolist() == [False, True, True, True]
+    assert info == {
+        "gene_filter": ("gene_type == 'protein-coding'",),
+        "n_genes_input": 4,
+        "n_genes_retained": 3,
+    }
+
+
 @patch("scomnom.annotation_utils.io_utils.get_gene_type_map")
 def test_apply_gene_filters_to_var_names_annotates_required_gene_metadata(mock_get_gene_type_map) -> None:
     adata = ad.AnnData(X=np.zeros((2, 3)))
@@ -244,7 +263,7 @@ def test_apply_gene_filters_to_var_names_annotates_required_gene_metadata(mock_g
     )
 
     assert keep_mask.tolist() == [False, True, True]
-    assert adata.var["gene_type"].tolist() == ["lncRNA", "protein_coding", "protein_coding"]
+    assert adata.var["gene_type"].tolist() == ["lncrna", "protein_coding", "protein_coding"]
     assert adata.var["gene_chrom"].tolist() == ["X", "19", "4"]
     assert info == {
         "gene_filter": (
@@ -290,6 +309,32 @@ def test_apply_gene_filters_to_de_stats_raises_on_invalid_query() -> None:
             gene_filter=("gene_type ==",),
             resource_name="test",
         )
+
+
+def test_apply_gene_filters_to_de_stats_accepts_protein_coding_hyphen_alias() -> None:
+    from scomnom.markers_and_de import _apply_gene_filters_to_de_stats
+
+    stats = pd.DataFrame({"stat": [1.0, 2.0, 3.0]}, index=pd.Index(["A", "B", "C"], name="gene"))
+    gene_meta = pd.DataFrame(
+        {
+            "gene": ["A", "B", "C"],
+            "gene_type": ["protein_coding", "lncrna", "protein_coding"],
+        }
+    ).set_index("gene", drop=False)
+
+    filtered, info = _apply_gene_filters_to_de_stats(
+        stats,
+        gene_meta=gene_meta,
+        gene_filter=("gene_type == 'protein-coding'",),
+        resource_name="test",
+    )
+
+    assert filtered.index.tolist() == ["A", "C"]
+    assert info == {
+        "gene_filter": ("gene_type == 'protein-coding'",),
+        "n_genes_input": 3,
+        "n_genes_retained": 2,
+    }
 
 
 def test_generate_enrichment_cluster_report_writes_html(tmp_path: Path) -> None:

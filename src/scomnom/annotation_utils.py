@@ -98,6 +98,27 @@ def _required_gene_filter_fields(exprs: Sequence[str]) -> set[str]:
     return required
 
 
+def _normalize_gene_filter_expr(expr_raw: str) -> str:
+    expr_norm = re.sub(r"\bnot_in\b", "not in", str(expr_raw))
+
+    uses_gene_type = any(
+        re.search(rf"\b{re.escape(col)}\b", expr_norm)
+        for col in _GENE_FILTER_TYPE_COLS
+    )
+    if not uses_gene_type:
+        return expr_norm
+
+    # Normalize quoted gene-type literals so both protein-coding and protein_coding work.
+    def _replace_literal(m: re.Match[str]) -> str:
+        q = m.group(1)
+        text = m.group(2)
+        normalized = text.strip().lower().replace("-", "_")
+        return f"{q}{normalized}{q}"
+
+    expr_norm = re.sub(r"([\"'])([^\"']*)(\1)", lambda m: _replace_literal(m), expr_norm)
+    return expr_norm
+
+
 def _ensure_gene_filter_metadata(
     adata: ad.AnnData,
     *,
@@ -151,7 +172,14 @@ def _ensure_gene_filter_metadata(
         if "gene_id" in annotated.columns:
             annotated["gene_id"] = annotated["gene_id"].fillna("").astype(str)
         if "gene_type" in annotated.columns:
-            annotated["gene_type"] = annotated["gene_type"].fillna("unknown").astype(str)
+            annotated["gene_type"] = (
+                annotated["gene_type"]
+                .fillna("unknown")
+                .astype(str)
+                .str.strip()
+                .str.lower()
+                .str.replace("-", "_", regex=False)
+            )
         meta = annotated.set_index(pd.Index(adata.var_names.astype(str), name=adata.var.index.name), drop=False)
 
     alias_map = {
@@ -209,7 +237,7 @@ def _apply_gene_filters_to_expr(
 
     keep = pd.Series(True, index=meta.index)
     for expr_raw in exprs:
-        expr_norm = re.sub(r"\bnot_in\b", "not in", str(expr_raw))
+        expr_norm = _normalize_gene_filter_expr(str(expr_raw))
         try:
             matched = meta.query(expr_norm, engine="python")
             keep &= meta.index.isin(matched.index)
@@ -256,7 +284,7 @@ def _apply_gene_filters_to_var_names(
 
     keep = pd.Series(True, index=meta.index)
     for expr_raw in exprs:
-        expr_norm = re.sub(r"\bnot_in\b", "not in", str(expr_raw))
+        expr_norm = _normalize_gene_filter_expr(str(expr_raw))
         try:
             matched = meta.query(expr_norm, engine="python")
             keep &= meta.index.isin(matched.index)
