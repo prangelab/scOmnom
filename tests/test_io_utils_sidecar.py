@@ -53,3 +53,37 @@ def test_save_and_load_dataset_with_object_dataframe_sidecar(tmp_path: Path) -> 
     loaded = load_dataset(out_path)
     assert isinstance(loaded.uns["object_df"], pd.DataFrame)
     assert loaded.uns["object_df"].shape == (2, 2)
+
+
+def test_save_and_load_dataset_with_object_ndarray_sidecar(tmp_path: Path) -> None:
+    adata = ad.AnnData(X=np.zeros((2, 2), dtype=np.float32))
+    adata.obs_names = ["cell0", "cell1"]
+    adata.var_names = ["gene0", "gene1"]
+    adata.uns["object_arr"] = np.array([["A", None], ["B", "C"]], dtype=object)
+
+    out_path = tmp_path / "sidecar_object_arr.zarr"
+    save_dataset(adata, out_path, fmt="zarr", archive=False)
+
+    loaded = load_dataset(out_path)
+    assert isinstance(loaded.uns["object_arr"], np.ndarray)
+    assert loaded.uns["object_arr"].shape == (2, 2)
+
+
+def test_save_dataset_zarr_coerces_object_columns_in_obs_var_obsm(tmp_path: Path) -> None:
+    adata = ad.AnnData(X=np.zeros((3, 2), dtype=np.float32))
+    adata.obs_names = ["cell0", "cell1", "cell2"]
+    adata.var_names = ["gene0", "gene1"]
+    adata.obs["mixed_obj"] = pd.Series(["A", 7, None], dtype=object)
+    adata.var["mixed_obj"] = pd.Series(["x", None], index=adata.var_names, dtype=object)
+    adata.obsm["meta_df"] = pd.DataFrame(
+        {"label": pd.Series(["u", None, "v"], dtype=object)},
+        index=adata.obs_names,
+    )
+
+    out_path = tmp_path / "sidecar_object_obs_var_obsm.zarr"
+    save_dataset(adata, out_path, fmt="zarr", archive=False)
+
+    loaded = load_dataset(out_path)
+    assert "mixed_obj" in loaded.obs.columns
+    assert "mixed_obj" in loaded.var.columns
+    assert "meta_df" in loaded.obsm

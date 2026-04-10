@@ -1358,6 +1358,30 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
         except Exception:
             pass
 
+    def _coerce_dataframe_for_zarr(df: pd.DataFrame, *, label: str) -> pd.DataFrame:
+        if df is None or df.empty:
+            return df
+        obj_cols = [c for c in df.columns if str(df[c].dtype) == "object"]
+        if not obj_cols:
+            return df
+        out = df.copy()
+        for col in obj_cols:
+            s = out[col]
+            vals = s.dropna()
+            if vals.empty:
+                coerced = pd.Series([""] * len(s), index=s.index, dtype="string")
+            elif vals.map(lambda x: isinstance(x, str)).all():
+                coerced = s.astype("string")
+            else:
+                LOGGER.warning(
+                    "save_dataset: coercing mixed object column in %s['%s'] to string categorical for zarr compatibility",
+                    label,
+                    col,
+                )
+                coerced = s.map(lambda v: "" if pd.isna(v) else str(v)).astype("string")
+            out[col] = pd.Categorical(coerced.fillna("").astype(str))
+        return out
+
     # ------------------------------------------------------------
     # Key sanitization + collision handling
     # ------------------------------------------------------------
@@ -1462,6 +1486,12 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
             max_len = max((len(v) for row in rows for v in row), default=1)
             return np.asarray(rows, dtype=f"<U{max(1, max_len)}")
 
+        def _to_unicode_ndarray(values_nd) -> np.ndarray:
+            arr = np.asarray(values_nd, dtype=object)
+            flat = [str(v) for v in arr.reshape(-1).tolist()]
+            max_len = max((len(v) for v in flat), default=1)
+            return np.asarray(flat, dtype=f"<U{max(1, max_len)}").reshape(arr.shape)
+
         for payload in _sidecar_payloads:
             pid = str(payload["id"])
             kind = str(payload["kind"])
@@ -1503,6 +1533,8 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
                 manifest_entries.append({"id": pid, "kind": kind, "shape": [int(series.shape[0])]})
             elif kind == "ndarray":
                 arr = np.asarray(obj)
+                if arr.dtype == object:
+                    arr = _to_unicode_ndarray(arr)
                 grp.create_array("data", data=arr, overwrite=True)
                 grp.attrs["dtype"] = str(arr.dtype)
                 manifest_entries.append({"id": pid, "kind": kind, "shape": [int(x) for x in arr.shape]})
@@ -1646,6 +1678,8 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
     orig_uns = adata.uns
     orig_obs = adata.obs
     orig_var = adata.var
+    orig_obsm_items: list[tuple[str, object]] = []
+    orig_varm_items: list[tuple[str, object]] = []
     sanitized_uns = orig_uns
     downgraded_obs = orig_obs
     downgraded_var = orig_var
@@ -1675,6 +1709,38 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
         except Exception as e:
             LOGGER.warning("Failed to downgrade nullable string columns in adata.obs; writing original obs. (%s)", e)
             downgraded_obs = orig_obs
+
+    if fmt == "zarr":
+        try:
+            downgraded_obs = _coerce_dataframe_for_zarr(orig_obs, label="adata.obs")
+        except Exception as e:
+            LOGGER.warning("Failed to coerce object columns in adata.obs for zarr; writing original obs. (%s)", e)
+            downgraded_obs = orig_obs
+        try:
+            downgraded_var = _coerce_dataframe_for_zarr(orig_var, label="adata.var")
+        except Exception as e:
+            LOGGER.warning("Failed to coerce object columns in adata.var for zarr; writing original var. (%s)", e)
+            downgraded_var = orig_var
+        try:
+            for key in list(adata.obsm.keys()):
+                val = adata.obsm[key]
+                if isinstance(val, pd.DataFrame):
+                    coerced = _coerce_dataframe_for_zarr(val, label=f"adata.obsm['{key}']")
+                    if coerced is not val:
+                        orig_obsm_items.append((str(key), val))
+                        adata.obsm[key] = coerced
+        except Exception as e:
+            LOGGER.warning("Failed to coerce object columns in adata.obsm DataFrames for zarr. (%s)", e)
+        try:
+            for key in list(adata.varm.keys()):
+                val = adata.varm[key]
+                if isinstance(val, pd.DataFrame):
+                    coerced = _coerce_dataframe_for_zarr(val, label=f"adata.varm['{key}']")
+                    if coerced is not val:
+                        orig_varm_items.append((str(key), val))
+                        adata.varm[key] = coerced
+        except Exception as e:
+            LOGGER.warning("Failed to coerce object columns in adata.varm DataFrames for zarr. (%s)", e)
 
     adata.uns = sanitized_uns
     adata.var = downgraded_var
@@ -1722,6 +1788,10 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
         adata.uns = orig_uns
         adata.var = orig_var
         adata.obs = orig_obs
+        for key, val in orig_obsm_items:
+            adata.obsm[key] = val
+        for key, val in orig_varm_items:
+            adata.varm[key] = val
 
     # Intentionally silent at INFO level to avoid duplicate save-path chatter.
 
