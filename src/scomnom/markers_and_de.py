@@ -1454,6 +1454,140 @@ def _module_score_gene_pool(
     return list(gene_index.astype(str))
 
 
+def _score_modules_scanpy(
+    adata: ad.AnnData,
+    *,
+    modules: Mapping[str, list[str]],
+    gene_pool: Sequence[str],
+    target_round_id: str,
+    module_set_token: str,
+    use_raw: bool,
+    layer: str | None,
+    ctrl_size: int,
+    n_bins: int,
+    random_state: int,
+) -> tuple[list[str], dict[str, str], list[dict[str, object]]]:
+    import scanpy as sc
+
+    gene_pool_set = set(gene_pool)
+    score_keys: list[str] = []
+    score_key_to_module: dict[str, str] = {}
+    module_records: list[dict[str, object]] = []
+
+    for module_name, genes in modules.items():
+        retained = [str(g) for g in genes if str(g) in gene_pool_set]
+        record: dict[str, object] = {
+            "module": str(module_name),
+            "n_genes_input": int(len(genes)),
+            "n_genes_retained": int(len(retained)),
+            "genes_retained": ",".join(retained),
+        }
+        if not retained:
+            LOGGER.warning("module-score: module %r retained no genes after filtering; skipping.", str(module_name))
+            module_records.append(record)
+            continue
+
+        score_key = (
+            f"module_score__{_sanitize_module_name(target_round_id)}__"
+            f"{module_set_token}__{_sanitize_module_name(module_name)}"
+        )
+        sc.tl.score_genes(
+            adata,
+            gene_list=retained,
+            score_name=score_key,
+            ctrl_size=ctrl_size,
+            n_bins=n_bins,
+            random_state=random_state,
+            gene_pool=list(gene_pool),
+            use_raw=use_raw,
+            layer=layer,
+            copy=False,
+        )
+        adata.obs[score_key] = pd.to_numeric(adata.obs[score_key], errors="coerce").astype(np.float32)
+        score_keys.append(score_key)
+        score_key_to_module[str(score_key)] = str(module_name)
+        record["score_key"] = str(score_key)
+        module_records.append(record)
+
+    return score_keys, score_key_to_module, module_records
+
+
+def _score_modules_aucell(
+    adata: ad.AnnData,
+    *,
+    modules: Mapping[str, list[str]],
+    gene_pool: Sequence[str],
+    target_round_id: str,
+    module_set_token: str,
+    use_raw: bool,
+    layer: str | None,
+) -> tuple[list[str], dict[str, str], list[dict[str, object]]]:
+    import decoupler as dc
+
+    gene_pool_set = set(gene_pool)
+    module_records: list[dict[str, object]] = []
+    net_rows: list[dict[str, object]] = []
+    module_names: list[str] = []
+
+    for module_name, genes in modules.items():
+        retained = [str(g) for g in genes if str(g) in gene_pool_set]
+        record: dict[str, object] = {
+            "module": str(module_name),
+            "n_genes_input": int(len(genes)),
+            "n_genes_retained": int(len(retained)),
+            "genes_retained": ",".join(retained),
+        }
+        if not retained:
+            LOGGER.warning("module-score: module %r retained no genes after filtering; skipping.", str(module_name))
+            module_records.append(record)
+            continue
+
+        module_names.append(str(module_name))
+        for gene in retained:
+            net_rows.append({"source": str(module_name), "target": str(gene)})
+        module_records.append(record)
+
+    if not net_rows:
+        return [], {}, module_records
+
+    net = pd.DataFrame(net_rows, columns=["source", "target"])
+    dc.mt.aucell(
+        adata,
+        net=net,
+        tmin=1,
+        raw=bool(use_raw),
+        layer=str(layer) if layer else None,
+        verbose=False,
+    )
+    scores = adata.obsm.get("score_aucell", None)
+    if scores is None or not isinstance(scores, pd.DataFrame) or scores.empty:
+        raise RuntimeError("module-score: AUCell did not produce a valid score matrix.")
+
+    score_keys: list[str] = []
+    score_key_to_module: dict[str, str] = {}
+    for module_name in module_names:
+        if str(module_name) not in scores.columns:
+            LOGGER.warning("module-score: AUCell output missing module %r; skipping.", str(module_name))
+            continue
+        score_key = (
+            f"module_score__{_sanitize_module_name(target_round_id)}__"
+            f"{module_set_token}__{_sanitize_module_name(module_name)}"
+        )
+        adata.obs[score_key] = pd.to_numeric(scores[str(module_name)], errors="coerce").astype(np.float32)
+        score_keys.append(score_key)
+        score_key_to_module[str(score_key)] = str(module_name)
+
+    for record in module_records:
+        module_name = str(record.get("module", ""))
+        score_key = next((k for k, v in score_key_to_module.items() if v == module_name), None)
+        if score_key is not None:
+            record["score_key"] = str(score_key)
+
+    adata.obsm.pop("score_aucell", None)
+    adata.obsm.pop("padj_aucell", None)
+    return score_keys, score_key_to_module, module_records
+
+
 def _zscore_module_summary(summary: pd.DataFrame) -> pd.DataFrame:
     if summary.empty:
         return summary.copy()
@@ -1485,7 +1619,6 @@ def _compute_module_score_on_adata(
     adata: ad.AnnData,
     cfg,
 ) -> tuple[dict[str, object], list[str], str]:
-    import scanpy as sc
     rounds = adata.uns.get("cluster_rounds", {})
     target_round_id = getattr(cfg, "round_id", None)
     if target_round_id is None:
@@ -1499,11 +1632,7 @@ def _compute_module_score_on_adata(
     target_round_id = str(target_round_id)
 
     method = str(getattr(cfg, "module_score_method", "scanpy") or "scanpy").strip().lower()
-    if method == "aucell":
-        raise NotImplementedError(
-            "module-score: backend 'aucell' is reserved but not implemented yet. Use --module-score-method scanpy."
-        )
-    if method != "scanpy":
+    if method not in {"scanpy", "aucell"}:
         raise RuntimeError(f"module-score: unsupported module_score_method={method!r}")
 
     use_raw = bool(getattr(cfg, "module_score_use_raw", False))
@@ -1520,7 +1649,6 @@ def _compute_module_score_on_adata(
     modules = _load_module_definitions(getattr(cfg, "module_files", ()))
 
     gene_pool = _module_score_gene_pool(adata, use_raw=use_raw)
-    gene_pool_set = set(gene_pool)
     if not gene_pool:
         raise RuntimeError("module-score: no genes are available in the selected expression source.")
 
@@ -1537,47 +1665,32 @@ def _compute_module_score_on_adata(
     display_map = dict(grouping.get("display_map", {}) or {})
     display_order = grouping.get("display_order", None)
 
-    score_keys: list[str] = []
-    score_key_to_module: dict[str, str] = {}
-    module_records: list[dict[str, object]] = []
     ctrl_size = int(getattr(cfg, "module_score_ctrl_size", 50))
     n_bins = int(getattr(cfg, "module_score_n_bins", 25))
     random_state = int(getattr(cfg, "module_score_random_state", 0))
-
-    for module_name, genes in modules.items():
-        retained = [str(g) for g in genes if str(g) in gene_pool_set]
-        module_records.append(
-            {
-                "module": str(module_name),
-                "n_genes_input": int(len(genes)),
-                "n_genes_retained": int(len(retained)),
-                "genes_retained": ",".join(retained),
-            }
-        )
-        if not retained:
-            LOGGER.warning("module-score: module %r retained no genes after filtering; skipping.", str(module_name))
-            continue
-
-        score_key = (
-            f"module_score__{_sanitize_module_name(target_round_id)}__"
-            f"{module_set_token}__{_sanitize_module_name(module_name)}"
-        )
-        sc.tl.score_genes(
+    if method == "scanpy":
+        score_keys, score_key_to_module, module_records = _score_modules_scanpy(
             adata,
-            gene_list=retained,
-            score_name=score_key,
+            modules=modules,
+            gene_pool=gene_pool,
+            target_round_id=target_round_id,
+            module_set_token=module_set_token,
+            use_raw=use_raw,
+            layer=str(layer) if layer else None,
             ctrl_size=ctrl_size,
             n_bins=n_bins,
             random_state=random_state,
-            gene_pool=gene_pool,
-            use_raw=use_raw,
-            layer=layer,
-            copy=False,
         )
-        adata.obs[score_key] = pd.to_numeric(adata.obs[score_key], errors="coerce").astype(np.float32)
-        score_keys.append(score_key)
-        score_key_to_module[str(score_key)] = str(module_name)
-        module_records[-1]["score_key"] = str(score_key)
+    else:
+        score_keys, score_key_to_module, module_records = _score_modules_aucell(
+            adata,
+            modules=modules,
+            gene_pool=gene_pool,
+            target_round_id=target_round_id,
+            module_set_token=module_set_token,
+            use_raw=use_raw,
+            layer=str(layer) if layer else None,
+        )
 
     if not score_keys:
         raise RuntimeError("module-score: no modules retained any genes after filtering.")
@@ -1631,6 +1744,8 @@ def _compute_module_score_on_adata(
         module_set_name=module_set_name,
         payload=payload,
     )
+    if cleanup_key:
+        adata.obs.drop(columns=[str(cleanup_key)], inplace=True, errors="ignore")
 
     return payload, score_keys, target_round_id
 
@@ -1718,9 +1833,6 @@ def run_module_score(cfg) -> ad.AnnData:
         except Exception as e:
             LOGGER.warning("Failed to generate module-score report: %s", e)
 
-    if cleanup_key:
-        adata.obs.drop(columns=[str(cleanup_key)], inplace=True, errors="ignore")
-
     out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.module_score")) + ".zarr")
     LOGGER.info("Saving dataset → %s", out_zarr)
     io_utils.save_dataset(adata, out_zarr, fmt="zarr")
@@ -1790,7 +1902,9 @@ def _apply_gene_filters_to_de_stats(
             matched = meta.query(expr_norm, engine="python")
             keep &= meta.index.isin(matched.index)
         except Exception as e:
-            LOGGER.warning("%s: gene_filter failed for expr=%r: %s", resource_name, str(expr_raw), e)
+            raise RuntimeError(
+                f"{resource_name}: gene_filter failed for expr={str(expr_raw)!r}: {e}"
+            ) from e
 
     kept_genes = keep[keep].index.astype(str).tolist()
     filtered = stats.loc[kept_genes].copy()

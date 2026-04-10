@@ -2308,7 +2308,7 @@ def enrichment_module_score(
     module_score_method: str = typer.Option(
         "scanpy",
         "--module-score-method",
-        help="[Module score] Backend. 'scanpy' is implemented; 'aucell' is reserved for a future backend.",
+        help="[Module score] Backend. Use 'scanpy' for score_genes or 'aucell' for rank-based AUCell scoring.",
     ),
     module_score_use_raw: bool = typer.Option(
         False,

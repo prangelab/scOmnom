@@ -3,6 +3,7 @@ from __future__ import annotations
 import anndata as ad
 import numpy as np
 import pandas as pd
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -13,6 +14,7 @@ from scomnom.markers_and_de import (
     _collect_pseudobulk_de_tables_from_dir,
     _collect_cell_contrast_tables_from_dir,
     _load_module_definitions,
+    _compute_module_score_on_adata,
     run_enrichment_cluster,
     run_module_score,
 )
@@ -220,6 +222,76 @@ def test_apply_gene_filters_to_var_names_filters_de_genes() -> None:
     }
 
 
+@patch("scomnom.annotation_utils.io_utils.get_gene_type_map")
+def test_apply_gene_filters_to_var_names_annotates_required_gene_metadata(mock_get_gene_type_map) -> None:
+    adata = ad.AnnData(X=np.zeros((2, 3)))
+    adata.var_names = ["XIST", "RPL13", "CXCL8"]
+    mock_get_gene_type_map.return_value = (
+        {"XIST": "lncRNA", "RPL13": "protein_coding", "CXCL8": "protein_coding"},
+        "biomart",
+        {"XIST": "X", "RPL13": "19", "CXCL8": "4"},
+        "biomart",
+        {"XIST": "ENSG1", "RPL13": "ENSG2", "CXCL8": "ENSG3"},
+    )
+
+    keep_mask, info = _apply_gene_filters_to_var_names(
+        adata,
+        gene_filter=(
+            "gene_chrom not in ['X','Y']",
+            "gene_type != 'lncRNA'",
+        ),
+        resource_name="test",
+    )
+
+    assert keep_mask.tolist() == [False, True, True]
+    assert adata.var["gene_type"].tolist() == ["lncRNA", "protein_coding", "protein_coding"]
+    assert adata.var["gene_chrom"].tolist() == ["X", "19", "4"]
+    assert info == {
+        "gene_filter": (
+            "gene_chrom not in ['X','Y']",
+            "gene_type != 'lncRNA'",
+        ),
+        "n_genes_input": 3,
+        "n_genes_retained": 2,
+    }
+
+
+@patch("scomnom.annotation_utils.io_utils.get_gene_type_map", side_effect=RuntimeError("biomart down"))
+def test_apply_gene_filters_to_expr_raises_when_required_gene_metadata_unavailable(mock_get_gene_type_map) -> None:
+    adata = ad.AnnData(X=np.zeros((2, 2)))
+    adata.var_names = ["XIST", "CXCL8"]
+    expr = pd.DataFrame(
+        [[1.0], [2.0]],
+        index=adata.var_names,
+        columns=["C00"],
+    )
+
+    with pytest.raises(RuntimeError, match="unable to annotate gene metadata required for gene_filter"):
+        _apply_gene_filters_to_expr(
+            adata,
+            expr,
+            gene_filter=("gene_chrom not in ['X','Y']",),
+            resource_name="test",
+        )
+
+
+def test_apply_gene_filters_to_de_stats_raises_on_invalid_query() -> None:
+    from scomnom.markers_and_de import _apply_gene_filters_to_de_stats
+
+    stats = pd.DataFrame({"stat": [1.0, 2.0]}, index=pd.Index(["A", "B"], name="gene"))
+    gene_meta = pd.DataFrame(
+        {"gene": ["A", "B"], "gene_type": ["protein_coding", "protein_coding"]}
+    ).set_index("gene", drop=False)
+
+    with pytest.raises(RuntimeError, match="gene_filter failed"):
+        _apply_gene_filters_to_de_stats(
+            stats,
+            gene_meta=gene_meta,
+            gene_filter=("gene_type ==",),
+            resource_name="test",
+        )
+
+
 def test_generate_enrichment_cluster_report_writes_html(tmp_path: Path) -> None:
     fig_root = tmp_path / "figures"
     run_dir = fig_root / "png" / "enrichment_r5_archetypes_round1"
@@ -317,6 +389,68 @@ def test_load_module_definitions_reads_gmt_and_txt(tmp_path: Path) -> None:
         "Fibrosis": ["COL1A1", "COL3A1"],
         "stress": ["ATF3", "DDIT3"],
     }
+
+
+def test_compute_module_score_on_adata_aucell_backend(monkeypatch, tmp_path: Path) -> None:
+    adata = ad.AnnData(X=np.zeros((4, 4)))
+    adata.var_names = ["CXCL8", "IL1B", "LST1", "FCN1"]
+    adata.obs_names = [f"cell{i}" for i in range(4)]
+    adata.obs["leiden__r5_archetypes"] = ["C00", "C00", "C01", "C01"]
+    adata.obs["cluster_label__r5_archetypes"] = [
+        "C00: Macrophages",
+        "C00: Macrophages",
+        "C01: T cells",
+        "C01: T cells",
+    ]
+    adata.uns["active_cluster_round"] = "r5_archetypes"
+    adata.uns["cluster_rounds"] = {
+        "r5_archetypes": {
+            "labels_obs_key": "leiden__r5_archetypes",
+            "cluster_order": ["C00", "C01"],
+        },
+    }
+
+    module_file = tmp_path / "mini.txt"
+    module_file.write_text("CXCL8\nIL1B\n")
+
+    class _FakeAucell:
+        def __call__(self, data, net, tmin=1, raw=False, layer=None, verbose=False):
+            data.obsm["score_aucell"] = pd.DataFrame(
+                {"mini": [0.9, 0.7, 0.1, 0.2]},
+                index=data.obs_names,
+            )
+            return None
+
+    class _FakeMt:
+        aucell = _FakeAucell()
+
+    class _FakeDc:
+        mt = _FakeMt()
+
+    import sys
+    monkeypatch.setitem(sys.modules, "decoupler", _FakeDc())
+
+    cfg = SimpleNamespace(
+        round_id="r5_archetypes",
+        condition_key=None,
+        module_files=(str(module_file),),
+        module_set_name="mini",
+        module_score_method="aucell",
+        module_score_use_raw=False,
+        module_score_layer=None,
+        module_score_ctrl_size=50,
+        module_score_n_bins=25,
+        module_score_random_state=0,
+        module_score_max_umaps=4,
+    )
+
+    payload, score_keys, rid = _compute_module_score_on_adata(adata, cfg)
+
+    assert rid == "r5_archetypes"
+    assert score_keys == ["module_score__r5_archetypes__mini__mini"]
+    assert payload["method"] == "aucell"
+    assert "module_score__r5_archetypes__mini__mini" in adata.obs.columns
+    assert adata.obsm.get("score_aucell", None) is None
 
 
 @patch("scomnom.markers_and_de.io_utils.save_dataset")

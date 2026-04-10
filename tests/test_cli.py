@@ -494,7 +494,7 @@ def test_enrichment_module_score_default_output_name_includes_round_and_set_name
 
 
 @patch("scomnom.cli.run_module_score")
-def test_enrichment_module_score_method_and_gene_filter_propagate_to_config(mock_run):
+def test_enrichment_module_score_method_propagates_to_config(mock_run):
     result = runner.invoke(
         app,
         [
@@ -504,7 +504,7 @@ def test_enrichment_module_score_method_and_gene_filter_propagate_to_config(mock
             "--input-path", "adata.zarr.tar.zst",
             "--module-file", "custom.tsv",
             "--module-set-name", "my_modules",
-            "--module-score-method", "scanpy",
+            "--module-score-method", "aucell",
             "--condition-key", "sex:MASLD",
         ],
     )
@@ -512,7 +512,7 @@ def test_enrichment_module_score_method_and_gene_filter_propagate_to_config(mock
     mock_run.assert_called_once()
     cfg = mock_run.call_args[0][0]
     assert cfg.module_set_name == "my_modules"
-    assert cfg.module_score_method == "scanpy"
+    assert cfg.module_score_method == "aucell"
     assert cfg.condition_key == "sex:MASLD"
 
 

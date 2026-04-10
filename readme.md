@@ -1123,6 +1123,7 @@ Examples:
 
 * `--gene-filter` filters genes before enrichment is computed, using pandas-query expressions against `adata.var`.
 * Filters are combined with logical AND.
+* If required gene metadata such as `gene_type` or `gene_chrom` is missing, scOmnom will try to annotate `adata.var` before filtering. If annotation lookup or filter evaluation fails, the run aborts instead of continuing unfiltered.
 * This changes the enrichment input universe, unlike `--plot-gene-filter`, which is plot-only in DE.
 
 Example:
@@ -1171,7 +1172,7 @@ This mode scores custom gene modules per cell, then summarizes those scores by c
 **Backend**
 
 * `--module-score-method scanpy` uses `scanpy.tl.score_genes`
-* `--module-score-method aucell` is reserved for a future backend and currently raises a clear not-implemented error
+* `--module-score-method aucell` uses `decoupler.mt.aucell` for rank-based AUCell scoring
 
 **Module inputs**
 
@@ -1244,6 +1245,7 @@ Within-cluster DE compares **condition levels inside each cluster**, e.g. `treat
 * `--gene-filter` filters genes before DE is calculated.
 * Filters are applied to both the cell-level and pseudobulk DE inputs.
 * Filters are combined with logical AND and evaluated against `adata.var`.
+* If required gene metadata such as `gene_type` or `gene_chrom` is missing, scOmnom will try to annotate `adata.var` before filtering. If annotation lookup or filter evaluation fails, the run aborts instead of continuing unfiltered.
 * `--plot-gene-filter` remains plot-only and does not change the DE statistics.
 
 **DE → pathway/TF activity (decoupler)**

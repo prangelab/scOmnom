@@ -172,7 +172,7 @@ Parameters:
 - `module_set_name`: Optional stable name for the module collection. Defaults to the first file stem.
 - `round_id`: Optional target round. If omitted, the active round is used.
 - `condition_key`: Optional condition key for cluster-by-condition summaries. Composite `A:B` syntax is supported.
-- `module_score_method`: Module-scoring backend. `"scanpy"` is implemented; `"aucell"` is reserved for future support.
+- `module_score_method`: Module-scoring backend. `"scanpy"` uses `scanpy.tl.score_genes`; `"aucell"` uses `decoupler.mt.aucell`.
 - `module_score_use_raw`: Whether to score using `adata.raw`.
 - `module_score_layer`: Optional AnnData layer to score from.
 - `module_score_ctrl_size`: Control gene set size for `scanpy.tl.score_genes`.

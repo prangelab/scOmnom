@@ -9,6 +9,7 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 
+from . import gene_utils
 from . import io_utils
 from .io_utils import resolve_msigdb_gene_sets
 from .clustering_utils import _ensure_cluster_rounds  # avoid duplication
@@ -75,6 +76,115 @@ def _parse_gene_filter_entry(raw: str) -> Optional[str]:
     return expr or None
 
 
+_GENE_FILTER_TYPE_COLS = ("gene_type", "gene_biotype", "biotype", "gene_type_ensembl")
+_GENE_FILTER_CHROM_COLS = ("gene_chrom", "chromosome", "chrom")
+_GENE_FILTER_ID_COLS = ("gene_id", "ensembl_gene_id")
+
+
+def _required_gene_filter_fields(exprs: Sequence[str]) -> set[str]:
+    required: set[str] = set()
+    field_groups = (
+        _GENE_FILTER_TYPE_COLS,
+        _GENE_FILTER_CHROM_COLS,
+        _GENE_FILTER_ID_COLS,
+        ("gene",),
+    )
+    for expr in exprs:
+        expr_text = str(expr)
+        for group in field_groups:
+            for field in group:
+                if re.search(rf"\b{re.escape(field)}\b", expr_text):
+                    required.add(field)
+    return required
+
+
+def _ensure_gene_filter_metadata(
+    adata: ad.AnnData,
+    *,
+    exprs: Sequence[str],
+    resource_name: str,
+) -> pd.DataFrame:
+    meta = adata.var.copy()
+    meta["gene"] = meta.index.astype(str)
+
+    required = _required_gene_filter_fields(exprs)
+    if required.issubset(set(meta.columns)):
+        return meta
+
+    needs_type = any(field in required for field in _GENE_FILTER_TYPE_COLS)
+    needs_chrom = any(field in required for field in _GENE_FILTER_CHROM_COLS)
+    needs_id = any(field in required for field in _GENE_FILTER_ID_COLS)
+
+    missing_type = needs_type and not any(col in meta.columns for col in _GENE_FILTER_TYPE_COLS)
+    missing_chrom = needs_chrom and not any(col in meta.columns for col in _GENE_FILTER_CHROM_COLS)
+    missing_id = needs_id and not any(col in meta.columns for col in _GENE_FILTER_ID_COLS)
+
+    if missing_type or missing_chrom or missing_id:
+        try:
+            gene_map, source_label, chrom_map, chrom_source, gene_id_map = io_utils.get_gene_type_map(
+                adata,
+                species="hsapiens",
+                allow_fallback=False,
+                force_download=False,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"{resource_name}: unable to annotate gene metadata required for gene_filter: {e}"
+            ) from e
+
+        annotated = gene_utils.apply_gene_type_map(
+            meta.reset_index(drop=True),
+            gene_map,
+            gene_col="gene",
+            gene_type_col="gene_type",
+            gene_chrom_col="gene_chrom",
+            gene_id_col="gene_id",
+            source_label=source_label,
+            chrom_map=chrom_map,
+            chrom_source_label=chrom_source,
+            gene_id_map=gene_id_map,
+            add_source_cols=False,
+            inplace=False,
+        )
+        if "gene_chrom" in annotated.columns:
+            annotated["gene_chrom"] = annotated["gene_chrom"].fillna("").astype(str)
+        if "gene_id" in annotated.columns:
+            annotated["gene_id"] = annotated["gene_id"].fillna("").astype(str)
+        if "gene_type" in annotated.columns:
+            annotated["gene_type"] = annotated["gene_type"].fillna("unknown").astype(str)
+        meta = annotated.set_index(pd.Index(adata.var_names.astype(str), name=adata.var.index.name), drop=False)
+
+    alias_map = {
+        "gene_type": _GENE_FILTER_TYPE_COLS,
+        "gene_chrom": _GENE_FILTER_CHROM_COLS,
+        "gene_id": _GENE_FILTER_ID_COLS,
+    }
+    for canonical, aliases in alias_map.items():
+        if canonical in meta.columns:
+            for alias in aliases:
+                if alias not in meta.columns:
+                    meta[alias] = meta[canonical]
+
+    missing_required = sorted(field for field in required if field not in meta.columns)
+    if missing_required:
+        raise RuntimeError(
+            f"{resource_name}: gene_filter requires unavailable gene metadata columns: {missing_required}"
+        )
+
+    if needs_chrom:
+        chrom_series = meta.get("gene_chrom", pd.Series("", index=meta.index)).fillna("").astype(str)
+        if not chrom_series.str.len().gt(0).any():
+            raise RuntimeError(
+                f"{resource_name}: gene_filter requires chromosome annotations, but no gene_chrom values could be resolved."
+            )
+
+    for col in ("gene_type", "gene_chrom", "gene_id"):
+        if col in meta.columns and col not in adata.var.columns:
+            adata.var[col] = meta[col].reindex(meta.index).to_numpy()
+
+    return meta
+
+
 def _apply_gene_filters_to_expr(
     adata: ad.AnnData,
     expr: pd.DataFrame,
@@ -93,8 +203,7 @@ def _apply_gene_filters_to_expr(
     if not exprs:
         return expr, None
 
-    meta = adata.var.copy()
-    meta["gene"] = meta.index.astype(str)
+    meta = _ensure_gene_filter_metadata(adata, exprs=exprs, resource_name=resource_name)
     meta = meta.set_index("gene", drop=False)
     meta = meta.reindex(expr.index.astype(str))
 
@@ -105,7 +214,9 @@ def _apply_gene_filters_to_expr(
             matched = meta.query(expr_norm, engine="python")
             keep &= meta.index.isin(matched.index)
         except Exception as e:
-            LOGGER.warning("%s: gene_filter failed for expr=%r: %s", resource_name, str(expr_raw), e)
+            raise RuntimeError(
+                f"{resource_name}: gene_filter failed for expr={str(expr_raw)!r}: {e}"
+            ) from e
 
     kept_genes = keep[keep].index.astype(str).tolist()
     filtered = expr.loc[kept_genes].copy()
@@ -140,8 +251,7 @@ def _apply_gene_filters_to_var_names(
     if not exprs:
         return np.ones(adata.n_vars, dtype=bool), None
 
-    meta = adata.var.copy()
-    meta["gene"] = meta.index.astype(str)
+    meta = _ensure_gene_filter_metadata(adata, exprs=exprs, resource_name=resource_name)
     meta = meta.set_index("gene", drop=False)
 
     keep = pd.Series(True, index=meta.index)
@@ -151,7 +261,9 @@ def _apply_gene_filters_to_var_names(
             matched = meta.query(expr_norm, engine="python")
             keep &= meta.index.isin(matched.index)
         except Exception as e:
-            LOGGER.warning("%s: gene_filter failed for expr=%r: %s", resource_name, str(expr_raw), e)
+            raise RuntimeError(
+                f"{resource_name}: gene_filter failed for expr={str(expr_raw)!r}: {e}"
+            ) from e
 
     keep_mask = keep.reindex(adata.var_names.astype(str)).fillna(False).to_numpy(dtype=bool, copy=False)
     info = {
