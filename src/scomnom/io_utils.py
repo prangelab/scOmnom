@@ -1447,6 +1447,11 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
             max_len = max((len(v) for v in vals), default=1)
             return np.asarray(vals, dtype=f"<U{max(1, max_len)}")
 
+        def _to_unicode_matrix(values_2d) -> np.ndarray:
+            rows = [[str(v) for v in row] for row in values_2d]
+            max_len = max((len(v) for row in rows for v in row), default=1)
+            return np.asarray(rows, dtype=f"<U{max(1, max_len)}")
+
         for payload in _sidecar_payloads:
             pid = str(payload["id"])
             kind = str(payload["kind"])
@@ -1462,7 +1467,7 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
                 data = np.asarray(df.to_numpy(copy=False))
                 data_cast = "native"
                 if data.dtype == object:
-                    data = np.asarray(df.astype(str).to_numpy(copy=False))
+                    data = _to_unicode_matrix(df.astype(str).to_numpy(copy=False))
                     data_cast = "str"
                 grp.create_array("data", data=data, overwrite=True)
                 idx = _to_unicode_array(df.index.astype(str).tolist())

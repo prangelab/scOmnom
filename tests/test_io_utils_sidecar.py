@@ -33,3 +33,23 @@ def test_save_and_load_dataset_with_uns_sidecar_roundtrip(tmp_path: Path) -> Non
     assert loaded.uns["df_payload"].shape == (2, 2)
     assert loaded.uns["arr_payload"].shape == (2, 2)
     assert loaded.uns["series_payload"].shape == (2,)
+
+
+def test_save_and_load_dataset_with_object_dataframe_sidecar(tmp_path: Path) -> None:
+    adata = ad.AnnData(X=np.zeros((2, 2), dtype=np.float32))
+    adata.obs_names = ["cell0", "cell1"]
+    adata.var_names = ["gene0", "gene1"]
+    adata.uns["object_df"] = pd.DataFrame(
+        {
+            "label": ["A", "B"],
+            "note": ["foo", None],
+        },
+        index=["r0", "r1"],
+    )
+
+    out_path = tmp_path / "sidecar_object_df.zarr"
+    save_dataset(adata, out_path, fmt="zarr", archive=False)
+
+    loaded = load_dataset(out_path)
+    assert isinstance(loaded.uns["object_df"], pd.DataFrame)
+    assert loaded.uns["object_df"].shape == (2, 2)
