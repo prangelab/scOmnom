@@ -22,6 +22,10 @@ from . import gene_utils
 
 LOGGER = logging.getLogger(__name__)
 
+_SIDECAR_REF_TYPE = "scomnom.ref.v1"
+_SIDECAR_GROUP_ROOT = "__scomnom_payloads__"
+_SIDECAR_GROUP_VERSION = "v1"
+
 # Official CellTypist model registry
 CELLTYPIST_REGISTRY_URL = "https://celltypist.cog.sanger.ac.uk/models/models.json"
 
@@ -1325,6 +1329,7 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
     import sys
     import numpy as np
     import pandas as pd
+    import zarr
 
     # ------------------------------------------------------------
     # Size estimation (warn-only)
@@ -1348,6 +1353,10 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
     # ------------------------------------------------------------
     _keymap: dict[str, str] = {}
     _seen_keys: set[str] = set()
+    _seen_sidecar_ids: set[str] = set()
+    _sidecar_payloads: list[dict[str, object]] = []
+
+    sidecar_enabled = fmt == "zarr"
 
     def _dedupe_key(safe: str, original: str) -> str:
         if safe not in _seen_keys:
@@ -1369,6 +1378,130 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
         _keymap[alt] = original
         return alt
 
+    def _sidecar_payload_id(path_tokens: tuple[str, ...]) -> str:
+        base = "__".join(
+            sanitize_identifier(str(tok), max_len=48, allow_spaces=False)
+            for tok in path_tokens
+            if str(tok).strip()
+        )
+        if not base:
+            base = "payload"
+        base = base[:180]
+        raw = "/".join(path_tokens)
+        digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10]
+        pid = f"{base}__{digest}"
+        if pid not in _seen_sidecar_ids:
+            _seen_sidecar_ids.add(pid)
+            return pid
+        i = 2
+        while f"{pid}__{i}" in _seen_sidecar_ids:
+            i += 1
+        deduped = f"{pid}__{i}"
+        _seen_sidecar_ids.add(deduped)
+        return deduped
+
+    def _register_sidecar_payload(kind: str, obj, path_tokens: tuple[str, ...]) -> dict[str, object]:
+        pid = _sidecar_payload_id(path_tokens)
+        _sidecar_payloads.append(
+            {
+                "id": pid,
+                "kind": str(kind),
+                "obj": obj,
+                "path_tokens": path_tokens,
+            }
+        )
+        meta: dict[str, object] = {}
+        if isinstance(obj, pd.DataFrame):
+            meta["shape"] = [int(obj.shape[0]), int(obj.shape[1])]
+            try:
+                meta["nbytes_est"] = int(obj.memory_usage(deep=True).sum())
+            except Exception:
+                pass
+        elif isinstance(obj, pd.Series):
+            meta["shape"] = [int(obj.shape[0])]
+            meta["dtype"] = str(obj.dtype)
+            try:
+                meta["nbytes_est"] = int(obj.memory_usage(deep=True))
+            except Exception:
+                pass
+        elif isinstance(obj, np.ndarray):
+            meta["shape"] = [int(x) for x in obj.shape]
+            meta["dtype"] = str(obj.dtype)
+            meta["nbytes_est"] = int(obj.nbytes)
+        return {
+            "__type__": _SIDECAR_REF_TYPE,
+            "kind": str(kind),
+            "path": f"{_SIDECAR_GROUP_ROOT}/{_SIDECAR_GROUP_VERSION}/{pid}",
+            "meta": meta,
+        }
+
+    def _write_sidecar_payloads(zarr_dir: Path) -> None:
+        if not _sidecar_payloads:
+            return
+        root = zarr.open_group(str(zarr_dir), mode="a", zarr_format=2)
+        side_root = root.require_group(_SIDECAR_GROUP_ROOT).require_group(_SIDECAR_GROUP_VERSION)
+        manifest_entries: list[dict[str, object]] = []
+        
+        def _to_unicode_array(values) -> np.ndarray:
+            vals = [str(v) for v in values]
+            max_len = max((len(v) for v in vals), default=1)
+            return np.asarray(vals, dtype=f"<U{max(1, max_len)}")
+
+        for payload in _sidecar_payloads:
+            pid = str(payload["id"])
+            kind = str(payload["kind"])
+            obj = payload["obj"]
+
+            if pid in side_root:
+                del side_root[pid]
+            grp = side_root.create_group(pid)
+            grp.attrs["kind"] = kind
+
+            if kind == "dataframe":
+                df = obj
+                data = np.asarray(df.to_numpy(copy=False))
+                data_cast = "native"
+                if data.dtype == object:
+                    data = np.asarray(df.astype(str).to_numpy(copy=False))
+                    data_cast = "str"
+                grp.create_array("data", data=data, overwrite=True)
+                idx = _to_unicode_array(df.index.astype(str).tolist())
+                cols = _to_unicode_array(df.columns.astype(str).tolist())
+                grp.create_array("index", data=idx, overwrite=True)
+                grp.create_array("columns", data=cols, overwrite=True)
+                grp.attrs["dtypes"] = json.dumps([str(x) for x in df.dtypes], ensure_ascii=True)
+                grp.attrs["data_cast"] = data_cast
+                manifest_entries.append({"id": pid, "kind": kind, "shape": [int(df.shape[0]), int(df.shape[1])]})
+            elif kind == "series":
+                series = obj
+                data = np.asarray(series.to_numpy(copy=False))
+                data_cast = "native"
+                if data.dtype == object:
+                    data = _to_unicode_array(series.astype(str).tolist())
+                    data_cast = "str"
+                grp.create_array("data", data=data, overwrite=True)
+                idx = _to_unicode_array(series.index.astype(str).tolist())
+                grp.create_array("index", data=idx, overwrite=True)
+                grp.attrs["name"] = "" if series.name is None else str(series.name)
+                grp.attrs["dtype"] = str(series.dtype)
+                grp.attrs["data_cast"] = data_cast
+                manifest_entries.append({"id": pid, "kind": kind, "shape": [int(series.shape[0])]})
+            elif kind == "ndarray":
+                arr = np.asarray(obj)
+                grp.create_array("data", data=arr, overwrite=True)
+                grp.attrs["dtype"] = str(arr.dtype)
+                manifest_entries.append({"id": pid, "kind": kind, "shape": [int(x) for x in arr.shape]})
+            else:
+                raise RuntimeError(f"Unknown sidecar payload kind: {kind!r}")
+
+        if "__manifest__" in side_root:
+            del side_root["__manifest__"]
+        manifest_grp = side_root.create_group("__manifest__")
+        manifest_grp.attrs["schema_version"] = "1"
+        manifest_grp.attrs["created_by"] = "save_dataset"
+        manifest_grp.attrs["payload_count"] = int(len(manifest_entries))
+        manifest_grp.attrs["entries_json"] = json.dumps(manifest_entries, ensure_ascii=True)
+
     # ------------------------------------------------------------
     # Payload tagging
     # ------------------------------------------------------------
@@ -1384,7 +1517,7 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
             "data": a.tolist(),
         }
 
-    def _sanitize(obj):
+    def _sanitize(obj, path_tokens: tuple[str, ...] = ()):
         def _has_legacy_type_marker(d: dict) -> bool:
             for k, v in d.items():
                 ks = str(k)
@@ -1393,9 +1526,13 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
                         return True
             return False
 
+        if sidecar_enabled and isinstance(obj, pd.DataFrame):
+            return _register_sidecar_payload("dataframe", obj, path_tokens)
         if isinstance(obj, pd.DataFrame):
             return _df_to_tagged_payload(obj)
 
+        if sidecar_enabled and isinstance(obj, pd.Series):
+            return _register_sidecar_payload("series", obj, path_tokens)
         if isinstance(obj, pd.Series):
             return {
                 "__type__": "pandas.Series",
@@ -1404,6 +1541,8 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
                 "data": obj.tolist(),
             }
 
+        if sidecar_enabled and isinstance(obj, np.ndarray):
+            return _register_sidecar_payload("ndarray", obj, path_tokens)
         if isinstance(obj, np.ndarray):
             return _ndarray_to_payload(obj)
 
@@ -1416,17 +1555,17 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
         if isinstance(obj, dict):
             if "__type__" in obj or _has_legacy_type_marker(obj):
                 # Preserve internal tag keys so load_dataset() can rehydrate payloads.
-                return {str(k): _sanitize(v) for k, v in obj.items()}
+                return {str(k): _sanitize(v, path_tokens + (str(k),)) for k, v in obj.items()}
             out: dict[str, object] = {}
             for k, v in obj.items():
                 orig = str(k)
                 safe = sanitize_identifier(orig, max_len=180, allow_spaces=True)
                 safe = _dedupe_key(safe, orig)
-                out[safe] = _sanitize(v)
+                out[safe] = _sanitize(v, path_tokens + (orig,))
             return out
 
         if isinstance(obj, (list, tuple)):
-            return [_sanitize(v) for v in obj]
+            return [_sanitize(v, path_tokens + (str(i),)) for i, v in enumerate(obj)]
 
         if isinstance(obj, pd.Index):
             return obj.astype(str).tolist()
@@ -1539,6 +1678,8 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
                     tmp_zarr_dir = tmp_root / zarr_dir_name
                     LOGGER.debug("save_dataset: staging zarr write at %s", tmp_zarr_dir)
                     adata.write_zarr(str(tmp_zarr_dir), chunks=None)
+                    if sidecar_enabled and _sidecar_payloads:
+                        _write_sidecar_payloads(tmp_zarr_dir)
 
                     LOGGER.debug("save_dataset: archiving staged zarr to %s", archive_path)
                     _tar_create_zst(tmp_root, zarr_dir_name, tmp_archive)
@@ -1550,6 +1691,8 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
             else:
                 LOGGER.debug("save_dataset: writing zarr directory %s", out_path)
                 adata.write_zarr(str(out_path), chunks=None)
+                if sidecar_enabled and _sidecar_payloads:
+                    _write_sidecar_payloads(out_path)
         elif fmt == "h5ad":
             LOGGER.debug("save_dataset: writing h5ad %s", out_path)
             adata.write_h5ad(str(out_path), compression="gzip")
@@ -1576,6 +1719,69 @@ def load_dataset(path: Path) -> ad.AnnData:
     import re
     import numpy as np
     import pandas as pd
+    import zarr
+
+    zarr_source_dir: Path | None = None
+    zarr_root_cache = None
+
+    def _load_sidecar_ref(ref_obj: dict):
+        nonlocal zarr_root_cache
+        if zarr_source_dir is None:
+            raise RuntimeError(
+                "Encountered sidecar reference in adata.uns, but dataset was not loaded from a Zarr store."
+            )
+        if zarr_root_cache is None:
+            zarr_root_cache = zarr.open_group(
+                str(zarr_source_dir),
+                mode="r",
+                zarr_format=2,
+                use_consolidated=False,
+            )
+        rel_path = str(ref_obj.get("path", "")).strip()
+        if not rel_path:
+            raise RuntimeError("Sidecar reference is missing required 'path'.")
+        node = zarr_root_cache
+        for token in [x for x in rel_path.split("/") if x]:
+            try:
+                node = node[token]
+            except Exception:
+                raise RuntimeError(f"Sidecar payload not found at path={rel_path!r}")
+
+        kind = str(ref_obj.get("kind", "")).strip() or str(node.attrs.get("kind", "")).strip()
+        if kind == "dataframe":
+            data = np.asarray(node["data"])
+            index = np.asarray(node["index"]).astype(str)
+            columns = np.asarray(node["columns"]).astype(str)
+            df = pd.DataFrame(data=data, index=pd.Index(index, dtype=str), columns=pd.Index(columns, dtype=str))
+            dtypes_raw = node.attrs.get("dtypes", None)
+            if dtypes_raw:
+                try:
+                    dtypes_list = json.loads(dtypes_raw)
+                    if isinstance(dtypes_list, list) and len(dtypes_list) == len(df.columns):
+                        for col, dt in zip(df.columns, dtypes_list):
+                            try:
+                                df[col] = df[col].astype(str(dt))
+                            except Exception:
+                                continue
+                except Exception:
+                    pass
+            return df
+        if kind == "series":
+            data = np.asarray(node["data"])
+            index = np.asarray(node["index"]).astype(str)
+            name = node.attrs.get("name", "")
+            name = None if str(name) == "" else str(name)
+            s = pd.Series(data=data, index=pd.Index(index, dtype=str), name=name)
+            dtype_raw = node.attrs.get("dtype", None)
+            if dtype_raw:
+                try:
+                    s = s.astype(str(dtype_raw))
+                except Exception:
+                    pass
+            return s
+        if kind == "ndarray":
+            return np.asarray(node["data"])
+        raise RuntimeError(f"Unsupported sidecar payload kind={kind!r} at path={rel_path!r}")
 
     def _rehydrate(obj):
         def _recover_stringified_legacy_array(s: str):
@@ -1660,6 +1866,9 @@ def load_dataset(path: Path) -> ad.AnnData:
                 except Exception:
                     return obj
 
+            if t == _SIDECAR_REF_TYPE:
+                return _load_sidecar_ref(obj)
+
         if isinstance(obj, list):
             return [_rehydrate(v) for v in obj]
         if isinstance(obj, tuple):
@@ -1693,12 +1902,13 @@ def load_dataset(path: Path) -> ad.AnnData:
     if not path.exists():
         raise FileNotFoundError(f"Dataset not found: {path}")
 
-    if path.suffix == ".h5ad":
-        LOGGER.info(f"Loading H5AD dataset → {path}")
-        adata = ad.read_h5ad(str(path))
-    elif _is_zarr_archive_path(path):
-        tmp_dir = Path(tempfile.mkdtemp(prefix="scomnom_load_"))
-        try:
+    tmp_dir: Path | None = None
+    try:
+        if path.suffix == ".h5ad":
+            LOGGER.info(f"Loading H5AD dataset → {path}")
+            adata = ad.read_h5ad(str(path))
+        elif _is_zarr_archive_path(path):
+            tmp_dir = Path(tempfile.mkdtemp(prefix="scomnom_load_"))
             member_names = _tar_list_zst(path)
             _validate_tar_members_safe(member_names)
             _tar_extract_zst(path, tmp_dir)
@@ -1715,24 +1925,24 @@ def load_dataset(path: Path) -> ad.AnnData:
                 extracted = candidates[0]
 
             LOGGER.info("Loading archived Zarr dataset %s via extracted directory %s", path, extracted)
+            zarr_source_dir = extracted
             adata = ad.read_zarr(str(extracted))
-        finally:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-    elif path.suffix == ".zarr" or path.is_dir():
-        LOGGER.info(f"Loading Zarr dataset → {path}")
-        adata = ad.read_zarr(str(path))  # fully in-memory
-    else:
-        raise ValueError(
-            f"Cannot load dataset from: {path}. Expected .zarr directory, .zarr.tar.zst archive, or .h5ad file."
-        )
+        elif path.suffix == ".zarr" or path.is_dir():
+            LOGGER.info(f"Loading Zarr dataset → {path}")
+            zarr_source_dir = path
+            adata = ad.read_zarr(str(path))  # fully in-memory
+        else:
+            raise ValueError(
+                f"Cannot load dataset from: {path}. Expected .zarr directory, .zarr.tar.zst archive, or .h5ad file."
+            )
 
-    # Rehydrate tagged structures in uns
-    try:
+        # Rehydrate tagged structures in uns
         adata.uns = _rehydrate(dict(adata.uns))
-    except Exception as e:
-        LOGGER.warning("Failed to rehydrate tagged objects in adata.uns. (%s)", e)
 
-    return adata
+        return adata
+    finally:
+        if tmp_dir is not None:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 # =====================================================================
@@ -2496,7 +2706,7 @@ def _safe_excel_sheet_name(name: str) -> str:
     """
     Excel constraints:
       - max 31 chars
-      - cannot contain: : \ / ? * [ ]
+      - cannot contain: : \\ / ? * [ ]
     """
     s = str(name)
     s = re.sub(r"[:\\/?*\[\]]+", "_", s)

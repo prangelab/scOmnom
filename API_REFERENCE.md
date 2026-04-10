@@ -27,6 +27,7 @@ save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: bool
 
 What it does:
 - Saves an AnnData object to zarr or h5ad using the project IO path.
+- For Zarr outputs, heavy `adata.uns` payloads are serialized under `__scomnom_payloads__/v1` via sidecar references to reduce save-time memory spikes.
 
 Parameters:
 - `adata`: AnnData object to save.

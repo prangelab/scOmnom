@@ -1,0 +1,35 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import anndata as ad
+import numpy as np
+import pandas as pd
+
+from scomnom.io_utils import load_dataset, save_dataset
+
+
+def test_save_and_load_dataset_with_uns_sidecar_roundtrip(tmp_path: Path) -> None:
+    adata = ad.AnnData(X=np.zeros((3, 4), dtype=np.float32))
+    adata.obs_names = [f"cell{i}" for i in range(3)]
+    adata.var_names = [f"gene{i}" for i in range(4)]
+    adata.uns["df_payload"] = pd.DataFrame(
+        [[1.0, 2.0], [3.0, 4.0]],
+        index=["row1", "row2"],
+        columns=["C00", "C01"],
+    )
+    adata.uns["arr_payload"] = np.array([[1, 2], [3, 4]], dtype=np.int32)
+    adata.uns["series_payload"] = pd.Series([0.1, 0.2], index=["a", "b"], name="s")
+
+    out_path = tmp_path / "sidecar_test.zarr"
+    save_dataset(adata, out_path, fmt="zarr", archive=False)
+
+    assert (out_path / "__scomnom_payloads__" / "v1").exists()
+
+    loaded = load_dataset(out_path)
+    assert isinstance(loaded.uns["df_payload"], pd.DataFrame)
+    assert isinstance(loaded.uns["arr_payload"], np.ndarray)
+    assert isinstance(loaded.uns["series_payload"], pd.Series)
+    assert loaded.uns["df_payload"].shape == (2, 2)
+    assert loaded.uns["arr_payload"].shape == (2, 2)
+    assert loaded.uns["series_payload"].shape == (2,)
