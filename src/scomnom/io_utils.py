@@ -1348,6 +1348,16 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
         except Exception:
             return 0
 
+    def _log_object_dtype_columns(frame: pd.DataFrame, *, label: str) -> None:
+        try:
+            if frame is None or frame.empty:
+                return
+            obj_cols = [str(c) for c in frame.columns if str(frame[c].dtype) == "object"]
+            if obj_cols:
+                LOGGER.error("save_dataset: detected object dtype columns in %s: %s", label, obj_cols[:20])
+        except Exception:
+            pass
+
     # ------------------------------------------------------------
     # Key sanitization + collision handling
     # ------------------------------------------------------------
@@ -1653,17 +1663,18 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
         )
         sanitized_uns = orig_uns
 
-    try:
-        downgraded_var = _downgrade_nullable_strings(orig_var)
-    except Exception as e:
-        LOGGER.warning("Failed to downgrade nullable string columns in adata.var; writing original var. (%s)", e)
-        downgraded_var = orig_var
+    if fmt == "h5ad":
+        try:
+            downgraded_var = _downgrade_nullable_strings(orig_var)
+        except Exception as e:
+            LOGGER.warning("Failed to downgrade nullable string columns in adata.var; writing original var. (%s)", e)
+            downgraded_var = orig_var
 
-    try:
-        downgraded_obs = _downgrade_nullable_strings(orig_obs)
-    except Exception as e:
-        LOGGER.warning("Failed to downgrade nullable string columns in adata.obs; writing original obs. (%s)", e)
-        downgraded_obs = orig_obs
+        try:
+            downgraded_obs = _downgrade_nullable_strings(orig_obs)
+        except Exception as e:
+            LOGGER.warning("Failed to downgrade nullable string columns in adata.obs; writing original obs. (%s)", e)
+            downgraded_obs = orig_obs
 
     adata.uns = sanitized_uns
     adata.var = downgraded_var
@@ -1703,6 +1714,10 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
             adata.write_h5ad(str(out_path), compression="gzip")
         else:
             raise ValueError(f"Unknown dataset format '{fmt}'. Expected 'zarr' or 'h5ad'.")
+    except Exception:
+        _log_object_dtype_columns(adata.obs, label="adata.obs")
+        _log_object_dtype_columns(adata.var, label="adata.var")
+        raise
     finally:
         adata.uns = orig_uns
         adata.var = orig_var
