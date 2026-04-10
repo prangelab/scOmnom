@@ -1330,6 +1330,7 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
     import numpy as np
     import pandas as pd
     import zarr
+    import resource
 
     # ------------------------------------------------------------
     # Size estimation (warn-only)
@@ -1357,6 +1358,43 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
                 LOGGER.error("save_dataset: detected object dtype columns in %s: %s", label, obj_cols[:20])
         except Exception:
             pass
+
+    def _read_int_file(path: Path) -> int | None:
+        try:
+            return int(path.read_text(encoding="utf-8").strip())
+        except Exception:
+            return None
+
+    def _format_gib(value_bytes: int | None) -> str:
+        if value_bytes is None or value_bytes < 0:
+            return "NA"
+        return f"{(float(value_bytes) / (1024.0 ** 3)):.2f}"
+
+    def _log_mem_checkpoint(stage: str) -> None:
+        rss_gib = "NA"
+        try:
+            rss_kib = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+            rss_bytes = rss_kib * 1024
+            rss_gib = _format_gib(rss_bytes)
+        except Exception:
+            pass
+
+        cgroup_current = _read_int_file(Path("/sys/fs/cgroup/memory.current"))
+        cgroup_max = _read_int_file(Path("/sys/fs/cgroup/memory.max"))
+        if cgroup_current is None:
+            cgroup_current = _read_int_file(Path("/sys/fs/cgroup/memory/memory.usage_in_bytes"))
+        if cgroup_max is None:
+            cgroup_max = _read_int_file(Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"))
+        if cgroup_max is not None and cgroup_max >= (2**60):
+            cgroup_max = None
+
+        LOGGER.info(
+            "save_dataset[%s]: rss_max=%s GiB cgroup_current=%s GiB cgroup_limit=%s GiB",
+            str(stage),
+            str(rss_gib),
+            _format_gib(cgroup_current),
+            _format_gib(cgroup_max),
+        )
 
     def _coerce_object_columns_inplace_for_zarr(
         df: pd.DataFrame, *, label: str
@@ -1684,7 +1722,9 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
     downgraded_obs = orig_obs
     downgraded_var = orig_var
     try:
+        _log_mem_checkpoint("pre_sanitize")
         sanitized_uns = _sanitize(orig_uns)
+        _log_mem_checkpoint("post_sanitize")
         if _keymap:
             sanitized_uns["__scomnom_keymap__"] = {
                 "__type__": "scomnom.keymap.v1",
@@ -1732,6 +1772,7 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
     # Write dataset
     # ------------------------------------------------------------
     try:
+        _log_mem_checkpoint("pre_write_dispatch")
         if fmt == "zarr":
             if archive:
                 archive_path = _default_zarr_archive_path(out_path)
@@ -1741,12 +1782,18 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
                 try:
                     tmp_zarr_dir = tmp_root / zarr_dir_name
                     LOGGER.debug("save_dataset: staging zarr write at %s", tmp_zarr_dir)
+                    _log_mem_checkpoint("pre_write_zarr_stage")
                     adata.write_zarr(str(tmp_zarr_dir), chunks=None)
+                    _log_mem_checkpoint("post_write_zarr_stage")
                     if sidecar_enabled and _sidecar_payloads:
+                        _log_mem_checkpoint("pre_write_sidecar_stage")
                         _write_sidecar_payloads(tmp_zarr_dir)
+                        _log_mem_checkpoint("post_write_sidecar_stage")
 
                     LOGGER.debug("save_dataset: archiving staged zarr to %s", archive_path)
+                    _log_mem_checkpoint("pre_archive")
                     _tar_create_zst(tmp_root, zarr_dir_name, tmp_archive)
+                    _log_mem_checkpoint("post_archive")
                     tmp_archive.replace(archive_path)
                 finally:
                     shutil.rmtree(tmp_root, ignore_errors=True)
@@ -1754,12 +1801,18 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
                         tmp_archive.unlink(missing_ok=True)
             else:
                 LOGGER.debug("save_dataset: writing zarr directory %s", out_path)
+                _log_mem_checkpoint("pre_write_zarr")
                 adata.write_zarr(str(out_path), chunks=None)
+                _log_mem_checkpoint("post_write_zarr")
                 if sidecar_enabled and _sidecar_payloads:
+                    _log_mem_checkpoint("pre_write_sidecar")
                     _write_sidecar_payloads(out_path)
+                    _log_mem_checkpoint("post_write_sidecar")
         elif fmt == "h5ad":
             LOGGER.debug("save_dataset: writing h5ad %s", out_path)
+            _log_mem_checkpoint("pre_write_h5ad")
             adata.write_h5ad(str(out_path), compression="gzip")
+            _log_mem_checkpoint("post_write_h5ad")
         else:
             raise ValueError(f"Unknown dataset format '{fmt}'. Expected 'zarr' or 'h5ad'.")
     except Exception:
