@@ -56,8 +56,24 @@ Extended adata-ops with annotation-merge, allowing refined subset annotations to
 ## 0.3.1 [31-03-2026]
 Moved manual renaming from cluster-and-annotate into adata-ops as `adata-ops rename`, so subset refinement now lives fully under adata-ops. Fixed rename logging and summaries so they report the correct parent round id.
 
+## 0.3.2 [02-04-2026]
+Added an option to rename to collapse same name clusters into broader categories.
+
 ## 0.3.3 [08-04-2026]
 Made markers-and-de outputs round-aware in both result folder names and default AnnData output names, so concurrent runs on different rounds no longer collide. Also removed redundant nested DE/DA/markers directory layers inside those round-namespaced output folders.
 
-## 0.3.2 [02-04-2026]
-Added an option to rename to collapse same name clusters into broader categories.
+## 0.4.0 [13-04-2026]
+Added `markers-and-de enrichment` as a dedicated command group with:
+- `enrichment cluster` for round-native enrichment on AnnData rounds (including condition-aware grouping syntax such as `sex:MASLD`)
+- `enrichment de` for enrichment directly from exported DE tables without loading AnnData
+- `enrichment module-score` for custom module scoring with Scanpy backend plus an AUCell backend option
+
+Added gene prefiltering support via `--gene-filter` across enrichment and DE execution paths (separate from plot-only `--plot-gene-filter`), with strict failure behavior for invalid filters and improved gene-annotation handling for filters based on `gene_type`, `gene_chrom`, and `gene_id`.
+
+Extended public API exposure for enrichment and module-score workflows and added notebook-facing plotting support for decoupler outputs.
+
+Improved save robustness and memory behavior around Zarr serialization by:
+- introducing sidecar storage for complex/large `uns` payloads with automatic rehydration on load
+- hardening object-dtype handling for sidecar payloads and Zarr metadata coercion
+- adding save-stage memory checkpoints in `save_dataset` to make HPC OOM diagnostics explicit
+- applying DE uns-pruning before enrichment save to reduce carried memory footprint
