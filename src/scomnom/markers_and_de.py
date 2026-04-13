@@ -6,6 +6,7 @@ import re
 import threading
 import time
 import traceback
+import gc
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -1329,6 +1330,9 @@ def run_enrichment(cfg) -> ad.AnnData:
         LOGGER.info("enrichment: regenerate_figures=True; skipping dataset save.")
     else:
         clear_top_level_decoupler_state(adata)
+        if bool(getattr(cfg, "prune_uns_de", True)):
+            _prune_uns_de(adata, store_key=str(getattr(cfg, "store_key", "scomnom_de")))
+        gc.collect()
         out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.enrichment")) + ".zarr")
         LOGGER.info("Saving dataset → %s", out_zarr)
         io_utils.save_dataset(adata, out_zarr, fmt="zarr")
