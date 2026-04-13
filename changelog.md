@@ -77,3 +77,8 @@ Improved save robustness and memory behavior around Zarr serialization by:
 - hardening object-dtype handling for sidecar payloads and Zarr metadata coercion
 - adding save-stage memory checkpoints in `save_dataset` to make HPC OOM diagnostics explicit
 - applying DE uns-pruning before enrichment save to reduce carried memory footprint
+
+## 0.4.1 [13-04-2026]
+Documentation and release housekeeping update:
+- added README section for `adata-ops annotation-merge` (subset back-merge workflow, key flags, and examples)
+- corrected changelog ordering for the `0.3.2` / `0.3.3` entries
