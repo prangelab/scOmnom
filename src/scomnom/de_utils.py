@@ -13,6 +13,7 @@ import time
 import contextlib
 import inspect
 import io
+import threading
 import anndata as ad
 import numpy as np
 import pandas as pd
@@ -20,6 +21,7 @@ from pandas.errors import SettingWithCopyWarning
 import scipy.sparse as sp
 
 LOGGER = logging.getLogger(__name__)
+_PSEUDOBULK_AGG_LOCK = threading.Lock()
 
 
 try:
@@ -517,51 +519,52 @@ def pseudobulk_aggregate(
     """
     if sample_key not in adata.obs:
         raise KeyError(f"sample_key={sample_key!r} not in adata.obs")
-    X = _get_counts_matrix(adata, counts_layer=counts_layer)
-    n_cells, n_genes = X.shape
+    with _PSEUDOBULK_AGG_LOCK:
+        X = _get_counts_matrix(adata, counts_layer=counts_layer)
+        n_cells, n_genes = X.shape
 
-    if restrict_cells_mask is not None:
-        restrict_cells_mask = np.asarray(restrict_cells_mask, dtype=bool)
-        if restrict_cells_mask.shape != (n_cells,):
-            raise ValueError("restrict_cells_mask has wrong shape")
-        cell_idx = np.where(restrict_cells_mask)[0]
-        if cell_idx.size == 0:
-            # empty aggregation
-            counts_df = pd.DataFrame(index=pd.Index([], name="pb_id"), columns=adata.var_names)
-            meta_df = pd.DataFrame(index=pd.Index([], name="pb_id"))
-            return counts_df, meta_df
-        X = X[cell_idx, :]
-        obs = adata.obs.iloc[cell_idx].copy()
-    else:
-        obs = adata.obs
+        if restrict_cells_mask is not None:
+            restrict_cells_mask = np.asarray(restrict_cells_mask, dtype=bool)
+            if restrict_cells_mask.shape != (n_cells,):
+                raise ValueError("restrict_cells_mask has wrong shape")
+            cell_idx = np.where(restrict_cells_mask)[0]
+            if cell_idx.size == 0:
+                # empty aggregation
+                counts_df = pd.DataFrame(index=pd.Index([], name="pb_id"), columns=adata.var_names)
+                meta_df = pd.DataFrame(index=pd.Index([], name="pb_id"))
+                return counts_df, meta_df
+            X = X[cell_idx, :]
+            obs = adata.obs.iloc[cell_idx].copy()
+        else:
+            obs = adata.obs
 
-    s = obs[sample_key].astype(str).to_numpy()
+        s = obs[sample_key].astype(str).to_numpy()
 
-    if group_key is None:
-        g = np.array(["ALL"] * obs.shape[0], dtype=object)
-        group_key_out = None
-    else:
-        if group_key not in obs:
-            raise KeyError(f"group_key={group_key!r} not in adata.obs")
-        g = obs[group_key].astype(str).to_numpy()
-        group_key_out = group_key
+        if group_key is None:
+            g = np.array(["ALL"] * obs.shape[0], dtype=object)
+            group_key_out = None
+        else:
+            if group_key not in obs:
+                raise KeyError(f"group_key={group_key!r} not in adata.obs")
+            g = obs[group_key].astype(str).to_numpy()
+            group_key_out = group_key
 
-    # Build unique (sample, group) library ids
-    # Use categorical codes to avoid slow python tuples on 1M cells.
-    df_keys = pd.DataFrame({"sample": s, "group": g})
-    # factorize the combined key
-    combo = pd.Index(df_keys["sample"] + "||" + df_keys["group"])
-    lib_codes, lib_uniques = pd.factorize(combo, sort=True)
-    n_libs = int(lib_uniques.size)
+        # Build unique (sample, group) library ids
+        # Use categorical codes to avoid slow python tuples on 1M cells.
+        df_keys = pd.DataFrame({"sample": s, "group": g})
+        # factorize the combined key
+        combo = pd.Index(df_keys["sample"] + "||" + df_keys["group"])
+        lib_codes, lib_uniques = pd.factorize(combo, sort=True)
+        n_libs = int(lib_uniques.size)
 
-    # Indicator matrix G: (cells x libs)
-    rows = np.arange(obs.shape[0], dtype=np.int64)
-    cols = lib_codes.astype(np.int64, copy=False)
-    data = np.ones(rows.shape[0], dtype=np.int8)
-    G = sp.csr_matrix((data, (rows, cols)), shape=(obs.shape[0], n_libs))
+        # Indicator matrix G: (cells x libs)
+        rows = np.arange(obs.shape[0], dtype=np.int64)
+        cols = lib_codes.astype(np.int64, copy=False)
+        data = np.ones(rows.shape[0], dtype=np.int8)
+        G = sp.csr_matrix((data, (rows, cols)), shape=(obs.shape[0], n_libs))
 
-    # PB counts: (libs x genes)
-    PB = (G.T @ X).tocsr()
+        # PB counts: (libs x genes)
+        PB = (G.T @ X).tocsr()
 
     # n_cells per library
     n_cells_lib = np.asarray(G.sum(axis=0)).ravel().astype(int)
