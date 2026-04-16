@@ -22,6 +22,7 @@ import scipy.sparse as sp
 
 LOGGER = logging.getLogger(__name__)
 _PSEUDOBULK_AGG_LOCK = threading.Lock()
+_ANNDATA_SLICE_LOCK = threading.Lock()
 
 
 try:
@@ -1007,6 +1008,7 @@ def _run_pydeseq2_interaction(
         meta["contrast_vector"] = contrast_vec.tolist()
         meta["contrast_col"] = str(interaction_col)
 
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         stat.summary(print_result=False)
         if shrink_lfc:
             try:
@@ -2376,8 +2378,10 @@ def _downsample_two_level_subset(
         var_mask = np.asarray(var_mask, dtype=bool)
         if var_mask.shape != (adata.n_vars,):
             raise ValueError("var_mask has wrong shape")
-        return adata[idx, var_mask].copy(), meta
-    return adata[idx].copy(), meta
+        with _ANNDATA_SLICE_LOCK:
+            return adata[idx, var_mask].copy(), meta
+    with _ANNDATA_SLICE_LOCK:
+        return adata[idx].copy(), meta
 
 
 def _pb_effect_log2fc(
@@ -2690,7 +2694,7 @@ def contrast_conditional_markers(
             return str(cl_val), f"{A}_vs_{B}", {}, None
         global_idx, by_level_idx = cluster_cache[cl_val]
         pair_key = f"{A}_vs_{B}"
-        LOGGER.info(
+        LOGGER.debug(
             "cell-level contrast: cluster=%r contrast_key=%r A=%r B=%r",
             str(cl_val),
             str(contrast_key),
@@ -3267,7 +3271,7 @@ def contrast_conditional_markers_multi(
         global_idx, by_level_idx = cluster_cache[cl_val]
         pair_key = f"{A}_vs_{B}"
 
-        LOGGER.info(
+        LOGGER.debug(
             "cell-level contrast: cluster=%r contrast_key=%r A=%r B=%r",
             str(cl_val),
             str(ck),

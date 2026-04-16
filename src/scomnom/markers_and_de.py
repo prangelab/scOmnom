@@ -3342,6 +3342,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
             entries: list[tuple[str, dict]] = []
 
             def _run_task(task: dict[str, str]):
+                t_task_start = time.perf_counter()
                 if task["kind"] == "interaction":
                     res, meta = de_condition_within_group_pseudobulk_interaction(
                         adata,
@@ -3359,7 +3360,8 @@ def run_within_cluster(cfg) -> ad.AnnData:
                         store=False,
                         n_cpus=1,
                     )
-                    return "interaction", str(task["cond_key"]), str(task["group"]), res, meta
+                    t_task_end = time.perf_counter()
+                    return "interaction", str(task["cond_key"]), str(task["group"]), res, meta, float(t_task_end - t_task_start)
                 res = de_condition_within_group_pseudobulk_multi(
                     adata,
                     group_value=str(task["group"]),
@@ -3374,7 +3376,8 @@ def run_within_cluster(cfg) -> ad.AnnData:
                     store=False,
                     n_cpus=1,
                 )
-                return "pair", str(task["cond_key"]), str(task["group"]), res, None
+                t_task_end = time.perf_counter()
+                return "pair", str(task["cond_key"]), str(task["group"]), res, None, float(t_task_end - t_task_start)
 
             done = 0
             t0 = time.perf_counter()
@@ -3388,34 +3391,38 @@ def run_within_cluster(cfg) -> ad.AnnData:
                 with ThreadPoolExecutor(max_workers=max_workers) as ex:
                     futs = {ex.submit(_run_task, task): task for task in tasks}
                     pending = set(futs.keys())
-                    start_by_fut = {f: time.perf_counter() for f in pending}
+                    submitted_by_fut = {f: time.perf_counter() for f in pending}
                     while pending:
                         now = time.perf_counter()
                         done_set, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
                         if not done_set:
                             if now >= next_heartbeat:
                                 if pending:
-                                    longest_fut = max(pending, key=lambda f: now - start_by_fut.get(f, now))
-                                    longest_age = now - start_by_fut.get(longest_fut, now)
+                                    longest_fut = max(pending, key=lambda f: now - submitted_by_fut.get(f, now))
+                                    longest_age = now - submitted_by_fut.get(longest_fut, now)
                                     longest_task = futs.get(longest_fut, {})
                                     LOGGER.info(
-                                        "within-cluster: pseudobulk longest-running task (age=%.1fs, kind=%s, group=%s, condition_key=%s, A=%s, B=%s).",
+                                        "within-cluster: pseudobulk longest-pending task (wall_age=%.1fs, kind=%s, group=%s, condition_key=%s, A=%s, B=%s, factor_a=%s, factor_b=%s).",
                                         float(longest_age),
                                         str(longest_task.get("kind")),
                                         str(longest_task.get("group")),
                                         str(longest_task.get("cond_key")),
                                         str(longest_task.get("A", "")),
                                         str(longest_task.get("B", "")),
+                                        str(longest_task.get("a_key", "")),
+                                        str(longest_task.get("b_key", "")),
                                     )
                                     if float(longest_age) >= float(slow_task_warn_s):
                                         LOGGER.warning(
-                                            "within-cluster: pseudobulk slow task (age=%.1fs, kind=%s, group=%s, condition_key=%s, A=%s, B=%s).",
+                                            "within-cluster: pseudobulk slow pending task (wall_age=%.1fs, kind=%s, group=%s, condition_key=%s, A=%s, B=%s, factor_a=%s, factor_b=%s).",
                                             float(longest_age),
                                             str(longest_task.get("kind")),
                                             str(longest_task.get("group")),
                                             str(longest_task.get("cond_key")),
                                             str(longest_task.get("A", "")),
                                             str(longest_task.get("B", "")),
+                                            str(longest_task.get("a_key", "")),
+                                            str(longest_task.get("b_key", "")),
                                         )
                                 LOGGER.info(
                                     "within-cluster: pseudobulk heartbeat (done=%d/%d, pending=%d).",
@@ -3426,9 +3433,12 @@ def run_within_cluster(cfg) -> ad.AnnData:
                                 next_heartbeat = now + heartbeat_s
                             continue
                         for fut in done_set:
-                            kind, cond_key, gval, res, meta = fut.result()
+                            done_now = time.perf_counter()
+                            kind, cond_key, gval, res, meta, run_s = fut.result()
                             task_info = futs.get(fut, {})
-                            t_elapsed = now - start_by_fut.get(fut, now)
+                            submitted_at = submitted_by_fut.get(fut, done_now)
+                            wall_s = max(0.0, float(done_now - submitted_at))
+                            queue_s = max(0.0, float(wall_s - float(run_s)))
                             if kind == "interaction":
                                 key = f"{groupby}={gval}::{cond_key}::interaction"
                                 payload = {
@@ -3496,17 +3506,21 @@ def run_within_cluster(cfg) -> ad.AnnData:
                                 eta_s,
                             )
                             LOGGER.info(
-                                "within-cluster: pseudobulk task finished (kind=%s, group=%s, condition_key=%s, A=%s, B=%s, task_s=%.1f).",
+                                "within-cluster: pseudobulk task finished (kind=%s, group=%s, condition_key=%s, A=%s, B=%s, factor_a=%s, factor_b=%s, run_s=%.1f, queue_s=%.1f, wall_s=%.1f).",
                                 str(task_info.get("kind")),
                                 str(task_info.get("group")),
                                 str(task_info.get("cond_key")),
                                 str(task_info.get("A", "")),
                                 str(task_info.get("B", "")),
-                                float(t_elapsed),
+                                str(task_info.get("a_key", "")),
+                                str(task_info.get("b_key", "")),
+                                float(run_s),
+                                float(queue_s),
+                                float(wall_s),
                             )
             else:
                 for task in tasks:
-                    kind, cond_key, gval, res, meta = _run_task(task)
+                    kind, cond_key, gval, res, meta, run_s = _run_task(task)
                     if kind == "interaction":
                         key = f"{groupby}={gval}::{cond_key}::interaction"
                         payload = {
@@ -3572,6 +3586,19 @@ def run_within_cluster(cfg) -> ad.AnnData:
                         int(total),
                         elapsed,
                         eta_s,
+                    )
+                    LOGGER.info(
+                        "within-cluster: pseudobulk task finished (kind=%s, group=%s, condition_key=%s, A=%s, B=%s, factor_a=%s, factor_b=%s, run_s=%.1f, queue_s=%.1f, wall_s=%.1f).",
+                        str(task.get("kind", "")),
+                        str(task.get("group", "")),
+                        str(task.get("cond_key", "")),
+                        str(task.get("A", "")),
+                        str(task.get("B", "")),
+                        str(task.get("a_key", "")),
+                        str(task.get("b_key", "")),
+                        float(run_s),
+                        0.0,
+                        float(run_s),
                     )
 
             LOGGER.info(
@@ -4047,6 +4074,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                     LOGGER.info("within-cluster: plotting DE-decoupler figures...")
                     pb_cond = adata.uns.get(store_key, {}).get("pseudobulk_condition_within_group", {})
                     pb_cond_multi = adata.uns.get(store_key, {}).get("pseudobulk_condition_within_group_multi", {})
+                    plot_tasks: list[tuple[dict, str, Path, str, Optional[str], Optional[str]]] = []
                     for condition_key, per_contrast in de_block.items():
                         if not isinstance(per_contrast, dict):
                             continue
@@ -4103,21 +4131,70 @@ def run_within_cluster(cfg) -> ad.AnnData:
                                             break
 
                                 for net_name, net_payload in nets.items():
-                                    artifacts = de_plot_utils.plot_de_decoupler_payload(
-                                        net_payload,
-                                        net_name=str(net_name),
-                                        figdir=base,
-                                        heatmap_top_k=int(getattr(cfg, "plot_max_genes_total", 80)),
-                                        bar_top_n=int(top_n_genes),
-                                        bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
-                                        bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
-                                        bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
-                                        dotplot_top_k=int(dotplot_top_n_genes),
-                                        title_prefix=f"{condition_key} {contrast}",
-                                        pos_label=pos_label,
-                                        neg_label=neg_label,
+                                    plot_tasks.append(
+                                        (
+                                            net_payload,
+                                            str(net_name),
+                                            base,
+                                            f"{condition_key} {contrast}",
+                                            pos_label,
+                                            neg_label,
+                                        )
                                     )
+                    if plot_tasks:
+                        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+                        requested_workers = int(getattr(cfg, "n_jobs", 1) or 1)
+                        max_workers = min(max(1, requested_workers), 8, len(plot_tasks))
+                        LOGGER.info(
+                            "within-cluster: plotting DE-decoupler figures in parallel (tasks=%d, workers=%d).",
+                            len(plot_tasks),
+                            max_workers,
+                        )
+
+                        def _plot_de_decoupler_task(task: tuple[dict, str, Path, str, Optional[str], Optional[str]]):
+                            net_payload, net_name, base, title_prefix, pos_label, neg_label = task
+                            return de_plot_utils.plot_de_decoupler_payload(
+                                net_payload,
+                                net_name=net_name,
+                                figdir=base,
+                                heatmap_top_k=int(getattr(cfg, "plot_max_genes_total", 80)),
+                                bar_top_n=int(top_n_genes),
+                                bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
+                                bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
+                                bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
+                                dotplot_top_k=int(dotplot_top_n_genes),
+                                title_prefix=title_prefix,
+                                pos_label=pos_label,
+                                neg_label=neg_label,
+                            )
+
+                        done = 0
+                        failures = 0
+                        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                            futs = {ex.submit(_plot_de_decoupler_task, task): task for task in plot_tasks}
+                            for fut in as_completed(futs):
+                                task = futs[fut]
+                                done += 1
+                                try:
+                                    artifacts = fut.result()
                                     plot_utils.persist_plot_artifacts(artifacts)
+                                except Exception as e:
+                                    failures += 1
+                                    LOGGER.exception(
+                                        "within-cluster: DE-decoupler plotting task failed (net=%s, figdir=%s, title=%s). (%s)",
+                                        task[1],
+                                        str(task[2]),
+                                        task[3],
+                                        e,
+                                    )
+                                if done == len(plot_tasks) or done % 10 == 0:
+                                    LOGGER.info(
+                                        "within-cluster: DE-decoupler plotting progress %d/%d (failed=%d).",
+                                        done,
+                                        len(plot_tasks),
+                                        failures,
+                                    )
 
             try:
                 LOGGER.info("within-cluster: generating DE report...")
