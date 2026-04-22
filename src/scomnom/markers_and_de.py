@@ -3331,12 +3331,14 @@ def run_within_cluster(cfg) -> ad.AnnData:
 
             total = int(len(tasks))
             total_cpus = int(getattr(cfg, "n_jobs", 1))
-            max_workers = min(int(total_cpus), max(1, total))
+            pb_max_workers = int(getattr(cfg, "pb_max_workers", 16) or 16)
+            max_workers = min(int(total_cpus), max(1, total), int(max(1, pb_max_workers)))
             LOGGER.info(
-                "within-cluster: pseudobulk parallel run (tasks=%d, workers=%d, total_cpus=%d).",
+                "within-cluster: pseudobulk parallel run (tasks=%d, workers=%d, total_cpus=%d, worker_cap=%d).",
                 int(total),
                 int(max_workers),
                 int(total_cpus),
+                int(max(1, pb_max_workers)),
             )
 
             entries: list[tuple[str, dict]] = []
@@ -3949,6 +3951,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                     f"counts_layer={counts_layer_used}",
                     f"min_cells_per_sample_group={getattr(cfg, 'min_cells_condition', None)}",
                     f"min_samples_per_level={getattr(cfg, 'min_samples_per_level', None)}",
+                    f"pb_max_workers={getattr(cfg, 'pb_max_workers', None)}",
                     f"gene_filter={list(gene_filter)}",
                     f"gene_filter_n_genes_input={int(gene_filter_info['n_genes_input']) if gene_filter_info else int(adata.n_vars)}",
                     f"gene_filter_n_genes_retained={int(gene_filter_info['n_genes_retained']) if gene_filter_info else int(adata.n_vars)}",
