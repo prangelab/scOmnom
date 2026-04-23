@@ -3331,14 +3331,14 @@ def run_within_cluster(cfg) -> ad.AnnData:
 
             total = int(len(tasks))
             total_cpus = int(getattr(cfg, "n_jobs", 1))
-            pb_max_workers = int(getattr(cfg, "pb_max_workers", 16) or 16)
-            max_workers = min(int(total_cpus), max(1, total), int(max(1, pb_max_workers)))
+            worker_cap = int(getattr(cfg, "max_workers", 16) or 16)
+            max_workers = min(int(total_cpus), max(1, total), int(max(1, worker_cap)))
             LOGGER.info(
                 "within-cluster: pseudobulk parallel run (tasks=%d, workers=%d, total_cpus=%d, worker_cap=%d).",
                 int(total),
                 int(max_workers),
                 int(total_cpus),
-                int(max(1, pb_max_workers)),
+                int(max(1, worker_cap)),
             )
 
             entries: list[tuple[str, dict]] = []
@@ -3665,6 +3665,14 @@ def run_within_cluster(cfg) -> ad.AnnData:
             )
 
         from .de_utils import contrast_conditional_markers_multi
+        worker_cap = int(getattr(cfg, "max_workers", 16) or 16)
+        cell_workers = min(int(total_cpus), int(max(1, worker_cap)))
+        LOGGER.info(
+            "within-cluster: cell-level worker selection (workers=%d, total_cpus=%d, worker_cap=%d).",
+            int(cell_workers),
+            int(total_cpus),
+            int(max(1, worker_cap)),
+        )
         results_by_key, summaries_by_key = contrast_conditional_markers_multi(
             adata,
             groupby=str(groupby),
@@ -3672,7 +3680,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
             specs=specs,
             pb_spec=pb_spec,
             gene_var_mask=gene_var_mask,
-            n_jobs=total_cpus,
+            n_jobs=cell_workers,
         )
 
         for condition_key in condition_keys:
@@ -3725,6 +3733,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                     f"groupby={groupby}",
                     f"contrast_key={contrast_key}",
                     f"contrast_methods={tuple(getattr(cfg, 'contrast_methods', ())) }",
+                    f"max_workers={getattr(cfg, 'max_workers', None)}",
                     f"contrast_min_cells_per_level={getattr(cfg, 'contrast_min_cells_per_level', None)}",
                     f"contrast_max_cells_per_level={getattr(cfg, 'contrast_max_cells_per_level', None)}",
                     f"contrast_min_total_counts={getattr(cfg, 'contrast_min_total_counts', None)}",
@@ -3951,7 +3960,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                     f"counts_layer={counts_layer_used}",
                     f"min_cells_per_sample_group={getattr(cfg, 'min_cells_condition', None)}",
                     f"min_samples_per_level={getattr(cfg, 'min_samples_per_level', None)}",
-                    f"pb_max_workers={getattr(cfg, 'pb_max_workers', None)}",
+                    f"max_workers={getattr(cfg, 'max_workers', None)}",
                     f"gene_filter={list(gene_filter)}",
                     f"gene_filter_n_genes_input={int(gene_filter_info['n_genes_input']) if gene_filter_info else int(adata.n_vars)}",
                     f"gene_filter_n_genes_retained={int(gene_filter_info['n_genes_retained']) if gene_filter_info else int(adata.n_vars)}",

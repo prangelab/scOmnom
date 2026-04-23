@@ -731,7 +731,7 @@ class MarkersAndDEConfig(BaseModel):
     pb_min_counts_per_lib: int = 5
     pb_min_lib_pct: float = 0.0
     pb_max_genes: Optional[int] = None
-    pb_max_workers: int = 16
+    max_workers: int = 16
     pb_covariates: Tuple[str, ...] = ()
     prune_uns_de: bool = True
 

@@ -23,6 +23,7 @@ import scipy.sparse as sp
 LOGGER = logging.getLogger(__name__)
 _PSEUDOBULK_AGG_LOCK = threading.Lock()
 _ANNDATA_SLICE_LOCK = threading.Lock()
+_SCANPY_RANK_GENES_LOCK = threading.Lock()
 
 
 try:
@@ -2801,18 +2802,19 @@ def contrast_conditional_markers(
         wilcoxon_df = pd.DataFrame()
         if "wilcoxon" in spec.methods:
             with _suppress_settingwithcopy_warning():
-                sc.tl.rank_genes_groups(
-                    adata_sub,
-                    groupby=contrast_key,
-                    groups=[A],
-                    reference=B,
-                    method="wilcoxon",
-                    use_raw=False,
-                    key_added="__tmp_wilcoxon",
-                    n_genes=adata_sub.n_vars,
-                    rankby_abs=False,
-                    pts=True,
-                )
+                with _SCANPY_RANK_GENES_LOCK:
+                    sc.tl.rank_genes_groups(
+                        adata_sub,
+                        groupby=contrast_key,
+                        groups=[A],
+                        reference=B,
+                        method="wilcoxon",
+                        use_raw=False,
+                        key_added="__tmp_wilcoxon",
+                        n_genes=adata_sub.n_vars,
+                        rankby_abs=False,
+                        pts=True,
+                    )
             d = rank_genes_groups_df(adata_sub, group=A, key="__tmp_wilcoxon")
             d = _coerce_pts_columns(d)
 
@@ -2839,18 +2841,19 @@ def contrast_conditional_markers(
         logreg_df = pd.DataFrame()
         if "logreg" in spec.methods:
             with _suppress_settingwithcopy_warning():
-                sc.tl.rank_genes_groups(
-                    adata_sub,
-                    groupby=contrast_key,
-                    groups=[A],
-                    reference=B,
-                    method="logreg",
-                    use_raw=False,
-                    key_added="__tmp_logreg",
-                    n_genes=adata_sub.n_vars,
-                    rankby_abs=False,
-                    pts=True,
-                )
+                with _SCANPY_RANK_GENES_LOCK:
+                    sc.tl.rank_genes_groups(
+                        adata_sub,
+                        groupby=contrast_key,
+                        groups=[A],
+                        reference=B,
+                        method="logreg",
+                        use_raw=False,
+                        key_added="__tmp_logreg",
+                        n_genes=adata_sub.n_vars,
+                        rankby_abs=False,
+                        pts=True,
+                    )
             d = rank_genes_groups_df(adata_sub, group=A, key="__tmp_logreg")
             d = _coerce_pts_columns(d)
 
@@ -3378,18 +3381,19 @@ def contrast_conditional_markers_multi(
         wilcoxon_df = pd.DataFrame()
         if "wilcoxon" in spec.methods:
             with _suppress_settingwithcopy_warning():
-                sc.tl.rank_genes_groups(
-                    adata_sub,
-                    groupby=ck,
-                    groups=[A],
-                    reference=B,
-                    method="wilcoxon",
-                    use_raw=False,
-                    key_added="__tmp_wilcoxon",
-                    n_genes=adata_sub.n_vars,
-                    rankby_abs=False,
-                    pts=True,
-                )
+                with _SCANPY_RANK_GENES_LOCK:
+                    sc.tl.rank_genes_groups(
+                        adata_sub,
+                        groupby=ck,
+                        groups=[A],
+                        reference=B,
+                        method="wilcoxon",
+                        use_raw=False,
+                        key_added="__tmp_wilcoxon",
+                        n_genes=adata_sub.n_vars,
+                        rankby_abs=False,
+                        pts=True,
+                    )
             d = rank_genes_groups_df(adata_sub, group=A, key="__tmp_wilcoxon")
             d = _coerce_pts_columns(d)
 
@@ -3416,18 +3420,19 @@ def contrast_conditional_markers_multi(
         logreg_df = pd.DataFrame()
         if "logreg" in spec.methods:
             with _suppress_settingwithcopy_warning():
-                sc.tl.rank_genes_groups(
-                    adata_sub,
-                    groupby=ck,
-                    groups=[A],
-                    reference=B,
-                    method="logreg",
-                    use_raw=False,
-                    key_added="__tmp_logreg",
-                    n_genes=adata_sub.n_vars,
-                    rankby_abs=False,
-                    pts=True,
-                )
+                with _SCANPY_RANK_GENES_LOCK:
+                    sc.tl.rank_genes_groups(
+                        adata_sub,
+                        groupby=ck,
+                        groups=[A],
+                        reference=B,
+                        method="logreg",
+                        use_raw=False,
+                        key_added="__tmp_logreg",
+                        n_genes=adata_sub.n_vars,
+                        rankby_abs=False,
+                        pts=True,
+                    )
             d = rank_genes_groups_df(adata_sub, group=A, key="__tmp_logreg")
             d = _coerce_pts_columns(d)
 
