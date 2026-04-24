@@ -387,7 +387,13 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
     LOGGER.info("Using embedding_key='%s', batch_key='%s'", embedding_key, batch_key)
 
     # CellTypist precompute (must happen BEFORE BISC for bioARI)
-    celltypist_labels, celltypist_proba, _ = ct_utils.ensure_celltypist(adata, cfg, reuse=True, store=True)
+    reuse_celltypist = not bool(getattr(cfg, "force_celltypist_recompute", False))
+    celltypist_labels, celltypist_proba, _ = ct_utils.ensure_celltypist(
+        adata,
+        cfg,
+        reuse=reuse_celltypist,
+        store=True,
+    )
 
     # neighbors + UMAP
     sc.pp.neighbors(adata, use_rep=embedding_key)

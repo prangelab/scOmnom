@@ -203,6 +203,21 @@ def test_cluster_dispatch(mock_run):
     assert cfg.res_max == 1.2
 
 
+@patch("scomnom.cli.run_clustering")
+def test_cluster_dispatch_force_celltypist_recompute(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "cluster-and-annotate",
+            "--input", "integrated.h5ad",
+            "--force-celltypist-recompute",
+        ]
+    )
+    assert result.exit_code == 0
+    cfg = mock_run.call_args[0][0]
+    assert cfg.force_celltypist_recompute is True
+
+
 # ---------------------------------------------------------
 # adata-ops
 # ---------------------------------------------------------

@@ -167,6 +167,10 @@ class IntegrateConfig(BaseModel):
         "Immune_All_Low.pkl",
         description="Path or name of CellTypist model (.pkl). If None, skip annotation",
     )
+    force_celltypist_recompute: bool = Field(
+        False,
+        description="If True, ignore cached CellTypist outputs in the AnnData and recompute using celltypist_model.",
+    )
     celltypist_majority_voting: bool = True
     celltypist_label_key: str = "celltypist_label"
     celltypist_cluster_label_key: str = "celltypist_cluster_label"
@@ -371,6 +375,7 @@ class ClusterAnnotateConfig(BaseModel):
         "Immune_All_Low.pkl",
         description="Path or name of CellTypist model (.pkl). If None, skip annotation",
     )
+    force_celltypist_recompute: bool = False
     celltypist_majority_voting: bool = True
     celltypist_label_key: str = "celltypist_label"
     celltypist_cluster_label_key: str = "celltypist_cluster_label"

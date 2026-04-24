@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import pytest
+from unittest.mock import Mock
 
 from scomnom.cluster_and_annotate import run_clustering, _compute_resolutions
 from scomnom.config import ClusterAnnotateConfig
@@ -221,3 +222,40 @@ def test_final_silhouette_qc(tmp_path, fake_io):
     assert qc is not None
     for k in ["mean", "median", "p10", "p90"]:
         assert k in qc
+
+
+def test_force_celltypist_recompute_disables_reuse(tmp_path, monkeypatch):
+    adata = synthetic_adata()
+    adata.obs_names = [f"cell{i}" for i in range(adata.n_obs)]
+    in_path = tmp_path / "in.h5ad"
+    adata.write_h5ad(in_path)
+
+    cfg = ClusterAnnotateConfig(
+        input_path=in_path,
+        make_figures=False,
+        bio_guided_clustering=False,
+        celltypist_model="dummy_model",
+        force_celltypist_recompute=True,
+        embedding_key="X_pca",
+        label_key="leiden",
+    )
+
+    import scomnom.cluster_and_annotate as ca
+
+    ensure_mock = Mock(return_value=(None, None, {}))
+    monkeypatch.setattr(ca.ct_utils, "ensure_celltypist", ensure_mock)
+    monkeypatch.setattr(ca, "_recompute_hvg_and_pca", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ca, "_ensure_embedding", lambda adata, embedding_key: embedding_key)
+    monkeypatch.setattr(ca.sc.pp, "neighbors", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ca.sc.tl, "umap", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ca, "_plot_round_clustering_diagnostics", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ca, "_export_round_annotations_csv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ca.io_utils, "save_dataset", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ca.reporting, "generate_cluster_and_annotate_report", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ca, "run_BISC", lambda adata, cfg, **kwargs: adata.uns.update({"active_cluster_round": "r1", "cluster_rounds": {"r1": {"cluster_key": cfg.label_key}}}) or adata.obs.__setitem__(cfg.label_key, pd.Categorical(["0"] * adata.n_obs)))
+    monkeypatch.setattr(ca, "_run_celltypist_annotation", lambda *args, **kwargs: None)
+
+    run_clustering(cfg)
+
+    assert ensure_mock.call_args.kwargs["reuse"] is False
+    assert ensure_mock.call_args.kwargs["store"] is True

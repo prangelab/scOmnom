@@ -975,6 +975,11 @@ def cluster_and_annotate(
         autocompletion=_celltypist_models_completion,
         help="[CellTypist] Path or name of model. If None, skip annotation.",
     ),
+    force_celltypist_recompute: bool = typer.Option(
+        False,
+        "--force-celltypist-recompute/--reuse-celltypist",
+        help="[CellTypist] Force a fresh CellTypist run with --celltypist-model instead of reusing stored outputs.",
+    ),
     celltypist_majority_voting: bool = typer.Option(
         True,
         "--celltypist-majority-voting/--no-celltypist-majority-voting",
@@ -1277,6 +1282,7 @@ def cluster_and_annotate(
         w_tiny=w_tiny,
 
         celltypist_model=celltypist_model,
+        force_celltypist_recompute=force_celltypist_recompute,
         celltypist_majority_voting=celltypist_majority_voting,
         annotation_csv=annotation_csv,
 

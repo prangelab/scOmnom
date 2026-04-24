@@ -190,3 +190,4 @@ def test_clusterannotate_defaults(tmp_path):
     assert cfg.w_sil == 0.35
     assert cfg.w_tiny == 0.15
     assert cfg.bio_guided_clustering is True
+    assert cfg.force_celltypist_recompute is False
