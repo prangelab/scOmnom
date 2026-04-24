@@ -3143,6 +3143,7 @@ def contrast_conditional_markers_multi(
     pb_spec: Optional[PseudobulkSpec] = None,
     gene_var_mask: Optional[np.ndarray] = None,
     n_jobs: int = 1,
+    cluster_values: Optional[Sequence[str]] = None,
 ) -> tuple[dict[str, dict[str, dict[str, dict[str, pd.DataFrame]]]], dict[str, pd.DataFrame]]:
     """
     Run cell-level contrasts for multiple contrast_keys using one global task pool.
@@ -3179,6 +3180,11 @@ def contrast_conditional_markers_multi(
         return 0
 
     clusters = pd.Index(pd.unique(adata.obs[group_key].astype(str))).sort_values()
+    if cluster_values:
+        allowed = {str(x) for x in cluster_values if str(x)}
+        clusters = pd.Index([str(c) for c in clusters.astype(str).tolist() if str(c) in allowed])
+        if len(clusters) == 0:
+            raise ValueError("cell-level contrasts: no clusters left after cluster_values filter.")
 
     contrast_info: dict[str, dict[str, Any]] = {}
     tasks: list[tuple[str, str, str, str]] = []

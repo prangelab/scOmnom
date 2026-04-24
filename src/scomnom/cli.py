@@ -1427,6 +1427,7 @@ def _build_cfg(
     prune_uns_de: bool,
     # within-cluster condition keys
     condition_keys: Optional[List[str]],
+    target_groups: Optional[List[str]],
     # de-decoupler
     de_decoupler_source: str,
     de_decoupler_stat_col: str,
@@ -1472,6 +1473,7 @@ def _build_cfg(
     layers = _parse_csv_repeat(pb_counts_layer) or ["counts_cb", "counts_raw"]
     covariates = tuple(_parse_csv_repeat(pb_covariates) or ())
     cond_keys = tuple(_parse_csv_repeat(condition_keys) or ())
+    target_groups_parsed = tuple(_parse_csv_repeat(target_groups) or ())
     gene_filters = tuple(gene_filter or ())
     plot_filters = tuple(plot_gene_filter or ())
     plot_annot_keys = tuple(plot_sample_annotation_keys or ())
@@ -1525,6 +1527,7 @@ def _build_cfg(
         pb_covariates=tuple(_parse_csv_repeat(pb_covariates) or ()),
         prune_uns_de=prune_uns_de,
         condition_keys=cond_keys,
+        target_groups=target_groups_parsed,
         de_decoupler_source=str(de_decoupler_source),
         de_decoupler_stat_col=str(de_decoupler_stat_col),
         decoupler_method=str(decoupler_method),
@@ -2035,6 +2038,7 @@ def cluster_vs_rest(
         pb_covariates=tuple(_parse_csv_repeat(pb_covariates) or ()),
         prune_uns_de=prune_uns_de,
         condition_keys=[],
+        target_groups=None,
         de_decoupler_source="none",
         de_decoupler_stat_col="stat",
         decoupler_method="consensus",
@@ -2488,6 +2492,11 @@ def within_cluster(
 
     condition_key: Optional[str] = typer.Option(None, "--condition-key"),
     condition_keys: List[str] = typer.Option([], "--condition-keys"),
+    target_groups: List[str] = typer.Option(
+        [],
+        "--target-groups",
+        help="Restrict within-cluster DE to selected group labels (repeatable/comma-separated).",
+    ),
     contrasts: Optional[List[str]] = typer.Option(None, "--contrasts"),
 
     min_pct: float = typer.Option(0.25, "--min-pct"),
@@ -2632,6 +2641,7 @@ def within_cluster(
         pb_covariates=pb_covariates,
         prune_uns_de=prune_uns_de,
         condition_keys=condition_keys,
+        target_groups=target_groups,
         de_decoupler_source=de_source,
         de_decoupler_stat_col=de_decoupler_stat_col,
         decoupler_method=decoupler_method,

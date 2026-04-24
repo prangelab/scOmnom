@@ -741,6 +741,7 @@ class MarkersAndDEConfig(BaseModel):
     condition_key: Optional[str] = None
     condition_keys: Tuple[str, ...] = ()
     condition_contrasts: Tuple[str, ...] = ()
+    target_groups: Tuple[str, ...] = ()
     min_cells_condition: int = 20
 
     # ------------------------------------------------------------------

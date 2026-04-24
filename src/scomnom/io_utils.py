@@ -849,7 +849,19 @@ def attach_raw_counts_postfilter(
     )
     cell_key_set = set(cell_key)
 
+    raw_glob = str(cfg.raw_sample_dir / cfg.raw_pattern)
+    LOGGER.info(
+        "attach_raw_counts_postfilter: cwd=%s raw_sample_dir=%r raw_pattern=%r raw_glob=%s",
+        Path.cwd(),
+        cfg.raw_sample_dir,
+        cfg.raw_pattern,
+        raw_glob,
+    )
     raw_dirs = find_raw_dirs(cfg.raw_sample_dir, cfg.raw_pattern)
+    LOGGER.info(
+        "attach_raw_counts_postfilter: found %d raw dirs",
+        len(raw_dirs),
+    )
     if not raw_dirs:
         raise RuntimeError("No raw data directories found")
 

@@ -3143,6 +3143,32 @@ def run_within_cluster(cfg) -> ad.AnnData:
     n_samples_total = _n_unique_samples(adata, str(sample_key))
     pseudobulk_enabled = n_samples_total >= _MIN_TOTAL_SAMPLES_FOR_PSEUDOBULK
 
+    all_groups = pd.Index(pd.unique(adata.obs[str(groupby)].astype(str))).sort_values()
+    target_groups_cfg = [str(x) for x in (getattr(cfg, "target_groups", ()) or ())]
+    target_groups_cfg = [x for x in target_groups_cfg if x]
+    if target_groups_cfg:
+        target_set = set(target_groups_cfg)
+        selected = [str(g) for g in all_groups.astype(str).tolist() if str(g) in target_set]
+        missing = sorted(target_set.difference(set(all_groups.astype(str).tolist())))
+        if missing:
+            LOGGER.warning(
+                "within-cluster: target_groups not found in %r and will be ignored: %s",
+                str(groupby),
+                ", ".join(missing),
+            )
+        if not selected:
+            raise RuntimeError(
+                f"within-cluster: none of target_groups matched {groupby!r}; aborting."
+            )
+        selected_groups = pd.Index(selected)
+    else:
+        selected_groups = pd.Index(all_groups.astype(str).tolist())
+    LOGGER.info(
+        "within-cluster: target group selection (%d/%d groups).",
+        int(len(selected_groups)),
+        int(len(all_groups)),
+    )
+
     pb_spec: Optional[PseudobulkSpec] = None
     pb_opts: Optional[PseudobulkDEOptions] = None
 
@@ -3222,7 +3248,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                 covariates=tuple(getattr(cfg, "pb_covariates", ())),
             )
 
-            groups = pd.Index(pd.unique(adata.obs[str(groupby)].astype(str))).sort_values()
+            groups = selected_groups
 
             from .de_utils import (
                 de_condition_within_group_pseudobulk_multi,
@@ -3681,6 +3707,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
             pb_spec=pb_spec,
             gene_var_mask=gene_var_mask,
             n_jobs=cell_workers,
+            cluster_values=selected_groups.astype(str).tolist(),
         )
 
         for condition_key in condition_keys:
@@ -3731,6 +3758,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                     "mode=within-cluster",
                     "engine=cell",
                     f"groupby={groupby}",
+                    f"target_groups={list(getattr(cfg, 'target_groups', ()) or ())}",
                     f"contrast_key={contrast_key}",
                     f"contrast_methods={tuple(getattr(cfg, 'contrast_methods', ())) }",
                     f"max_workers={getattr(cfg, 'max_workers', None)}",
@@ -3956,6 +3984,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                     "engine=pseudobulk",
                     f"groupby={groupby}",
                     f"condition_key={condition_key}",
+                    f"target_groups={list(getattr(cfg, 'target_groups', ()) or ())}",
                     f"sample_key={sample_key}",
                     f"counts_layer={counts_layer_used}",
                     f"min_cells_per_sample_group={getattr(cfg, 'min_cells_condition', None)}",

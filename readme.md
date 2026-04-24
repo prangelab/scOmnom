@@ -1289,12 +1289,19 @@ Within-cluster DE compares **condition levels inside each cluster**, e.g. `treat
 * Runs contrast-conditional markers per cluster using `wilcoxon` and `logreg` (configurable).
 * Uses `min_pct` and `min_diff_pct` to focus on robust signals.
 * Does not require the pseudobulk sample guard.
+* Typically much faster than pseudobulk, which makes it practical for iterative test runs.
 
 **Pseudobulk within-cluster DE**
 
 * Aggregates counts by sample and cluster, then runs DESeq2 per cluster and contrast.
 * Requires at least **6 unique samples** (guarded).
 * Supports sample-level covariates and minimum cells per sample-cluster.
+* Usually substantially slower than cell-level mode, but more rigorous for replicate-aware inference.
+
+**Target populations**
+
+* `--target-groups` restricts DE to selected cluster/population labels from `--group-key` (repeatable and comma-separated).
+* Applies to both cell-level and pseudobulk phases, so unrelated populations are skipped in computation and outputs.
 
 **Gene filtering**
 
