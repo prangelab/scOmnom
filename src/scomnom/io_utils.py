@@ -1542,9 +1542,19 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
             max_len = max((len(v) for v in flat), default=1)
             return np.asarray(flat, dtype=f"<U{max(1, max_len)}").reshape(arr.shape)
 
+        def _dtype_has_object(dt: np.dtype) -> bool:
+            if dt == object:
+                return True
+            if dt.fields:
+                for _, field_info in dt.fields.items():
+                    field_dt = np.dtype(field_info[0])
+                    if _dtype_has_object(field_dt):
+                        return True
+            return False
+
         def _create_array_safe(grp, name: str, data) -> None:
             arr = np.asarray(data)
-            if arr.dtype == object:
+            if _dtype_has_object(arr.dtype):
                 arr = _to_unicode_ndarray(arr)
             grp.create_array(name, data=arr, overwrite=True)
 
