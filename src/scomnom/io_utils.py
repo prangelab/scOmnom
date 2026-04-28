@@ -1400,7 +1400,7 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
         if cgroup_max is not None and cgroup_max >= (2**60):
             cgroup_max = None
 
-        LOGGER.info(
+        LOGGER.debug(
             "save_dataset[%s]: rss_max=%s GiB cgroup_current=%s GiB cgroup_limit=%s GiB",
             str(stage),
             str(rss_gib),
@@ -1562,7 +1562,7 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
             pid = str(payload["id"])
             kind = str(payload["kind"])
             obj = payload["obj"]
-            LOGGER.info("save_dataset: writing sidecar payload id=%s kind=%s", pid, kind)
+            LOGGER.debug("save_dataset: writing sidecar payload id=%s kind=%s", pid, kind)
 
             if pid in side_root:
                 del side_root[pid]
