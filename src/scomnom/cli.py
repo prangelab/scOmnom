@@ -1928,7 +1928,7 @@ def cluster_vs_rest(
     pb_store_key: str = typer.Option("scomnom_de", "--pb-store-key"),
     pb_max_genes: Optional[int] = typer.Option(None, "--pb-max-genes"),
     max_workers: int = typer.Option(
-        16,
+        8,
         "--max-workers",
         "--pb-max-workers",
         help="Maximum parallel DE worker tasks for both pseudobulk and cell-level phases.",
@@ -2524,7 +2524,7 @@ def within_cluster(
     pb_store_key: str = typer.Option("scomnom_de", "--pb-store-key"),
     pb_max_genes: Optional[int] = typer.Option(None, "--pb-max-genes"),
     max_workers: int = typer.Option(
-        16,
+        8,
         "--max-workers",
         "--pb-max-workers",
         help="Maximum parallel DE worker tasks for both pseudobulk and cell-level phases.",

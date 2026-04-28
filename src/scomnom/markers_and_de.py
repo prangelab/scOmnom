@@ -23,6 +23,7 @@ from .de_utils import (
     PseudobulkSpec,
     CellLevelMarkerSpec,
     PseudobulkDEOptions,
+    _set_blas_threads,
     compute_markers_celllevel,
     de_cluster_vs_rest_pseudobulk,
     pydeseq2_supports_interaction_by_name,
@@ -52,6 +53,7 @@ from .annotation_utils import (
 
 LOGGER = logging.getLogger(__name__)
 _SCCODA_LOCK = threading.Lock()
+_DECOUPLER_PLOT_LOCK = threading.Lock()
 
 # -----------------------------------------------------------------------------
 # Internal policy guard
@@ -3415,6 +3417,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                 heartbeat_s = 60.0
                 slow_task_warn_s = 30 * 60.0
                 next_heartbeat = time.perf_counter() + heartbeat_s
+                _set_blas_threads(1, force=True)
 
                 with ThreadPoolExecutor(max_workers=max_workers) as ex:
                     futs = {ex.submit(_run_task, task): task for task in tasks}
@@ -4195,20 +4198,21 @@ def run_within_cluster(cfg) -> ad.AnnData:
 
                         def _plot_de_decoupler_task(task: tuple[dict, str, Path, str, Optional[str], Optional[str]]):
                             net_payload, net_name, base, title_prefix, pos_label, neg_label = task
-                            return de_plot_utils.plot_de_decoupler_payload(
-                                net_payload,
-                                net_name=net_name,
-                                figdir=base,
-                                heatmap_top_k=int(getattr(cfg, "plot_max_genes_total", 80)),
-                                bar_top_n=int(top_n_genes),
-                                bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
-                                bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
-                                bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
-                                dotplot_top_k=int(dotplot_top_n_genes),
-                                title_prefix=title_prefix,
-                                pos_label=pos_label,
-                                neg_label=neg_label,
-                            )
+                            with _DECOUPLER_PLOT_LOCK:
+                                return de_plot_utils.plot_de_decoupler_payload(
+                                    net_payload,
+                                    net_name=net_name,
+                                    figdir=base,
+                                    heatmap_top_k=int(getattr(cfg, "plot_max_genes_total", 80)),
+                                    bar_top_n=int(top_n_genes),
+                                    bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
+                                    bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
+                                    bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
+                                    dotplot_top_k=int(dotplot_top_n_genes),
+                                    title_prefix=title_prefix,
+                                    pos_label=pos_label,
+                                    neg_label=neg_label,
+                                )
 
                         done = 0
                         failures = 0
@@ -4219,7 +4223,8 @@ def run_within_cluster(cfg) -> ad.AnnData:
                                 done += 1
                                 try:
                                     artifacts = fut.result()
-                                    plot_utils.persist_plot_artifacts(artifacts)
+                                    with _DECOUPLER_PLOT_LOCK:
+                                        plot_utils.persist_plot_artifacts(artifacts)
                                 except Exception as e:
                                     failures += 1
                                     LOGGER.exception(
