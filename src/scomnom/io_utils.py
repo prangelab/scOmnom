@@ -1552,51 +1552,62 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
             pid = str(payload["id"])
             kind = str(payload["kind"])
             obj = payload["obj"]
-            LOGGER.debug("save_dataset: writing sidecar payload id=%s kind=%s", pid, kind)
+            LOGGER.info("save_dataset: writing sidecar payload id=%s kind=%s", pid, kind)
 
             if pid in side_root:
                 del side_root[pid]
             grp = side_root.create_group(pid)
             grp.attrs["kind"] = kind
 
-            if kind == "dataframe":
-                df = obj
-                data = np.asarray(df.to_numpy(copy=False))
-                data_cast = "native"
-                if data.dtype == object:
-                    data = _to_unicode_matrix(df.astype(str).to_numpy(copy=False))
-                    data_cast = "str"
-                _create_array_safe(grp, "data", data)
-                idx = _to_unicode_array(df.index.astype(str).tolist())
-                cols = _to_unicode_array(df.columns.astype(str).tolist())
-                _create_array_safe(grp, "index", idx)
-                _create_array_safe(grp, "columns", cols)
-                grp.attrs["dtypes"] = json.dumps([str(x) for x in df.dtypes], ensure_ascii=True)
-                grp.attrs["data_cast"] = data_cast
-                manifest_entries.append({"id": pid, "kind": kind, "shape": [int(df.shape[0]), int(df.shape[1])]})
-            elif kind == "series":
-                series = obj
-                data = np.asarray(series.to_numpy(copy=False))
-                data_cast = "native"
-                if data.dtype == object:
-                    data = _to_unicode_array(series.astype(str).tolist())
-                    data_cast = "str"
-                _create_array_safe(grp, "data", data)
-                idx = _to_unicode_array(series.index.astype(str).tolist())
-                _create_array_safe(grp, "index", idx)
-                grp.attrs["name"] = "" if series.name is None else str(series.name)
-                grp.attrs["dtype"] = str(series.dtype)
-                grp.attrs["data_cast"] = data_cast
-                manifest_entries.append({"id": pid, "kind": kind, "shape": [int(series.shape[0])]})
-            elif kind == "ndarray":
-                arr = np.asarray(obj)
-                if arr.dtype == object:
-                    arr = _to_unicode_ndarray(arr)
-                _create_array_safe(grp, "data", arr)
-                grp.attrs["dtype"] = str(arr.dtype)
-                manifest_entries.append({"id": pid, "kind": kind, "shape": [int(x) for x in arr.shape]})
-            else:
-                raise RuntimeError(f"Unknown sidecar payload kind: {kind!r}")
+            try:
+                if kind == "dataframe":
+                    df = obj
+                    data = np.asarray(df.to_numpy(copy=False))
+                    data_cast = "native"
+                    if data.dtype == object:
+                        data = _to_unicode_matrix(df.astype(str).to_numpy(copy=False))
+                        data_cast = "str"
+                    _create_array_safe(grp, "data", data)
+                    idx = _to_unicode_array(df.index.astype(str).tolist())
+                    cols = _to_unicode_array(df.columns.astype(str).tolist())
+                    _create_array_safe(grp, "index", idx)
+                    _create_array_safe(grp, "columns", cols)
+                    grp.attrs["dtypes"] = json.dumps([str(x) for x in df.dtypes], ensure_ascii=True)
+                    grp.attrs["data_cast"] = data_cast
+                    manifest_entries.append({"id": pid, "kind": kind, "shape": [int(df.shape[0]), int(df.shape[1])]})
+                elif kind == "series":
+                    series = obj
+                    data = np.asarray(series.to_numpy(copy=False))
+                    data_cast = "native"
+                    if data.dtype == object:
+                        data = _to_unicode_array(series.astype(str).tolist())
+                        data_cast = "str"
+                    _create_array_safe(grp, "data", data)
+                    idx = _to_unicode_array(series.index.astype(str).tolist())
+                    _create_array_safe(grp, "index", idx)
+                    grp.attrs["name"] = "" if series.name is None else str(series.name)
+                    grp.attrs["dtype"] = str(series.dtype)
+                    grp.attrs["data_cast"] = data_cast
+                    manifest_entries.append({"id": pid, "kind": kind, "shape": [int(series.shape[0])]})
+                elif kind == "ndarray":
+                    arr = np.asarray(obj)
+                    if arr.dtype == object:
+                        arr = _to_unicode_ndarray(arr)
+                    _create_array_safe(grp, "data", arr)
+                    grp.attrs["dtype"] = str(arr.dtype)
+                    manifest_entries.append({"id": pid, "kind": kind, "shape": [int(x) for x in arr.shape]})
+                else:
+                    raise RuntimeError(f"Unknown sidecar payload kind: {kind!r}")
+            except Exception as e:
+                LOGGER.warning(
+                    "save_dataset: sidecar payload failed (id=%s kind=%s); skipping payload. (%s)",
+                    pid,
+                    kind,
+                    e,
+                )
+                if pid in side_root:
+                    del side_root[pid]
+                continue
 
         if "__manifest__" in side_root:
             del side_root["__manifest__"]
@@ -1806,7 +1817,10 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
                     _log_mem_checkpoint("post_write_zarr_stage")
                     if sidecar_enabled and _sidecar_payloads:
                         _log_mem_checkpoint("pre_write_sidecar_stage")
-                        _write_sidecar_payloads(tmp_zarr_dir)
+                        try:
+                            _write_sidecar_payloads(tmp_zarr_dir)
+                        except Exception as e:
+                            LOGGER.warning("save_dataset: sidecar stage failed; continuing without sidecar payloads. (%s)", e)
                         _log_mem_checkpoint("post_write_sidecar_stage")
 
                     LOGGER.debug("save_dataset: archiving staged zarr to %s", archive_path)
@@ -1825,7 +1839,10 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
                 _log_mem_checkpoint("post_write_zarr")
                 if sidecar_enabled and _sidecar_payloads:
                     _log_mem_checkpoint("pre_write_sidecar")
-                    _write_sidecar_payloads(out_path)
+                    try:
+                        _write_sidecar_payloads(out_path)
+                    except Exception as e:
+                        LOGGER.warning("save_dataset: sidecar stage failed; continuing without sidecar payloads. (%s)", e)
                     _log_mem_checkpoint("post_write_sidecar")
         elif fmt == "h5ad":
             LOGGER.debug("save_dataset: writing h5ad %s", out_path)
