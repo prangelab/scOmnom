@@ -82,3 +82,19 @@ Improved save robustness and memory behavior around Zarr serialization by:
 Documentation and release housekeeping update:
 - added README section for `adata-ops annotation-merge` (subset back-merge workflow, key flags, and examples)
 - corrected changelog ordering for the `0.3.2` / `0.3.3` entries
+
+## 0.5.0 [28-04-2026]
+Stability and robustness release focused on DE execution and dataset serialization:
+- fixed within-cluster DE gene-filter indexing mismatch that could crash conditional runs with `IndexError` when filtered gene sets were used
+- added `--target-groups` support for within-cluster DE so users can restrict analysis to selected populations
+- capped and unified DE worker control via `--max-workers` for both pseudobulk and cell-level phases to reduce native-thread instability on large HPC runs
+- improved DE report run-folder detection to support round-aware directory names like `de_<round_id>_roundN` (case-insensitive and backward-compatible)
+
+Serialization and save-path hardening:
+- hardened sidecar writing for nested object dtypes (including structured arrays with object fields) to avoid Zarr object-dtype resolution failures
+- made sidecar payload failures non-fatal during save so core dataset writes still complete, with warning-level diagnostics for skipped payloads
+- reduced `save_dataset` log noise by moving memory checkpoint and per-payload sidecar write lines to debug-level output
+
+Documentation and CLI ergonomics:
+- documented a practical fallback strategy for large DE workloads: split `--run both` into separate `--run pseudobulk` and `--run cell` jobs when needed
+- added CLI support to force CellTypist recomputation with explicit reuse/refresh control
