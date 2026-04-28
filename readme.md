@@ -1331,6 +1331,7 @@ Within-cluster DE compares **condition levels inside each cluster**, e.g. `treat
 * **Pseudobulk** respects sample-level independence, improves control of confounders via covariates, applies the `min_pct` filter, and yields more conservative inference, but requires enough replicates and loses single-cell resolution.
 
 Running both can be informative: cell-level for discovery, pseudobulk for robustness.
+For very large jobs, if `--run both` is unstable (for example due to memory pressure or native-thread failures), run two separate commands instead (`--run pseudobulk` and `--run cell`) into separate output folders and combine the interpretation afterward.
 
 ---
 

@@ -501,7 +501,12 @@ def _find_latest_run_dir(*, fig_root: Path, fmt: str, module_prefix: str) -> Pat
     if not base.exists():
         return None
 
-    pat = re.compile(rf"^{re.escape(module_prefix)}_round(\d+)$")
+    # Accept both legacy "<prefix>_roundN" and newer "<prefix>_<runname>_roundN"
+    # while being case-insensitive for prefix matching.
+    pat = re.compile(
+        rf"^{re.escape(module_prefix)}(?:_.+)?_round(\d+)$",
+        flags=re.IGNORECASE,
+    )
     best_n = None
     best_dir = None
 
@@ -520,7 +525,12 @@ def _find_latest_run_dir(*, fig_root: Path, fmt: str, module_prefix: str) -> Pat
         return best_dir
 
     fallback = base / module_prefix
-    return fallback if fallback.exists() else None
+    if fallback.exists():
+        return fallback
+    for d in base.iterdir():
+        if d.is_dir() and d.name.lower() == str(module_prefix).lower():
+            return d
+    return None
 
 
 def _collect_images_in_dir(run_dir: Path, fmt: str, *, recursive: bool = True) -> List[Path]:
