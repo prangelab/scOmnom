@@ -2431,6 +2431,7 @@ def _pb_effect_log2fc(
     # densify 2 rows only
     sub = counts_df.loc[[rid_A, rid_B]]
     dense = sub.sparse.to_coo().toarray().astype(np.int64, copy=False)
+    genes_all = sub.columns.to_numpy(dtype=str, copy=False)
     sumA = dense[0, :]
     sumB = dense[1, :]
 
@@ -2442,7 +2443,7 @@ def _pb_effect_log2fc(
 
     sumA = sumA[keep]
     sumB = sumB[keep]
-    genes = adata.var_names.to_numpy()[keep]
+    genes = genes_all[keep]
 
     pc = float(pseudocount)
     pb_log2fc = np.log2((sumA + pc) / (sumB + pc))

@@ -1542,10 +1542,17 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
             max_len = max((len(v) for v in flat), default=1)
             return np.asarray(flat, dtype=f"<U{max(1, max_len)}").reshape(arr.shape)
 
+        def _create_array_safe(grp, name: str, data) -> None:
+            arr = np.asarray(data)
+            if arr.dtype == object:
+                arr = _to_unicode_ndarray(arr)
+            grp.create_array(name, data=arr, overwrite=True)
+
         for payload in _sidecar_payloads:
             pid = str(payload["id"])
             kind = str(payload["kind"])
             obj = payload["obj"]
+            LOGGER.debug("save_dataset: writing sidecar payload id=%s kind=%s", pid, kind)
 
             if pid in side_root:
                 del side_root[pid]
@@ -1559,11 +1566,11 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
                 if data.dtype == object:
                     data = _to_unicode_matrix(df.astype(str).to_numpy(copy=False))
                     data_cast = "str"
-                grp.create_array("data", data=data, overwrite=True)
+                _create_array_safe(grp, "data", data)
                 idx = _to_unicode_array(df.index.astype(str).tolist())
                 cols = _to_unicode_array(df.columns.astype(str).tolist())
-                grp.create_array("index", data=idx, overwrite=True)
-                grp.create_array("columns", data=cols, overwrite=True)
+                _create_array_safe(grp, "index", idx)
+                _create_array_safe(grp, "columns", cols)
                 grp.attrs["dtypes"] = json.dumps([str(x) for x in df.dtypes], ensure_ascii=True)
                 grp.attrs["data_cast"] = data_cast
                 manifest_entries.append({"id": pid, "kind": kind, "shape": [int(df.shape[0]), int(df.shape[1])]})
@@ -1574,9 +1581,9 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
                 if data.dtype == object:
                     data = _to_unicode_array(series.astype(str).tolist())
                     data_cast = "str"
-                grp.create_array("data", data=data, overwrite=True)
+                _create_array_safe(grp, "data", data)
                 idx = _to_unicode_array(series.index.astype(str).tolist())
-                grp.create_array("index", data=idx, overwrite=True)
+                _create_array_safe(grp, "index", idx)
                 grp.attrs["name"] = "" if series.name is None else str(series.name)
                 grp.attrs["dtype"] = str(series.dtype)
                 grp.attrs["data_cast"] = data_cast
@@ -1585,7 +1592,7 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
                 arr = np.asarray(obj)
                 if arr.dtype == object:
                     arr = _to_unicode_ndarray(arr)
-                grp.create_array("data", data=arr, overwrite=True)
+                _create_array_safe(grp, "data", arr)
                 grp.attrs["dtype"] = str(arr.dtype)
                 manifest_entries.append({"id": pid, "kind": kind, "shape": [int(x) for x in arr.shape]})
             else:
