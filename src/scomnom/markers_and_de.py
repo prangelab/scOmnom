@@ -3418,11 +3418,28 @@ def run_within_cluster(cfg) -> ad.AnnData:
                 slow_task_warn_s = 30 * 60.0
                 next_heartbeat = time.perf_counter() + heartbeat_s
                 _set_blas_threads(1, force=True)
+                gc_every_n = max(8, int(max_workers))
+                LOGGER.info(
+                    "within-cluster: pseudobulk memory-hygiene settings (scheduler=dynamic_refill, gc_every_n=%d).",
+                    int(gc_every_n),
+                )
 
                 with ThreadPoolExecutor(max_workers=max_workers) as ex:
-                    futs = {ex.submit(_run_task, task): task for task in tasks}
-                    pending = set(futs.keys())
-                    submitted_by_fut = {f: time.perf_counter() for f in pending}
+                    task_iter = iter(tasks)
+                    futs: dict = {}
+                    pending = set()
+                    submitted_by_fut: dict = {}
+
+                    for _ in range(min(int(max_workers), len(tasks))):
+                        try:
+                            task = next(task_iter)
+                        except StopIteration:
+                            break
+                        fut = ex.submit(_run_task, task)
+                        futs[fut] = task
+                        pending.add(fut)
+                        submitted_by_fut[fut] = time.perf_counter()
+
                     while pending:
                         now = time.perf_counter()
                         done_set, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
@@ -3549,6 +3566,23 @@ def run_within_cluster(cfg) -> ad.AnnData:
                                 float(queue_s),
                                 float(wall_s),
                             )
+
+                            futs.pop(fut, None)
+                            submitted_by_fut.pop(fut, None)
+                            del fut
+
+                            try:
+                                task = next(task_iter)
+                                fut2 = ex.submit(_run_task, task)
+                                futs[fut2] = task
+                                pending.add(fut2)
+                                submitted_by_fut[fut2] = time.perf_counter()
+                            except StopIteration:
+                                pass
+
+                            if done % int(gc_every_n) == 0:
+                                gc.collect()
+                gc.collect()
             else:
                 for task in tasks:
                     kind, cond_key, gval, res, meta, run_s = _run_task(task)
