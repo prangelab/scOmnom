@@ -98,7 +98,15 @@ The standard workflow consists of:
 2. `integrate`
 3. `cluster-and-annotate`
 4. `integrate --annotated-run` (optional refinement)
-5. `markers-and-de` (run `markers`, `de`, and `da`)
+5. `adata-ops rename` (optional but common before DE/DA)
+6. `markers-and-de de`
+7. `markers-and-de da`
+
+Optional subset branch between steps 4 and 5:
+* `adata-ops subset` on the projected parent object
+* run subset objects through the same `integrate -> cluster-and-annotate -> integrate --annotated-run` pattern
+* `adata-ops annotation-merge` back into the parent object
+* then continue with parent-level `adata-ops rename`, `de`, and `da`
 
 Minimal end-to-end example (stringing outputs across modules):
 
@@ -567,6 +575,26 @@ integrate
 cluster-and-annotate
    ↓
 integrate --annotated-run (optional)
+   ↓
+adata-ops rename (optional, often used)
+   ↓
+markers-and-de de
+   ↓
+markers-and-de da
+```
+
+Optional subset loop after `integrate --annotated-run` and before final rename/DE/DA:
+
+```
+parent projected object
+   ↓
+adata-ops subset
+   ↓
+[subset object(s)] integrate -> cluster-and-annotate -> integrate --annotated-run
+   ↓
+adata-ops annotation-merge (back into parent)
+   ↓
+adata-ops rename
 ```
 
 The secondary integration step is **purely optional** and should be used only when:
@@ -1320,6 +1348,31 @@ Within-cluster DE compares **condition levels inside each cluster**, e.g. `treat
 **Outputs**
 
 * Tables: `tables/de_<round>_roundN/cell_based/` and `tables/de_<round>_roundN/pseudobulk_based/`
+
+**HPC stability/throughput recipe (large pseudobulk runs)**
+
+For large DE jobs on HPC, use a conservative worker cap and disable nested BLAS/OpenMP threading in the job script:
+
+Base template: `slurm/scomnom_template.job`
+
+```bash
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
+```
+
+Then run DE with:
+
+```bash
+scomnom markers-and-de de ... --run pseudobulk --max-workers 8
+```
+
+Notes:
+* `--max-workers` defaults to `8` for DE.
+* Keep `--n-jobs $SLURM_CPUS_PER_TASK`; `--max-workers` controls DE task concurrency.
+* If `--run both` is unstable on very large jobs, split into separate `--run pseudobulk` and `--run cell` runs with separate output folders.
 * Figures: `figures/<fmt>/de_<round>_roundN/`
 * Default AnnData output name: `adata.de_<round>.zarr.tar.zst`
 
@@ -1420,8 +1473,18 @@ Example SLURM job scripts are provided:
 
 ```text
 slurm/
-├── scomnom_loadandfilter.job
-└── scomnom_integrate.job
+├── scomnom_template.job
+├── scomnom_1_load_and_filter.job
+├── scomnom_2_integrate.job
+├── scomnom_3_cluster_and_annotate.job
+├── scomnom_4_integrate_annotated_run.job
+├── scomnom_4a_subset.job
+├── scomnom_4b_annotation_merge.job
+├── scomnom_5_rename.job
+├── scomnom_5a_rename_archetypes.job
+├── scomnom_6_de.job
+├── scomnom_7_da.job
+└── scomnom_8_enrichment_cluster.job
 ```
 
 These scripts are configured for **SURF’s Snellius** compute cluster. Users on other systems must adapt module names, CUDA/driver versions, and conda initialization paths.

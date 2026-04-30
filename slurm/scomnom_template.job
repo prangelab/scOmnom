@@ -1,0 +1,71 @@
+#!/bin/bash
+# Generic scOmnom SLURM template.
+# Fill in SCOMNOM_CMD and adapt scheduler directives for your HPC site.
+
+#SBATCH --job-name=scomnom_job
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+
+# Adapt these to your HPC setup:
+#SBATCH --partition=rome
+#SBATCH --constraint=scratch-node
+#SBATCH --cpus-per-task=16
+#SBATCH --time=08:00:00
+
+set -euo pipefail
+
+# ---------- user-configurable ----------
+INPUT_ARCHIVE="results/REPLACE_INPUT.zarr.tar.zst"
+SCRATCH_INPUT_NAME="$(basename "$INPUT_ARCHIVE")"
+RESULTS_DIR_NAME="results_run"
+FIGURES_SOURCE_DIR="results/figures"
+
+# Fill this with the actual command before submission.
+# Example:
+# SCOMNOM_CMD=(scomnom markers-and-de de -i "$SCRATCH_INPUT_NAME" -o "$RESULTS_DIR_NAME" --n-jobs "$SLURM_CPUS_PER_TASK")
+SCOMNOM_CMD=()
+# --------------------------------------
+
+if [ ${#SCOMNOM_CMD[@]} -eq 0 ]; then
+  echo "ERROR: SCOMNOM_CMD is empty. Fill it in before submitting."
+  exit 2
+fi
+
+module load 2025
+eval "$(micromamba shell hook -s bash)"
+micromamba activate scOmnom_env
+
+echo "Copying input to scratch..."
+cp -R "$INPUT_ARCHIVE" "$TMPDIR/."
+
+mkdir -p "$TMPDIR/$RESULTS_DIR_NAME/figures"
+# Copy only the empty directory tree so existing round folders are visible on scratch.
+# This helps scOmnom continue round numbering correctly and prevents output-name collisions.
+if [ -d "$FIGURES_SOURCE_DIR" ]; then
+  rsync -a --include='*/' --exclude='*' "$FIGURES_SOURCE_DIR/" "$TMPDIR/$RESULTS_DIR_NAME/figures/"
+fi
+
+PREVLOC="$(pwd)"
+cd "$TMPDIR"
+pwd
+
+# Prevent BLAS/OpenMP oversubscription
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
+export IGRAPH_OPENMP_NUM_THREADS=1
+
+echo "Running scomnom..."
+"${SCOMNOM_CMD[@]}"
+status=$?
+
+if [ "$status" -ne 0 ]; then
+  echo "scOmnom failed with exit code $status"
+  exit "$status"
+fi
+
+echo "Copying results back to $PREVLOC"
+rsync -a "$RESULTS_DIR_NAME" "$PREVLOC/."
+echo "Done!"

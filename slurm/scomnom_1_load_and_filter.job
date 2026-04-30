@@ -1,0 +1,66 @@
+#!/bin/bash
+# scOmnom module example: 1) load-and-filter
+
+#SBATCH --job-name=scomnom_load_and_filter
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+
+# Adapt these to your HPC setup:
+#SBATCH --partition=gpu_a100
+#SBATCH --gres=gpu:2
+#SBATCH --constraint=scratch-node
+#SBATCH --cpus-per-task=16
+#SBATCH --time=08:00:00
+
+set -euo pipefail
+
+# ---------- user-configurable ----------
+RAW_DIR="data/raw"
+CELLBENDER_DIR="data/cellbender"
+METADATA_TSV="metadata.mash_update.tsv"
+RESULTS_DIR_NAME="results"
+# --------------------------------------
+
+module load 2025
+module load CUDA/12.8.0
+module load cuDNN/9.10.1.4-CUDA-12.8.0
+
+eval "$(micromamba shell hook -s bash)"
+micromamba activate scOmnom_env
+
+python - << 'EOF'
+import torch
+print("torch.cuda.is_available() =", torch.cuda.is_available())
+print("CUDA devices =", torch.cuda.device_count())
+EOF
+
+echo "Copying data to scratch..."
+cp -R "$CELLBENDER_DIR" "$TMPDIR/."
+cp -R "$RAW_DIR" "$TMPDIR/."
+cp "$METADATA_TSV" "$TMPDIR/."
+
+PREVLOC="$(pwd)"
+cd "$TMPDIR"
+pwd
+
+# Prevent BLAS/OpenMP oversubscription
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
+export IGRAPH_OPENMP_NUM_THREADS=1
+
+echo "Running scomnom..."
+scomnom load-and-filter \
+  -c cellbender \
+  -r raw \
+  -o "$RESULTS_DIR_NAME" \
+  -m "$(basename "$METADATA_TSV")" \
+  --n-jobs "$SLURM_CPUS_PER_TASK" \
+  --min-genes 200 \
+  --max-pct-mt 30
+
+echo "Copying results back to $PREVLOC"
+rsync -a "$RESULTS_DIR_NAME" "$PREVLOC/."
+echo "Done!"

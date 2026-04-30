@@ -1,0 +1,63 @@
+#!/bin/bash
+# scOmnom module example: 4) integrate (annotated-run / scANVI projection)
+
+#SBATCH --job-name=scomnom_integrate_annotated_run
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+
+# Adapt these to your HPC setup:
+#SBATCH --partition=gpu_a100
+#SBATCH --gres=gpu:1
+#SBATCH --constraint=scratch-node
+#SBATCH --cpus-per-task=16
+#SBATCH --time=08:00:00
+
+set -euo pipefail
+
+# ---------- user-configurable ----------
+INPUT_ARCHIVE="results/adata.clustered.annotated.zarr.tar.zst"
+RESULTS_DIR_NAME="results"
+FIGURES_SOURCE_DIR="results/figures"
+OUTPUT_NAME="adata.clustered.annotated.projected"
+# --------------------------------------
+
+module load 2025
+module load CUDA/12.8.0
+module load cuDNN/9.10.1.4-CUDA-12.8.0
+
+eval "$(micromamba shell hook -s bash)"
+micromamba activate scOmnom_env
+
+echo "Copying data to scratch..."
+cp -R "$INPUT_ARCHIVE" "$TMPDIR/."
+
+mkdir -p "$TMPDIR/$RESULTS_DIR_NAME/figures"
+# Copy only the empty directory tree so existing round folders are visible on scratch.
+# This helps scOmnom continue round numbering correctly and prevents output-name collisions.
+if [ -d "$FIGURES_SOURCE_DIR" ]; then
+  rsync -a --include='*/' --exclude='*' "$FIGURES_SOURCE_DIR/" "$TMPDIR/$RESULTS_DIR_NAME/figures/"
+fi
+
+PREVLOC="$(pwd)"
+cd "$TMPDIR"
+pwd
+
+# Prevent BLAS/OpenMP oversubscription
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
+export IGRAPH_OPENMP_NUM_THREADS=1
+
+echo "Running scomnom..."
+scomnom integrate \
+  -i "$(basename "$INPUT_ARCHIVE")" \
+  -o "$RESULTS_DIR_NAME" \
+  --output-name "$OUTPUT_NAME" \
+  --annotated-run \
+  --benchmark-n-jobs "$SLURM_CPUS_PER_TASK"
+
+echo "Copying results back to $PREVLOC"
+rsync -a "$RESULTS_DIR_NAME" "$PREVLOC/."
+echo "Done!"

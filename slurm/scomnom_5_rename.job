@@ -1,0 +1,64 @@
+#!/bin/bash
+# scOmnom module example: 5) adata-ops rename
+
+#SBATCH --job-name=scomnom_rename
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+
+# Adapt these to your HPC setup:
+#SBATCH --partition=rome
+#SBATCH --constraint=scratch-node
+#SBATCH --cpus-per-task=8
+#SBATCH --time=02:00:00
+
+set -euo pipefail
+
+# ---------- user-configurable ----------
+# Use step-4 output by default; if you ran optional 4a/4b branch, point this to the merged parent output.
+INPUT_ARCHIVE="results/adata.clustered.annotated.projected.zarr.tar.zst"
+RENAME_TSV="rename.tsv"
+RESULTS_DIR_NAME="results"
+FIGURES_SOURCE_DIR="results/figures"
+OUTPUT_NAME="adata.clustered.annotated.projected.markers.renamed"
+RENAME_ROUND_NAME="manual_rename"
+# --------------------------------------
+
+module load 2025
+
+eval "$(micromamba shell hook -s bash)"
+micromamba activate scOmnom_env
+
+echo "Copying data to scratch..."
+cp -R "$INPUT_ARCHIVE" "$TMPDIR/."
+cp "$RENAME_TSV" "$TMPDIR/."
+
+mkdir -p "$TMPDIR/$RESULTS_DIR_NAME/figures"
+# Copy only the empty directory tree so existing round folders are visible on scratch.
+# This helps scOmnom continue round numbering correctly and prevents output-name collisions.
+if [ -d "$FIGURES_SOURCE_DIR" ]; then
+  rsync -a --include='*/' --exclude='*' "$FIGURES_SOURCE_DIR/" "$TMPDIR/$RESULTS_DIR_NAME/figures/"
+fi
+
+PREVLOC="$(pwd)"
+cd "$TMPDIR"
+pwd
+
+# Prevent BLAS/OpenMP oversubscription
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
+export IGRAPH_OPENMP_NUM_THREADS=1
+
+echo "Running scomnom..."
+scomnom adata-ops rename \
+  -i "$(basename "$INPUT_ARCHIVE")" \
+  -o "$RESULTS_DIR_NAME" \
+  --output-name "$OUTPUT_NAME" \
+  --rename-idents-file "$(basename "$RENAME_TSV")" \
+  --rename-round-name "$RENAME_ROUND_NAME"
+
+echo "Copying results back to $PREVLOC"
+rsync -a "$RESULTS_DIR_NAME" "$PREVLOC/."
+echo "Done!"
