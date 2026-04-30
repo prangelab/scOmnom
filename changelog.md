@@ -2,25 +2,6 @@
 
 All notable changes to this project will be documented in this file.
 
-## 0.6.0 [30-04-2026]
-HPC workflow standardization release:
-- DE execution stability fix: hardened within-cluster pseudobulk scheduling and thread behavior for HPC runs, preventing recurrent segfault/oversubscription patterns seen in large multi-contrast jobs; documented recommended worker/thread settings in the SLURM examples
-- added a generic SLURM template (`slurm/scomnom_template.job`) with configurable command slot, scratch staging, figure-tree carry-over, strict shell safety (`set -euo pipefail`), and BLAS/OpenMP oversubscription guards (`OMP/MKL/OPENBLAS/NUMEXPR/VECLIB/IGRAPH` set to 1)
-- added numbered module SLURM examples covering the main pipeline and optional subset branch:
-  - `scomnom_1_load_and_filter.job`
-  - `scomnom_2_integrate.job`
-  - `scomnom_3_cluster_and_annotate.job`
-  - `scomnom_4_integrate_annotated_run.job`
-  - `scomnom_4a_subset.job`
-  - `scomnom_4b_annotation_merge.job`
-  - `scomnom_5_rename.job`
-  - `scomnom_5a_rename_archetypes.job`
-  - `scomnom_6_de.job`
-  - `scomnom_7_da.job`
-  - `scomnom_8_enrichment_cluster.job`
-- removed legacy unnumbered SLURM examples to avoid duplication and drift
-- updated README workflow documentation to reflect the optional subset/merge branch and the expanded numbered SLURM examples list
-
 ## 0.1.0: [dec 2025]
 Implemented a working version of the load-and-filter and integrate modules.
 
@@ -117,3 +98,22 @@ Serialization and save-path hardening:
 Documentation and CLI ergonomics:
 - documented a practical fallback strategy for large DE workloads: split `--run both` into separate `--run pseudobulk` and `--run cell` jobs when needed
 - added CLI support to force CellTypist recomputation with explicit reuse/refresh control
+
+## 0.6.0 [30-04-2026]
+HPC workflow standardization release:
+- DE execution stability fix: hardened within-cluster pseudobulk scheduling and thread behavior for HPC runs, preventing recurrent segfault/oversubscription patterns seen in large multi-contrast jobs; documented recommended worker/thread settings in the SLURM examples
+- added a generic SLURM template (`slurm/scomnom_template.job`) with configurable command slot, scratch staging, figure-tree carry-over, strict shell safety (`set -euo pipefail`), and BLAS/OpenMP oversubscription guards (`OMP/MKL/OPENBLAS/NUMEXPR/VECLIB/IGRAPH` set to 1)
+- added numbered module SLURM examples covering the main pipeline and optional subset branch:
+  - `scomnom_1_load_and_filter.job`
+  - `scomnom_2_integrate.job`
+  - `scomnom_3_cluster_and_annotate.job`
+  - `scomnom_4_integrate_annotated_run.job`
+  - `scomnom_4a_subset.job`
+  - `scomnom_4b_annotation_merge.job`
+  - `scomnom_5_rename.job`
+  - `scomnom_5a_rename_archetypes.job`
+  - `scomnom_6_de.job`
+  - `scomnom_7_da.job`
+  - `scomnom_8_enrichment_cluster.job`
+- removed legacy unnumbered SLURM examples to avoid duplication and drift
+- updated README workflow documentation to reflect the optional subset/merge branch and the expanded numbered SLURM examples list
