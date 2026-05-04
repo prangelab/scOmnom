@@ -12,7 +12,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --time=08:00:00
 
-set -euo pipefail
+set -eo pipefail
 
 # ---------- user-configurable ----------
 INPUT_ARCHIVE="results/REPLACE_INPUT.zarr.tar.zst"
@@ -33,7 +33,9 @@ fi
 
 module load 2025
 eval "$(micromamba shell hook -s bash)"
+set +u
 micromamba activate scOmnom_env
+set -u
 
 echo "Copying input to scratch..."
 cp -R "$INPUT_ARCHIVE" "$TMPDIR/."

@@ -12,7 +12,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --time=08:00:00
 
-set -euo pipefail
+set -eo pipefail
 
 # ---------- user-configurable ----------
 INPUT_ARCHIVE="results/adata.clustered.annotated.zarr.tar.zst"
@@ -26,7 +26,9 @@ module load CUDA/12.8.0
 module load cuDNN/9.10.1.4-CUDA-12.8.0
 
 eval "$(micromamba shell hook -s bash)"
+set +u
 micromamba activate scOmnom_env
+set -u
 
 echo "Copying data to scratch..."
 cp -R "$INPUT_ARCHIVE" "$TMPDIR/."

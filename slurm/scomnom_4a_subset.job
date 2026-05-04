@@ -11,7 +11,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --time=02:00:00
 
-set -euo pipefail
+set -eo pipefail
 
 # ---------- user-configurable ----------
 INPUT_ARCHIVE="results/adata.clustered.annotated.projected.zarr.tar.zst"
@@ -23,7 +23,9 @@ FIGURES_SOURCE_DIR="results/figures"
 module load 2025
 
 eval "$(micromamba shell hook -s bash)"
+set +u
 micromamba activate scOmnom_env
+set -u
 
 echo "Copying data to scratch..."
 cp -R "$INPUT_ARCHIVE" "$TMPDIR/."

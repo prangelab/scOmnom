@@ -11,7 +11,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --time=18:00:00
 
-set -euo pipefail
+set -eo pipefail
 
 # ---------- user-configurable ----------
 # Simplified input for examples: use output from step 4 directly.
@@ -23,7 +23,9 @@ FIGURES_SOURCE_DIR="results/figures"
 module load 2025
 
 eval "$(micromamba shell hook -s bash)"
+set +u
 micromamba activate scOmnom_env
+set -u
 
 echo "Copying data to scratch..."
 cp -R "$INPUT_ARCHIVE" "$TMPDIR/."
