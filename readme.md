@@ -97,12 +97,14 @@ The standard workflow consists of:
 1. `load-and-filter`
 2. `integrate`
 3. `cluster-and-annotate`
-4. `integrate --annotated-run` (optional refinement)
-5. `adata-ops rename` (optional but common before DE/DA)
-6. `markers-and-de de`
-7. `markers-and-de da`
+4. `markers-and-de markers` (recommended before naming/subsetting)
+5. `integrate --annotated-run` (optional refinement)
+6. `adata-ops rename` (optional but common before DE/DA)
+7. `markers-and-de de`
+8. `markers-and-de da`
+9. `markers-and-de enrichment cluster` (optional)
 
-Optional subset branch between steps 4 and 5:
+Optional subset branch between steps 5 and 6:
 * `adata-ops subset` on the projected parent object
 * run subset objects through the same `integrate -> cluster-and-annotate -> integrate --annotated-run` pattern
 * `adata-ops annotation-merge` back into the parent object
@@ -574,6 +576,8 @@ integrate
    ↓
 cluster-and-annotate
    ↓
+markers-and-de markers (recommended)
+   ↓
 integrate --annotated-run (optional)
    ↓
 adata-ops rename (optional, often used)
@@ -581,12 +585,16 @@ adata-ops rename (optional, often used)
 markers-and-de de
    ↓
 markers-and-de da
+   ↓
+markers-and-de enrichment cluster (optional)
 ```
 
-Optional subset loop after `integrate --annotated-run` and before final rename/DE/DA:
+Optional subset loop after markers and before final rename/DE/DA:
 
 ```
 parent projected object
+   ↓
+markers-and-de markers
    ↓
 adata-ops subset
    ↓
@@ -1477,14 +1485,15 @@ slurm/
 ├── scomnom_1_load_and_filter.job
 ├── scomnom_2_integrate.job
 ├── scomnom_3_cluster_and_annotate.job
-├── scomnom_4_integrate_annotated_run.job
-├── scomnom_4a_subset.job
-├── scomnom_4b_annotation_merge.job
-├── scomnom_5_rename.job
-├── scomnom_5a_rename_archetypes.job
-├── scomnom_6_de.job
-├── scomnom_7_da.job
-└── scomnom_8_enrichment_cluster.job
+├── scomnom_4_markers.job
+├── scomnom_5_integrate_annotated_run.job
+├── scomnom_5a_subset.job
+├── scomnom_5b_annotation_merge.job
+├── scomnom_6_rename.job
+├── scomnom_6a_rename_archetypes.job
+├── scomnom_7_de.job
+├── scomnom_8_da.job
+└── scomnom_9_enrichment_cluster.job
 ```
 
 These scripts are configured for **SURF’s Snellius** compute cluster. Users on other systems must adapt module names, CUDA/driver versions, and conda initialization paths.

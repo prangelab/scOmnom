@@ -1,5 +1,5 @@
 #!/bin/bash
-# scOmnom module example: 7) markers-and-de da
+# scOmnom module example: 8) markers-and-de da
 
 #SBATCH --job-name=scomnom_da
 #SBATCH --nodes=1

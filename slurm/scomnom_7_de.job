@@ -1,7 +1,7 @@
 #!/bin/bash
-# scOmnom module example: 8) markers-and-de enrichment cluster
+# scOmnom module example: 7) markers-and-de de
 
-#SBATCH --job-name=scomnom_enrichment_cluster
+#SBATCH --job-name=scomnom_de
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 
@@ -9,12 +9,13 @@
 #SBATCH --partition=rome
 #SBATCH --constraint=scratch-node
 #SBATCH --cpus-per-task=16
-#SBATCH --time=08:00:00
+#SBATCH --time=18:00:00
 
 set -eo pipefail
 
 # ---------- user-configurable ----------
-INPUT_ARCHIVE="results/adata.clustered.annotated.projected.markers.renamed.zarr.tar.zst"
+# Simplified input for examples: use output from step 4 directly.
+INPUT_ARCHIVE="results/adata.clustered.annotated.projected.zarr.tar.zst"
 RESULTS_DIR_NAME="results"
 FIGURES_SOURCE_DIR="results/figures"
 # --------------------------------------
@@ -49,13 +50,17 @@ export VECLIB_MAXIMUM_THREADS=1
 export IGRAPH_OPENMP_NUM_THREADS=1
 
 echo "Running scomnom..."
-scomnom markers-and-de enrichment cluster \
+scomnom markers-and-de de \
+  --run pseudobulk \
   -i "$(basename "$INPUT_ARCHIVE")" \
   -o "$RESULTS_DIR_NAME" \
   --n-jobs "$SLURM_CPUS_PER_TASK" \
-  --condition-key sex \
-  --condition-key MASLD \
-  --condition-key sex:MASLD
+  --condition-keys sex \
+  --condition-keys MASLD \
+  --condition-keys sex@MASLD \
+  --condition-keys sex^MASLD \
+  --plot-sample-annotation-keys sex \
+  --plot-sample-annotation-keys MASLD
 
 echo "Copying results back to $PREVLOC"
 rsync -a "$RESULTS_DIR_NAME" "$PREVLOC/."
