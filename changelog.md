@@ -107,13 +107,21 @@ HPC workflow standardization release:
   - `scomnom_1_load_and_filter.job`
   - `scomnom_2_integrate.job`
   - `scomnom_3_cluster_and_annotate.job`
-  - `scomnom_4_integrate_annotated_run.job`
-  - `scomnom_4a_subset.job`
-  - `scomnom_4b_annotation_merge.job`
-  - `scomnom_5_rename.job`
-  - `scomnom_5a_rename_archetypes.job`
-  - `scomnom_6_de.job`
-  - `scomnom_7_da.job`
-  - `scomnom_8_enrichment_cluster.job`
+  - `scomnom_4_markers.job`
+  - `scomnom_5_integrate_annotated_run.job`
+  - `scomnom_5a_subset.job`
+  - `scomnom_5b_annotation_merge.job`
+  - `scomnom_6_rename.job`
+  - `scomnom_6a_rename_archetypes.job`
+  - `scomnom_7_de.job`
+  - `scomnom_8_da.job`
+  - `scomnom_9_enrichment_cluster.job`
 - removed legacy unnumbered SLURM examples to avoid duplication and drift
 - updated README workflow documentation to reflect the optional subset/merge branch and the expanded numbered SLURM examples list
+
+## 0.6.1 [05-05-2026]
+Post-0.6.0 SLURM and workflow ordering patch:
+- fixed strict-shell activation in all SLURM templates/examples by guarding `micromamba activate` with `set +u` / `set -u`, preventing `MKL_INTERFACE_LAYER: unbound variable` failures under `set -u`
+- reordered and renumbered the documented SLURM workflow to place marker calling before rename/subset decisions, and shifted downstream step numbering accordingly
+- updated README workflow and SLURM script listings to match the new numbering and optional branch labels
+- kept changelog ordering chronological (oldest -> newest top-to-bottom)
