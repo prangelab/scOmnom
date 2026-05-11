@@ -551,3 +551,39 @@ def test_de_gene_filter_propagates_to_config(mock_run):
         "not gene.str.startswith('MT-')",
         "expr=gene_biotype == 'protein_coding'",
     )
+
+
+@patch("scomnom.cli.run_within_cluster")
+def test_de_gsea_flags_propagate_to_config(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "markers-and-de",
+            "de",
+            "--input-path", "adata.zarr.tar.zst",
+            "--condition-keys", "sex",
+            "--no-run-gsea",
+            "--gsea-min-size", "15",
+            "--gsea-max-size", "250",
+            "--gsea-eps", "1e-6",
+            "--gsea-rank-col", "log2FoldChange",
+            "--joint-enrichment-alpha", "0.1",
+            "--joint-enrichment-top-n", "12",
+            "--no-joint-enrichment-require-concordant",
+            "--no-joint-enrichment-require-gsea-sig",
+            "--joint-enrichment-leading-edge-top-n", "5",
+        ],
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.run_gsea is False
+    assert cfg.gsea_min_size == 15
+    assert cfg.gsea_max_size == 250
+    assert cfg.gsea_eps == pytest.approx(1e-6)
+    assert cfg.gsea_rank_col == "log2FoldChange"
+    assert cfg.joint_enrichment_alpha == pytest.approx(0.1)
+    assert cfg.joint_enrichment_top_n == 12
+    assert cfg.joint_enrichment_require_concordant is False
+    assert cfg.joint_enrichment_require_gsea_sig is False
+    assert cfg.joint_enrichment_leading_edge_top_n == 5

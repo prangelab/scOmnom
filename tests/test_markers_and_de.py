@@ -15,17 +15,132 @@ from scomnom.markers_and_de import (
     _collect_cell_contrast_tables_from_dir,
     _load_module_definitions,
     _compute_module_score_on_adata,
+    _write_de_enrichment_tables,
     run_enrichment_cluster,
     run_module_score,
 )
 from scomnom.annotation_utils import (
     _apply_gene_filters_to_expr,
     _apply_gene_filters_to_var_names,
+    _merge_msigdb_decoupler_and_gsea,
     _prepare_decoupler_grouping,
+    _run_msigdb_gsea_from_stats,
     run_decoupler_for_round,
 )
 from scomnom.reporting import _de_report_summary_rows
 from scomnom import reporting
+
+
+def test_run_msigdb_gsea_from_stats_returns_long_results(monkeypatch, tmp_path: Path) -> None:
+    gmt = tmp_path / "hallmark.gmt"
+    gmt.write_text("HALLMARK_TEST\tna\tG1\tG2\tG3\n", encoding="utf-8")
+
+    class _FakePrerankRes:
+        def __init__(self):
+            self.res2d = pd.DataFrame(
+                {
+                    "Term": ["HALLMARK_TEST"],
+                    "ES": [0.6],
+                    "NES": [1.8],
+                    "NOM p-val": [0.01],
+                    "FDR q-val": [0.03],
+                    "Lead_genes": ["G1;G2"],
+                }
+            )
+
+    class _FakeGseapy:
+        @staticmethod
+        def prerank(**kwargs):
+            return _FakePrerankRes()
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "gseapy", _FakeGseapy)
+    monkeypatch.setattr(
+        "scomnom.annotation_utils.resolve_msigdb_gene_sets",
+        lambda gene_sets: ([str(gmt)], ["HALLMARK"], "vX"),
+    )
+
+    stats = pd.DataFrame({"C00": [3.0, 1.0, -1.0]}, index=["G1", "G2", "G3"])
+    cfg = SimpleNamespace(
+        msigdb_gene_sets=["HALLMARK"],
+        gsea_min_size=1,
+        gsea_max_size=500,
+        gsea_eps=1e-10,
+        random_state=42,
+        joint_enrichment_leading_edge_top_n=5,
+    )
+
+    payload = _run_msigdb_gsea_from_stats(stats, cfg, input_label="demo")
+
+    assert payload is not None
+    results = payload["results"]
+    assert list(results.columns[:6]) == ["cluster", "pathway", "NES", "ES", "pval", "padj"]
+    assert results.loc[0, "cluster"] == "C00"
+    assert results.loc[0, "pathway"] == "HALLMARK_TEST"
+    assert results.loc[0, "leading_edge_n"] == 2
+    assert "G1" in results.loc[0, "leading_edge_preview"]
+
+
+def test_merge_msigdb_decoupler_and_gsea_marks_concordance() -> None:
+    decoupler_payload = {
+        "activity": pd.DataFrame(
+            [[1.5, -2.0]],
+            index=["C00"],
+            columns=["HALLMARK_UP", "HALLMARK_DOWN"],
+        )
+    }
+    gsea_payload = {
+        "results": pd.DataFrame(
+            {
+                "cluster": ["C00", "C00"],
+                "pathway": ["HALLMARK_UP", "HALLMARK_DOWN"],
+                "NES": [2.1, -1.7],
+                "ES": [0.5, -0.4],
+                "pval": [0.001, 0.02],
+                "padj": [0.01, 0.08],
+                "leading_edge": ["G1,G2", "G3,G4"],
+                "leading_edge_n": [2, 2],
+                "leading_edge_preview": ["G1, G2", "G3, G4"],
+                "direction": ["up", "down"],
+            }
+        )
+    }
+
+    payload = _merge_msigdb_decoupler_and_gsea(
+        decoupler_payload=decoupler_payload,
+        gsea_payload=gsea_payload,
+        alpha=0.05,
+        leading_edge_top_n=5,
+    )
+
+    assert payload is not None
+    results = payload["results"]
+    assert set(results["sign_concordant"].tolist()) == {True}
+    got = results.set_index("pathway")["supported_by_both"].to_dict()
+    assert got["HALLMARK_UP"] is True
+    assert got["HALLMARK_DOWN"] is False
+
+
+def test_write_de_enrichment_tables_writes_results_and_activity(tmp_path: Path) -> None:
+    payloads = {
+        "msigdb": {"activity": pd.DataFrame([[1.0]], index=["C00"], columns=["TERM"])},
+        "msigdb_gsea": {
+            "results": pd.DataFrame(
+                {
+                    "cluster": ["C00"],
+                    "pathway": ["TERM"],
+                    "NES": [1.9],
+                    "padj": [0.02],
+                }
+            )
+        },
+    }
+
+    _write_de_enrichment_tables(payloads, tables_root=tmp_path)
+
+    assert (tmp_path / "msigdb" / "activity.tsv").exists()
+    assert (tmp_path / "msigdb_gsea" / "results.tsv").exists()
 
 
 def _make_adata_with_round(round_id: str | None) -> ad.AnnData:
@@ -365,6 +480,12 @@ def test_generate_enrichment_de_report_writes_html(tmp_path: Path) -> None:
     plot_dir = run_dir / "pseudobulk_DE" / "sex" / "female_vs_male"
     plot_dir.mkdir(parents=True)
     (plot_dir / "heatmap_top_up_.png").write_bytes(b"")
+    gsea_dir = run_dir / "msigdb_gsea" / "sex" / "female_vs_male"
+    gsea_dir.mkdir(parents=True)
+    (gsea_dir / "msigdb_gsea_summary.png").write_bytes(b"")
+    joint_dir = run_dir / "msigdb_joint" / "sex" / "female_vs_male"
+    joint_dir.mkdir(parents=True)
+    (joint_dir / "msigdb_joint_concordant.png").write_bytes(b"")
 
     cfg = SimpleNamespace(input_dir="/tmp/de_tables", de_decoupler_source="auto", gene_filter=())
 
@@ -379,6 +500,8 @@ def test_generate_enrichment_de_report_writes_html(tmp_path: Path) -> None:
     html = (run_dir / "enrichment_de_report.html").read_text(encoding="utf-8")
     assert "scOmnom enrichment-from-DE report" in html
     assert "Pseudobulk De" in html
+    assert "MSigDB GSEA" in html
+    assert "MSigDB concordance" in html
 
 
 def test_generate_module_score_report_writes_html(tmp_path: Path) -> None:

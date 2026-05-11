@@ -1109,6 +1109,307 @@ def _msigdb_activity_by_gmt_payload(activity: pd.DataFrame) -> tuple[pd.DataFram
         LOGGER.warning("MSigDB: failed to build activity_by_gmt; leaving empty. (%s)", e)
         return None, {}
 
+
+def _gmt_files_to_gene_sets(gmt_files: Sequence[str | Path]) -> dict[str, list[str]]:
+    gene_sets: dict[str, list[str]] = {}
+    for gmt in gmt_files:
+        path = Path(gmt)
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 3:
+                    continue
+                term = str(parts[0]).strip()
+                genes = [str(g).strip() for g in parts[2:] if str(g).strip()]
+                if not term or not genes:
+                    continue
+                if term not in gene_sets:
+                    gene_sets[term] = []
+                gene_sets[term].extend(genes)
+
+    out: dict[str, list[str]] = {}
+    for term, genes in gene_sets.items():
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for gene in genes:
+            if gene not in seen:
+                seen.add(gene)
+                deduped.append(gene)
+        if deduped:
+            out[str(term)] = deduped
+    return out
+
+
+def _leading_edge_to_strings(leading_edge: object, *, top_n: int) -> tuple[str, int]:
+    if leading_edge is None:
+        return "", 0
+    if isinstance(leading_edge, float) and not np.isfinite(leading_edge):
+        return "", 0
+    if isinstance(leading_edge, str):
+        genes = [g.strip() for g in re.split(r"[;,]", leading_edge) if g.strip()]
+    elif isinstance(leading_edge, (list, tuple, np.ndarray, pd.Series)):
+        genes = [str(g).strip() for g in list(leading_edge) if str(g).strip()]
+    else:
+        genes = [str(leading_edge).strip()] if str(leading_edge).strip() else []
+
+    n = int(len(genes))
+    preview = ", ".join(genes[: int(max(1, top_n))]) if genes else ""
+    return preview, n
+
+
+def _run_msigdb_gsea_from_stats(
+    stats: pd.DataFrame,
+    cfg,
+    *,
+    input_label: str,
+) -> Optional[dict]:
+    if stats is None or stats.empty:
+        return None
+
+    try:
+        import gseapy
+    except Exception as e:
+        LOGGER.warning("MSigDB GSEA: gseapy is not available; skipping. (%s)", e)
+        return None
+
+    gene_sets_spec = getattr(cfg, "msigdb_gene_sets", None) or ["HALLMARK", "REACTOME"]
+    try:
+        gmt_files, used_keywords, msigdb_release = resolve_msigdb_gene_sets(gene_sets_spec)
+    except Exception as e:
+        LOGGER.warning("MSigDB GSEA: failed to resolve gene sets: %s", e)
+        return None
+    if not gmt_files:
+        LOGGER.warning("MSigDB GSEA: no gene set files resolved; skipping.")
+        return None
+
+    try:
+        gene_sets = _gmt_files_to_gene_sets(gmt_files)
+    except Exception as e:
+        LOGGER.warning("MSigDB GSEA: failed to parse GMT gene sets: %s", e)
+        return None
+    if not gene_sets:
+        LOGGER.warning("MSigDB GSEA: parsed gene set collection is empty; skipping.")
+        return None
+
+    min_size = int(getattr(cfg, "gsea_min_size", 10) or 10)
+    max_size = int(getattr(cfg, "gsea_max_size", 500) or 500)
+    eps = float(getattr(cfg, "gsea_eps", 1e-10) or 1e-10)
+    leading_edge_top_n = int(getattr(cfg, "joint_enrichment_leading_edge_top_n", 8) or 8)
+
+    result_rows: list[dict[str, object]] = []
+    for cluster in stats.columns.astype(str):
+        rnk = (
+            pd.DataFrame(
+                {
+                    "gene": stats.index.astype(str),
+                    "score": pd.to_numeric(stats.loc[:, cluster], errors="coerce"),
+                }
+            )
+            .dropna(subset=["gene", "score"])
+            .sort_values("score", ascending=False, kind="mergesort")
+        )
+        if rnk.empty:
+            continue
+        rnk = rnk.drop_duplicates(subset=["gene"], keep="first")
+
+        try:
+            prerank_res = gseapy.prerank(
+                rnk=rnk,
+                gene_sets=gene_sets,
+                min_size=min_size,
+                max_size=max_size,
+                permutation_num=1000,
+                outdir=None,
+                seed=int(getattr(cfg, "random_state", 42)),
+                verbose=False,
+            )
+        except TypeError:
+            prerank_res = gseapy.prerank(
+                rnk=rnk,
+                gene_sets=gene_sets,
+                min_size=min_size,
+                max_size=max_size,
+                outdir=None,
+                seed=int(getattr(cfg, "random_state", 42)),
+                verbose=False,
+            )
+        except Exception as e:
+            LOGGER.warning(
+                "MSigDB GSEA: prerank failed for cluster=%r input=%r: %s",
+                str(cluster),
+                str(input_label),
+                e,
+            )
+            continue
+
+        res2d = getattr(prerank_res, "res2d", None)
+        if res2d is None or not isinstance(res2d, pd.DataFrame) or res2d.empty:
+            continue
+
+        d = res2d.copy()
+        if "Term" not in d.columns:
+            d = d.reset_index().rename(columns={d.index.name or "index": "Term"})
+        d = d.rename(
+            columns={
+                "Term": "pathway",
+                "ES": "ES",
+                "NES": "NES",
+                "NOM p-val": "pval",
+                "FDR q-val": "padj",
+                "FWER p-val": "fwer_pval",
+                "Tag %": "tag_pct",
+                "Gene %": "gene_pct",
+                "Lead_genes": "leading_edge",
+                "Lead genes": "leading_edge",
+            }
+        )
+        if "pathway" not in d.columns:
+            continue
+
+        d["cluster"] = str(cluster)
+        d["pathway"] = d["pathway"].astype(str)
+        d["NES"] = pd.to_numeric(d.get("NES", np.nan), errors="coerce")
+        d["ES"] = pd.to_numeric(d.get("ES", np.nan), errors="coerce")
+        d["pval"] = pd.to_numeric(d.get("pval", np.nan), errors="coerce")
+        d["padj"] = pd.to_numeric(d.get("padj", np.nan), errors="coerce")
+        if "leading_edge" not in d.columns:
+            d["leading_edge"] = ""
+        d["leading_edge_preview"] = ""
+        d["leading_edge_n"] = 0
+        for idx, le in d["leading_edge"].items():
+            preview, n = _leading_edge_to_strings(le, top_n=leading_edge_top_n)
+            d.at[idx, "leading_edge_preview"] = preview
+            d.at[idx, "leading_edge_n"] = int(n)
+        d["direction"] = np.where(
+            pd.to_numeric(d["NES"], errors="coerce").fillna(0.0) >= 0.0,
+            "up",
+            "down",
+        )
+
+        cols = [
+            "cluster",
+            "pathway",
+            "NES",
+            "ES",
+            "pval",
+            "padj",
+            "leading_edge",
+            "leading_edge_n",
+            "leading_edge_preview",
+            "direction",
+        ]
+        if "tag_pct" in d.columns:
+            cols.append("tag_pct")
+        if "gene_pct" in d.columns:
+            cols.append("gene_pct")
+        if "fwer_pval" in d.columns:
+            cols.append("fwer_pval")
+        result_rows.extend(d.loc[:, [c for c in cols if c in d.columns]].to_dict(orient="records"))
+
+    if not result_rows:
+        return None
+
+    results = pd.DataFrame(result_rows)
+    results["pathway"] = results["pathway"].astype(str)
+    results["cluster"] = results["cluster"].astype(str)
+    results = results.sort_values(
+        by=["cluster", "padj", "NES"],
+        ascending=[True, True, False],
+        kind="mergesort",
+    ).reset_index(drop=True)
+
+    return {
+        "results": results,
+        "config": {
+            "input": str(input_label),
+            "resource": "msigdb_gsea",
+            "msigdb_release": msigdb_release,
+            "gene_sets": [str(g) for g in gmt_files],
+            "used_keywords": used_keywords,
+            "min_size": int(min_size),
+            "max_size": int(max_size),
+            "eps": float(eps),
+        },
+    }
+
+
+def _merge_msigdb_decoupler_and_gsea(
+    *,
+    decoupler_payload: dict,
+    gsea_payload: dict,
+    alpha: float,
+    leading_edge_top_n: int,
+) -> Optional[dict]:
+    activity = decoupler_payload.get("activity", None) if isinstance(decoupler_payload, dict) else None
+    results = gsea_payload.get("results", None) if isinstance(gsea_payload, dict) else None
+    if activity is None or not isinstance(activity, pd.DataFrame) or activity.empty:
+        return None
+    if results is None or not isinstance(results, pd.DataFrame) or results.empty:
+        return None
+
+    dec = (
+        activity.copy()
+        .apply(pd.to_numeric, errors="coerce")
+        .fillna(0.0)
+        .rename_axis(index="cluster", columns="pathway")
+        .stack(dropna=False)
+        .reset_index(name="decoupler_score")
+    )
+    dec["cluster"] = dec["cluster"].astype(str)
+    dec["pathway"] = dec["pathway"].astype(str)
+    dec["decoupler_direction"] = np.where(dec["decoupler_score"] >= 0.0, "up", "down")
+
+    fg = results.copy()
+    fg["cluster"] = fg["cluster"].astype(str)
+    fg["pathway"] = fg["pathway"].astype(str)
+    fg["NES"] = pd.to_numeric(fg.get("NES", np.nan), errors="coerce")
+    fg["pval"] = pd.to_numeric(fg.get("pval", np.nan), errors="coerce")
+    fg["padj"] = pd.to_numeric(fg.get("padj", np.nan), errors="coerce")
+    if "leading_edge_preview" not in fg.columns or "leading_edge_n" not in fg.columns:
+        previews: list[str] = []
+        counts: list[int] = []
+        for le in fg.get("leading_edge", pd.Series("", index=fg.index)):
+            preview, n = _leading_edge_to_strings(le, top_n=leading_edge_top_n)
+            previews.append(preview)
+            counts.append(n)
+        fg["leading_edge_preview"] = previews
+        fg["leading_edge_n"] = counts
+    fg["gsea_direction"] = np.where(fg["NES"].fillna(0.0) >= 0.0, "up", "down")
+    fg["gsea_sig"] = fg["padj"].notna() & (fg["padj"] <= float(alpha))
+
+    merged = dec.merge(
+        fg,
+        on=["cluster", "pathway"],
+        how="inner",
+        suffixes=("", "_gsea"),
+    )
+    if merged.empty:
+        return None
+
+    merged["sign_concordant"] = merged["decoupler_direction"] == merged["gsea_direction"]
+    merged["supported_by_both"] = merged["sign_concordant"] & merged["gsea_sig"]
+    merged["joint_rank"] = (
+        merged["supported_by_both"].astype(int) * 1_000_000
+        + merged["sign_concordant"].astype(int) * 100_000
+        + merged["gsea_sig"].astype(int) * 10_000
+        + merged["decoupler_score"].abs().rank(method="dense", ascending=False).rsub(10_000)
+        + merged["NES"].abs().rank(method="dense", ascending=False).rsub(10_000)
+    )
+    merged = merged.sort_values(
+        by=["cluster", "supported_by_both", "sign_concordant", "padj", "joint_rank"],
+        ascending=[True, False, False, True, False],
+        kind="mergesort",
+    ).reset_index(drop=True)
+
+    return {
+        "results": merged,
+        "config": {
+            "resource": "msigdb_joint",
+            "alpha": float(alpha),
+            "leading_edge_top_n": int(leading_edge_top_n),
+        },
+    }
+
 def _run_msigdb(
     adata: ad.AnnData,
     cfg,

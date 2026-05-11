@@ -32,10 +32,23 @@ def _pretty_relpath(p: Path) -> str:
 def _caption_from_filename(fname: str) -> str:
     name = Path(fname).stem
     name = name.replace("_", " ")
+    name = name.replace("msigdb", "MSigDB")
+    name = name.replace("gsea", "GSEA")
     name = name.replace("postfilter", "post-filter")
     name = name.replace("prefilter", "pre-filter")
     name = name.replace("qc", "QC")
     return name.strip().capitalize()
+
+
+def _pretty_enrichment_de_source(source: str) -> str:
+    mapping = {
+        "msigdb": "MSigDB decoupler",
+        "msigdb_gsea": "MSigDB GSEA",
+        "msigdb_joint": "MSigDB concordance",
+        "progeny": "PROGENy decoupler",
+        "dorothea": "DoRothEA decoupler",
+    }
+    return mapping.get(source, source.replace("_", " ").title())
 
 
 def _details_block(title: str, inner_html: str, *, open_by_default: bool = False, extra_class: str = "") -> str:
@@ -229,6 +242,12 @@ def _describe_plot(rel_path: Path) -> str:
         return "Silhouette distributions per cluster (quality diagnostic)."
     if "compaction_flow" in stem:
         return "Flow from parent clusters to compacted clusters."
+    if "gsea" in s:
+        if "summary" in stem:
+            return "Compact preranked GSEA summary with NES, adjusted significance, and leading-edge genes."
+        return "Preranked GSEA pathway summary."
+    if "joint" in s or "concordant" in stem:
+        return "MSigDB pathways with concordant direction between decoupler activity scores and GSEA NES."
     if "decoupler" in s:
         if "heatmap" in stem:
             return "Decoupler activity heatmap (top pathways/features)."
@@ -1831,7 +1850,7 @@ def generate_enrichment_de_report(
         "Parameters:\n"
         f"{cfg_json}"
         "</div>"
-        "<p class='note'>This report is organized by analysis source, condition, and contrast for enrichment derived from DE tables.</p>"
+        "<p class='note'>This report is organized by analysis source, condition, and contrast for enrichment derived from DE tables, including decoupler activity summaries, MSigDB GSEA summaries, and concordance views when available.</p>"
     )
 
     summary_rows = _simple_summary_rows(
@@ -1864,7 +1883,7 @@ def generate_enrichment_de_report(
 
     toc_sections: List[Tuple[str, str]] = [("summary", "Summary")]
     for source in sorted(grouped):
-        toc_sections.append((_slug(source), source.replace("_", " ").title()))
+        toc_sections.append((_slug(source), _pretty_enrichment_de_source(source)))
     toc_html = _toc(toc_sections)
 
     blocks: List[str] = [header, '<div id="summary"></div>', _details_block("Summary", summary_inner, open_by_default=True)]
@@ -1894,7 +1913,7 @@ def generate_enrichment_de_report(
             )
         blocks.append(
             _details_block(
-                f"{_safe(source.replace('_', ' ').title())} <span class='pill'>{sum(len(v) for cond in grouped[source].values() for v in cond.values())} plots</span>",
+                f"{_safe(_pretty_enrichment_de_source(source))} <span class='pill'>{sum(len(v) for cond in grouped[source].values() for v in cond.values())} plots</span>",
                 "".join(source_inner),
                 open_by_default=False,
             )

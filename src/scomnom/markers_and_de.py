@@ -2003,6 +2003,9 @@ def _write_de_enrichment_tables(
         activity = payload.get("activity")
         if isinstance(activity, pd.DataFrame) and not activity.empty:
             activity.to_csv(net_dir / "activity.tsv", sep="\t")
+        results = payload.get("results")
+        if isinstance(results, pd.DataFrame) and not results.empty:
+            results.to_csv(net_dir / "results.tsv", sep="\t", index=False)
         activity_by_gmt = payload.get("activity_by_gmt")
         if isinstance(activity_by_gmt, dict):
             for gmt_key, gmt_df in activity_by_gmt.items():
@@ -2018,6 +2021,8 @@ def _compute_de_enrichment_from_dir(
 ) -> dict[str, dict[str, dict[str, dict[str, object]]]]:
     from .annotation_utils import (
         _run_msigdb_from_stats,
+        _run_msigdb_gsea_from_stats,
+        _merge_msigdb_decoupler_and_gsea,
         _run_progeny_from_stats,
         _run_dorothea_from_stats,
     )
@@ -2075,6 +2080,19 @@ def _compute_de_enrichment_from_dir(
                 msigdb_payload = _run_msigdb_from_stats(stats, cfg, input_label=input_label)
                 if msigdb_payload is not None:
                     payloads["msigdb"] = msigdb_payload
+                if bool(getattr(cfg, "run_gsea", True)):
+                    gsea_payload = _run_msigdb_gsea_from_stats(stats, cfg, input_label=input_label)
+                    if gsea_payload is not None:
+                        payloads["msigdb_gsea"] = gsea_payload
+                        if msigdb_payload is not None:
+                            joint_payload = _merge_msigdb_decoupler_and_gsea(
+                                decoupler_payload=msigdb_payload,
+                                gsea_payload=gsea_payload,
+                                alpha=float(getattr(cfg, "joint_enrichment_alpha", 0.05)),
+                                leading_edge_top_n=int(getattr(cfg, "joint_enrichment_leading_edge_top_n", 8)),
+                            )
+                            if joint_payload is not None:
+                                payloads["msigdb_joint"] = joint_payload
                 if bool(getattr(cfg, "run_progeny", True)):
                     prog = _run_progeny_from_stats(stats, cfg, input_label=input_label)
                     if prog is not None:
@@ -2185,20 +2203,36 @@ def run_enrichment_de(cfg) -> None:
                             pos_label, neg_label = parts[0], parts[1]
 
                     for net_name, net_payload in payloads.items():
-                        artifacts = de_plot_utils.plot_de_decoupler_payload(
-                            net_payload,
-                            net_name=str(net_name),
-                            figdir=base,
-                            heatmap_top_k=int(getattr(cfg, "plot_max_genes_total", 80)),
-                            bar_top_n=10,
-                            bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
-                            bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
-                            bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
-                            dotplot_top_k=25,
-                            title_prefix=f"{condition_key} {contrast}",
-                            pos_label=pos_label,
-                            neg_label=neg_label,
-                        )
+                        if str(net_name) == "msigdb_gsea":
+                            artifacts = de_plot_utils.plot_de_gsea_payload(
+                                net_payload,
+                                figdir=base / "msigdb_gsea",
+                                title_prefix=f"{condition_key} {contrast}",
+                                top_n=int(getattr(cfg, "joint_enrichment_top_n", 20)),
+                            )
+                        elif str(net_name) == "msigdb_joint":
+                            artifacts = de_plot_utils.plot_de_msigdb_joint_payload(
+                                net_payload,
+                                figdir=base / "msigdb_joint",
+                                title_prefix=f"{condition_key} {contrast}",
+                                top_n=int(getattr(cfg, "joint_enrichment_top_n", 20)),
+                                require_gsea_sig=bool(getattr(cfg, "joint_enrichment_require_gsea_sig", True)),
+                            )
+                        else:
+                            artifacts = de_plot_utils.plot_de_decoupler_payload(
+                                net_payload,
+                                net_name=str(net_name),
+                                figdir=base,
+                                heatmap_top_k=int(getattr(cfg, "plot_max_genes_total", 80)),
+                                bar_top_n=10,
+                                bar_top_n_up=getattr(cfg, "decoupler_bar_top_n_up", None),
+                                bar_top_n_down=getattr(cfg, "decoupler_bar_top_n_down", None),
+                                bar_split_signed=bool(getattr(cfg, "decoupler_bar_split_signed", True)),
+                                dotplot_top_k=25,
+                                title_prefix=f"{condition_key} {contrast}",
+                                pos_label=pos_label,
+                                neg_label=neg_label,
+                            )
                         plot_utils.persist_plot_artifacts(artifacts)
 
     if total_runs == 0:
@@ -3850,6 +3884,8 @@ def run_within_cluster(cfg) -> ad.AnnData:
     if de_source != "none" and not regenerate_figures:
         from .annotation_utils import (
             _run_msigdb_from_stats,
+            _run_msigdb_gsea_from_stats,
+            _merge_msigdb_decoupler_and_gsea,
             _run_progeny_from_stats,
             _run_dorothea_from_stats,
         )
@@ -3916,6 +3952,19 @@ def run_within_cluster(cfg) -> ad.AnnData:
                     msigdb_payload = _run_msigdb_from_stats(stats, cfg, input_label=input_label)
                     if msigdb_payload is not None:
                         payloads["msigdb"] = msigdb_payload
+                    if bool(getattr(cfg, "run_gsea", True)):
+                        gsea_payload = _run_msigdb_gsea_from_stats(stats, cfg, input_label=input_label)
+                        if gsea_payload is not None:
+                            payloads["msigdb_gsea"] = gsea_payload
+                            if msigdb_payload is not None:
+                                joint_payload = _merge_msigdb_decoupler_and_gsea(
+                                    decoupler_payload=msigdb_payload,
+                                    gsea_payload=gsea_payload,
+                                    alpha=float(getattr(cfg, "joint_enrichment_alpha", 0.05)),
+                                    leading_edge_top_n=int(getattr(cfg, "joint_enrichment_leading_edge_top_n", 8)),
+                                )
+                                if joint_payload is not None:
+                                    payloads["msigdb_joint"] = joint_payload
 
                     if bool(getattr(cfg, "run_progeny", True)):
                         prog = _run_progeny_from_stats(stats, cfg, input_label=input_label)
@@ -4233,6 +4282,21 @@ def run_within_cluster(cfg) -> ad.AnnData:
                         def _plot_de_decoupler_task(task: tuple[dict, str, Path, str, Optional[str], Optional[str]]):
                             net_payload, net_name, base, title_prefix, pos_label, neg_label = task
                             with _DECOUPLER_PLOT_LOCK:
+                                if str(net_name) == "msigdb_gsea":
+                                    return de_plot_utils.plot_de_gsea_payload(
+                                        net_payload,
+                                        figdir=base / "msigdb_gsea",
+                                        title_prefix=title_prefix,
+                                        top_n=int(getattr(cfg, "joint_enrichment_top_n", 20)),
+                                    )
+                                if str(net_name) == "msigdb_joint":
+                                    return de_plot_utils.plot_de_msigdb_joint_payload(
+                                        net_payload,
+                                        figdir=base / "msigdb_joint",
+                                        title_prefix=title_prefix,
+                                        top_n=int(getattr(cfg, "joint_enrichment_top_n", 20)),
+                                        require_gsea_sig=bool(getattr(cfg, "joint_enrichment_require_gsea_sig", True)),
+                                    )
                                 return de_plot_utils.plot_de_decoupler_payload(
                                     net_payload,
                                     net_name=net_name,

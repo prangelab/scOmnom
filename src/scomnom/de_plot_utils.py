@@ -3360,3 +3360,150 @@ def plot_de_decoupler_payload(
             stem=f"dotplot_top_{neg_stem}_",
             title_prefix=f"{title_prefix} ({neg_text})" if title_prefix else neg_text,
         )
+
+
+def plot_de_gsea_payload(
+    payload: dict,
+    *,
+    figdir: Path,
+    title_prefix: str | None = None,
+    top_n: int = 10,
+    artifact_stem: str = "gsea_summary",
+) -> list[plot_utils.PlotArtifact]:
+    if not isinstance(payload, dict):
+        return []
+    results = payload.get("results", None)
+    if results is None or not isinstance(results, pd.DataFrame) or results.empty:
+        return []
+
+    d = results.copy()
+    d["NES"] = pd.to_numeric(d.get("NES", np.nan), errors="coerce")
+    d["padj"] = pd.to_numeric(d.get("padj", np.nan), errors="coerce")
+    d["leading_edge_n"] = pd.to_numeric(d.get("leading_edge_n", 0), errors="coerce").fillna(0).astype(int)
+    d["pathway"] = d.get("pathway", pd.Series("", index=d.index)).astype(str)
+    d["cluster"] = d.get("cluster", pd.Series("", index=d.index)).astype(str)
+    if "leading_edge_preview" not in d.columns:
+        d["leading_edge_preview"] = ""
+
+    d = d.dropna(subset=["NES"])
+    if d.empty:
+        return []
+
+    up = d.loc[d["NES"] > 0].sort_values(["padj", "NES"], ascending=[True, False], kind="mergesort").head(int(top_n))
+    down = d.loc[d["NES"] < 0].sort_values(["padj", "NES"], ascending=[True, True], kind="mergesort").head(int(top_n))
+    show = pd.concat([up, down], axis=0)
+    if show.empty:
+        return []
+
+    show["label"] = (
+        show["cluster"].astype(str)
+        + " | "
+        + show["pathway"].astype(str)
+    )
+    labels = show["label"].tolist()
+    values = show["NES"].to_numpy(dtype=float)
+    colors = ["#3a7f3b" if v >= 0 else "#b04a4a" for v in values]
+
+    fig_h = max(4.5, 0.42 * len(show) + 1.8)
+    fig, (ax, ax_text) = plt.subplots(
+        1,
+        2,
+        figsize=(16.0, fig_h),
+        gridspec_kw={"width_ratios": [1.15, 1.0]},
+    )
+    y = np.arange(len(show))
+    ax.barh(y, values, color=colors, edgecolor="#1f2d3a", linewidth=0.8)
+    ax.axvline(0.0, color="#222222", linewidth=1.0)
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=10)
+    ax.invert_yaxis()
+    ax.set_xlabel("NES")
+    ax.set_title(title_prefix or "GSEA summary", fontsize=14, weight="bold")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    ax_text.axis("off")
+    text_lines = ["padj    LE_n    Leading edge"]
+    for row in show.itertuples(index=False):
+        padj = getattr(row, "padj", np.nan)
+        padj_txt = f"{float(padj):.2e}" if np.isfinite(padj) else "NA"
+        le_n = int(getattr(row, "leading_edge_n", 0))
+        preview = str(getattr(row, "leading_edge_preview", "") or "")
+        text_lines.append(f"{padj_txt:>8}  {le_n:>4}    {preview}")
+    ax_text.text(
+        0.0,
+        1.0,
+        "\n".join(text_lines),
+        va="top",
+        ha="left",
+        family="monospace",
+        fontsize=9,
+    )
+    fig.tight_layout()
+
+    return [_emit_figure_artifact(fig, artifact_stem=artifact_stem, artifact_figdir=figdir, default_stem=artifact_stem)]
+
+
+def plot_de_msigdb_joint_payload(
+    payload: dict,
+    *,
+    figdir: Path,
+    title_prefix: str | None = None,
+    top_n: int = 20,
+    require_gsea_sig: bool = True,
+    artifact_stem: str = "msigdb_joint_concordant",
+) -> list[plot_utils.PlotArtifact]:
+    if not isinstance(payload, dict):
+        return []
+    results = payload.get("results", None)
+    if results is None or not isinstance(results, pd.DataFrame) or results.empty:
+        return []
+
+    d = results.copy()
+    d["decoupler_score"] = pd.to_numeric(d.get("decoupler_score", np.nan), errors="coerce")
+    d["padj"] = pd.to_numeric(d.get("padj", np.nan), errors="coerce")
+    d["NES"] = pd.to_numeric(d.get("NES", np.nan), errors="coerce")
+    d["sign_concordant"] = d.get("sign_concordant", False).fillna(False).astype(bool)
+    d["gsea_sig"] = d.get("gsea_sig", False).fillna(False).astype(bool)
+    d = d.loc[d["sign_concordant"]].copy()
+    if require_gsea_sig:
+        d = d.loc[d["gsea_sig"]].copy()
+    if d.empty:
+        return []
+
+    d["rank_abs"] = d["decoupler_score"].abs() + d["NES"].abs()
+    up = d.loc[d["decoupler_score"] > 0].sort_values(["padj", "rank_abs"], ascending=[True, False], kind="mergesort").head(int(top_n))
+    down = d.loc[d["decoupler_score"] < 0].sort_values(["padj", "rank_abs"], ascending=[True, False], kind="mergesort").head(int(top_n))
+    show = pd.concat([up, down], axis=0)
+    if show.empty:
+        return []
+
+    show["label"] = show["cluster"].astype(str) + " | " + show["pathway"].astype(str)
+    y = np.arange(len(show))
+    sizes = np.clip(-np.log10(show["padj"].clip(lower=1e-300).fillna(1.0).to_numpy(dtype=float) + 1e-300), 0.0, 20.0)
+    sizes = 40.0 + sizes * 16.0
+
+    fig_h = max(4.5, 0.42 * len(show) + 1.8)
+    fig, ax = plt.subplots(figsize=(13.5, fig_h))
+    scatter = ax.scatter(
+        show["decoupler_score"].to_numpy(dtype=float),
+        y,
+        c=show["NES"].to_numpy(dtype=float),
+        s=sizes,
+        cmap="coolwarm",
+        edgecolors="#1f2d3a",
+        linewidths=0.7,
+    )
+    ax.axvline(0.0, color="#222222", linewidth=1.0)
+    ax.set_yticks(y)
+    ax.set_yticklabels(show["label"].tolist(), fontsize=10)
+    ax.invert_yaxis()
+    ax.set_xlabel("Decoupler MSigDB score")
+    ax.set_title(title_prefix or "MSigDB concordant pathways", fontsize=14, weight="bold")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    cbar = fig.colorbar(scatter, ax=ax, pad=0.02)
+    cbar.set_label("GSEA NES")
+    fig.tight_layout()
+
+    return [_emit_figure_artifact(fig, artifact_stem=artifact_stem, artifact_figdir=figdir, default_stem=artifact_stem)]

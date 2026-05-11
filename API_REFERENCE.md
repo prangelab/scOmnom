@@ -126,7 +126,7 @@ Returns:
 
 Signature:
 ```python
-enrichment_de_from_tables(input_dir: str | Path, *, gene_filter: Sequence[str] = (), de_decoupler_source: str = "auto", de_decoupler_stat_col: str = "stat", decoupler_method: str = "consensus", decoupler_consensus_methods: Sequence[str] | None = ("ulm", "mlm", "wsum"), decoupler_min_n_targets: int = 5, msigdb_gene_sets: Sequence[str] | None = ("HALLMARK", "REACTOME"), msigdb_method: str = "consensus", msigdb_min_n_targets: int = 5, run_progeny: bool = True, progeny_method: str = "consensus", progeny_min_n_targets: int = 5, progeny_top_n: int = 100, progeny_organism: str = "human", run_dorothea: bool = True, dorothea_method: str = "consensus", dorothea_min_n_targets: int = 5, dorothea_confidence: Sequence[str] | None = ("A", "B", "C"), dorothea_organism: str = "human") -> dict[str, dict[str, dict[str, dict[str, object]]]]
+enrichment_de_from_tables(input_dir: str | Path, *, gene_filter: Sequence[str] = (), de_decoupler_source: str = "auto", de_decoupler_stat_col: str = "stat", decoupler_method: str = "consensus", decoupler_consensus_methods: Sequence[str] | None = ("ulm", "mlm", "wsum"), decoupler_min_n_targets: int = 5, msigdb_gene_sets: Sequence[str] | None = ("HALLMARK", "REACTOME"), msigdb_method: str = "consensus", msigdb_min_n_targets: int = 5, run_gsea: bool = True, gsea_min_size: int = 10, gsea_max_size: int = 500, gsea_eps: float = 1e-10, gsea_rank_col: str = "stat", joint_enrichment_alpha: float = 0.05, joint_enrichment_top_n: int = 20, joint_enrichment_require_concordant: bool = True, joint_enrichment_require_gsea_sig: bool = True, joint_enrichment_leading_edge_top_n: int = 8, run_progeny: bool = True, progeny_method: str = "consensus", progeny_min_n_targets: int = 5, progeny_top_n: int = 100, progeny_organism: str = "human", run_dorothea: bool = True, dorothea_method: str = "consensus", dorothea_min_n_targets: int = 5, dorothea_confidence: Sequence[str] | None = ("A", "B", "C"), dorothea_organism: str = "human") -> dict[str, dict[str, dict[str, dict[str, object]]]]
 ```
 
 What it does:
@@ -143,6 +143,16 @@ Parameters:
 - `msigdb_gene_sets`: MSigDB keywords and/or `.gmt` files.
 - `msigdb_method`: Decoupler method for MSigDB.
 - `msigdb_min_n_targets`: Minimum MSigDB targets retained.
+- `run_gsea`: Whether to also run Python preranked GSEA (`gseapy`) for MSigDB enrichment.
+- `gsea_min_size`: Minimum MSigDB pathway size retained for preranked GSEA.
+- `gsea_max_size`: Maximum MSigDB pathway size retained for preranked GSEA.
+- `gsea_eps`: Numerical epsilon passed to the preranked GSEA backend.
+- `gsea_rank_col`: Preferred DE statistic column for preranked GSEA. When unavailable, the selected decoupler statistic is reused.
+- `joint_enrichment_alpha`: Adjusted-significance threshold used when labeling joint MSigDB support.
+- `joint_enrichment_top_n`: Maximum number of concordant MSigDB pathways shown in joint summaries per direction.
+- `joint_enrichment_require_concordant`: Whether joint summaries require matching decoupler and GSEA directions.
+- `joint_enrichment_require_gsea_sig`: Whether joint summaries require GSEA adjusted significance.
+- `joint_enrichment_leading_edge_top_n`: Number of leading-edge genes previewed in compact GSEA and joint outputs.
 - `run_progeny`: Whether to compute PROGENy.
 - `progeny_method`: Decoupler method for PROGENy.
 - `progeny_min_n_targets`: Minimum PROGENy targets retained.
@@ -155,7 +165,7 @@ Parameters:
 - `dorothea_organism`: DoRothEA organism.
 
 Returns:
-- `dict[str, dict[str, dict[str, dict[str, object]]]]`: Nested payload bundle keyed as `condition_key -> contrast -> source -> payload`.
+- `dict[str, dict[str, dict[str, dict[str, object]]]]`: Nested payload bundle keyed as `condition_key -> contrast -> source -> payload`. Each source payload stores a `nets` block that can include `msigdb`, `msigdb_gsea`, `msigdb_joint`, `progeny`, and `dorothea`.
 
 ### `module_score`
 

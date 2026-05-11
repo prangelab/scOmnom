@@ -795,6 +795,16 @@ class MarkersAndDEConfig(BaseModel):
     )
     msigdb_method: str = "consensus"
     msigdb_min_n_targets: int = 5
+    run_gsea: bool = True
+    gsea_min_size: int = 10
+    gsea_max_size: int = 500
+    gsea_eps: float = 1e-10
+    gsea_rank_col: Optional[str] = None
+    joint_enrichment_alpha: float = 0.05
+    joint_enrichment_top_n: int = 20
+    joint_enrichment_require_concordant: bool = True
+    joint_enrichment_require_gsea_sig: bool = True
+    joint_enrichment_leading_edge_top_n: int = 8
 
     run_progeny: bool = True
     progeny_method: str = "consensus"
@@ -855,3 +865,22 @@ class MarkersAndDEConfig(BaseModel):
 
     # umap features grid layout
     plot_umap_ncols: int = 3
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_fgsea_keys(cls, data: Any):
+        if not isinstance(data, dict):
+            return data
+        migrated = dict(data)
+        legacy_to_new = {
+            "run_fgsea": "run_gsea",
+            "fgsea_min_size": "gsea_min_size",
+            "fgsea_max_size": "gsea_max_size",
+            "fgsea_eps": "gsea_eps",
+            "fgsea_rank_col": "gsea_rank_col",
+            "joint_enrichment_require_fgsea_sig": "joint_enrichment_require_gsea_sig",
+        }
+        for legacy_key, new_key in legacy_to_new.items():
+            if legacy_key in migrated and new_key not in migrated:
+                migrated[new_key] = migrated.pop(legacy_key)
+        return migrated

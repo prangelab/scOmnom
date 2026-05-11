@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 
 import scomnom.plot_utils as pu
 import scomnom.plotting as plotting
+import scomnom.de_plot_utils as dpu
 
 
 # ---------------------------------------------------------------------
@@ -220,6 +221,51 @@ def test_plotting_api_plot_de_decoupler_payload_accepts_source_payload():
     assert len(figs) >= 1
     for fig in figs:
         plt.close(fig)
+
+
+def test_plot_de_gsea_payload_returns_artifact():
+    payload = {
+        "results": pd.DataFrame(
+            {
+                "cluster": ["C00", "C00"],
+                "pathway": ["PATH_UP", "PATH_DOWN"],
+                "NES": [1.8, -1.6],
+                "ES": [0.5, -0.4],
+                "pval": [0.01, 0.02],
+                "padj": [0.03, 0.04],
+                "leading_edge_preview": ["G1, G2", "G3, G4"],
+                "leading_edge_n": [2, 2],
+            }
+        )
+    }
+
+    artifacts = dpu.plot_de_gsea_payload(payload, figdir=Path("gsea"), title_prefix="sex female_vs_male")
+
+    assert isinstance(artifacts, list)
+    assert len(artifacts) == 1
+    assert artifacts[0].stem == "gsea_summary"
+
+
+def test_plot_de_msigdb_joint_payload_returns_artifact():
+    payload = {
+        "results": pd.DataFrame(
+            {
+                "cluster": ["C00", "C00"],
+                "pathway": ["PATH_UP", "PATH_DOWN"],
+                "decoupler_score": [2.0, -1.5],
+                "NES": [1.9, -1.7],
+                "padj": [0.01, 0.02],
+                "sign_concordant": [True, True],
+                "gsea_sig": [True, True],
+            }
+        )
+    }
+
+    artifacts = dpu.plot_de_msigdb_joint_payload(payload, figdir=Path("joint"), title_prefix="sex female_vs_male")
+
+    assert isinstance(artifacts, list)
+    assert len(artifacts) == 1
+    assert artifacts[0].stem == "msigdb_joint_concordant"
 
 
 def test_plotting_api_plot_module_score_summary_heatmap_returns_figure():

@@ -1233,7 +1233,7 @@ Example:
 
 #### Enrichment de (from exported DE tables)
 
-This mode reads exported DE CSV tables from a DE results folder and runs the same MSigDB / PROGENy / DoRothEA decoupler backends on the DE statistics. It reuses the signed up/down barplot layout from the existing DE decoupler workflow.
+This mode reads exported DE CSV tables from a DE results folder and runs the same MSigDB / PROGENy / DoRothEA decoupler backends on the DE statistics. For MSigDB it can also run a Python preranked GSEA pass and build a joint concordance summary between decoupler activity direction and GSEA direction. It reuses the signed up/down barplot layout from the existing DE decoupler workflow.
 
 **Inputs**
 
@@ -1256,6 +1256,7 @@ This mode reads exported DE CSV tables from a DE results folder and runs the sam
 * Figures: `figures/<fmt>/enrichment_de_<inputdir>_roundN/`
 * Tables: `tables/enrichment_de_<inputdir>_roundN/`
 * Report: `figures/<fmt>/enrichment_de_<inputdir>_roundN/enrichment_de_report.html`
+* MSigDB outputs can include decoupler activity plots, compact GSEA summaries, and concordance-only joint summaries when `run_gsea` is enabled
 
 #### Enrichment module-score (user-defined signatures)
 
@@ -1352,6 +1353,18 @@ Within-cluster DE compares **condition levels inside each cluster**, e.g. `treat
 * Optional activity inference from DE statistics for each contrast.
 * Sources can be `cell`, `pseudobulk`, `all`, or `auto` (prefer pseudobulk if present).
 * Supports MSigDB, PROGENy, and DoRothEA with configurable methods and target filters.
+* MSigDB GSEA is enabled by default for `markers-and-de de` and writes additional `msigdb_gsea` and `msigdb_joint` outputs alongside the decoupler summaries.
+
+**GSEA controls for `markers-and-de de`**
+
+* `--run-gsea/--no-run-gsea` enables or disables MSigDB preranked GSEA on the DE statistic matrix.
+* `--gsea-min-size`, `--gsea-max-size`, and `--gsea-eps` control pathway-size filtering and numerical tolerance for the Python `gseapy` backend.
+* `--gsea-rank-col` lets you override the DE column used for GSEA ranking. If omitted, scOmnom uses the same statistic requested through `--de-decoupler-stat-col`.
+* `--joint-enrichment-alpha` controls the adjusted-significance threshold used when building the `msigdb_joint` concordance summary.
+* `--joint-enrichment-top-n` controls how many concordant up/down pathways are shown in the compact GSEA and joint plots.
+* `--joint-enrichment-require-concordant/--no-joint-enrichment-require-concordant` toggles whether joint summaries require matching decoupler and GSEA direction.
+* `--joint-enrichment-require-gsea-sig/--no-joint-enrichment-require-gsea-sig` toggles whether joint summaries require GSEA adjusted significance.
+* `--joint-enrichment-leading-edge-top-n` controls how many leading-edge genes are previewed in compact GSEA summaries.
 
 **Outputs**
 
