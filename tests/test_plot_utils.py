@@ -227,14 +227,19 @@ def test_plot_de_gsea_payload_returns_artifact():
     payload = {
         "results": pd.DataFrame(
             {
-                "cluster": ["C00", "C00", "C01"],
-                "pathway": ["PATH_UP", "PATH_DOWN", "PATH_OTHER"],
-                "NES": [1.8, -1.6, 1.4],
-                "ES": [0.5, -0.4, 0.3],
-                "pval": [0.01, 0.02, 0.03],
-                "padj": [0.03, 0.04, 0.05],
-                "leading_edge_preview": ["G1, G2", "G3, G4", "G5, G6"],
-                "leading_edge_n": [2, 2, 2],
+                "cluster": ["C00", "C00", "C00", "C01"],
+                "pathway": [
+                    "HALLMARK_INFLAMMATORY_RESPONSE",
+                    "HALLMARK_INTERFERON_ALPHA_RESPONSE",
+                    "REACTOME_SIGNALING_BY_FGFR",
+                    "REACTOME_MAPK_TARGETS",
+                ],
+                "NES": [1.8, -1.6, 1.2, 1.4],
+                "ES": [0.5, -0.4, 0.25, 0.3],
+                "pval": [0.01, 0.02, 0.03, 0.03],
+                "padj": [0.03, 0.04, 0.05, 0.05],
+                "leading_edge_preview": ["G1, G2", "G3, G4", "G5, G6", "G7, G8"],
+                "leading_edge_n": [2, 2, 2, 2],
             }
         )
     }
@@ -242,21 +247,31 @@ def test_plot_de_gsea_payload_returns_artifact():
     artifacts = dpu.plot_de_gsea_payload(payload, figdir=Path("gsea"), title_prefix="sex female_vs_male")
 
     assert isinstance(artifacts, list)
-    assert len(artifacts) == 2
-    assert sorted(a.stem for a in artifacts) == ["gsea_summary_C00", "gsea_summary_C01"]
+    assert len(artifacts) == 3
+    assert sorted(a.stem for a in artifacts) == [
+        "gsea_summary_HALLMARK_C00",
+        "gsea_summary_REACTOME_C00",
+        "gsea_summary_REACTOME_C01",
+    ]
 
 
 def test_plot_de_msigdb_joint_payload_returns_artifact():
     payload = {
         "results": pd.DataFrame(
             {
-                "cluster": ["C00", "C00", "C01"],
-                "pathway": ["PATH_UP", "PATH_DOWN", "PATH_OTHER"],
-                "decoupler_score": [2.0, -1.5, 1.2],
-                "NES": [1.9, -1.7, 1.3],
-                "padj": [0.01, 0.02, 0.04],
-                "sign_concordant": [True, True, True],
-                "gsea_sig": [True, True, True],
+                "cluster": ["C00", "C00", "C00", "C01"],
+                "pathway": [
+                    "HALLMARK_TNFA_SIGNALING_VIA_NFKB",
+                    "HALLMARK_INTERFERON_GAMMA_RESPONSE",
+                    "REACTOME_SIGNALING_BY_EGFR",
+                    "REACTOME_MAPK_TARGETS",
+                ],
+                "decoupler_score": [2.0, -1.5, 1.1, 1.2],
+                "NES": [1.9, -1.7, 1.0, 1.3],
+                "padj": [0.01, 0.02, 0.04, 0.04],
+                "sign_concordant": [True, True, True, True],
+                "gsea_sig": [True, True, True, True],
+                "leading_edge_n": [3, 4, 2, 2],
             }
         )
     }
@@ -264,8 +279,12 @@ def test_plot_de_msigdb_joint_payload_returns_artifact():
     artifacts = dpu.plot_de_msigdb_joint_payload(payload, figdir=Path("joint"), title_prefix="sex female_vs_male")
 
     assert isinstance(artifacts, list)
-    assert len(artifacts) == 2
-    assert sorted(a.stem for a in artifacts) == ["msigdb_joint_concordant_C00", "msigdb_joint_concordant_C01"]
+    assert len(artifacts) == 3
+    assert sorted(a.stem for a in artifacts) == [
+        "msigdb_joint_concordant_HALLMARK_C00",
+        "msigdb_joint_concordant_REACTOME_C00",
+        "msigdb_joint_concordant_REACTOME_C01",
+    ]
 
 
 def test_plotting_api_plot_module_score_summary_heatmap_returns_figure():

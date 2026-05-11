@@ -19,6 +19,7 @@ from matplotlib import gridspec
 from matplotlib.collections import PathCollection
 
 from . import io_utils, plot_utils
+from .annotation_utils import _infer_msigdb_gmt
 
 LOGGER = logging.getLogger(__name__)
 
@@ -87,6 +88,115 @@ def _persist_artifacts_now(artifacts) -> None:
             art.fig = None
         except Exception:
             pass
+
+
+def _select_top_enrichment_rows(
+    df: pd.DataFrame,
+    *,
+    score_col: str,
+    top_n: int,
+) -> pd.DataFrame:
+    ranked = df.copy()
+    ranked["_rank_abs"] = pd.to_numeric(ranked[score_col], errors="coerce").abs()
+    up = (
+        ranked.loc[pd.to_numeric(ranked[score_col], errors="coerce") > 0]
+        .sort_values(["padj", "_rank_abs", "pathway"], ascending=[True, False, True], kind="mergesort")
+        .head(int(top_n))
+    )
+    down = (
+        ranked.loc[pd.to_numeric(ranked[score_col], errors="coerce") < 0]
+        .sort_values(["padj", "_rank_abs", "pathway"], ascending=[True, False, True], kind="mergesort")
+        .head(int(top_n))
+    )
+    show = pd.concat([up, down], axis=0).copy()
+    if "_rank_abs" in show.columns:
+        show = show.drop(columns=["_rank_abs"])
+    return show
+
+
+def _build_leading_edge_handles(values: Sequence[int], *, facecolor: str) -> tuple[list[PathCollection], list[str]]:
+    uniq = sorted(set(int(v) for v in values if int(v) > 0))
+    if not uniq:
+        return [], []
+    picks = uniq if len(uniq) <= 4 else [uniq[0], uniq[len(uniq) // 3], uniq[(2 * len(uniq)) // 3], uniq[-1]]
+    handles = [
+        plt.scatter([], [], s=55.0 + 24.0 * np.sqrt(float(v)), facecolor=facecolor, edgecolor="#1f2d3a")
+        for v in picks
+    ]
+    return handles, [str(v) for v in picks]
+
+
+def _plot_enrichment_dotplot_panel(
+    show: pd.DataFrame,
+    *,
+    x_col: str,
+    x_label: str,
+    title: str,
+    cmap: str,
+) -> Figure:
+    plot_df = show.copy()
+    plot_df["padj_plot"] = -np.log10(plot_df["padj"].clip(lower=1e-300).fillna(1.0))
+    plot_df = plot_df.sort_values([x_col, "padj"], ascending=[False, True], kind="mergesort")
+    plot_df["pathway_label"] = plot_utils._wrap_labels(plot_df["pathway"].astype(str).tolist(), wrap_at=56)
+
+    y = np.arange(len(plot_df))
+    sizes = 55.0 + 24.0 * np.sqrt(np.clip(plot_df["leading_edge_n"].to_numpy(dtype=float), 1.0, None))
+    labels = plot_df["pathway_label"].tolist()
+    fig_h = max(5.6, 0.46 * len(plot_df) + 2.0)
+    fig_w = plot_utils._dynamic_fig_width_for_barplot(labels, min_w=18.0, max_w=30.0)
+    left = plot_utils._dynamic_left_margin_from_labels(labels, base=0.18)
+
+    fig = plt.figure(figsize=(fig_w, fig_h))
+    gs = gridspec.GridSpec(1, 2, figure=fig, width_ratios=[14.0, 3.8], wspace=0.12)
+    ax = fig.add_subplot(gs[0, 0])
+    aux_ax = fig.add_subplot(gs[0, 1])
+    aux_ax.axis("off")
+
+    scatter = ax.scatter(
+        plot_df[x_col].to_numpy(dtype=float),
+        y,
+        c=plot_df["padj_plot"].to_numpy(dtype=float),
+        s=sizes,
+        cmap=cmap,
+        edgecolors="#1f2d3a",
+        linewidths=0.8,
+        alpha=0.95,
+    )
+    ax.axvline(0.0, color="#222222", linewidth=1.0)
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=9)
+    ax.invert_yaxis()
+    ax.grid(axis="x", color="#d9d9d9", linewidth=0.8, alpha=0.8)
+    ax.set_axisbelow(True)
+    ax.set_xlabel(x_label)
+    ax.set_title(title, fontsize=14, weight="bold")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    cax = aux_ax.inset_axes([0.12, 0.10, 0.24, 0.82])
+    cbar = fig.colorbar(scatter, cax=cax)
+    cbar.set_label("-log10 adjusted p-value")
+
+    handles, labels_legend = _build_leading_edge_handles(
+        plot_df["leading_edge_n"].astype(int).tolist(),
+        facecolor="#8da0cb" if x_col == "NES" else "#fc8d62",
+    )
+    if handles:
+        aux_ax.legend(
+            handles,
+            labels_legend,
+            title="Leading-edge genes",
+            loc="upper left",
+            bbox_to_anchor=(0.46, 0.98),
+            frameon=False,
+            borderaxespad=0.0,
+            handlelength=1.2,
+            handletextpad=0.6,
+            labelspacing=0.6,
+        )
+
+    fig.subplots_adjust(left=left, right=0.97, top=0.90, bottom=0.08)
+    return fig
 
 
 def _normalize_levels_for_combo(series: pd.Series) -> pd.Series:
@@ -3385,6 +3495,7 @@ def plot_de_gsea_payload(
     ).fillna(0).astype(int)
     d["pathway"] = d.get("pathway", pd.Series("", index=d.index)).astype(str)
     d["cluster"] = d.get("cluster", pd.Series("", index=d.index)).astype(str)
+    d["gmt"] = d["pathway"].map(_infer_msigdb_gmt).astype(str)
     if "leading_edge_preview" not in d.columns:
         d["leading_edge_preview"] = ""
 
@@ -3398,78 +3509,34 @@ def plot_de_gsea_payload(
         sub = d.loc[d["cluster"].astype(str) == str(cluster)].copy()
         if sub.empty:
             continue
-        sub["_rank_abs"] = sub["NES"].abs()
-        up = (
-            sub.loc[sub["NES"] > 0]
-            .sort_values(["padj", "_rank_abs", "pathway"], ascending=[True, False, True], kind="mergesort")
-            .head(int(top_n))
-        )
-        down = (
-            sub.loc[sub["NES"] < 0]
-            .sort_values(["padj", "_rank_abs", "pathway"], ascending=[True, False, True], kind="mergesort")
-            .head(int(top_n))
-        )
-        show = pd.concat([up, down], axis=0).copy()
-        if show.empty:
-            continue
+        for gmt in _unique_keep_order(sub["gmt"].astype(str).tolist()):
+            gmt_sub = sub.loc[sub["gmt"].astype(str) == str(gmt)].copy()
+            if gmt_sub.empty:
+                continue
+            show = _select_top_enrichment_rows(gmt_sub, score_col="NES", top_n=int(top_n))
+            if show.empty:
+                continue
 
-        show["padj_plot"] = -np.log10(show["padj"].clip(lower=1e-300).fillna(1.0))
-        show = show.sort_values(["NES", "padj"], ascending=[False, True], kind="mergesort")
-        show["pathway_label"] = plot_utils._wrap_labels(show["pathway"].astype(str).tolist(), wrap_at=48)
-        y = np.arange(len(show))
-        sizes = 50.0 + 24.0 * np.sqrt(np.clip(show["leading_edge_n"].to_numpy(dtype=float), 1.0, None))
-
-        fig_h = max(4.8, 0.42 * len(show) + 1.8)
-        fig, ax = plt.subplots(figsize=(11.5, fig_h))
-        scatter = ax.scatter(
-            show["NES"].to_numpy(dtype=float),
-            y,
-            c=show["padj_plot"].to_numpy(dtype=float),
-            s=sizes,
-            cmap="viridis",
-            edgecolors="#1f2d3a",
-            linewidths=0.8,
-            alpha=0.95,
-        )
-        ax.axvline(0.0, color="#222222", linewidth=1.0)
-        ax.set_yticks(y)
-        ax.set_yticklabels(show["pathway_label"].tolist(), fontsize=9)
-        ax.invert_yaxis()
-        ax.grid(axis="x", color="#d9d9d9", linewidth=0.8, alpha=0.8)
-        ax.set_axisbelow(True)
-        ax.set_xlabel("NES")
-        cluster_title = f"{title_prefix} [{cluster}]" if title_prefix else str(cluster)
-        ax.set_title(cluster_title, fontsize=14, weight="bold")
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        cbar = fig.colorbar(scatter, ax=ax, pad=0.02)
-        cbar.set_label("-log10 adjusted p-value")
-
-        uniq = sorted(set(int(v) for v in show["leading_edge_n"].astype(int).tolist() if int(v) > 0))
-        if uniq:
-            picks = uniq if len(uniq) <= 3 else [uniq[0], uniq[len(uniq) // 2], uniq[-1]]
-            handles = [
-                plt.scatter([], [], s=50.0 + 24.0 * np.sqrt(float(v)), facecolor="#8da0cb", edgecolor="#1f2d3a")
-                for v in picks
-            ]
-            ax.legend(
-                handles,
-                [str(v) for v in picks],
-                title="Leading-edge genes",
-                loc="upper left",
-                bbox_to_anchor=(1.02, 1.0),
-                frameon=False,
+            cluster_title = f"{title_prefix} [{cluster}] {gmt}" if title_prefix else f"{cluster} {gmt}"
+            fig = _plot_enrichment_dotplot_panel(
+                show,
+                x_col="NES",
+                x_label="NES",
+                title=cluster_title,
+                cmap="viridis",
             )
-
-        fig.tight_layout()
-        artifacts.append(
-            _emit_figure_artifact(
-                fig,
-                artifact_stem=f"{artifact_stem}_{io_utils.sanitize_identifier(str(cluster), allow_spaces=False)}",
-                artifact_figdir=figdir,
-                default_stem=artifact_stem,
+            artifacts.append(
+                _emit_figure_artifact(
+                    fig,
+                    artifact_stem=(
+                        f"{artifact_stem}_"
+                        f"{io_utils.sanitize_identifier(str(gmt), allow_spaces=False)}_"
+                        f"{io_utils.sanitize_identifier(str(cluster), allow_spaces=False)}"
+                    ),
+                    artifact_figdir=figdir,
+                    default_stem=artifact_stem,
+                )
             )
-        )
 
     return artifacts
 
@@ -3495,6 +3562,9 @@ def plot_de_msigdb_joint_payload(
     d["NES"] = pd.to_numeric(d.get("NES", np.nan), errors="coerce")
     d["sign_concordant"] = d.get("sign_concordant", False).fillna(False).astype(bool)
     d["gsea_sig"] = d.get("gsea_sig", False).fillna(False).astype(bool)
+    d["pathway"] = d.get("pathway", pd.Series("", index=d.index)).astype(str)
+    d["cluster"] = d.get("cluster", pd.Series("", index=d.index)).astype(str)
+    d["gmt"] = d["pathway"].map(_infer_msigdb_gmt).astype(str)
     d = d.loc[d["sign_concordant"]].copy()
     if require_gsea_sig:
         d = d.loc[d["gsea_sig"]].copy()
@@ -3505,83 +3575,39 @@ def plot_de_msigdb_joint_payload(
         d.get("leading_edge_n", pd.Series(0, index=d.index)),
         errors="coerce",
     ).fillna(0).astype(int)
-    d["rank_abs"] = d["decoupler_score"].abs() + d["NES"].abs()
     artifacts: list[plot_utils.PlotArtifact] = []
 
     for cluster in _unique_keep_order(d["cluster"].astype(str).tolist()):
         sub = d.loc[d["cluster"].astype(str) == str(cluster)].copy()
         if sub.empty:
             continue
-        up = (
-            sub.loc[sub["decoupler_score"] > 0]
-            .sort_values(["padj", "rank_abs", "pathway"], ascending=[True, False, True], kind="mergesort")
-            .head(int(top_n))
-        )
-        down = (
-            sub.loc[sub["decoupler_score"] < 0]
-            .sort_values(["padj", "rank_abs", "pathway"], ascending=[True, False, True], kind="mergesort")
-            .head(int(top_n))
-        )
-        show = pd.concat([up, down], axis=0).copy()
-        if show.empty:
-            continue
+        for gmt in _unique_keep_order(sub["gmt"].astype(str).tolist()):
+            gmt_sub = sub.loc[sub["gmt"].astype(str) == str(gmt)].copy()
+            if gmt_sub.empty:
+                continue
+            show = _select_top_enrichment_rows(gmt_sub, score_col="decoupler_score", top_n=int(top_n))
+            if show.empty:
+                continue
 
-        show["padj_plot"] = -np.log10(show["padj"].clip(lower=1e-300).fillna(1.0))
-        show = show.sort_values(["decoupler_score", "padj"], ascending=[False, True], kind="mergesort")
-        show["pathway_label"] = plot_utils._wrap_labels(show["pathway"].astype(str).tolist(), wrap_at=48)
-        y = np.arange(len(show))
-        sizes = 50.0 + 24.0 * np.sqrt(np.clip(show["leading_edge_n"].to_numpy(dtype=float), 1.0, None))
-
-        fig_h = max(4.8, 0.42 * len(show) + 1.8)
-        fig, ax = plt.subplots(figsize=(11.5, fig_h))
-        scatter = ax.scatter(
-            show["decoupler_score"].to_numpy(dtype=float),
-            y,
-            c=show["padj_plot"].to_numpy(dtype=float),
-            s=sizes,
-            cmap="magma",
-            edgecolors="#1f2d3a",
-            linewidths=0.8,
-            alpha=0.95,
-        )
-        ax.axvline(0.0, color="#222222", linewidth=1.0)
-        ax.set_yticks(y)
-        ax.set_yticklabels(show["pathway_label"].tolist(), fontsize=9)
-        ax.invert_yaxis()
-        ax.grid(axis="x", color="#d9d9d9", linewidth=0.8, alpha=0.8)
-        ax.set_axisbelow(True)
-        ax.set_xlabel("Decoupler MSigDB score")
-        cluster_title = f"{title_prefix} [{cluster}]" if title_prefix else str(cluster)
-        ax.set_title(cluster_title, fontsize=14, weight="bold")
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        cbar = fig.colorbar(scatter, ax=ax, pad=0.02)
-        cbar.set_label("-log10 adjusted p-value")
-
-        uniq = sorted(set(int(v) for v in show["leading_edge_n"].astype(int).tolist() if int(v) > 0))
-        if uniq:
-            picks = uniq if len(uniq) <= 3 else [uniq[0], uniq[len(uniq) // 2], uniq[-1]]
-            handles = [
-                plt.scatter([], [], s=50.0 + 24.0 * np.sqrt(float(v)), facecolor="#fc8d62", edgecolor="#1f2d3a")
-                for v in picks
-            ]
-            ax.legend(
-                handles,
-                [str(v) for v in picks],
-                title="Leading-edge genes",
-                loc="upper left",
-                bbox_to_anchor=(1.02, 1.0),
-                frameon=False,
+            cluster_title = f"{title_prefix} [{cluster}] {gmt}" if title_prefix else f"{cluster} {gmt}"
+            fig = _plot_enrichment_dotplot_panel(
+                show,
+                x_col="decoupler_score",
+                x_label="Decoupler MSigDB score",
+                title=cluster_title,
+                cmap="magma",
             )
-
-        fig.tight_layout()
-        artifacts.append(
-            _emit_figure_artifact(
-                fig,
-                artifact_stem=f"{artifact_stem}_{io_utils.sanitize_identifier(str(cluster), allow_spaces=False)}",
-                artifact_figdir=figdir,
-                default_stem=artifact_stem,
+            artifacts.append(
+                _emit_figure_artifact(
+                    fig,
+                    artifact_stem=(
+                        f"{artifact_stem}_"
+                        f"{io_utils.sanitize_identifier(str(gmt), allow_spaces=False)}_"
+                        f"{io_utils.sanitize_identifier(str(cluster), allow_spaces=False)}"
+                    ),
+                    artifact_figdir=figdir,
+                    default_stem=artifact_stem,
+                )
             )
-        )
 
     return artifacts
