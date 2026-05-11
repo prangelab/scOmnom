@@ -3379,7 +3379,10 @@ def plot_de_gsea_payload(
     d = results.copy()
     d["NES"] = pd.to_numeric(d.get("NES", np.nan), errors="coerce")
     d["padj"] = pd.to_numeric(d.get("padj", np.nan), errors="coerce")
-    d["leading_edge_n"] = pd.to_numeric(d.get("leading_edge_n", 0), errors="coerce").fillna(0).astype(int)
+    d["leading_edge_n"] = pd.to_numeric(
+        d.get("leading_edge_n", pd.Series(0, index=d.index)),
+        errors="coerce",
+    ).fillna(0).astype(int)
     d["pathway"] = d.get("pathway", pd.Series("", index=d.index)).astype(str)
     d["cluster"] = d.get("cluster", pd.Series("", index=d.index)).astype(str)
     if "leading_edge_preview" not in d.columns:
@@ -3389,57 +3392,120 @@ def plot_de_gsea_payload(
     if d.empty:
         return []
 
-    up = d.loc[d["NES"] > 0].sort_values(["padj", "NES"], ascending=[True, False], kind="mergesort").head(int(top_n))
-    down = d.loc[d["NES"] < 0].sort_values(["padj", "NES"], ascending=[True, True], kind="mergesort").head(int(top_n))
-    show = pd.concat([up, down], axis=0)
-    if show.empty:
+    def _top_per_cluster(df: pd.DataFrame, *, positive: bool) -> pd.DataFrame:
+        sel = df.loc[df["NES"] > 0].copy() if positive else df.loc[df["NES"] < 0].copy()
+        if sel.empty:
+            return sel
+        sel["_rank_abs"] = sel["NES"].abs()
+        sel = sel.sort_values(
+            ["cluster", "padj", "_rank_abs", "pathway"],
+            ascending=[True, True, False, True],
+            kind="mergesort",
+        )
+        return sel.groupby("cluster", sort=False, group_keys=False).head(int(top_n)).drop(columns="_rank_abs")
+
+    def _plot_dot_panel(ax: Axes, df: pd.DataFrame, *, panel_title: str) -> Optional[PathCollection]:
+        if df.empty:
+            ax.axis("off")
+            ax.set_title(panel_title, fontsize=12, weight="bold")
+            ax.text(0.5, 0.5, "No pathways retained", ha="center", va="center", fontsize=10, transform=ax.transAxes)
+            return None
+
+        show = df.copy()
+        show["padj_plot"] = -np.log10(show["padj"].clip(lower=1e-300).fillna(1.0))
+        x_levels = sorted(_unique_keep_order(show["cluster"].astype(str).tolist()))
+        pathway_order = (
+            show.groupby("pathway", dropna=False)
+            .agg(min_padj=("padj", "min"), max_abs_nes=("NES", lambda s: float(np.nanmax(np.abs(s)))))
+            .sort_values(["min_padj", "max_abs_nes"], ascending=[True, False], kind="mergesort")
+            .index.astype(str)
+            .tolist()
+        )
+        pathway_order = list(reversed(pathway_order))
+        x_pos = {label: idx for idx, label in enumerate(x_levels)}
+        y_pos = {label: idx for idx, label in enumerate(pathway_order)}
+        show["x"] = show["cluster"].map(x_pos).astype(float)
+        show["y"] = show["pathway"].map(y_pos).astype(float)
+        sizes = 40.0 + 22.0 * np.sqrt(np.clip(show["leading_edge_n"].to_numpy(dtype=float), 1.0, None))
+
+        scatter = ax.scatter(
+            show["x"].to_numpy(dtype=float),
+            show["y"].to_numpy(dtype=float),
+            c=show["padj_plot"].to_numpy(dtype=float),
+            s=sizes,
+            cmap="viridis",
+            edgecolors="#1f2d3a",
+            linewidths=0.7,
+            alpha=0.95,
+        )
+        ax.set_xticks(range(len(x_levels)))
+        ax.set_xticklabels(x_levels, rotation=0, fontsize=10)
+        ax.set_yticks(range(len(pathway_order)))
+        ax.set_yticklabels(plot_utils._wrap_labels(pathway_order, wrap_at=48), fontsize=9)
+        ax.set_xlim(-0.5, len(x_levels) - 0.5)
+        ax.set_ylim(-0.5, len(pathway_order) - 0.5)
+        ax.grid(axis="x", color="#d9d9d9", linewidth=0.8, alpha=0.8)
+        ax.set_axisbelow(True)
+        ax.set_title(panel_title, fontsize=12, weight="bold")
+        ax.set_xlabel("Cluster")
+        ax.set_ylabel("")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        return scatter
+
+    up = _top_per_cluster(d, positive=True)
+    down = _top_per_cluster(d, positive=False)
+    if up.empty and down.empty:
         return []
 
-    show["label"] = (
-        show["cluster"].astype(str)
-        + " | "
-        + show["pathway"].astype(str)
-    )
-    labels = show["label"].tolist()
-    values = show["NES"].to_numpy(dtype=float)
-    colors = ["#3a7f3b" if v >= 0 else "#b04a4a" for v in values]
+    panels: list[tuple[str, pd.DataFrame]] = []
+    if up.empty is False:
+        panels.append(("Up In Better", up))
+    if down.empty is False:
+        panels.append(("Up In Worse", down))
 
-    fig_h = max(4.5, 0.42 * len(show) + 1.8)
-    fig, (ax, ax_text) = plt.subplots(
+    fig_h = max(5.0, sum(max(3.0, 0.34 * part["pathway"].nunique() + 1.6) for _, part in panels))
+    fig, axes = plt.subplots(
+        len(panels),
         1,
-        2,
-        figsize=(16.0, fig_h),
-        gridspec_kw={"width_ratios": [1.15, 1.0]},
+        figsize=(12.5, fig_h),
+        squeeze=False,
     )
-    y = np.arange(len(show))
-    ax.barh(y, values, color=colors, edgecolor="#1f2d3a", linewidth=0.8)
-    ax.axvline(0.0, color="#222222", linewidth=1.0)
-    ax.set_yticks(y)
-    ax.set_yticklabels(labels, fontsize=10)
-    ax.invert_yaxis()
-    ax.set_xlabel("NES")
-    ax.set_title(title_prefix or "GSEA summary", fontsize=14, weight="bold")
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
+    scatters: list[PathCollection] = []
+    for ax, (panel_title, panel_df) in zip(axes[:, 0], panels):
+        scatter = _plot_dot_panel(ax, panel_df, panel_title=panel_title)
+        if scatter is not None:
+            scatters.append(scatter)
 
-    ax_text.axis("off")
-    text_lines = ["padj    LE_n    Leading edge"]
-    for row in show.itertuples(index=False):
-        padj = getattr(row, "padj", np.nan)
-        padj_txt = f"{float(padj):.2e}" if np.isfinite(padj) else "NA"
-        le_n = int(getattr(row, "leading_edge_n", 0))
-        preview = str(getattr(row, "leading_edge_preview", "") or "")
-        text_lines.append(f"{padj_txt:>8}  {le_n:>4}    {preview}")
-    ax_text.text(
-        0.0,
-        1.0,
-        "\n".join(text_lines),
-        va="top",
-        ha="left",
-        family="monospace",
-        fontsize=9,
-    )
-    fig.tight_layout()
+    if title_prefix:
+        fig.suptitle(f"{title_prefix}\nTop {int(top_n)} MSigDB pathways per cluster", fontsize=16, weight="bold", y=0.995)
+    else:
+        fig.suptitle(f"Top {int(top_n)} MSigDB pathways per cluster", fontsize=16, weight="bold", y=0.995)
+
+    if scatters:
+        cbar = fig.colorbar(scatters[-1], ax=axes[:, 0].tolist(), pad=0.01, fraction=0.025)
+        cbar.set_label("-log10 adjusted p-value")
+        size_vals = []
+        for _, panel_df in panels:
+            size_vals.extend(panel_df["leading_edge_n"].astype(int).tolist())
+        if size_vals:
+            uniq = sorted(set(int(v) for v in size_vals if int(v) > 0))
+            if uniq:
+                picks = uniq if len(uniq) <= 3 else [uniq[0], uniq[len(uniq) // 2], uniq[-1]]
+                handles = [
+                    plt.scatter([], [], s=40.0 + 22.0 * np.sqrt(float(v)), facecolor="#8da0cb", edgecolor="#1f2d3a")
+                    for v in picks
+                ]
+                axes[0, 0].legend(
+                    handles,
+                    [str(v) for v in picks],
+                    title="Leading-edge genes",
+                    loc="upper left",
+                    bbox_to_anchor=(1.02, 1.0),
+                    frameon=False,
+                )
+
+    fig.tight_layout(rect=(0.0, 0.0, 0.94, 0.97))
 
     return [_emit_figure_artifact(fig, artifact_stem=artifact_stem, artifact_figdir=figdir, default_stem=artifact_stem)]
 
@@ -3471,39 +3537,124 @@ def plot_de_msigdb_joint_payload(
     if d.empty:
         return []
 
+    d["leading_edge_n"] = pd.to_numeric(
+        d.get("leading_edge_n", pd.Series(0, index=d.index)),
+        errors="coerce",
+    ).fillna(0).astype(int)
     d["rank_abs"] = d["decoupler_score"].abs() + d["NES"].abs()
-    up = d.loc[d["decoupler_score"] > 0].sort_values(["padj", "rank_abs"], ascending=[True, False], kind="mergesort").head(int(top_n))
-    down = d.loc[d["decoupler_score"] < 0].sort_values(["padj", "rank_abs"], ascending=[True, False], kind="mergesort").head(int(top_n))
-    show = pd.concat([up, down], axis=0)
-    if show.empty:
+
+    def _top_per_cluster(df: pd.DataFrame, *, positive: bool) -> pd.DataFrame:
+        sel = df.loc[df["decoupler_score"] > 0].copy() if positive else df.loc[df["decoupler_score"] < 0].copy()
+        if sel.empty:
+            return sel
+        sel = sel.sort_values(
+            ["cluster", "padj", "rank_abs", "pathway"],
+            ascending=[True, True, False, True],
+            kind="mergesort",
+        )
+        return sel.groupby("cluster", sort=False, group_keys=False).head(int(top_n))
+
+    def _plot_dot_panel(ax: Axes, df: pd.DataFrame, *, panel_title: str) -> Optional[PathCollection]:
+        if df.empty:
+            ax.axis("off")
+            ax.set_title(panel_title, fontsize=12, weight="bold")
+            ax.text(0.5, 0.5, "No pathways retained", ha="center", va="center", fontsize=10, transform=ax.transAxes)
+            return None
+
+        show = df.copy()
+        show["padj_plot"] = -np.log10(show["padj"].clip(lower=1e-300).fillna(1.0))
+        x_levels = sorted(_unique_keep_order(show["cluster"].astype(str).tolist()))
+        pathway_order = (
+            show.groupby("pathway", dropna=False)
+            .agg(min_padj=("padj", "min"), max_abs_score=("rank_abs", "max"))
+            .sort_values(["min_padj", "max_abs_score"], ascending=[True, False], kind="mergesort")
+            .index.astype(str)
+            .tolist()
+        )
+        pathway_order = list(reversed(pathway_order))
+        x_pos = {label: idx for idx, label in enumerate(x_levels)}
+        y_pos = {label: idx for idx, label in enumerate(pathway_order)}
+        show["x"] = show["cluster"].map(x_pos).astype(float)
+        show["y"] = show["pathway"].map(y_pos).astype(float)
+        sizes = 40.0 + 22.0 * np.sqrt(np.clip(show["leading_edge_n"].to_numpy(dtype=float), 1.0, None))
+
+        scatter = ax.scatter(
+            show["x"].to_numpy(dtype=float),
+            show["y"].to_numpy(dtype=float),
+            c=show["padj_plot"].to_numpy(dtype=float),
+            s=sizes,
+            cmap="magma",
+            edgecolors="#1f2d3a",
+            linewidths=0.7,
+            alpha=0.95,
+        )
+        ax.set_xticks(range(len(x_levels)))
+        ax.set_xticklabels(x_levels, rotation=0, fontsize=10)
+        ax.set_yticks(range(len(pathway_order)))
+        ax.set_yticklabels(plot_utils._wrap_labels(pathway_order, wrap_at=48), fontsize=9)
+        ax.set_xlim(-0.5, len(x_levels) - 0.5)
+        ax.set_ylim(-0.5, len(pathway_order) - 0.5)
+        ax.grid(axis="x", color="#d9d9d9", linewidth=0.8, alpha=0.8)
+        ax.set_axisbelow(True)
+        ax.set_title(panel_title, fontsize=12, weight="bold")
+        ax.set_xlabel("Cluster")
+        ax.set_ylabel("")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        return scatter
+
+    up = _top_per_cluster(d, positive=True)
+    down = _top_per_cluster(d, positive=False)
+    if up.empty and down.empty:
         return []
 
-    show["label"] = show["cluster"].astype(str) + " | " + show["pathway"].astype(str)
-    y = np.arange(len(show))
-    sizes = np.clip(-np.log10(show["padj"].clip(lower=1e-300).fillna(1.0).to_numpy(dtype=float) + 1e-300), 0.0, 20.0)
-    sizes = 40.0 + sizes * 16.0
+    panels: list[tuple[str, pd.DataFrame]] = []
+    if up.empty is False:
+        panels.append(("Concordant Up In Better", up))
+    if down.empty is False:
+        panels.append(("Concordant Up In Worse", down))
 
-    fig_h = max(4.5, 0.42 * len(show) + 1.8)
-    fig, ax = plt.subplots(figsize=(13.5, fig_h))
-    scatter = ax.scatter(
-        show["decoupler_score"].to_numpy(dtype=float),
-        y,
-        c=show["NES"].to_numpy(dtype=float),
-        s=sizes,
-        cmap="coolwarm",
-        edgecolors="#1f2d3a",
-        linewidths=0.7,
+    fig_h = max(5.0, sum(max(3.0, 0.34 * part["pathway"].nunique() + 1.6) for _, part in panels))
+    fig, axes = plt.subplots(
+        len(panels),
+        1,
+        figsize=(12.5, fig_h),
+        squeeze=False,
     )
-    ax.axvline(0.0, color="#222222", linewidth=1.0)
-    ax.set_yticks(y)
-    ax.set_yticklabels(show["label"].tolist(), fontsize=10)
-    ax.invert_yaxis()
-    ax.set_xlabel("Decoupler MSigDB score")
-    ax.set_title(title_prefix or "MSigDB concordant pathways", fontsize=14, weight="bold")
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    cbar = fig.colorbar(scatter, ax=ax, pad=0.02)
-    cbar.set_label("GSEA NES")
-    fig.tight_layout()
+    scatters: list[PathCollection] = []
+    for ax, (panel_title, panel_df) in zip(axes[:, 0], panels):
+        scatter = _plot_dot_panel(ax, panel_df, panel_title=panel_title)
+        if scatter is not None:
+            scatters.append(scatter)
+
+    if title_prefix:
+        fig.suptitle(f"{title_prefix}\nTop {int(top_n)} concordant MSigDB pathways per cluster", fontsize=16, weight="bold", y=0.995)
+    else:
+        fig.suptitle(f"Top {int(top_n)} concordant MSigDB pathways per cluster", fontsize=16, weight="bold", y=0.995)
+
+    if scatters:
+        cbar = fig.colorbar(scatters[-1], ax=axes[:, 0].tolist(), pad=0.01, fraction=0.025)
+        cbar.set_label("-log10 adjusted p-value")
+        size_vals = []
+        for _, panel_df in panels:
+            size_vals.extend(panel_df["leading_edge_n"].astype(int).tolist())
+        if size_vals:
+            uniq = sorted(set(int(v) for v in size_vals if int(v) > 0))
+            if uniq:
+                picks = uniq if len(uniq) <= 3 else [uniq[0], uniq[len(uniq) // 2], uniq[-1]]
+                handles = [
+                    plt.scatter([], [], s=40.0 + 22.0 * np.sqrt(float(v)), facecolor="#fc8d62", edgecolor="#1f2d3a")
+                    for v in picks
+                ]
+                axes[0, 0].legend(
+                    handles,
+                    [str(v) for v in picks],
+                    title="Leading-edge genes",
+                    loc="upper left",
+                    bbox_to_anchor=(1.02, 1.0),
+                    frameon=False,
+                )
+
+    fig.tight_layout(rect=(0.0, 0.0, 0.94, 0.97))
 
     return [_emit_figure_artifact(fig, artifact_stem=artifact_stem, artifact_figdir=figdir, default_stem=artifact_stem)]
