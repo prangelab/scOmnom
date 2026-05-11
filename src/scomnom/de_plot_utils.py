@@ -3392,122 +3392,86 @@ def plot_de_gsea_payload(
     if d.empty:
         return []
 
-    def _top_per_cluster(df: pd.DataFrame, *, positive: bool) -> pd.DataFrame:
-        sel = df.loc[df["NES"] > 0].copy() if positive else df.loc[df["NES"] < 0].copy()
-        if sel.empty:
-            return sel
-        sel["_rank_abs"] = sel["NES"].abs()
-        sel = sel.sort_values(
-            ["cluster", "padj", "_rank_abs", "pathway"],
-            ascending=[True, True, False, True],
-            kind="mergesort",
+    artifacts: list[plot_utils.PlotArtifact] = []
+
+    for cluster in _unique_keep_order(d["cluster"].astype(str).tolist()):
+        sub = d.loc[d["cluster"].astype(str) == str(cluster)].copy()
+        if sub.empty:
+            continue
+        sub["_rank_abs"] = sub["NES"].abs()
+        up = (
+            sub.loc[sub["NES"] > 0]
+            .sort_values(["padj", "_rank_abs", "pathway"], ascending=[True, False, True], kind="mergesort")
+            .head(int(top_n))
         )
-        return sel.groupby("cluster", sort=False, group_keys=False).head(int(top_n)).drop(columns="_rank_abs")
+        down = (
+            sub.loc[sub["NES"] < 0]
+            .sort_values(["padj", "_rank_abs", "pathway"], ascending=[True, False, True], kind="mergesort")
+            .head(int(top_n))
+        )
+        show = pd.concat([up, down], axis=0).copy()
+        if show.empty:
+            continue
 
-    def _plot_dot_panel(ax: Axes, df: pd.DataFrame, *, panel_title: str) -> Optional[PathCollection]:
-        if df.empty:
-            ax.axis("off")
-            ax.set_title(panel_title, fontsize=12, weight="bold")
-            ax.text(0.5, 0.5, "No pathways retained", ha="center", va="center", fontsize=10, transform=ax.transAxes)
-            return None
-
-        show = df.copy()
         show["padj_plot"] = -np.log10(show["padj"].clip(lower=1e-300).fillna(1.0))
-        x_levels = sorted(_unique_keep_order(show["cluster"].astype(str).tolist()))
-        pathway_order = (
-            show.groupby("pathway", dropna=False)
-            .agg(min_padj=("padj", "min"), max_abs_nes=("NES", lambda s: float(np.nanmax(np.abs(s)))))
-            .sort_values(["min_padj", "max_abs_nes"], ascending=[True, False], kind="mergesort")
-            .index.astype(str)
-            .tolist()
-        )
-        pathway_order = list(reversed(pathway_order))
-        x_pos = {label: idx for idx, label in enumerate(x_levels)}
-        y_pos = {label: idx for idx, label in enumerate(pathway_order)}
-        show["x"] = show["cluster"].map(x_pos).astype(float)
-        show["y"] = show["pathway"].map(y_pos).astype(float)
-        sizes = 40.0 + 22.0 * np.sqrt(np.clip(show["leading_edge_n"].to_numpy(dtype=float), 1.0, None))
+        show = show.sort_values(["NES", "padj"], ascending=[False, True], kind="mergesort")
+        show["pathway_label"] = plot_utils._wrap_labels(show["pathway"].astype(str).tolist(), wrap_at=48)
+        y = np.arange(len(show))
+        sizes = 50.0 + 24.0 * np.sqrt(np.clip(show["leading_edge_n"].to_numpy(dtype=float), 1.0, None))
 
+        fig_h = max(4.8, 0.42 * len(show) + 1.8)
+        fig, ax = plt.subplots(figsize=(11.5, fig_h))
         scatter = ax.scatter(
-            show["x"].to_numpy(dtype=float),
-            show["y"].to_numpy(dtype=float),
+            show["NES"].to_numpy(dtype=float),
+            y,
             c=show["padj_plot"].to_numpy(dtype=float),
             s=sizes,
             cmap="viridis",
             edgecolors="#1f2d3a",
-            linewidths=0.7,
+            linewidths=0.8,
             alpha=0.95,
         )
-        ax.set_xticks(range(len(x_levels)))
-        ax.set_xticklabels(x_levels, rotation=0, fontsize=10)
-        ax.set_yticks(range(len(pathway_order)))
-        ax.set_yticklabels(plot_utils._wrap_labels(pathway_order, wrap_at=48), fontsize=9)
-        ax.set_xlim(-0.5, len(x_levels) - 0.5)
-        ax.set_ylim(-0.5, len(pathway_order) - 0.5)
+        ax.axvline(0.0, color="#222222", linewidth=1.0)
+        ax.set_yticks(y)
+        ax.set_yticklabels(show["pathway_label"].tolist(), fontsize=9)
+        ax.invert_yaxis()
         ax.grid(axis="x", color="#d9d9d9", linewidth=0.8, alpha=0.8)
         ax.set_axisbelow(True)
-        ax.set_title(panel_title, fontsize=12, weight="bold")
-        ax.set_xlabel("Cluster")
-        ax.set_ylabel("")
+        ax.set_xlabel("NES")
+        cluster_title = f"{title_prefix} [{cluster}]" if title_prefix else str(cluster)
+        ax.set_title(cluster_title, fontsize=14, weight="bold")
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
-        return scatter
-
-    up = _top_per_cluster(d, positive=True)
-    down = _top_per_cluster(d, positive=False)
-    if up.empty and down.empty:
-        return []
-
-    panels: list[tuple[str, pd.DataFrame]] = []
-    if up.empty is False:
-        panels.append(("Up In Better", up))
-    if down.empty is False:
-        panels.append(("Up In Worse", down))
-
-    fig_h = max(5.0, sum(max(3.0, 0.34 * part["pathway"].nunique() + 1.6) for _, part in panels))
-    fig, axes = plt.subplots(
-        len(panels),
-        1,
-        figsize=(12.5, fig_h),
-        squeeze=False,
-    )
-    scatters: list[PathCollection] = []
-    for ax, (panel_title, panel_df) in zip(axes[:, 0], panels):
-        scatter = _plot_dot_panel(ax, panel_df, panel_title=panel_title)
-        if scatter is not None:
-            scatters.append(scatter)
-
-    if title_prefix:
-        fig.suptitle(f"{title_prefix}\nTop {int(top_n)} MSigDB pathways per cluster", fontsize=16, weight="bold", y=0.995)
-    else:
-        fig.suptitle(f"Top {int(top_n)} MSigDB pathways per cluster", fontsize=16, weight="bold", y=0.995)
-
-    if scatters:
-        cbar = fig.colorbar(scatters[-1], ax=axes[:, 0].tolist(), pad=0.01, fraction=0.025)
+        cbar = fig.colorbar(scatter, ax=ax, pad=0.02)
         cbar.set_label("-log10 adjusted p-value")
-        size_vals = []
-        for _, panel_df in panels:
-            size_vals.extend(panel_df["leading_edge_n"].astype(int).tolist())
-        if size_vals:
-            uniq = sorted(set(int(v) for v in size_vals if int(v) > 0))
-            if uniq:
-                picks = uniq if len(uniq) <= 3 else [uniq[0], uniq[len(uniq) // 2], uniq[-1]]
-                handles = [
-                    plt.scatter([], [], s=40.0 + 22.0 * np.sqrt(float(v)), facecolor="#8da0cb", edgecolor="#1f2d3a")
-                    for v in picks
-                ]
-                axes[0, 0].legend(
-                    handles,
-                    [str(v) for v in picks],
-                    title="Leading-edge genes",
-                    loc="upper left",
-                    bbox_to_anchor=(1.02, 1.0),
-                    frameon=False,
-                )
 
-    fig.tight_layout(rect=(0.0, 0.0, 0.94, 0.97))
+        uniq = sorted(set(int(v) for v in show["leading_edge_n"].astype(int).tolist() if int(v) > 0))
+        if uniq:
+            picks = uniq if len(uniq) <= 3 else [uniq[0], uniq[len(uniq) // 2], uniq[-1]]
+            handles = [
+                plt.scatter([], [], s=50.0 + 24.0 * np.sqrt(float(v)), facecolor="#8da0cb", edgecolor="#1f2d3a")
+                for v in picks
+            ]
+            ax.legend(
+                handles,
+                [str(v) for v in picks],
+                title="Leading-edge genes",
+                loc="upper left",
+                bbox_to_anchor=(1.02, 1.0),
+                frameon=False,
+            )
 
-    return [_emit_figure_artifact(fig, artifact_stem=artifact_stem, artifact_figdir=figdir, default_stem=artifact_stem)]
+        fig.tight_layout()
+        artifacts.append(
+            _emit_figure_artifact(
+                fig,
+                artifact_stem=f"{artifact_stem}_{io_utils.sanitize_identifier(str(cluster), allow_spaces=False)}",
+                artifact_figdir=figdir,
+                default_stem=artifact_stem,
+            )
+        )
+
+    return artifacts
 
 
 def plot_de_msigdb_joint_payload(
@@ -3542,119 +3506,82 @@ def plot_de_msigdb_joint_payload(
         errors="coerce",
     ).fillna(0).astype(int)
     d["rank_abs"] = d["decoupler_score"].abs() + d["NES"].abs()
+    artifacts: list[plot_utils.PlotArtifact] = []
 
-    def _top_per_cluster(df: pd.DataFrame, *, positive: bool) -> pd.DataFrame:
-        sel = df.loc[df["decoupler_score"] > 0].copy() if positive else df.loc[df["decoupler_score"] < 0].copy()
-        if sel.empty:
-            return sel
-        sel = sel.sort_values(
-            ["cluster", "padj", "rank_abs", "pathway"],
-            ascending=[True, True, False, True],
-            kind="mergesort",
+    for cluster in _unique_keep_order(d["cluster"].astype(str).tolist()):
+        sub = d.loc[d["cluster"].astype(str) == str(cluster)].copy()
+        if sub.empty:
+            continue
+        up = (
+            sub.loc[sub["decoupler_score"] > 0]
+            .sort_values(["padj", "rank_abs", "pathway"], ascending=[True, False, True], kind="mergesort")
+            .head(int(top_n))
         )
-        return sel.groupby("cluster", sort=False, group_keys=False).head(int(top_n))
+        down = (
+            sub.loc[sub["decoupler_score"] < 0]
+            .sort_values(["padj", "rank_abs", "pathway"], ascending=[True, False, True], kind="mergesort")
+            .head(int(top_n))
+        )
+        show = pd.concat([up, down], axis=0).copy()
+        if show.empty:
+            continue
 
-    def _plot_dot_panel(ax: Axes, df: pd.DataFrame, *, panel_title: str) -> Optional[PathCollection]:
-        if df.empty:
-            ax.axis("off")
-            ax.set_title(panel_title, fontsize=12, weight="bold")
-            ax.text(0.5, 0.5, "No pathways retained", ha="center", va="center", fontsize=10, transform=ax.transAxes)
-            return None
-
-        show = df.copy()
         show["padj_plot"] = -np.log10(show["padj"].clip(lower=1e-300).fillna(1.0))
-        x_levels = sorted(_unique_keep_order(show["cluster"].astype(str).tolist()))
-        pathway_order = (
-            show.groupby("pathway", dropna=False)
-            .agg(min_padj=("padj", "min"), max_abs_score=("rank_abs", "max"))
-            .sort_values(["min_padj", "max_abs_score"], ascending=[True, False], kind="mergesort")
-            .index.astype(str)
-            .tolist()
-        )
-        pathway_order = list(reversed(pathway_order))
-        x_pos = {label: idx for idx, label in enumerate(x_levels)}
-        y_pos = {label: idx for idx, label in enumerate(pathway_order)}
-        show["x"] = show["cluster"].map(x_pos).astype(float)
-        show["y"] = show["pathway"].map(y_pos).astype(float)
-        sizes = 40.0 + 22.0 * np.sqrt(np.clip(show["leading_edge_n"].to_numpy(dtype=float), 1.0, None))
+        show = show.sort_values(["decoupler_score", "padj"], ascending=[False, True], kind="mergesort")
+        show["pathway_label"] = plot_utils._wrap_labels(show["pathway"].astype(str).tolist(), wrap_at=48)
+        y = np.arange(len(show))
+        sizes = 50.0 + 24.0 * np.sqrt(np.clip(show["leading_edge_n"].to_numpy(dtype=float), 1.0, None))
 
+        fig_h = max(4.8, 0.42 * len(show) + 1.8)
+        fig, ax = plt.subplots(figsize=(11.5, fig_h))
         scatter = ax.scatter(
-            show["x"].to_numpy(dtype=float),
-            show["y"].to_numpy(dtype=float),
+            show["decoupler_score"].to_numpy(dtype=float),
+            y,
             c=show["padj_plot"].to_numpy(dtype=float),
             s=sizes,
             cmap="magma",
             edgecolors="#1f2d3a",
-            linewidths=0.7,
+            linewidths=0.8,
             alpha=0.95,
         )
-        ax.set_xticks(range(len(x_levels)))
-        ax.set_xticklabels(x_levels, rotation=0, fontsize=10)
-        ax.set_yticks(range(len(pathway_order)))
-        ax.set_yticklabels(plot_utils._wrap_labels(pathway_order, wrap_at=48), fontsize=9)
-        ax.set_xlim(-0.5, len(x_levels) - 0.5)
-        ax.set_ylim(-0.5, len(pathway_order) - 0.5)
+        ax.axvline(0.0, color="#222222", linewidth=1.0)
+        ax.set_yticks(y)
+        ax.set_yticklabels(show["pathway_label"].tolist(), fontsize=9)
+        ax.invert_yaxis()
         ax.grid(axis="x", color="#d9d9d9", linewidth=0.8, alpha=0.8)
         ax.set_axisbelow(True)
-        ax.set_title(panel_title, fontsize=12, weight="bold")
-        ax.set_xlabel("Cluster")
-        ax.set_ylabel("")
+        ax.set_xlabel("Decoupler MSigDB score")
+        cluster_title = f"{title_prefix} [{cluster}]" if title_prefix else str(cluster)
+        ax.set_title(cluster_title, fontsize=14, weight="bold")
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
-        return scatter
-
-    up = _top_per_cluster(d, positive=True)
-    down = _top_per_cluster(d, positive=False)
-    if up.empty and down.empty:
-        return []
-
-    panels: list[tuple[str, pd.DataFrame]] = []
-    if up.empty is False:
-        panels.append(("Concordant Up In Better", up))
-    if down.empty is False:
-        panels.append(("Concordant Up In Worse", down))
-
-    fig_h = max(5.0, sum(max(3.0, 0.34 * part["pathway"].nunique() + 1.6) for _, part in panels))
-    fig, axes = plt.subplots(
-        len(panels),
-        1,
-        figsize=(12.5, fig_h),
-        squeeze=False,
-    )
-    scatters: list[PathCollection] = []
-    for ax, (panel_title, panel_df) in zip(axes[:, 0], panels):
-        scatter = _plot_dot_panel(ax, panel_df, panel_title=panel_title)
-        if scatter is not None:
-            scatters.append(scatter)
-
-    if title_prefix:
-        fig.suptitle(f"{title_prefix}\nTop {int(top_n)} concordant MSigDB pathways per cluster", fontsize=16, weight="bold", y=0.995)
-    else:
-        fig.suptitle(f"Top {int(top_n)} concordant MSigDB pathways per cluster", fontsize=16, weight="bold", y=0.995)
-
-    if scatters:
-        cbar = fig.colorbar(scatters[-1], ax=axes[:, 0].tolist(), pad=0.01, fraction=0.025)
+        cbar = fig.colorbar(scatter, ax=ax, pad=0.02)
         cbar.set_label("-log10 adjusted p-value")
-        size_vals = []
-        for _, panel_df in panels:
-            size_vals.extend(panel_df["leading_edge_n"].astype(int).tolist())
-        if size_vals:
-            uniq = sorted(set(int(v) for v in size_vals if int(v) > 0))
-            if uniq:
-                picks = uniq if len(uniq) <= 3 else [uniq[0], uniq[len(uniq) // 2], uniq[-1]]
-                handles = [
-                    plt.scatter([], [], s=40.0 + 22.0 * np.sqrt(float(v)), facecolor="#fc8d62", edgecolor="#1f2d3a")
-                    for v in picks
-                ]
-                axes[0, 0].legend(
-                    handles,
-                    [str(v) for v in picks],
-                    title="Leading-edge genes",
-                    loc="upper left",
-                    bbox_to_anchor=(1.02, 1.0),
-                    frameon=False,
-                )
 
-    fig.tight_layout(rect=(0.0, 0.0, 0.94, 0.97))
+        uniq = sorted(set(int(v) for v in show["leading_edge_n"].astype(int).tolist() if int(v) > 0))
+        if uniq:
+            picks = uniq if len(uniq) <= 3 else [uniq[0], uniq[len(uniq) // 2], uniq[-1]]
+            handles = [
+                plt.scatter([], [], s=50.0 + 24.0 * np.sqrt(float(v)), facecolor="#fc8d62", edgecolor="#1f2d3a")
+                for v in picks
+            ]
+            ax.legend(
+                handles,
+                [str(v) for v in picks],
+                title="Leading-edge genes",
+                loc="upper left",
+                bbox_to_anchor=(1.02, 1.0),
+                frameon=False,
+            )
 
-    return [_emit_figure_artifact(fig, artifact_stem=artifact_stem, artifact_figdir=figdir, default_stem=artifact_stem)]
+        fig.tight_layout()
+        artifacts.append(
+            _emit_figure_artifact(
+                fig,
+                artifact_stem=f"{artifact_stem}_{io_utils.sanitize_identifier(str(cluster), allow_spaces=False)}",
+                artifact_figdir=figdir,
+                default_stem=artifact_stem,
+            )
+        )
+
+    return artifacts

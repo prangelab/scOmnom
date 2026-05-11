@@ -227,14 +227,14 @@ def test_plot_de_gsea_payload_returns_artifact():
     payload = {
         "results": pd.DataFrame(
             {
-                "cluster": ["C00", "C00"],
-                "pathway": ["PATH_UP", "PATH_DOWN"],
-                "NES": [1.8, -1.6],
-                "ES": [0.5, -0.4],
-                "pval": [0.01, 0.02],
-                "padj": [0.03, 0.04],
-                "leading_edge_preview": ["G1, G2", "G3, G4"],
-                "leading_edge_n": [2, 2],
+                "cluster": ["C00", "C00", "C01"],
+                "pathway": ["PATH_UP", "PATH_DOWN", "PATH_OTHER"],
+                "NES": [1.8, -1.6, 1.4],
+                "ES": [0.5, -0.4, 0.3],
+                "pval": [0.01, 0.02, 0.03],
+                "padj": [0.03, 0.04, 0.05],
+                "leading_edge_preview": ["G1, G2", "G3, G4", "G5, G6"],
+                "leading_edge_n": [2, 2, 2],
             }
         )
     }
@@ -242,21 +242,21 @@ def test_plot_de_gsea_payload_returns_artifact():
     artifacts = dpu.plot_de_gsea_payload(payload, figdir=Path("gsea"), title_prefix="sex female_vs_male")
 
     assert isinstance(artifacts, list)
-    assert len(artifacts) == 1
-    assert artifacts[0].stem == "gsea_summary"
+    assert len(artifacts) == 2
+    assert sorted(a.stem for a in artifacts) == ["gsea_summary_C00", "gsea_summary_C01"]
 
 
 def test_plot_de_msigdb_joint_payload_returns_artifact():
     payload = {
         "results": pd.DataFrame(
             {
-                "cluster": ["C00", "C00"],
-                "pathway": ["PATH_UP", "PATH_DOWN"],
-                "decoupler_score": [2.0, -1.5],
-                "NES": [1.9, -1.7],
-                "padj": [0.01, 0.02],
-                "sign_concordant": [True, True],
-                "gsea_sig": [True, True],
+                "cluster": ["C00", "C00", "C01"],
+                "pathway": ["PATH_UP", "PATH_DOWN", "PATH_OTHER"],
+                "decoupler_score": [2.0, -1.5, 1.2],
+                "NES": [1.9, -1.7, 1.3],
+                "padj": [0.01, 0.02, 0.04],
+                "sign_concordant": [True, True, True],
+                "gsea_sig": [True, True, True],
             }
         )
     }
@@ -264,8 +264,8 @@ def test_plot_de_msigdb_joint_payload_returns_artifact():
     artifacts = dpu.plot_de_msigdb_joint_payload(payload, figdir=Path("joint"), title_prefix="sex female_vs_male")
 
     assert isinstance(artifacts, list)
-    assert len(artifacts) == 1
-    assert artifacts[0].stem == "msigdb_joint_concordant"
+    assert len(artifacts) == 2
+    assert sorted(a.stem for a in artifacts) == ["msigdb_joint_concordant_C00", "msigdb_joint_concordant_C01"]
 
 
 def test_plotting_api_plot_module_score_summary_heatmap_returns_figure():
