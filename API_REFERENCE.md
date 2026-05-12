@@ -85,6 +85,33 @@ Parameters:
 Returns:
 - `tuple[dict[str, AnnData], DataFrame]`: subset objects and summary table.
 
+### `merge_datasets`
+
+Signature:
+```python
+merge_datasets(input_paths: Sequence[Path | str], *, output_root: Path | str, output_name: str | None = None, output_format: str | None = None, dataset_short_labels: Sequence[str] | None = None, subset_merge_tsv: Path | str | None = None, round_id: str | None = None, cluster_key: str | None = None, join: str = "outer", recompute_embedding: bool = True) -> tuple[dict[str, Path], pd.DataFrame]
+```
+
+What it does:
+- Merges two or more AnnData datasets into one output object.
+- Supports optional strict subset merge mode via a two-column TSV (`dataset_basename<TAB>cluster_token`).
+- By default recomputes PCA/neighbors/UMAP on the merged object and writes merge diagnostics plus provenance metadata.
+
+Parameters:
+- `input_paths`: Two or more input dataset paths.
+- `output_root`: Output root directory.
+- `output_name`: Optional base output name (default `adata.merged`).
+- `output_format`: Optional output format (`"zarr"` or `"h5ad"`).
+- `dataset_short_labels`: Optional short dataset labels in input order. Defaults to `dataset1`, `dataset2`, ...
+- `subset_merge_tsv`: Optional subset-selection TSV; when set, only explicitly listed selections are merged.
+- `round_id`: Optional round used for cluster token resolution in scOmnom objects.
+- `cluster_key`: Optional fallback `obs` key for non-scOmnom objects (falls back to `leiden` when present).
+- `join`: Feature join mode across inputs (`"outer"` or `"inner"`).
+- `recompute_embedding`: Whether to recompute PCA/neighbors/UMAP after merge.
+
+Returns:
+- `tuple[dict[str, Path], DataFrame]`: merged output path dictionary and per-dataset merge summary table.
+
 ### `enrichment_cluster`
 
 Signature:

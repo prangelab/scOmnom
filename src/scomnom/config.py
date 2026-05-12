@@ -263,12 +263,18 @@ class IntegrateConfig(BaseModel):
 # ---------------------------------------------------------------------
 class AdataOpsConfig(BaseModel):
     input_path: Path
+    input_paths: Tuple[Path, ...] = ()
+    dataset_short_labels: Tuple[str, ...] = ()
     output_dir: Optional[Path] = None
-    operation: Literal["subset", "rename", "annotation_merge"] = "subset"
+    operation: Literal["subset", "rename", "annotation_merge", "merge"] = "subset"
     output_name: Optional[str] = None
     subset_mapping_tsv: Optional[Path] = None
+    subset_merge_tsv: Optional[Path] = None
     output_format: Optional[Literal["zarr", "h5ad"]] = None
     round_id: Optional[str] = None
+    cluster_key: Optional[str] = None
+    join: Literal["outer", "inner"] = "outer"
+    recompute_embedding: bool = True
     rename_idents_file: Optional[Path] = None
     rename_round_name: str = "manual_rename"
     rename_collapse_same_labels: bool = False

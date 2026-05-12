@@ -137,3 +137,19 @@ Plotting and reporting updates:
 - split GSEA and joint figures by cluster and selected MSigDB family, matching the decoupler output rhythm while respecting dynamic CLI-selected gene set collections
 - improved enrichment dotplot layout, legend spacing, and color normalization, including safeguards so `-log10(adjusted p-value)` colorbars never display impossible negative ranges
 - updated reports, README/API docs, and notebooks to cover the new DE GSEA workflow and outputs
+
+## 0.8.0 [12-05-2026]
+AnnData merge operations release:
+- added `adata-ops merge` for full multi-input AnnData merging with repeatable `-i/--input-path`, configurable feature join (`--join outer|inner`), and default embedding refresh (`PCA -> neighbors -> UMAP`) after merge
+- added strict subset merge mode (`--subset-merge`) with dataset-scoped cluster token resolution (cluster id, exact label, or `Cnn` token extraction), including hard-fail validation for unknown dataset names and ambiguous matches
+- added support for per-input short dataset labels via `--dataset-short-label` (fallback `dataset1..N`) and propagated these labels into merge plots and merged metadata columns
+
+OOM/stability and provenance hardening:
+- switched merge concatenation to sequential incremental concat with immediate subset release (`gc.collect`) to reduce peak memory versus collect-all concat
+- added merged-source metadata columns in `obs`: `merge_source_dataset`, `merge_source_dataset_short`, `merge_source_cluster_id`, `merge_source_cluster_label`, `merge_source_cluster_composite`
+- added merged cluster relabeling/renumbering by size to `merge_cluster_id` and `merge_cluster_label`
+- hardened `uns["merge"]` persistence by storing structured provenance tables (`inputs_table`, `dataset_summary_table`, `subset_selections_table`) to avoid object-dtype/list rehydration drift after save/load
+
+API and docs:
+- exposed merge API wrapper as `scomnom.adata_ops.merge_datasets(...)`
+- updated API reference and README merge section with subset TSV format, short-label usage, and emitted metadata/diagnostics

@@ -8,6 +8,7 @@ import anndata as ad
 import pandas as pd
 
 from .adata_ops import subset_adata_by_cluster_mapping as _subset_adata_by_cluster_mapping
+from .adata_ops import merge_datasets as _merge_datasets
 from .annotation_utils import run_decoupler_for_round
 from .markers_and_de import _compute_de_enrichment_from_dir, _compute_module_score_on_adata
 from .rename_utils import rename_idents
@@ -59,6 +60,36 @@ def subset_adata_by_cluster_mapping(
         adata=adata,
         subset_to_clusters=subset_to_clusters,
         round_id=round_id,
+    )
+
+
+def merge_datasets(
+    input_paths: Sequence[str | Path],
+    *,
+    output_root: str | Path,
+    output_name: str | None = None,
+    output_format: str | None = None,
+    dataset_short_labels: Sequence[str] | None = None,
+    subset_merge_tsv: str | Path | None = None,
+    round_id: str | None = None,
+    cluster_key: str | None = None,
+    join: str = "outer",
+    recompute_embedding: bool = True,
+) -> tuple[dict[str, Path], pd.DataFrame]:
+    """
+    Public API wrapper for multi-input AnnData merge.
+    """
+    return _merge_datasets(
+        input_paths=input_paths,
+        output_root=output_root,
+        output_name=output_name,
+        output_format=output_format,
+        dataset_short_labels=dataset_short_labels,
+        subset_merge_tsv=subset_merge_tsv,
+        round_id=round_id,
+        cluster_key=cluster_key,
+        join=join,
+        recompute_embedding=recompute_embedding,
     )
 
 
@@ -241,6 +272,7 @@ def module_score(
 __all__ = [
     "rename_idents",
     "subset_adata_by_cluster_mapping",
+    "merge_datasets",
     "enrichment_cluster",
     "enrichment_de_from_tables",
     "module_score",

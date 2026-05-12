@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import logging
 import re
+import gc
 from pathlib import Path
 from typing import Any
 
 import anndata as ad
+import numpy as np
 import pandas as pd
 import scanpy as sc
 
@@ -32,6 +34,7 @@ __all__ = [
     "subset_dataset_from_tsv",
     "rename_dataset_idents",
     "run_adata_ops",
+    "merge_datasets",
 ]
 
 
@@ -366,6 +369,448 @@ def _resolve_batch_key_for_plots(adata: ad.AnnData) -> str | None:
         if key in adata.obs:
             return str(key)
     return None
+
+
+def _resolve_cluster_id_and_label_series_for_merge(
+    adata: ad.AnnData,
+    *,
+    round_id: str | None = None,
+    cluster_key: str | None = None,
+) -> tuple[pd.Series, pd.Series, dict[str, Any]]:
+    rounds = adata.uns.get("cluster_rounds", None)
+    if isinstance(rounds, dict) and rounds:
+        rid = _resolve_round_id(adata, round_id)
+        rinfo = rounds[rid]
+        labels_obs_key = str(rinfo.get("labels_obs_key", rinfo.get("cluster_key", "leiden")))
+        if labels_obs_key not in adata.obs:
+            raise KeyError(f"Round {rid!r} labels_obs_key {labels_obs_key!r} not in adata.obs.")
+        cluster_ids = adata.obs[labels_obs_key].astype(str)
+        pretty_key = None
+        ann = rinfo.get("annotation", {})
+        if isinstance(ann, dict):
+            pk = ann.get("pretty_cluster_key", None)
+            if pk is not None and str(pk) in adata.obs:
+                pretty_key = str(pk)
+        if pretty_key is not None:
+            cluster_labels = adata.obs[pretty_key].astype(str)
+        else:
+            dm = rinfo.get("cluster_display_map", None)
+            if isinstance(dm, dict) and dm:
+                cluster_labels = cluster_ids.map(lambda c: str(dm.get(str(c), str(c)))).astype(str)
+            else:
+                cluster_labels = cluster_ids.astype(str)
+        return cluster_ids, cluster_labels, {
+            "mode": "round",
+            "round_id": str(rid),
+            "id_key": str(labels_obs_key),
+            "label_key": str(pretty_key) if pretty_key else None,
+        }
+
+    fallback_key = str(cluster_key).strip() if cluster_key is not None else ""
+    if fallback_key and fallback_key in adata.obs:
+        key = fallback_key
+    elif "leiden" in adata.obs:
+        key = "leiden"
+    else:
+        raise KeyError(
+            "Could not resolve cluster labels for merge subset mode. "
+            "Provide --cluster-key for non-scOmnom inputs or ensure obs['leiden'] exists."
+        )
+    series = adata.obs[key].astype(str)
+    return series, series, {"mode": "obs", "round_id": None, "id_key": key, "label_key": key}
+
+
+def _load_subset_merge_tsv(path: Path | str) -> dict[str, list[str]]:
+    rows: list[tuple[str, str]] = []
+    for lineno, raw in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split("\t")]
+        if len(parts) != 2:
+            raise ValueError(
+                f"subset-merge TSV must have exactly 2 tab-delimited columns; got {len(parts)} on line {lineno}."
+            )
+        ds, token = parts
+        if not ds or not token:
+            raise ValueError(f"subset-merge TSV has empty dataset/token on line {lineno}.")
+        rows.append((ds, token))
+    if not rows:
+        raise ValueError("subset-merge TSV is empty.")
+    out: dict[str, list[str]] = {}
+    for ds, token in rows:
+        out.setdefault(str(ds), []).append(str(token))
+    return out
+
+
+def _resolve_subset_tokens_for_dataset(
+    *,
+    dataset_name: str,
+    tokens: list[str],
+    cluster_ids: pd.Series,
+    cluster_labels: pd.Series,
+) -> tuple[np.ndarray, list[dict[str, Any]]]:
+    ids = cluster_ids.astype(str)
+    labels = cluster_labels.astype(str)
+    all_ids = set(ids.unique().tolist())
+    selected_ids: set[str] = set()
+    selection_rows: list[dict[str, Any]] = []
+
+    for token in tokens:
+        tok = str(token).strip()
+        if not tok:
+            continue
+        matched_as = None
+        resolved_id = None
+        resolved_label = None
+        if tok in all_ids:
+            matched_as = "id"
+            resolved_id = tok
+            labels_for_id = labels[ids == resolved_id]
+            resolved_label = str(labels_for_id.iloc[0]) if len(labels_for_id) else tok
+        else:
+            label_match_ids = sorted(set(ids[labels == tok].tolist()))
+            if len(label_match_ids) == 1:
+                matched_as = "label"
+                resolved_id = str(label_match_ids[0])
+                resolved_label = tok
+            elif len(label_match_ids) > 1:
+                raise ValueError(
+                    f"subset-merge token {tok!r} in dataset {dataset_name!r} matches multiple cluster IDs via label."
+                )
+            else:
+                cnn_match_ids = sorted(
+                    set(
+                        ids[
+                            labels.map(lambda x: _extract_cnn(str(x)) == tok)
+                        ].tolist()
+                    )
+                )
+                if len(cnn_match_ids) == 1:
+                    matched_as = "cnn"
+                    resolved_id = str(cnn_match_ids[0])
+                    labels_for_id = labels[ids == resolved_id]
+                    resolved_label = str(labels_for_id.iloc[0]) if len(labels_for_id) else tok
+                elif len(cnn_match_ids) > 1:
+                    raise ValueError(
+                        f"subset-merge token {tok!r} in dataset {dataset_name!r} matches multiple cluster IDs via Cnn."
+                    )
+                else:
+                    raise ValueError(
+                        f"subset-merge token {tok!r} in dataset {dataset_name!r} did not match any cluster ID/label."
+                    )
+
+        selected_ids.add(str(resolved_id))
+        n_cells = int((ids == str(resolved_id)).sum())
+        selection_rows.append(
+            {
+                "dataset": str(dataset_name),
+                "token": str(tok),
+                "matched_as": str(matched_as),
+                "resolved_cluster_id": str(resolved_id),
+                "resolved_cluster_label": str(resolved_label),
+                "selected_cells": int(n_cells),
+            }
+        )
+
+    mask = ids.isin(selected_ids).to_numpy()
+    return mask, selection_rows
+
+
+def _reset_stale_embedding_state(adata: ad.AnnData) -> None:
+    for key in ("X_umap", "X_pca"):
+        if key in adata.obsm:
+            del adata.obsm[key]
+    for key in list(adata.obsp.keys()):
+        del adata.obsp[key]
+    for key in ("neighbors", "pca", "umap", "cluster_rounds", "active_cluster_round"):
+        if key in adata.uns:
+            del adata.uns[key]
+    if "highly_variable" in adata.var:
+        del adata.var["highly_variable"]
+
+
+def _recompute_basic_embedding(adata: ad.AnnData) -> None:
+    _reset_stale_embedding_state(adata)
+    n_obs, n_vars = int(adata.n_obs), int(adata.n_vars)
+    if n_obs < 3 or n_vars < 3:
+        LOGGER.warning("merge: too few cells/genes for PCA+UMAP recompute (n_obs=%d n_vars=%d).", n_obs, n_vars)
+        return
+
+    n_top = int(min(2000, max(200, n_vars)))
+    used_hvg = False
+    hvg_layer = "counts_cb" if "counts_cb" in adata.layers else None
+    try:
+        if hvg_layer is not None:
+            sc.pp.highly_variable_genes(adata, n_top_genes=n_top, flavor="seurat_v3", layer=hvg_layer)
+        else:
+            sc.pp.highly_variable_genes(adata, n_top_genes=n_top, flavor="seurat")
+        used_hvg = "highly_variable" in adata.var
+    except Exception as e:
+        LOGGER.warning("merge: HVG recompute failed (%s); proceeding without HVG mask.", e)
+
+    n_comps = int(min(50, n_vars - 1, n_obs - 1))
+    if n_comps < 2:
+        LOGGER.warning("merge: insufficient rank for PCA recompute (n_comps=%d).", n_comps)
+        return
+    sc.pp.pca(adata, n_comps=n_comps, use_highly_variable=bool(used_hvg))
+    sc.pp.neighbors(adata, use_rep="X_pca")
+    sc.tl.umap(adata)
+
+
+@plot_utils.collect_plot_artifacts
+def _plot_merge_source_counts(adata: ad.AnnData, *, key: str, figdir: Path) -> None:
+    import matplotlib.pyplot as plt
+
+    if key not in adata.obs:
+        return
+    counts = adata.obs[key].astype(str).value_counts()
+    if counts.empty:
+        return
+    labels = counts.index.tolist()
+    values = counts.values.astype(int)
+    fig, ax = plt.subplots(figsize=(max(8, 0.55 * len(labels)), 4))
+    ax.bar(range(len(labels)), values)
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, rotation=40, ha="right")
+    ax.set_ylabel("Cells")
+    ax.set_title("Cells per source dataset")
+    fig.tight_layout()
+    plot_utils.record_plot_artifact("merge_source_dataset_counts", figdir, fig=fig)
+
+
+def _emit_merge_plots(
+    adata: ad.AnnData,
+    *,
+    output_root: Path,
+    cluster_label_key: str,
+    source_key: str,
+) -> None:
+    figures_root = output_root / "figures"
+    plot_utils.setup_scanpy_figs(figures_root)
+    figdir = Path("merge") / "clustering"
+    artifacts = []
+    source_plot_key = "merge_source_dataset_short" if "merge_source_dataset_short" in adata.obs else source_key
+    artifacts.extend(_plot_merge_source_counts(adata, key=source_plot_key, figdir=figdir))
+    if cluster_label_key in adata.obs:
+        artifacts.extend(plot_utils.plot_cluster_sizes(adata, cluster_label_key, figdir, stem="merge_cluster_sizes"))
+    if "X_umap" in adata.obsm:
+        if source_plot_key in adata.obs:
+            artifacts.extend(
+                plot_utils.umap_by_two_legend_styles(
+                    adata,
+                    key=source_plot_key,
+                    figdir=figdir,
+                    stem="umap_source_dataset",
+                    title=source_plot_key,
+                )
+            )
+        if cluster_label_key in adata.obs:
+            artifacts.extend(
+                plot_utils.umap_by_two_legend_styles(
+                    adata,
+                    key=cluster_label_key,
+                    figdir=figdir,
+                    stem="umap_merge_clusters",
+                    title=cluster_label_key,
+                )
+            )
+    plot_utils.persist_plot_artifacts(artifacts)
+
+
+def merge_datasets(
+    input_paths: Sequence[Path | str],
+    *,
+    output_root: Path | str,
+    output_name: str | None = None,
+    output_format: str | None = None,
+    dataset_short_labels: Sequence[str] | None = None,
+    subset_merge_tsv: Path | str | None = None,
+    round_id: str | None = None,
+    cluster_key: str | None = None,
+    join: str = "outer",
+    recompute_embedding: bool = True,
+) -> tuple[dict[str, Path], pd.DataFrame]:
+    if len(input_paths) < 2:
+        raise ValueError("merge requires at least two input paths.")
+    paths = [Path(p) for p in input_paths]
+    names = [_dataset_stem_for_outputs(p) for p in paths]
+    if dataset_short_labels is None or len(tuple(dataset_short_labels)) == 0:
+        short_labels = [f"dataset{i+1}" for i in range(len(paths))]
+    else:
+        short_labels = [str(x).strip() for x in dataset_short_labels]
+        if len(short_labels) != len(paths):
+            raise ValueError(
+                f"--dataset-short-label count ({len(short_labels)}) must match number of inputs ({len(paths)})."
+            )
+        if any(not x for x in short_labels):
+            raise ValueError("--dataset-short-label values must be non-empty.")
+    if len(set(short_labels)) != len(short_labels):
+        dup = sorted({x for x in short_labels if short_labels.count(x) > 1})
+        raise ValueError(f"dataset short labels must be unique; duplicates: {dup}")
+
+    if len(set(names)) != len(names):
+        dup = sorted({x for x in names if names.count(x) > 1})
+        raise ValueError(f"merge input basenames must be unique; duplicates: {dup}")
+
+    subset_map = _load_subset_merge_tsv(subset_merge_tsv) if subset_merge_tsv is not None else None
+    if subset_map is not None:
+        unknown = sorted(set(subset_map.keys()) - set(names))
+        if unknown:
+            raise ValueError(f"subset-merge references unknown dataset basenames: {unknown}")
+
+    merged: ad.AnnData | None = None
+    selection_rows: list[dict[str, Any]] = []
+    dataset_rows: list[dict[str, Any]] = []
+    source_key = "merge_source_dataset"
+    cluster_id_key = "merge_cluster_id"
+    cluster_label_key = "merge_cluster_label"
+
+    for path, dataset_name, dataset_short in zip(paths, names, short_labels):
+        adata = load_dataset(path)
+        ids, labels, resolver_meta = _resolve_cluster_id_and_label_series_for_merge(
+            adata,
+            round_id=round_id,
+            cluster_key=cluster_key,
+        )
+        if subset_map is not None:
+            tokens = subset_map.get(dataset_name, [])
+            if not tokens:
+                continue
+            mask, rows = _resolve_subset_tokens_for_dataset(
+                dataset_name=dataset_name,
+                tokens=list(tokens),
+                cluster_ids=ids,
+                cluster_labels=labels,
+            )
+            if int(mask.sum()) == 0:
+                raise ValueError(f"subset-merge selected zero cells for dataset {dataset_name!r}.")
+            selection_rows.extend(rows)
+        else:
+            mask = np.ones(adata.n_obs, dtype=bool)
+
+        sub = adata[mask].copy()
+        source_cell_ids = [str(x) for x in sub.obs_names.tolist()]
+        sub.obs["merge_source_cell_id"] = source_cell_ids
+        sub.obs_names = pd.Index([f"{dataset_name}__{x}" for x in source_cell_ids], dtype="object")
+        sub.obs[source_key] = pd.Categorical([dataset_name] * sub.n_obs)
+        sub.obs["merge_source_dataset_short"] = pd.Categorical([dataset_short] * sub.n_obs)
+        sub.obs["merge_source_cluster_id"] = ids[mask].to_numpy(dtype="object")
+        sub.obs["merge_source_cluster_label"] = labels[mask].to_numpy(dtype="object")
+        source_cnn = (
+            sub.obs["merge_source_cluster_id"]
+            .astype(str)
+            .map(lambda v: f"C{int(v):02d}" if re.fullmatch(r"\d+", str(v)) else str(v))
+        )
+        source_label_clean = (
+            sub.obs["merge_source_cluster_label"]
+            .astype(str)
+            .map(lambda x: re.sub(r"^\s*C\d+\s*:\s*", "", str(x)).strip())
+        )
+        combined_label = pd.Series(
+            [
+                f"{dataset_short} {cid} {lab}".strip()
+                for cid, lab in zip(
+                    source_cnn.tolist(),
+                    source_label_clean.tolist(),
+                )
+            ],
+            index=sub.obs_names,
+            dtype="object",
+        )
+        sub.obs["merge_source_cluster_composite"] = combined_label.to_numpy(dtype="object")
+        sub.obs["merge_source_cluster_id"] = sub.obs["merge_source_cluster_id"].astype("category")
+        sub.obs["merge_source_cluster_label"] = sub.obs["merge_source_cluster_label"].astype("category")
+        sub.obs["merge_source_cluster_composite"] = sub.obs["merge_source_cluster_composite"].astype("category")
+        selected_n = int(sub.n_obs)
+        if merged is None:
+            merged = sub
+        else:
+            merged = ad.concat([merged, sub], axis=0, join=str(join), merge="same", uns_merge="first")
+            del sub
+            gc.collect()
+
+        dataset_rows.append(
+            {
+                "dataset": dataset_name,
+                "dataset_short_label": dataset_short,
+                "input_path": str(path),
+                "selected_cells": selected_n,
+                "total_cells": int(adata.n_obs),
+                "resolver_mode": str(resolver_meta.get("mode")),
+                "resolver_round_id": resolver_meta.get("round_id"),
+                "resolver_id_key": resolver_meta.get("id_key"),
+                "resolver_label_key": resolver_meta.get("label_key"),
+            }
+        )
+
+    if merged is None:
+        raise ValueError("merge produced zero selected cells across all inputs.")
+
+    composite_key = "merge_source_cluster_composite"
+    if composite_key in merged.obs:
+        comps = merged.obs[composite_key].astype(str)
+        order = _cluster_order_by_size(comps)
+        merged_cluster_ids = [f"C{i:02d}" for i in range(len(order))]
+        id_map = {str(comp): cid for comp, cid in zip(order, merged_cluster_ids)}
+        merged.obs[cluster_id_key] = comps.map(id_map).astype("category")
+        merged.obs[cluster_label_key] = merged.obs.apply(
+            lambda r: f"{id_map.get(str(r[composite_key]), 'C??')}: {str(r[composite_key])}",
+            axis=1,
+        ).astype("category")
+    else:
+        merged.obs[cluster_id_key] = pd.Categorical(["C00"] * merged.n_obs)
+        merged.obs[cluster_label_key] = pd.Categorical(["C00: merged"] * merged.n_obs)
+
+    if recompute_embedding:
+        _recompute_basic_embedding(merged)
+
+    provenance = {
+        "input_paths": [str(p) for p in paths],
+        "input_dataset_names": [str(n) for n in names],
+        "input_dataset_short_labels": [str(x) for x in short_labels],
+        "inputs_table": pd.DataFrame(
+            {
+                "dataset": [str(n) for n in names],
+                "dataset_short_label": [str(x) for x in short_labels],
+                "input_path": [str(p) for p in paths],
+            }
+        ),
+        "join": str(join),
+        "round_id": None if round_id is None else str(round_id),
+        "cluster_key": None if cluster_key is None else str(cluster_key),
+        "subset_merge_tsv": None if subset_merge_tsv is None else str(subset_merge_tsv),
+        "subset_selections_table": pd.DataFrame(selection_rows),
+        "dataset_summary_table": pd.DataFrame(dataset_rows),
+        "recompute_embedding": bool(recompute_embedding),
+    }
+    merged.uns["merge"] = provenance
+
+    output_root = Path(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+    _emit_merge_plots(
+        merged,
+        output_root=output_root,
+        cluster_label_key=cluster_label_key,
+        source_key=source_key,
+    )
+
+    source_path0 = paths[0]
+    fmt = str(output_format).lower().strip() if output_format else None
+    if fmt is None:
+        if source_path0.suffix.lower() == ".h5ad":
+            fmt = "h5ad"
+        else:
+            fmt = "zarr"
+    if fmt not in {"zarr", "h5ad"}:
+        raise ValueError("output_format must be 'zarr' or 'h5ad'.")
+
+    stem = str(output_name).strip() if output_name else "adata.merged"
+    out_path = output_root / f"{stem}.{fmt}"
+    save_dataset(merged, out_path, fmt=fmt)
+
+    summary_df = pd.DataFrame(dataset_rows).sort_values("dataset").reset_index(drop=True)
+    return {"merged": out_path}, summary_df
 
 
 def _ensure_umap_for_annotation_merge(adata: ad.AnnData) -> None:
@@ -823,5 +1268,19 @@ def run_adata_ops(cfg: AdataOpsConfig) -> tuple[dict[str, Path], pd.DataFrame]:
             target_round_id=cfg.target_round_id,
             update_existing_round=cfg.update_existing_round,
             annotation_merge_round_name=cfg.annotation_merge_round_name,
+        )
+    if op == "merge":
+        paths = tuple(cfg.input_paths) if cfg.input_paths else (cfg.input_path,)
+        return merge_datasets(
+            paths,
+            output_root=cfg.resolved_output_dir,
+            output_name=cfg.output_name,
+            output_format=cfg.output_format,
+            dataset_short_labels=cfg.dataset_short_labels,
+            subset_merge_tsv=cfg.subset_merge_tsv,
+            round_id=cfg.round_id,
+            cluster_key=cfg.cluster_key,
+            join=cfg.join,
+            recompute_embedding=cfg.recompute_embedding,
         )
     raise ValueError(f"Unsupported adata-ops operation: {cfg.operation!r}")

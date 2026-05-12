@@ -855,6 +855,90 @@ def adata_ops_annotation_merge(
     run_adata_ops(cfg)
 
 
+@adata_ops_app.command(
+    "merge",
+    help="Merge two or more AnnData datasets with optional cluster-based subset selection per input.",
+)
+def adata_ops_merge(
+    input_paths: List[Path] = typer.Option(
+        ...,
+        "--input-path",
+        "-i",
+        help="[I/O] Input dataset path. Repeat for multiple datasets.",
+    ),
+    output_dir: Optional[Path] = typer.Option(
+        None,
+        "--output-dir",
+        "-o",
+        help="[I/O] Output directory (default: parent of first input).",
+    ),
+    output_name: Optional[str] = typer.Option(
+        None,
+        "--output-name",
+        help="[I/O] Base name for merged output dataset (default: adata.merged).",
+    ),
+    output_format: Optional[Literal["zarr", "h5ad"]] = typer.Option(
+        None,
+        "--output-format",
+        help="[I/O] Output format for merged dataset. Default: match first input when possible.",
+    ),
+    dataset_short_labels: Optional[List[str]] = typer.Option(
+        None,
+        "--dataset-short-label",
+        help="[Merge] Short dataset label per input (repeat in same order as -i). Default: dataset1,dataset2,...",
+    ),
+    subset_merge_tsv: Optional[Path] = typer.Option(
+        None,
+        "--subset-merge",
+        help="[Merge] Two-column TSV: dataset_basename<TAB>cluster_token. If set, only listed selections are merged.",
+    ),
+    round_id: Optional[str] = typer.Option(
+        None,
+        "--round-id",
+        help="[Merge] Cluster round id used for cluster token resolution (default: active round).",
+    ),
+    cluster_key: Optional[str] = typer.Option(
+        None,
+        "--cluster-key",
+        help="[Merge] Fallback obs key for cluster labels when round metadata is unavailable.",
+    ),
+    join: Literal["outer", "inner"] = typer.Option(
+        "outer",
+        "--join",
+        help="[Merge] Feature join mode across inputs.",
+    ),
+    recompute_embedding: bool = typer.Option(
+        True,
+        "--recompute-embedding/--no-recompute-embedding",
+        help="[Merge] Recompute PCA/neighbors/UMAP after merge (default: enabled).",
+    ),
+):
+    if len(input_paths) < 2:
+        raise typer.BadParameter("merge requires at least two --input-path values.")
+    out_dir = output_dir or input_paths[0].parent
+    log_dir = out_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    logfile = log_dir / "adata-ops.log"
+    init_logging(logfile)
+
+    cfg = AdataOpsConfig(
+        input_path=input_paths[0],
+        input_paths=tuple(input_paths),
+        dataset_short_labels=tuple(dataset_short_labels or ()),
+        output_dir=out_dir,
+        operation="merge",
+        output_name=output_name,
+        output_format=output_format,
+        subset_merge_tsv=subset_merge_tsv,
+        round_id=round_id,
+        cluster_key=cluster_key,
+        join=join,
+        recompute_embedding=recompute_embedding,
+        logfile=logfile,
+    )
+    run_adata_ops(cfg)
+
+
 # ======================================================================
 #  cluster-and-annotate
 # ======================================================================
