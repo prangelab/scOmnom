@@ -13,6 +13,7 @@ import re
 import anndata as ad
 
 import matplotlib.pyplot as plt
+from matplotlib import colors as mcolors
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from matplotlib import gridspec
@@ -152,13 +153,18 @@ def _plot_enrichment_dotplot_panel(
     ax = fig.add_subplot(gs[0, 0])
     aux_ax = fig.add_subplot(gs[0, 1])
     aux_ax.axis("off")
+    padj_plot_np = plot_df["padj_plot"].to_numpy(dtype=float)
+    finite = np.isfinite(padj_plot_np)
+    color_max = float(np.nanmax(padj_plot_np[finite])) if finite.any() else 0.0
+    norm = mcolors.Normalize(vmin=0.0, vmax=max(color_max, 0.1))
 
     scatter = ax.scatter(
         plot_df[x_col].to_numpy(dtype=float),
         y,
-        c=plot_df["padj_plot"].to_numpy(dtype=float),
+        c=padj_plot_np,
         s=sizes,
         cmap=cmap,
+        norm=norm,
         edgecolors="#1f2d3a",
         linewidths=0.8,
         alpha=0.95,

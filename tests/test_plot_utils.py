@@ -257,6 +257,9 @@ def test_plot_de_gsea_payload_returns_artifact():
         scatter = art.fig.axes[0].collections[0]
         color_values = np.asarray(scatter.get_array(), dtype=float)
         assert np.all(color_values >= 0.0)
+        clim = scatter.get_clim()
+        assert clim[0] == 0.0
+        assert clim[1] >= 0.0
 
 
 def test_plot_de_msigdb_joint_payload_returns_artifact():
