@@ -125,3 +125,15 @@ Post-0.6.0 SLURM and workflow ordering patch:
 - reordered and renumbered the documented SLURM workflow to place marker calling before rename/subset decisions, and shifted downstream step numbering accordingly
 - updated README workflow and SLURM script listings to match the new numbering and optional branch labels
 - kept changelog ordering chronological (oldest -> newest top-to-bottom)
+
+## 0.7.0 [12-05-2026]
+DE enrichment expansion release:
+- added MSigDB GSEA support to `markers-and-de de` alongside the existing decoupler-based enrichment path, using the same DE-ranked input signal and storing dedicated `msigdb_gsea` results plus joint concordance summaries
+- added concordance-aware MSigDB joint summaries that combine decoupler scores with GSEA direction/significance without collapsing them into a fake combined p-value
+- extended `markers-and-de de` CLI and Python API/config surfaces with explicit GSEA and joint-enrichment controls
+
+Plotting and reporting updates:
+- added dedicated DE-enrichment plots for MSigDB GSEA and joint concordance, emitted through the native `PlotArtifact` pipeline
+- split GSEA and joint figures by cluster and selected MSigDB family, matching the decoupler output rhythm while respecting dynamic CLI-selected gene set collections
+- improved enrichment dotplot layout, legend spacing, and color normalization, including safeguards so `-log10(adjusted p-value)` colorbars never display impossible negative ranges
+- updated reports, README/API docs, and notebooks to cover the new DE GSEA workflow and outputs
