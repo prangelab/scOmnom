@@ -135,7 +135,8 @@ def _plot_enrichment_dotplot_panel(
     cmap: str,
 ) -> Figure:
     plot_df = show.copy()
-    plot_df["padj_plot"] = -np.log10(plot_df["padj"].clip(lower=1e-300).fillna(1.0))
+    padj_np = _clip_padj(pd.to_numeric(plot_df["padj"], errors="coerce").fillna(1.0).to_numpy(dtype=float))
+    plot_df["padj_plot"] = -np.log10(padj_np)
     plot_df = plot_df.sort_values([x_col, "padj"], ascending=[False, True], kind="mergesort")
     plot_df["pathway_label"] = plot_utils._wrap_labels(plot_df["pathway"].astype(str).tolist(), wrap_at=56)
 

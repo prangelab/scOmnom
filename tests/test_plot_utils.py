@@ -237,7 +237,7 @@ def test_plot_de_gsea_payload_returns_artifact():
                 "NES": [1.8, -1.6, 1.2, 1.4],
                 "ES": [0.5, -0.4, 0.25, 0.3],
                 "pval": [0.01, 0.02, 0.03, 0.03],
-                "padj": [0.03, 0.04, 0.05, 0.05],
+                "padj": [1.20, 0.04, 0.05, 0.05],
                 "leading_edge_preview": ["G1, G2", "G3, G4", "G5, G6", "G7, G8"],
                 "leading_edge_n": [2, 2, 2, 2],
             }
@@ -253,6 +253,10 @@ def test_plot_de_gsea_payload_returns_artifact():
         "gsea_summary_REACTOME_C00",
         "gsea_summary_REACTOME_C01",
     ]
+    for art in artifacts:
+        scatter = art.fig.axes[0].collections[0]
+        color_values = np.asarray(scatter.get_array(), dtype=float)
+        assert np.all(color_values >= 0.0)
 
 
 def test_plot_de_msigdb_joint_payload_returns_artifact():

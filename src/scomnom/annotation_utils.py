@@ -1272,6 +1272,12 @@ def _run_msigdb_gsea_from_stats(
         d["ES"] = pd.to_numeric(d.get("ES", np.nan), errors="coerce")
         d["pval"] = pd.to_numeric(d.get("pval", np.nan), errors="coerce")
         d["padj"] = pd.to_numeric(d.get("padj", np.nan), errors="coerce")
+        for col in ("pval", "padj"):
+            vals = pd.to_numeric(d.get(col, np.nan), errors="coerce")
+            finite = np.isfinite(vals.to_numpy(dtype=float))
+            clipped = vals.to_numpy(dtype=float, copy=True)
+            clipped[finite] = np.clip(clipped[finite], 0.0, 1.0)
+            d[col] = clipped
         if "leading_edge" not in d.columns:
             d["leading_edge"] = ""
         d["leading_edge_preview"] = ""
