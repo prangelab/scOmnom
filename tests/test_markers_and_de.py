@@ -13,7 +13,9 @@ from scomnom.markers_and_de import (
     _run_namespace_for_round,
     _collect_pseudobulk_de_tables_from_dir,
     _collect_cell_contrast_tables_from_dir,
+    _load_de_enrichment_payload_from_tables,
     _load_module_definitions,
+    _prune_uns_de,
     _compute_module_score_on_adata,
     _write_de_enrichment_tables,
     run_enrichment_cluster,
@@ -141,6 +143,70 @@ def test_write_de_enrichment_tables_writes_results_and_activity(tmp_path: Path) 
 
     assert (tmp_path / "msigdb" / "activity.tsv").exists()
     assert (tmp_path / "msigdb_gsea" / "results.tsv").exists()
+
+
+def test_load_de_enrichment_payload_from_tables_rehydrates_summary_payload(tmp_path: Path) -> None:
+    payloads = {
+        "msigdb_gsea": {
+            "results": pd.DataFrame(
+                {
+                    "cluster": ["C00"],
+                    "pathway": ["TERM"],
+                    "NES": [1.9],
+                    "padj": [0.02],
+                }
+            )
+        },
+        "msigdb": {"activity": pd.DataFrame([[1.0]], index=["C00"], columns=["TERM"])},
+    }
+    _write_de_enrichment_tables(payloads, tables_root=tmp_path)
+
+    got = _load_de_enrichment_payload_from_tables({}, net_name="msigdb_gsea", tables_root=tmp_path)
+    assert "results" in got
+    assert isinstance(got["results"], pd.DataFrame)
+    assert got["results"].loc[0, "pathway"] == "TERM"
+
+    got_msigdb = _load_de_enrichment_payload_from_tables({}, net_name="msigdb", tables_root=tmp_path)
+    assert "activity" in got_msigdb
+    assert isinstance(got_msigdb["activity"], pd.DataFrame)
+    assert got_msigdb["activity"].loc["C00", "TERM"] == 1.0
+
+
+def test_prune_uns_de_replaces_de_enrichment_tables_with_summaries() -> None:
+    adata = ad.AnnData(X=np.zeros((1, 1)))
+    adata.uns["scomnom_de"] = {
+        "de_decoupler": {
+            "sex": {
+                "female_vs_male": {
+                    "cell": {
+                        "nets": {
+                            "msigdb_gsea": {
+                                "results": pd.DataFrame(
+                                    {
+                                        "cluster": ["C00", "C00"],
+                                        "pathway": ["P1", "P2"],
+                                        "NES": [1.8, -1.2],
+                                        "padj": [0.01, 0.03],
+                                        "leading_edge_n": [3, 2],
+                                        "leading_edge_preview": ["G1, G2", "G3, G4"],
+                                    }
+                                ),
+                                "config": {"resource": "msigdb_gsea"},
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    _prune_uns_de(adata, "scomnom_de", top_n=10, decoupler_top_n=5)
+
+    payload = adata.uns["scomnom_de"]["de_decoupler"]["sex"]["female_vs_male"]["cell"]["nets"]["msigdb_gsea"]
+    assert "results" not in payload
+    assert "results_top" in payload
+    assert "summary" in payload
+    assert int(payload["summary"]["n_rows"]) == 2
 
 
 def _make_adata_with_round(round_id: str | None) -> ad.AnnData:

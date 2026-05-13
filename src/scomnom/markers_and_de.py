@@ -53,7 +53,6 @@ from .annotation_utils import (
 
 LOGGER = logging.getLogger(__name__)
 _SCCODA_LOCK = threading.Lock()
-_DECOUPLER_PLOT_LOCK = threading.Lock()
 
 # -----------------------------------------------------------------------------
 # Internal policy guard
@@ -212,6 +211,64 @@ def _prune_uns_de(adata: ad.AnnData, store_key: str, *, top_n: int = 50, decoupl
             top_cols = list(activity.columns[:n])
         return activity.loc[:, top_cols].copy()
 
+    def _top_enrichment_results(df: pd.DataFrame, n: int) -> pd.DataFrame:
+        if df is None or getattr(df, "empty", True):
+            return pd.DataFrame()
+        d = df.copy()
+        if "cluster" in d.columns:
+            d["cluster"] = d["cluster"].astype(str)
+        if "pathway" in d.columns:
+            d["pathway"] = d["pathway"].astype(str)
+        rank_col = None
+        for cand in ("decoupler_score", "NES", "ES"):
+            if cand in d.columns:
+                rank_col = cand
+                break
+        if rank_col is not None:
+            d["_abs_rank"] = pd.to_numeric(d[rank_col], errors="coerce").abs()
+        sort_cols: list[str] = []
+        ascending: list[bool] = []
+        if "cluster" in d.columns:
+            sort_cols.append("cluster")
+            ascending.append(True)
+        if "padj" in d.columns:
+            sort_cols.append("padj")
+            ascending.append(True)
+        if "_abs_rank" in d.columns:
+            sort_cols.append("_abs_rank")
+            ascending.append(False)
+        if "pathway" in d.columns:
+            sort_cols.append("pathway")
+            ascending.append(True)
+        if sort_cols:
+            d = d.sort_values(sort_cols, ascending=ascending, kind="mergesort")
+        if "cluster" in d.columns:
+            d = d.groupby("cluster", sort=False, as_index=False).head(int(max(1, n)))
+        else:
+            d = d.head(int(max(1, n)))
+        keep_cols = [
+            "cluster",
+            "pathway",
+            "decoupler_score",
+            "NES",
+            "ES",
+            "padj",
+            "pval",
+            "leading_edge_n",
+            "leading_edge_preview",
+            "direction",
+            "decoupler_direction",
+            "gsea_direction",
+            "gsea_sig",
+            "sign_concordant",
+            "supported_by_both",
+            "joint_rank",
+        ]
+        keep = [c for c in keep_cols if c in d.columns]
+        if "_abs_rank" in d.columns:
+            d = d.drop(columns=["_abs_rank"], errors="ignore")
+        return d.loc[:, keep].copy() if keep else d.copy()
+
     # Cluster-vs-rest pseudobulk
     pb_cvr = block.get("pseudobulk_cluster_vs_rest", None)
     if isinstance(pb_cvr, dict):
@@ -302,10 +359,26 @@ def _prune_uns_de(adata: ad.AnnData, store_key: str, *, top_n: int = 50, decoupl
                     for net_name, net_payload in list(nets.items()):
                         if not isinstance(net_payload, dict):
                             continue
+                        results = net_payload.get("results", None)
+                        if isinstance(results, pd.DataFrame):
+                            net_payload["results_top"] = _top_enrichment_results(results, decoupler_top_n)
+                            summary = {
+                                "n_rows": int(len(results)),
+                            }
+                            if "cluster" in results.columns:
+                                summary["n_clusters"] = int(results["cluster"].astype(str).nunique(dropna=True))
+                            if "pathway" in results.columns:
+                                summary["n_pathways"] = int(results["pathway"].astype(str).nunique(dropna=True))
+                            if "supported_by_both" in results.columns:
+                                summary["n_supported_by_both"] = int(pd.Series(results["supported_by_both"]).fillna(False).astype(bool).sum())
+                            if "sign_concordant" in results.columns:
+                                summary["n_sign_concordant"] = int(pd.Series(results["sign_concordant"]).fillna(False).astype(bool).sum())
+                            net_payload["summary"] = summary
                         activity = net_payload.get("activity", None)
                         if isinstance(activity, pd.DataFrame):
                             net_payload["activity_top"] = _top_activity(activity, decoupler_top_n)
                         net_payload.pop("activity", None)
+                        net_payload.pop("results", None)
                         net_payload.pop("activity_by_gmt", None)
                         net_payload.pop("feature_meta", None)
 
@@ -2012,6 +2085,95 @@ def _write_de_enrichment_tables(
                 if isinstance(gmt_df, pd.DataFrame) and not gmt_df.empty:
                     gmt_name = io_utils.sanitize_identifier(str(gmt_key), allow_spaces=False)
                     gmt_df.to_csv(net_dir / f"activity_{gmt_name}.tsv", sep="\t")
+
+
+def _de_enrichment_rel_base(
+    *,
+    source: str,
+    condition_key: str,
+    contrast: str,
+) -> Path:
+    if str(source) == "cell":
+        return Path(str(condition_key)) / str(contrast)
+    if str(contrast) == "interaction" or "^" in str(condition_key):
+        return Path(f"{condition_key}__interaction") / "interaction"
+    return Path(str(condition_key)) / str(contrast)
+
+
+def _export_de_enrichment_tables_from_uns(
+    adata: ad.AnnData,
+    *,
+    store_key: str,
+    de_cell_dir: Path,
+    de_pb_dir: Path,
+) -> None:
+    de_block = adata.uns.get(store_key, {}).get("de_decoupler", {})
+    if not isinstance(de_block, dict) or not de_block:
+        return
+    for condition_key, per_contrast in de_block.items():
+        if not isinstance(per_contrast, dict):
+            continue
+        for contrast, payload_by_source in per_contrast.items():
+            if not isinstance(payload_by_source, dict):
+                continue
+            for source, payload in payload_by_source.items():
+                if not isinstance(payload, dict):
+                    continue
+                payloads = payload.get("nets", {})
+                if not isinstance(payloads, dict) or not payloads:
+                    continue
+                rel_base = _de_enrichment_rel_base(
+                    source=str(source),
+                    condition_key=str(condition_key),
+                    contrast=str(contrast),
+                )
+                tables_root = (de_cell_dir if str(source) == "cell" else de_pb_dir) / rel_base
+                _write_de_enrichment_tables(payloads, tables_root=tables_root)
+
+
+def _load_de_enrichment_payload_from_tables(
+    payload: dict,
+    *,
+    net_name: str,
+    tables_root: Path,
+) -> dict:
+    if not isinstance(payload, dict):
+        return {}
+    full_payload = dict(payload)
+    needs_results = "results" not in full_payload
+    needs_activity = "activity" not in full_payload
+    if not needs_results and not needs_activity:
+        return full_payload
+
+    net_dir = Path(tables_root) / io_utils.sanitize_identifier(str(net_name), allow_spaces=False)
+    if not net_dir.exists():
+        return full_payload
+
+    activity_path = net_dir / "activity.tsv"
+    results_path = net_dir / "results.tsv"
+    if needs_activity and activity_path.exists():
+        try:
+            full_payload["activity"] = pd.read_csv(activity_path, sep="\t", index_col=0)
+        except Exception:
+            LOGGER.warning("Failed to reload DE enrichment activity from %s", str(activity_path))
+    if needs_results and results_path.exists():
+        try:
+            full_payload["results"] = pd.read_csv(results_path, sep="\t")
+        except Exception:
+            LOGGER.warning("Failed to reload DE enrichment results from %s", str(results_path))
+    if str(net_name).lower().strip() == "msigdb" and "activity_by_gmt" not in full_payload:
+        by_gmt: dict[str, pd.DataFrame] = {}
+        for gmt_path in sorted(net_dir.glob("activity_*.tsv")):
+            if gmt_path.name == "activity.tsv":
+                continue
+            key = gmt_path.stem[len("activity_") :]
+            try:
+                by_gmt[str(key).upper()] = pd.read_csv(gmt_path, sep="\t", index_col=0)
+            except Exception:
+                LOGGER.warning("Failed to reload MSigDB activity split from %s", str(gmt_path))
+        if by_gmt:
+            full_payload["activity_by_gmt"] = by_gmt
+    return full_payload
 
 
 def _compute_de_enrichment_from_dir(
@@ -4113,6 +4275,14 @@ def run_within_cluster(cfg) -> ad.AnnData:
     else:
         LOGGER.info("within-cluster: skipping pseudobulk exports (not run).")
 
+    if de_decoupler_ran and not regenerate_figures:
+        _export_de_enrichment_tables_from_uns(
+            adata,
+            store_key=store_key,
+            de_cell_dir=de_cell_dir / "de_enrichment",
+            de_pb_dir=de_pb_dir / "de_enrichment",
+        )
+
     if regenerate_figures:
         ran_pseudobulk = bool(run_pb_requested)
         ran_cell_contrast = bool(run_cell_requested)
@@ -4201,7 +4371,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                     LOGGER.info("within-cluster: plotting DE-decoupler figures...")
                     pb_cond = adata.uns.get(store_key, {}).get("pseudobulk_condition_within_group", {})
                     pb_cond_multi = adata.uns.get(store_key, {}).get("pseudobulk_condition_within_group_multi", {})
-                    plot_tasks: list[tuple[dict, str, Path, str, Optional[str], Optional[str]]] = []
+                    plot_tasks: list[tuple[dict, str, Path, Path, str, Optional[str], Optional[str]]] = []
                     for condition_key, per_contrast in de_block.items():
                         if not isinstance(per_contrast, dict):
                             continue
@@ -4215,19 +4385,17 @@ def run_within_cluster(cfg) -> ad.AnnData:
                                 if not isinstance(nets, dict) or not nets:
                                     continue
 
-                                base = Path()
+                                rel_base = _de_enrichment_rel_base(
+                                    source=str(source),
+                                    condition_key=str(condition_key),
+                                    contrast=str(contrast),
+                                )
                                 if str(source) == "cell":
-                                    base = base / "cell_level_DE" / str(condition_key) / str(contrast)
+                                    base = Path("cell_level_DE") / rel_base
+                                    tables_base = de_cell_dir / "de_enrichment" / rel_base
                                 else:
-                                    if str(contrast) == "interaction" or "^" in str(condition_key):
-                                        base = (
-                                            base
-                                            / "pseudobulk_DE"
-                                            / f"{condition_key}__interaction"
-                                            / "interaction"
-                                        )
-                                    else:
-                                        base = base / "pseudobulk_DE" / str(condition_key) / str(contrast)
+                                    base = Path("pseudobulk_DE") / rel_base
+                                    tables_base = de_pb_dir / "de_enrichment" / rel_base
 
                                 pos_label = None
                                 neg_label = None
@@ -4263,13 +4431,14 @@ def run_within_cluster(cfg) -> ad.AnnData:
                                             net_payload,
                                             str(net_name),
                                             base,
+                                            tables_base,
                                             f"{condition_key} {contrast}",
                                             pos_label,
                                             neg_label,
                                         )
                                     )
                     if plot_tasks:
-                        from concurrent.futures import ThreadPoolExecutor, as_completed
+                        from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
                         requested_workers = int(getattr(cfg, "n_jobs", 1) or 1)
                         max_workers = min(max(1, requested_workers), 8, len(plot_tasks))
@@ -4279,26 +4448,30 @@ def run_within_cluster(cfg) -> ad.AnnData:
                             max_workers,
                         )
 
-                        def _plot_de_decoupler_task(task: tuple[dict, str, Path, str, Optional[str], Optional[str]]):
-                            net_payload, net_name, base, title_prefix, pos_label, neg_label = task
-                            with _DECOUPLER_PLOT_LOCK:
-                                if str(net_name) == "msigdb_gsea":
-                                    return de_plot_utils.plot_de_gsea_payload(
-                                        net_payload,
-                                        figdir=base / "msigdb_gsea",
-                                        title_prefix=title_prefix,
-                                        top_n=int(getattr(cfg, "joint_enrichment_top_n", 20)),
-                                    )
-                                if str(net_name) == "msigdb_joint":
-                                    return de_plot_utils.plot_de_msigdb_joint_payload(
-                                        net_payload,
-                                        figdir=base / "msigdb_joint",
-                                        title_prefix=title_prefix,
-                                        top_n=int(getattr(cfg, "joint_enrichment_top_n", 20)),
-                                        require_gsea_sig=bool(getattr(cfg, "joint_enrichment_require_gsea_sig", True)),
-                                    )
-                                return de_plot_utils.plot_de_decoupler_payload(
-                                    net_payload,
+                        def _plot_de_decoupler_task(task: tuple[dict, str, Path, Path, str, Optional[str], Optional[str]]):
+                            net_payload, net_name, base, tables_base, title_prefix, pos_label, neg_label = task
+                            payload_full = _load_de_enrichment_payload_from_tables(
+                                net_payload,
+                                net_name=net_name,
+                                tables_root=tables_base,
+                            )
+                            if str(net_name) == "msigdb_gsea":
+                                return de_plot_utils.plot_de_gsea_payload(
+                                    payload_full,
+                                    figdir=base / "msigdb_gsea",
+                                    title_prefix=title_prefix,
+                                    top_n=int(getattr(cfg, "joint_enrichment_top_n", 20)),
+                                )
+                            if str(net_name) == "msigdb_joint":
+                                return de_plot_utils.plot_de_msigdb_joint_payload(
+                                    payload_full,
+                                    figdir=base / "msigdb_joint",
+                                    title_prefix=title_prefix,
+                                    top_n=int(getattr(cfg, "joint_enrichment_top_n", 20)),
+                                    require_gsea_sig=bool(getattr(cfg, "joint_enrichment_require_gsea_sig", True)),
+                                )
+                            return de_plot_utils.plot_de_decoupler_payload(
+                                    payload_full,
                                     net_name=net_name,
                                     figdir=base,
                                     heatmap_top_k=int(getattr(cfg, "plot_max_genes_total", 80)),
@@ -4315,30 +4488,55 @@ def run_within_cluster(cfg) -> ad.AnnData:
                         done = 0
                         failures = 0
                         with ThreadPoolExecutor(max_workers=max_workers) as ex:
-                            futs = {ex.submit(_plot_de_decoupler_task, task): task for task in plot_tasks}
-                            for fut in as_completed(futs):
-                                task = futs[fut]
-                                done += 1
+                            task_iter = iter(plot_tasks)
+                            futs: dict = {}
+                            pending = set()
+
+                            for _ in range(min(int(max_workers), len(plot_tasks))):
                                 try:
-                                    artifacts = fut.result()
-                                    with _DECOUPLER_PLOT_LOCK:
+                                    task = next(task_iter)
+                                except StopIteration:
+                                    break
+                                fut = ex.submit(_plot_de_decoupler_task, task)
+                                futs[fut] = task
+                                pending.add(fut)
+
+                            while pending:
+                                done_set, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
+                                if not done_set:
+                                    continue
+                                for fut in done_set:
+                                    task = futs.pop(fut)
+                                    done += 1
+                                    try:
+                                        artifacts = fut.result()
                                         plot_utils.persist_plot_artifacts(artifacts)
-                                except Exception as e:
-                                    failures += 1
-                                    LOGGER.exception(
-                                        "within-cluster: DE-decoupler plotting task failed (net=%s, figdir=%s, title=%s). (%s)",
-                                        task[1],
-                                        str(task[2]),
-                                        task[3],
-                                        e,
-                                    )
-                                if done == len(plot_tasks) or done % 10 == 0:
-                                    LOGGER.info(
-                                        "within-cluster: DE-decoupler plotting progress %d/%d (failed=%d).",
-                                        done,
-                                        len(plot_tasks),
-                                        failures,
-                                    )
+                                        del artifacts
+                                        gc.collect()
+                                    except Exception as e:
+                                        failures += 1
+                                        LOGGER.exception(
+                                            "within-cluster: DE-decoupler plotting task failed (net=%s, figdir=%s, title=%s). (%s)",
+                                            task[1],
+                                            str(task[2]),
+                                            task[4],
+                                            e,
+                                        )
+                                    try:
+                                        next_task = next(task_iter)
+                                    except StopIteration:
+                                        next_task = None
+                                    if next_task is not None:
+                                        next_fut = ex.submit(_plot_de_decoupler_task, next_task)
+                                        futs[next_fut] = next_task
+                                        pending.add(next_fut)
+                                    if done == len(plot_tasks) or done % 10 == 0:
+                                        LOGGER.info(
+                                            "within-cluster: DE-decoupler plotting progress %d/%d (failed=%d).",
+                                            done,
+                                            len(plot_tasks),
+                                            failures,
+                                        )
 
             try:
                 LOGGER.info("within-cluster: generating DE report...")

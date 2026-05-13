@@ -77,6 +77,14 @@ def persist_plot_artifacts(artifacts: Iterable[PlotArtifact]) -> None:
             fig=artifact.fig,
             savefig_kwargs=artifact.savefig_kwargs,
         )
+        try:
+            close_plot(artifact.fig)
+        except Exception:
+            pass
+        try:
+            artifact.fig = None
+        except Exception:
+            pass
 
 
 def collect_plot_artifacts(func):

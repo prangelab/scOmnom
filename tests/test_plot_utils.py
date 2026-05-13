@@ -85,6 +85,22 @@ def test_save_multi_without_setup_raises(tmp_path, monkeypatch):
         pu.save_multi("x", tmp_path, fig=fig)
 
 
+def test_persist_plot_artifacts_clears_figure_reference(monkeypatch):
+    calls = []
+
+    def _save(stem, figdir, fig=None, savefig_kwargs=None):
+        calls.append((stem, Path(figdir), fig is not None))
+
+    monkeypatch.setattr(pu, "save_multi", _save)
+    fig = plt.figure()
+    artifact = pu.PlotArtifact(stem="demo", figdir=Path("figs"), fig=fig)
+
+    pu.persist_plot_artifacts([artifact])
+
+    assert calls == [("demo", Path("figs"), True)]
+    assert artifact.fig is None
+
+
 # ---------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------
