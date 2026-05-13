@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import pytest
+import sys
 from pathlib import Path
 
 import matplotlib as mpl
@@ -13,6 +14,7 @@ import matplotlib.pyplot as plt
 import scomnom.plot_utils as pu
 import scomnom.plotting as plotting
 import scomnom.de_plot_utils as dpu
+import scomnom.io_utils as iu
 
 
 # ---------------------------------------------------------------------
@@ -99,6 +101,15 @@ def test_persist_plot_artifacts_clears_figure_reference(monkeypatch):
 
     assert calls == [("demo", Path("figs"), True)]
     assert artifact.fig is None
+
+
+def test_use_system_tar_zstd_prefers_python_path_on_macos(monkeypatch):
+    monkeypatch.setattr(iu.sys, "platform", "darwin", raising=False)
+    monkeypatch.setenv("SCOMNOM_FORCE_SYSTEM_TAR_ZSTD", "")
+    monkeypatch.setattr(iu.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setitem(sys.modules, "zstandard", object())
+
+    assert iu._use_system_tar_zstd() is False
 
 
 # ---------------------------------------------------------------------
@@ -237,6 +248,26 @@ def test_plotting_api_plot_de_decoupler_payload_accepts_source_payload():
     assert len(figs) >= 1
     for fig in figs:
         plt.close(fig)
+
+
+def test_plot_decoupler_dotplot_uses_numeric_positions():
+    activity = pd.DataFrame(
+        [[1.2, -0.8, 0.4], [0.7, -1.1, 0.2]],
+        index=["1", "2"],
+        columns=["TERM_A", "TERM_B", "TERM_C"],
+    )
+
+    artifacts = pu.plot_decoupler_dotplot(activity, net_name="msigdb", figdir=Path("decoupler"), top_k=3)
+
+    assert len(artifacts) == 1
+    fig = artifacts[0].fig
+    ax = fig.axes[0]
+    offsets = ax.collections[0].get_offsets()
+
+    assert offsets.shape[0] > 0
+    assert np.issubdtype(offsets.dtype, np.number)
+    assert [tick.get_text() for tick in ax.get_xticklabels()][:2] == ["1", "2"]
+    plt.close(fig)
 
 
 def test_plot_de_gsea_payload_returns_artifact():

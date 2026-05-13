@@ -7,6 +7,7 @@ import pytest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+import scomnom.annotation_utils as au
 
 from scomnom.composition_utils import _resolve_active_cluster_key
 from scomnom.markers_and_de import (
@@ -82,6 +83,61 @@ def test_run_msigdb_gsea_from_stats_returns_long_results(monkeypatch, tmp_path: 
     assert results.loc[0, "pathway"] == "HALLMARK_TEST"
     assert results.loc[0, "leading_edge_n"] == 2
     assert "G1" in results.loc[0, "leading_edge_preview"]
+
+
+def test_run_msigdb_gsea_from_stats_caches_msigdb_resolution(monkeypatch, tmp_path: Path) -> None:
+    gmt = tmp_path / "hallmark.gmt"
+    gmt.write_text("HALLMARK_TEST\tna\tG1\tG2\tG3\n", encoding="utf-8")
+
+    class _FakePrerankRes:
+        def __init__(self):
+            self.res2d = pd.DataFrame(
+                {
+                    "Term": ["HALLMARK_TEST"],
+                    "ES": [0.6],
+                    "NES": [1.8],
+                    "NOM p-val": [0.01],
+                    "FDR q-val": [0.03],
+                    "Lead_genes": ["G1;G2"],
+                }
+            )
+
+    class _FakeGseapy:
+        @staticmethod
+        def prerank(**kwargs):
+            return _FakePrerankRes()
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "gseapy", _FakeGseapy)
+    monkeypatch.setattr(au, "_MSIGDB_RESOLUTION_CACHE", {}, raising=False)
+    monkeypatch.setattr(au, "_MSIGDB_GENE_SET_CACHE", {}, raising=False)
+
+    calls = {"n": 0}
+
+    def _resolve(gene_sets):
+        calls["n"] += 1
+        return [str(gmt)], ["HALLMARK"], "vX"
+
+    monkeypatch.setattr("scomnom.annotation_utils.resolve_msigdb_gene_sets", _resolve)
+
+    stats = pd.DataFrame({"C00": [3.0, 1.0, -1.0]}, index=["G1", "G2", "G3"])
+    cfg = SimpleNamespace(
+        msigdb_gene_sets=["HALLMARK"],
+        gsea_min_size=1,
+        gsea_max_size=500,
+        gsea_eps=1e-10,
+        random_state=42,
+        joint_enrichment_leading_edge_top_n=5,
+        n_jobs=1,
+    )
+
+    payload1 = _run_msigdb_gsea_from_stats(stats, cfg, input_label="demo1")
+    payload2 = _run_msigdb_gsea_from_stats(stats, cfg, input_label="demo2")
+
+    assert payload1 is not None
+    assert payload2 is not None
+    assert calls["n"] == 1
 
 
 def test_merge_msigdb_decoupler_and_gsea_marks_concordance() -> None:

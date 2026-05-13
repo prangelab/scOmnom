@@ -5057,12 +5057,18 @@ def plot_decoupler_dotplot(
     # --------------------------------------------------
     # SCATTER
     # --------------------------------------------------
+    cluster_pos = {cl: idx for idx, cl in enumerate(clusters)}
+    feature_pos = {feat: idx for idx, feat in enumerate(features_disp)}
+
     rows = []
     for j, feat in enumerate(sub_raw.columns):
+        feature_label = features_disp[j]
         for cl in clusters:
             rows.append({
                 "cluster": cl,
-                "feature": features_disp[j],
+                "cluster_pos": float(cluster_pos[cl]),
+                "feature": feature_label,
+                "feature_pos": float(feature_pos[feature_label]),
                 "color": float(color_mat.loc[cl, feat]),
                 "size": float(size_mat.loc[cl, feat]),
             })
@@ -5075,8 +5081,8 @@ def plot_decoupler_dotplot(
         return 30.0 + (v - s_min) / (s_max - s_min) * 250.0 if s_max > s_min else 80.0
 
     sca = ax.scatter(
-        x=df["cluster"],
-        y=df["feature"],
+        x=df["cluster_pos"].to_numpy(dtype=float),
+        y=df["feature_pos"].to_numpy(dtype=float),
         s=[size_scale(v) for v in df["size"]],
         c=df["color"],
         cmap=cmap,
@@ -5086,6 +5092,10 @@ def plot_decoupler_dotplot(
         zorder=3,
     )
 
+    ax.set_xticks(np.arange(len(clusters), dtype=float))
+    ax.set_xticklabels(clusters)
+    ax.set_yticks(np.arange(len(features_disp), dtype=float))
+    ax.set_yticklabels(features_disp)
     ax.tick_params(axis="x", rotation=45, pad=8)
     ax.set_title(
         f"{(title_prefix + ' ') if title_prefix else ''}{net_name}",

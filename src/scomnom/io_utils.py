@@ -11,6 +11,7 @@ import shutil
 import os
 import re
 import json
+import sys
 import tarfile
 import tempfile
 import subprocess
@@ -1225,6 +1226,15 @@ def _validate_tar_members_safe(member_names: List[str]) -> None:
 
 
 def _use_system_tar_zstd() -> bool:
+    force_system = str(os.getenv("SCOMNOM_FORCE_SYSTEM_TAR_ZSTD", "")).strip().lower()
+    if force_system in {"1", "true", "yes", "on"}:
+        return shutil.which("tar") is not None and shutil.which("zstd") is not None
+    if sys.platform == "darwin":
+        try:
+            import zstandard  # noqa: F401
+            return False
+        except Exception:
+            pass
     return shutil.which("tar") is not None and shutil.which("zstd") is not None
 
 

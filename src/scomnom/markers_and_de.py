@@ -61,6 +61,24 @@ _MIN_TOTAL_SAMPLES_FOR_PSEUDOBULK = 6
 _MIN_SAMPLES_PER_LEVEL_COMPOSITION = 2
 
 
+def _matplotlib_backend_supports_threaded_plotting() -> bool:
+    try:
+        backend = str(plot_utils.mpl.get_backend() or "").strip().lower()
+    except Exception:
+        return False
+    if not backend:
+        return False
+    safe = (
+        "agg",
+        "pdf",
+        "svg",
+        "ps",
+        "pgf",
+        "cairo",
+    )
+    return any(token in backend for token in safe) and "macosx" not in backend
+
+
 def _match_cluster_color(label: str, color_map: dict[str, str]) -> Optional[str]:
     lab = str(label)
     if lab in color_map:
@@ -2239,10 +2257,24 @@ def _compute_de_enrichment_from_dir(
 
                 input_label = f"{source}:{condition_key}:{contrast}:{stat_col}"
                 payloads: dict[str, dict] = {}
+                LOGGER.info(
+                    "DE enrichment: running MSigDB decoupler source=%r condition_key=%r contrast=%r stat_col=%r",
+                    str(source),
+                    str(condition_key),
+                    str(contrast),
+                    str(stat_col),
+                )
                 msigdb_payload = _run_msigdb_from_stats(stats, cfg, input_label=input_label)
                 if msigdb_payload is not None:
                     payloads["msigdb"] = msigdb_payload
                 if bool(getattr(cfg, "run_gsea", True)):
+                    LOGGER.info(
+                        "DE enrichment: running MSigDB GSEA source=%r condition_key=%r contrast=%r stat_col=%r",
+                        str(source),
+                        str(condition_key),
+                        str(contrast),
+                        str(stat_col),
+                    )
                     gsea_payload = _run_msigdb_gsea_from_stats(stats, cfg, input_label=input_label)
                     if gsea_payload is not None:
                         payloads["msigdb_gsea"] = gsea_payload
@@ -4111,10 +4143,24 @@ def run_within_cluster(cfg) -> ad.AnnData:
                     input_label = f"{source}:{condition_key}:{contrast}:{stat_col}"
                     payloads = {}
 
+                    LOGGER.info(
+                        "DE enrichment: running MSigDB decoupler source=%r condition_key=%r contrast=%r stat_col=%r",
+                        str(source),
+                        str(condition_key),
+                        str(contrast),
+                        str(stat_col),
+                    )
                     msigdb_payload = _run_msigdb_from_stats(stats, cfg, input_label=input_label)
                     if msigdb_payload is not None:
                         payloads["msigdb"] = msigdb_payload
                     if bool(getattr(cfg, "run_gsea", True)):
+                        LOGGER.info(
+                            "DE enrichment: running MSigDB GSEA source=%r condition_key=%r contrast=%r stat_col=%r",
+                            str(source),
+                            str(condition_key),
+                            str(contrast),
+                            str(stat_col),
+                        )
                         gsea_payload = _run_msigdb_gsea_from_stats(stats, cfg, input_label=input_label)
                         if gsea_payload is not None:
                             payloads["msigdb_gsea"] = gsea_payload
@@ -4438,15 +4484,22 @@ def run_within_cluster(cfg) -> ad.AnnData:
                                         )
                                     )
                     if plot_tasks:
-                        from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
-
                         requested_workers = int(getattr(cfg, "n_jobs", 1) or 1)
                         max_workers = min(max(1, requested_workers), 8, len(plot_tasks))
-                        LOGGER.info(
-                            "within-cluster: plotting DE-decoupler figures in parallel (tasks=%d, workers=%d).",
-                            len(plot_tasks),
-                            max_workers,
-                        )
+                        threaded_ok = _matplotlib_backend_supports_threaded_plotting()
+                        if threaded_ok and max_workers > 1:
+                            LOGGER.info(
+                                "within-cluster: plotting DE-decoupler figures in parallel (tasks=%d, workers=%d, backend=%s).",
+                                len(plot_tasks),
+                                max_workers,
+                                str(plot_utils.mpl.get_backend()),
+                            )
+                        else:
+                            LOGGER.info(
+                                "within-cluster: plotting DE-decoupler figures serially (tasks=%d, backend=%s).",
+                                len(plot_tasks),
+                                str(plot_utils.mpl.get_backend()),
+                            )
 
                         def _plot_de_decoupler_task(task: tuple[dict, str, Path, Path, str, Optional[str], Optional[str]]):
                             net_payload, net_name, base, tables_base, title_prefix, pos_label, neg_label = task
@@ -4487,56 +4540,83 @@ def run_within_cluster(cfg) -> ad.AnnData:
 
                         done = 0
                         failures = 0
-                        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-                            task_iter = iter(plot_tasks)
-                            futs: dict = {}
-                            pending = set()
+                        if threaded_ok and max_workers > 1:
+                            from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
-                            for _ in range(min(int(max_workers), len(plot_tasks))):
-                                try:
-                                    task = next(task_iter)
-                                except StopIteration:
-                                    break
-                                fut = ex.submit(_plot_de_decoupler_task, task)
-                                futs[fut] = task
-                                pending.add(fut)
+                            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                                task_iter = iter(plot_tasks)
+                                futs: dict = {}
+                                pending = set()
 
-                            while pending:
-                                done_set, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
-                                if not done_set:
-                                    continue
-                                for fut in done_set:
-                                    task = futs.pop(fut)
-                                    done += 1
+                                for _ in range(min(int(max_workers), len(plot_tasks))):
                                     try:
-                                        artifacts = fut.result()
-                                        plot_utils.persist_plot_artifacts(artifacts)
-                                        del artifacts
-                                        gc.collect()
-                                    except Exception as e:
-                                        failures += 1
-                                        LOGGER.exception(
-                                            "within-cluster: DE-decoupler plotting task failed (net=%s, figdir=%s, title=%s). (%s)",
-                                            task[1],
-                                            str(task[2]),
-                                            task[4],
-                                            e,
-                                        )
-                                    try:
-                                        next_task = next(task_iter)
+                                        task = next(task_iter)
                                     except StopIteration:
-                                        next_task = None
-                                    if next_task is not None:
-                                        next_fut = ex.submit(_plot_de_decoupler_task, next_task)
-                                        futs[next_fut] = next_task
-                                        pending.add(next_fut)
-                                    if done == len(plot_tasks) or done % 10 == 0:
-                                        LOGGER.info(
-                                            "within-cluster: DE-decoupler plotting progress %d/%d (failed=%d).",
-                                            done,
-                                            len(plot_tasks),
-                                            failures,
-                                        )
+                                        break
+                                    fut = ex.submit(_plot_de_decoupler_task, task)
+                                    futs[fut] = task
+                                    pending.add(fut)
+
+                                while pending:
+                                    done_set, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
+                                    if not done_set:
+                                        continue
+                                    for fut in done_set:
+                                        task = futs.pop(fut)
+                                        done += 1
+                                        try:
+                                            artifacts = fut.result()
+                                            plot_utils.persist_plot_artifacts(artifacts)
+                                            del artifacts
+                                            gc.collect()
+                                        except Exception as e:
+                                            failures += 1
+                                            LOGGER.exception(
+                                                "within-cluster: DE-decoupler plotting task failed (net=%s, figdir=%s, title=%s). (%s)",
+                                                task[1],
+                                                str(task[2]),
+                                                task[4],
+                                                e,
+                                            )
+                                        try:
+                                            next_task = next(task_iter)
+                                        except StopIteration:
+                                            next_task = None
+                                        if next_task is not None:
+                                            next_fut = ex.submit(_plot_de_decoupler_task, next_task)
+                                            futs[next_fut] = next_task
+                                            pending.add(next_fut)
+                                        if done == len(plot_tasks) or done % 10 == 0:
+                                            LOGGER.info(
+                                                "within-cluster: DE-decoupler plotting progress %d/%d (failed=%d).",
+                                                done,
+                                                len(plot_tasks),
+                                                failures,
+                                            )
+                        else:
+                            for task in plot_tasks:
+                                done += 1
+                                try:
+                                    artifacts = _plot_de_decoupler_task(task)
+                                    plot_utils.persist_plot_artifacts(artifacts)
+                                    del artifacts
+                                    gc.collect()
+                                except Exception as e:
+                                    failures += 1
+                                    LOGGER.exception(
+                                        "within-cluster: DE-decoupler plotting task failed (net=%s, figdir=%s, title=%s). (%s)",
+                                        task[1],
+                                        str(task[2]),
+                                        task[4],
+                                        e,
+                                    )
+                                if done == len(plot_tasks) or done % 10 == 0:
+                                    LOGGER.info(
+                                        "within-cluster: DE-decoupler plotting progress %d/%d (failed=%d).",
+                                        done,
+                                        len(plot_tasks),
+                                        failures,
+                                    )
 
             try:
                 LOGGER.info("within-cluster: generating DE report...")

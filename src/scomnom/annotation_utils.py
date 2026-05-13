@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 import re
+import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import anndata as ad
@@ -15,9 +16,80 @@ from .io_utils import resolve_msigdb_gene_sets
 from .clustering_utils import _ensure_cluster_rounds  # avoid duplication
 
 LOGGER = logging.getLogger(__name__)
+_MSIGDB_CACHE_LOCK = threading.Lock()
+_MSIGDB_RESOLUTION_CACHE: dict[tuple[str, ...], tuple[list[str], list[str], str | None]] = {}
+_MSIGDB_GENE_SET_CACHE: dict[tuple[str, ...], dict[str, list[str]]] = {}
+_MSIGDB_DECOUPLER_NET_CACHE: dict[tuple[str, ...], pd.DataFrame | None] = {}
 
 # Canonical pretty cluster label column name (your module uses this)
 CLUSTER_LABEL_KEY = "cluster_label"
+
+
+def _msigdb_spec_cache_key(gene_sets_spec: Sequence[str | Path]) -> tuple[str, ...]:
+    return tuple(str(x) for x in gene_sets_spec)
+
+
+def _resolve_msigdb_gene_sets_cached(
+    gene_sets_spec: Sequence[str | Path],
+) -> tuple[list[str], list[str], str | None]:
+    cache_key = _msigdb_spec_cache_key(gene_sets_spec)
+    with _MSIGDB_CACHE_LOCK:
+        cached = _MSIGDB_RESOLUTION_CACHE.get(cache_key)
+    if cached is not None:
+        gmt_files, used_keywords, msigdb_release = cached
+        LOGGER.info(
+            "MSigDB cache hit: resolved gene-set bundle (release=%s, files=%d, keywords=%s).",
+            str(msigdb_release),
+            int(len(gmt_files)),
+            ",".join(used_keywords) if used_keywords else "custom",
+        )
+        return list(gmt_files), list(used_keywords), msigdb_release
+
+    LOGGER.info("MSigDB cache miss: resolving gene-set bundle for spec=%s", list(cache_key))
+    gmt_files, used_keywords, msigdb_release = resolve_msigdb_gene_sets(gene_sets_spec)
+    bundle = ([str(g) for g in gmt_files], [str(k) for k in used_keywords], msigdb_release)
+    with _MSIGDB_CACHE_LOCK:
+        _MSIGDB_RESOLUTION_CACHE[cache_key] = bundle
+    return list(bundle[0]), list(bundle[1]), bundle[2]
+
+
+def _load_msigdb_gene_sets_cached(gmt_files: Sequence[str | Path]) -> dict[str, list[str]]:
+    cache_key = tuple(str(x) for x in gmt_files)
+    with _MSIGDB_CACHE_LOCK:
+        cached = _MSIGDB_GENE_SET_CACHE.get(cache_key)
+    if cached is not None:
+        LOGGER.info("MSigDB cache hit: loaded GSEA gene sets from parsed GMT cache (files=%d).", int(len(cache_key)))
+        return {str(k): list(v) for k, v in cached.items()}
+
+    LOGGER.info("MSigDB cache miss: parsing GSEA gene sets from GMT files (files=%d).", int(len(cache_key)))
+    gene_sets = _gmt_files_to_gene_sets(gmt_files)
+    cached_copy = {str(k): list(v) for k, v in gene_sets.items()}
+    with _MSIGDB_CACHE_LOCK:
+        _MSIGDB_GENE_SET_CACHE[cache_key] = cached_copy
+    return {str(k): list(v) for k, v in cached_copy.items()}
+
+
+def _load_msigdb_decoupler_net_cached(gmt_files: Sequence[str | Path]) -> pd.DataFrame | None:
+    cache_key = tuple(str(x) for x in gmt_files)
+    with _MSIGDB_CACHE_LOCK:
+        cached = _MSIGDB_DECOUPLER_NET_CACHE.get(cache_key, ...)
+    if cached is not ...:
+        LOGGER.info("MSigDB cache hit: loaded decoupler net from parsed GMT cache (files=%d).", int(len(cache_key)))
+        return None if cached is None else cached.copy()
+
+    LOGGER.info("MSigDB cache miss: parsing decoupler net from GMT files (files=%d).", int(len(cache_key)))
+    nets: list[pd.DataFrame] = []
+    for gmt in gmt_files:
+        try:
+            net_i = io_utils.gmt_to_decoupler_net(gmt)
+            nets.append(net_i)
+        except Exception as e:
+            LOGGER.warning("MSigDB: failed to parse GMT '%s': %s", str(gmt), e)
+
+    net = pd.concat(nets, axis=0, ignore_index=True) if nets else None
+    with _MSIGDB_CACHE_LOCK:
+        _MSIGDB_DECOUPLER_NET_CACHE[cache_key] = None if net is None else net.copy()
+    return None if net is None else net.copy()
 
 # -------------------------------------------------------------------------
 # Pseudobulk store (round-scoped)
@@ -1166,6 +1238,8 @@ def _run_msigdb_gsea_from_stats(
     if stats is None or stats.empty:
         return None
 
+    LOGGER.info("MSigDB GSEA: starting input=%r", str(input_label))
+
     try:
         import gseapy
     except Exception as e:
@@ -1174,7 +1248,7 @@ def _run_msigdb_gsea_from_stats(
 
     gene_sets_spec = getattr(cfg, "msigdb_gene_sets", None) or ["HALLMARK", "REACTOME"]
     try:
-        gmt_files, used_keywords, msigdb_release = resolve_msigdb_gene_sets(gene_sets_spec)
+        gmt_files, used_keywords, msigdb_release = _resolve_msigdb_gene_sets_cached(gene_sets_spec)
     except Exception as e:
         LOGGER.warning("MSigDB GSEA: failed to resolve gene sets: %s", e)
         return None
@@ -1183,7 +1257,7 @@ def _run_msigdb_gsea_from_stats(
         return None
 
     try:
-        gene_sets = _gmt_files_to_gene_sets(gmt_files)
+        gene_sets = _load_msigdb_gene_sets_cached(gmt_files)
     except Exception as e:
         LOGGER.warning("MSigDB GSEA: failed to parse GMT gene sets: %s", e)
         return None
@@ -1196,8 +1270,18 @@ def _run_msigdb_gsea_from_stats(
     eps = float(getattr(cfg, "gsea_eps", 1e-10) or 1e-10)
     leading_edge_top_n = int(getattr(cfg, "joint_enrichment_leading_edge_top_n", 8) or 8)
 
-    result_rows: list[dict[str, object]] = []
-    for cluster in stats.columns.astype(str):
+    cluster_names = stats.columns.astype(str).tolist()
+    requested_workers = int(getattr(cfg, "n_jobs", 1) or 1)
+    max_workers = min(max(1, requested_workers), 8, len(cluster_names))
+    LOGGER.info(
+        "MSigDB GSEA: input=%r clusters=%d workers=%d gene_sets=%d",
+        str(input_label),
+        int(len(cluster_names)),
+        int(max_workers),
+        int(len(gene_sets)),
+    )
+
+    def _run_cluster(cluster: str) -> list[dict[str, object]]:
         rnk = (
             pd.DataFrame(
                 {
@@ -1209,7 +1293,7 @@ def _run_msigdb_gsea_from_stats(
             .sort_values("score", ascending=False, kind="mergesort")
         )
         if rnk.empty:
-            continue
+            return []
         rnk = rnk.drop_duplicates(subset=["gene"], keep="first")
 
         try:
@@ -1240,11 +1324,11 @@ def _run_msigdb_gsea_from_stats(
                 str(input_label),
                 e,
             )
-            continue
+            return []
 
         res2d = getattr(prerank_res, "res2d", None)
         if res2d is None or not isinstance(res2d, pd.DataFrame) or res2d.empty:
-            continue
+            return []
 
         d = res2d.copy()
         if "Term" not in d.columns:
@@ -1264,7 +1348,7 @@ def _run_msigdb_gsea_from_stats(
             }
         )
         if "pathway" not in d.columns:
-            continue
+            return []
 
         d["cluster"] = str(cluster)
         d["pathway"] = d["pathway"].astype(str)
@@ -1310,7 +1394,23 @@ def _run_msigdb_gsea_from_stats(
             cols.append("gene_pct")
         if "fwer_pval" in d.columns:
             cols.append("fwer_pval")
-        result_rows.extend(d.loc[:, [c for c in cols if c in d.columns]].to_dict(orient="records"))
+        return d.loc[:, [c for c in cols if c in d.columns]].to_dict(orient="records")
+
+    result_rows: list[dict[str, object]] = []
+    if max_workers > 1 and len(cluster_names) > 1:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(_run_cluster, cluster): cluster for cluster in cluster_names}
+            for fut in as_completed(futures):
+                cluster_rows = fut.result()
+                if cluster_rows:
+                    result_rows.extend(cluster_rows)
+    else:
+        for cluster in cluster_names:
+            cluster_rows = _run_cluster(cluster)
+            if cluster_rows:
+                result_rows.extend(cluster_rows)
 
     if not result_rows:
         return None
@@ -1447,7 +1547,7 @@ def _run_msigdb(
     gene_sets = getattr(cfg, "msigdb_gene_sets", None) or ["HALLMARK", "REACTOME"]
 
     try:
-        gmt_files, used_keywords, msigdb_release = resolve_msigdb_gene_sets(gene_sets)
+        gmt_files, used_keywords, msigdb_release = _resolve_msigdb_gene_sets_cached(gene_sets)
     except Exception as e:
         LOGGER.warning("MSigDB: failed to resolve gene sets: %s", e)
         return
@@ -1462,19 +1562,10 @@ def _run_msigdb(
     )
     min_n = int(getattr(cfg, "msigdb_min_n_targets", getattr(cfg, "decoupler_min_n_targets", 5)) or 5)
 
-    nets = []
-    for gmt in gmt_files:
-        try:
-            net_i = io_utils.gmt_to_decoupler_net(gmt)
-            nets.append(net_i)
-        except Exception as e:
-            LOGGER.warning("MSigDB: failed to parse GMT '%s': %s", str(gmt), e)
-
-    if not nets:
+    net = _load_msigdb_decoupler_net_cached(gmt_files)
+    if net is None or net.empty:
         LOGGER.warning("MSigDB: no GMTs could be parsed into a decoupler net; skipping.")
         return
-
-    net = pd.concat(nets, axis=0, ignore_index=True)
     for col in ("source", "target"):
         if col not in net.columns:
             LOGGER.warning("MSigDB: net missing required column '%s'; skipping.", col)
@@ -1765,9 +1856,11 @@ def _run_msigdb_from_stats(
     if stats is None or stats.empty:
         return None
 
+    LOGGER.info("MSigDB decoupler: starting input=%r", str(input_label))
+
     gene_sets = getattr(cfg, "msigdb_gene_sets", None) or ["HALLMARK", "REACTOME"]
     try:
-        gmt_files, used_keywords, msigdb_release = resolve_msigdb_gene_sets(gene_sets)
+        gmt_files, used_keywords, msigdb_release = _resolve_msigdb_gene_sets_cached(gene_sets)
     except Exception as e:
         LOGGER.warning("MSigDB: failed to resolve gene sets: %s", e)
         return None
@@ -1782,25 +1875,24 @@ def _run_msigdb_from_stats(
     )
     min_n = int(getattr(cfg, "msigdb_min_n_targets", getattr(cfg, "decoupler_min_n_targets", 5)) or 5)
 
-    nets = []
-    for gmt in gmt_files:
-        try:
-            net_i = io_utils.gmt_to_decoupler_net(gmt)
-            nets.append(net_i)
-        except Exception as e:
-            LOGGER.warning("MSigDB: failed to parse GMT '%s': %s", str(gmt), e)
-
-    if not nets:
+    net = _load_msigdb_decoupler_net_cached(gmt_files)
+    if net is None or net.empty:
         LOGGER.warning("MSigDB: no GMTs could be parsed into a decoupler net; skipping.")
         return None
-
-    net = pd.concat(nets, axis=0, ignore_index=True)
     for col in ("source", "target"):
         if col not in net.columns:
             LOGGER.warning("MSigDB: net missing required column '%s'; skipping.", col)
             return None
     if "weight" not in net.columns:
         net["weight"] = 1.0
+
+    LOGGER.info(
+        "MSigDB decoupler: running method=%s input=%r pathways=%d clusters=%d",
+        str(method),
+        str(input_label),
+        int(net["source"].astype(str).nunique()),
+        int(stats.shape[1]),
+    )
 
     try:
         activity = _dc_activity_from_stats(
