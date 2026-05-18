@@ -50,3 +50,6 @@ scomnom = "scomnom.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"scomnom" = ["resources/*.tsv"]

@@ -9,6 +9,16 @@ These rules are persistent for all threads and apply across the whole project.
 - Temporary compatibility note: `load_dataset()` currently includes a legacy `_rehydrate` compatibility section to recover historically corrupted/stringified tagged payloads in `adata.uns` (notably old palette payloads).
 - Once legacy affected datasets have been re-saved with the fixed serializer, remove that compatibility branch from `_rehydrate` to keep the loader minimal.
 
+## Assay / Layer Conventions (mandatory)
+- Treat `counts_cb` as the preferred primary count assay when present. This is the CellBender-denoised count matrix and is the intended default for downstream count-based modeling.
+- Treat `counts_raw` as the aligned raw 10x count matrix for the same cells. Use it as the fallback count assay when `counts_cb` is absent, or when explicitly comparing raw vs CellBender behavior.
+- Do not assume `adata.raw` is initialized or authoritative for count-based workflows.
+- Do not assume `adata.X` still contains counts in downstream objects. `adata.X` may have been normalized/log-transformed later in the pipeline.
+- For new count-based methods that need an automatic matrix choice, prefer this order unless a module has a documented reason not to:
+  - `adata.layers["counts_cb"]`
+  - `adata.layers["counts_raw"]`
+  - `adata.X` as a last fallback
+
 ## Plot Saving (mandatory)
 - Plot functions should emit `PlotArtifact` objects (from `src/scomnom/plot_utils.py`) and must not do direct filesystem saving themselves.
 - `PlotArtifact` contains:
@@ -55,3 +65,4 @@ These rules are persistent for all threads and apply across the whole project.
 
 ## Environment Notes
 - On the HPC, the project environment is managed with `micromamba` rather than `conda`. Keep that in mind when comparing or reproducing environments across HPC and local macOS setups.
+- On local macOS, prefer validating code in the `scOmnom_env` Conda environment when the base shell is missing project dependencies. This can be used for compile checks, focused tests, and command smoke tests instead of assuming the bare shell reflects the real project runtime.

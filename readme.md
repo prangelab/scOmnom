@@ -1220,6 +1220,58 @@ Markers are computed per cluster against all other cells. The module supports **
 
 ---
 
+### LIANA CCC
+
+`scomnom markers-and-de ccc liana` runs LIANA-based ligand-receptor analysis on an annotated AnnData object and writes tables, figures, and an `adata.uns["markers_and_de"]["ccc"]["liana"]` payload.
+
+**Assay selection**
+
+For count-based CCC input, scOmnom prefers assays in this order:
+
+* `counts_cb`
+* `counts_raw`
+* `adata.X` as a final fallback
+
+Use `--use-raw` only when you explicitly want `adata.raw`.
+
+**Condition key syntax**
+
+LIANA CCC supports the same round-aware condition syntax used elsewhere in the pipeline:
+
+| Syntax | Meaning | Resulting behavior |
+| --- | --- | --- |
+| omitted | No condition split | One LIANA run on the full object |
+| `A` | Single obs key | One LIANA run per level of `A` |
+| `A:B` | Composite key | One LIANA run per joint level of `A` and `B` |
+| `A@B` | A within B | One LIANA run per level of `B`, with `A` treated as the condition label inside each subset |
+
+**CellChatDB-backed pathway families**
+
+The LIANA family / route plots use a vendored CellChatDB annotation table at [src/scomnom/resources/cellchatdb_interaction_annotations.tsv](/Users/k.h.prange/Library/CloudStorage/OneDrive-AmsterdamUMC/Documenten/Tech/scOmnom/src/scomnom/resources/cellchatdb_interaction_annotations.tsv:1). This table was exported one time from the official `jinworks/CellChat` package source at version `2.2.0.9001`.
+
+scOmnom first tries to map each LIANA `ligand_complex` / `receptor_complex` pair onto CellChatDB and uses CellChat `pathway_name` values such as `BMP`, `TGFb`, `NOTCH`, or `CXCL` as the route family. If no exact CellChatDB match is found, scOmnom falls back to its internal heuristic family classifier.
+
+The vendored export preserves CellChat's own row-level `version` field, which currently contains both:
+
+* `CellChatDB v1`
+* `CellChatDB v2`
+
+**Example**
+
+```bash
+scomnom markers-and-de ccc liana \
+  --input-path results/adata.clustered.annotated.projected.markers.de.zarr.tar.zst \
+  --condition-key masld_status@timepoint
+```
+
+**Outputs**
+
+* Figures: `figures/<fmt>/ccc_liana_<round>_roundN/`
+* Tables: `tables/ccc_liana_<round>_roundN/`
+* Route-family summary: `route_family_summary.tsv`
+
+---
+
 ### Enrichment
 
 The enrichment submodule has three entry points:

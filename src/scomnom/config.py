@@ -842,11 +842,13 @@ class MarkersAndDEConfig(BaseModel):
     # ------------------------------------------------------------------
     ccc_backend: Optional[str] = None
     ccc_condition_key: Optional[str] = None
+    ccc_condition_keys: Tuple[str, ...] = ()
     ccc_condition_values: Tuple[str, ...] = ()
+    ccc_compare_levels: Tuple[str, ...] = ()
     liana_resource: str = "consensus"
     liana_methods: Tuple[str, ...] = ("rank_aggregate",)
     liana_expr_prop: float = 0.1
-    liana_use_raw: bool = True
+    liana_use_raw: bool = False
     liana_layer: Optional[str] = None
     liana_n_perms: Optional[int] = 1000
     liana_seed: int = 42

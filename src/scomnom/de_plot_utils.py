@@ -18,6 +18,7 @@ from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from matplotlib import gridspec
 from matplotlib.collections import PathCollection
+from matplotlib.lines import Line2D
 
 from . import io_utils, plot_utils
 from .annotation_utils import _infer_msigdb_gmt
@@ -115,13 +116,22 @@ def _select_top_enrichment_rows(
     return show
 
 
-def _build_leading_edge_handles(values: Sequence[int], *, facecolor: str) -> tuple[list[PathCollection], list[str]]:
+def _build_leading_edge_handles(values: Sequence[int], *, facecolor: str) -> tuple[list[Line2D], list[str]]:
     uniq = sorted(set(int(v) for v in values if int(v) > 0))
     if not uniq:
         return [], []
     picks = uniq if len(uniq) <= 4 else [uniq[0], uniq[len(uniq) // 3], uniq[(2 * len(uniq)) // 3], uniq[-1]]
     handles = [
-        plt.scatter([], [], s=55.0 + 24.0 * np.sqrt(float(v)), facecolor=facecolor, edgecolor="#1f2d3a")
+        Line2D(
+            [],
+            [],
+            linestyle="",
+            marker="o",
+            markersize=np.sqrt(55.0 + 24.0 * np.sqrt(float(v))),
+            markerfacecolor=facecolor,
+            markeredgecolor="#1f2d3a",
+            markeredgewidth=0.8,
+        )
         for v in picks
     ]
     return handles, [str(v) for v in picks]

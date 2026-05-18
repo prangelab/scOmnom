@@ -2023,8 +2023,9 @@ def _build_cfg_ccc_liana(
     round_id: Optional[str],
     group_key: Optional[str],
     label_source: str,
-    condition_key: Optional[str],
+    condition_keys: Optional[List[str]],
     condition_values: Optional[List[str]],
+    compare_levels: Optional[List[str]],
     liana_methods: Sequence[str],
     liana_resource: str,
     liana_expr_prop: float,
@@ -2042,6 +2043,7 @@ def _build_cfg_ccc_liana(
     log_path = log_dir / "markers-and-de.ccc.liana.log"
     init_logging(log_path)
 
+    cond_keys = tuple(_parse_csv_repeat(condition_keys) or ())
     return MarkersAndDEConfig(
         input_path=input_path,
         input_dir=None,
@@ -2059,8 +2061,10 @@ def _build_cfg_ccc_liana(
         label_source=label_source,
         round_id=round_id,
         ccc_backend="liana",
-        ccc_condition_key=(str(condition_key).strip() if condition_key else None),
+        ccc_condition_key=(str(cond_keys[0]).strip() if cond_keys else None),
+        ccc_condition_keys=cond_keys,
         ccc_condition_values=tuple(_parse_csv_repeat(condition_values) or ()),
+        ccc_compare_levels=tuple(_parse_csv_repeat(compare_levels) or ()),
         liana_resource=str(liana_resource).strip().lower(),
         liana_methods=tuple(str(x).strip().lower() for x in liana_methods if str(x).strip()),
         liana_expr_prop=float(liana_expr_prop),
@@ -2102,26 +2106,39 @@ def ccc_liana(
     group_key: Optional[str] = typer.Option(None, "--group-key"),
     label_source: str = typer.Option("pretty", "--label-source"),
     round_id: Optional[str] = typer.Option(None, "--round-id"),
-    condition_key: Optional[str] = typer.Option(
-        None,
+    condition_keys: List[str] = typer.Option(
+        [],
         "--condition-key",
-        help="Optional obs key; if provided, LIANA is run separately for each condition level.",
+        help="Optional condition spec(s); repeatable/comma-separated. Supports A, A:B, and A@B.",
     ),
     condition_values: List[str] = typer.Option(
         [],
         "--condition-value",
-        help="Restrict to selected condition levels (repeatable/comma-separated).",
+        help="Restrict selected condition levels. For A@B this filters the B-side subset levels.",
+    ),
+    compare_levels: List[str] = typer.Option(
+        [],
+        "--compare-level",
+        help="Restrict levels of the comparison variable within each condition spec (repeatable/comma-separated). For A@B this filters the A-side levels.",
     ),
     liana_method: List[str] = typer.Option(
         ["rank_aggregate"],
         "--liana-method",
         callback=validate_liana_methods,
-        help="LIANA method(s) to run. Use rank_aggregate for consensus.",
+        help="LIANA method(s) to run. Use rank_aggregate for consensus. By default rank_aggregate uses a sparse-safer subset: cellphonedb,natmi,sca,logfc.",
     ),
     liana_resource: str = typer.Option("consensus", "--resource"),
     liana_expr_prop: float = typer.Option(0.1, "--expr-prop"),
-    liana_use_raw: bool = typer.Option(True, "--use-raw/--no-use-raw"),
-    liana_layer: Optional[str] = typer.Option(None, "--layer"),
+    liana_use_raw: bool = typer.Option(
+        False,
+        "--use-raw/--no-use-raw",
+        help="Use adata.raw explicitly. Default behavior prefers counts_cb, then counts_raw, then adata.X.",
+    ),
+    liana_layer: Optional[str] = typer.Option(
+        None,
+        "--layer",
+        help="Explicit layer override. By default LIANA prefers counts_cb, then counts_raw, then adata.X.",
+    ),
     liana_n_perms: Optional[int] = typer.Option(
         1000,
         "--n-perms",
@@ -2152,8 +2169,9 @@ def ccc_liana(
         round_id=round_id,
         group_key=group_key,
         label_source=label_source,
-        condition_key=condition_key,
+        condition_keys=condition_keys,
         condition_values=condition_values,
+        compare_levels=compare_levels,
         liana_methods=liana_method,
         liana_resource=liana_resource,
         liana_expr_prop=liana_expr_prop,

@@ -438,6 +438,8 @@ def test_ccc_liana_method_and_resource_propagate_to_config(mock_run):
             "--input-path", "adata.zarr.tar.zst",
             "--condition-key", "sex",
             "--condition-value", "female,male",
+            "--compare-level", "female",
+            "--compare-level", "male",
             "--liana-method", "rank_aggregate",
             "--liana-method", "cellphonedb",
             "--liana-method", "natmi",
@@ -452,7 +454,9 @@ def test_ccc_liana_method_and_resource_propagate_to_config(mock_run):
     mock_run.assert_called_once()
     cfg = mock_run.call_args[0][0]
     assert cfg.ccc_condition_key == "sex"
+    assert cfg.ccc_condition_keys == ("sex",)
     assert cfg.ccc_condition_values == ("female", "male")
+    assert cfg.ccc_compare_levels == ("female", "male")
     assert cfg.liana_methods == ("rank_aggregate", "cellphonedb", "natmi")
     assert cfg.liana_resource == "cellphonedb"
     assert cfg.liana_expr_prop == pytest.approx(0.2)

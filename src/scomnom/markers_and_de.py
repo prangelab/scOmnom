@@ -7,8 +7,10 @@ import threading
 import time
 import traceback
 import gc
+import warnings
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
@@ -53,6 +55,10 @@ from .annotation_utils import (
 
 LOGGER = logging.getLogger(__name__)
 _SCCODA_LOCK = threading.Lock()
+_LIANA_DEFAULT_AGGREGATE_METHODS = ("cellphonedb", "natmi", "sca", "logfc")
+_CELLCHATDB_INTERACTION_ANNOTATIONS = (
+    Path(__file__).resolve().parent / "resources" / "cellchatdb_interaction_annotations.tsv"
+)
 
 # -----------------------------------------------------------------------------
 # Internal policy guard
@@ -2505,10 +2511,9 @@ def _liana_method_specs(li: Any) -> dict[str, dict[str, Any]]:
 
 def _make_liana_rank_aggregate(li: Any, method_names: Sequence[str]) -> Any:
     selected = [m for m in method_names if str(m) != "rank_aggregate"]
-    if not selected:
-        return getattr(li, "mt").rank_aggregate
-
     specs = _liana_method_specs(li)
+    if not selected:
+        selected = list(_LIANA_DEFAULT_AGGREGATE_METHODS)
     methods = [specs[str(name)]["callable"] for name in selected]
     return getattr(li, "mt").AggregateClass(getattr(li, "mt").aggregate_meta, methods=methods)
 
@@ -2569,6 +2574,238 @@ def _summarize_liana_source_targets(
     return agg.sort_values(["n_interactions", "source", "target"], ascending=[False, True, True], kind="mergesort")
 
 
+def _liana_plot_label(value: object, display_map: Mapping[str, str]) -> str:
+    raw = str(value)
+    pretty = str(display_map.get(raw, raw))
+    token = plot_utils._extract_cnn_token(pretty)
+    return str(token or raw)
+
+
+def _prepare_liana_plot_df(df: pd.DataFrame, *, display_map: Mapping[str, str]) -> pd.DataFrame:
+    if df is None:
+        return pd.DataFrame()
+    if getattr(df, "empty", True):
+        return df.copy()
+    out = df.copy()
+    for col in ("source", "target"):
+        if col in out.columns:
+            out[col] = out[col].astype(str).map(lambda x: _liana_plot_label(x, display_map))
+    return out
+
+
+def _liana_family_label(value: object, display_map: Mapping[str, str]) -> str:
+    raw = str(value)
+    pretty = str(display_map.get(raw, raw)).strip()
+    pretty = re.sub(r"^\s*C\d+\s*[:\-]?\s*", "", pretty)
+    return pretty or raw
+
+
+def _liana_signal_family(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "Unknown"
+    token = re.split(r"[_:;|]", raw, maxsplit=1)[0].strip()
+    m = re.match(r"([A-Za-z-]+)", token)
+    if m:
+        family = m.group(1).rstrip("-")
+        if family:
+            return family
+    return token or raw
+
+
+def _normalize_cellchat_lr_token(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    raw = raw.replace(" ", "")
+    raw = raw.strip("()")
+    raw = raw.replace("+", "_")
+    raw = raw.replace("-", "_")
+    raw = raw.replace("/", "_")
+    raw = raw.replace(":", "_")
+    raw = re.sub(r"_+", "_", raw).strip("_")
+    return raw.upper()
+
+
+def _parse_cellchat_interaction_name_2(value: object) -> tuple[str, str] | None:
+    raw = str(value or "").strip()
+    if not raw or " - " not in raw:
+        return None
+    ligand, receptor = raw.split(" - ", 1)
+    ligand_key = _normalize_cellchat_lr_token(ligand)
+    receptor_key = _normalize_cellchat_lr_token(receptor)
+    if not ligand_key or not receptor_key:
+        return None
+    return ligand_key, receptor_key
+
+
+@lru_cache(maxsize=1)
+def _load_cellchatdb_pathway_lookup() -> dict[tuple[str, str], tuple[str, str]]:
+    if not _CELLCHATDB_INTERACTION_ANNOTATIONS.exists():
+        LOGGER.warning(
+            "CellChatDB interaction annotations not found at %s; using LIANA route-family heuristic only.",
+            _CELLCHATDB_INTERACTION_ANNOTATIONS,
+        )
+        return {}
+
+    df = pd.read_csv(_CELLCHATDB_INTERACTION_ANNOTATIONS, sep="\t", dtype=str).fillna("")
+    by_key: dict[tuple[str, str], set[tuple[str, str]]] = {}
+    for row in df.itertuples(index=False):
+        pathway_name = str(getattr(row, "pathway_name", "")).strip()
+        annotation = str(getattr(row, "annotation", "")).strip()
+        if not pathway_name:
+            continue
+        keys: set[tuple[str, str]] = set()
+        ligand_key = _normalize_cellchat_lr_token(getattr(row, "ligand", ""))
+        receptor_key = _normalize_cellchat_lr_token(getattr(row, "receptor", ""))
+        if ligand_key and receptor_key:
+            keys.add((ligand_key, receptor_key))
+        parsed_key = _parse_cellchat_interaction_name_2(getattr(row, "interaction_name_2", ""))
+        if parsed_key is not None:
+            keys.add(parsed_key)
+        for key in keys:
+            by_key.setdefault(key, set()).add((pathway_name, annotation))
+
+    resolved: dict[tuple[str, str], tuple[str, str]] = {}
+    for key, hits in by_key.items():
+        resolved[key] = sorted(hits, key=lambda x: (x[0], x[1]))[0]
+    return resolved
+
+
+def _lookup_cellchat_route_family(ligand: object, receptor: object) -> tuple[str, str] | None:
+    ligand_key = _normalize_cellchat_lr_token(ligand)
+    receptor_key = _normalize_cellchat_lr_token(receptor)
+    if not ligand_key or not receptor_key:
+        return None
+    return _load_cellchatdb_pathway_lookup().get((ligand_key, receptor_key))
+
+
+def _liana_route_family_heuristic(ligand: object, receptor: object) -> str:
+    ligand = str(ligand or "").strip()
+    receptor = str(receptor or "").strip()
+
+    if (
+        receptor.startswith("TLR")
+        or receptor.startswith("C5AR")
+        or receptor.startswith("C3AR")
+        or receptor in {"CD93", "LILRB2", "LILRB3"}
+        or ligand in {"HMGB1", "CD14", "IRAK4", "HSPA4"}
+    ):
+        return "Innate sensing / complement"
+    if (
+        receptor.startswith("ITGA")
+        or receptor.startswith("ITGB")
+        or receptor in {"CD44", "SDC2", "PLAUR", "PTPRJ", "CADM1", "APLP2", "ACKR3"}
+        or ligand in {"ADAM9", "ADAM10", "CXCL12", "PDGFB", "ITGB3BP", "F13A1", "TIMP2", "TLN1"}
+    ):
+        return "ECM / adhesion"
+    if (
+        receptor.startswith("EGFR")
+        or receptor.startswith("ERBB")
+        or receptor.startswith("FGFR")
+        or receptor in {"MET", "NRP1", "ASGR1", "ASGR2", "LDLR", "INSR", "IGF1R", "IL6R"}
+        or ligand in {"HGF", "FGF13", "GRN", "S100A4", "PTPN6", "LRIG2", "HP", "TGFA", "IGF1", "ANXA1", "NAMPT", "ARF1", "GNAI2"}
+    ):
+        return "Growth factor / receptor handling"
+    if receptor.startswith("NOTCH") or ligand == "MAML2":
+        return "Notch / juxtacrine"
+    if (
+        receptor in {"LRP1", "ABCA1", "AR", "SORT1", "SORL1", "VLDLR"}
+        or ligand in {"APOA1", "A2M", "PSAP", "LRPAP1", "ACTR2", "PLTP"}
+    ):
+        return "Scavenger / metabolic handling"
+    if (
+        receptor.startswith("FCGR")
+        or receptor.startswith("KLR")
+        or receptor in {"PTPRK", "B2M_FCGRT", "PILRB", "CD81", "CD99L2", "TYRO3"}
+        or ligand in {"LGALS9", "ALB", "B2M", "CD99", "GAS6", "PROS1", "CD200R1"}
+    ):
+        return "Immune recognition"
+    if (
+        receptor.startswith("PLXN")
+        or receptor.startswith("EPH")
+        or ligand.startswith("EFN")
+        or ligand in {"AFDN", "ANG", "FARP2", "RTN4"}
+    ):
+        return "Guidance / interface"
+    if receptor.startswith("IL6R") or ligand in {"ADAM10", "ADAM17"}:
+        return "Protease / cytokine interface"
+    return "Other"
+
+
+def _liana_route_family(ligand: object, receptor: object) -> str:
+    cellchat_hit = _lookup_cellchat_route_family(ligand, receptor)
+    if cellchat_hit is not None:
+        return str(cellchat_hit[0])
+    return _liana_route_family_heuristic(ligand, receptor)
+
+
+def _prepare_liana_family_plot_df(df: pd.DataFrame, *, display_map: Mapping[str, str]) -> pd.DataFrame:
+    if df is None:
+        return pd.DataFrame()
+    if getattr(df, "empty", True):
+        return df.copy()
+    out = _prepare_liana_plot_df(df, display_map=display_map)
+    if "source" in df.columns:
+        out["source_family"] = df["source"].astype(str).map(lambda x: _liana_family_label(x, display_map))
+    if "target" in df.columns:
+        out["target_family"] = df["target"].astype(str).map(lambda x: _liana_family_label(x, display_map))
+    if "ligand_complex" in df.columns:
+        out["ligand_family"] = df["ligand_complex"].astype(str).map(_liana_signal_family)
+    if "receptor_complex" in df.columns:
+        out["receptor_family"] = df["receptor_complex"].astype(str).map(_liana_signal_family)
+    if {"ligand_complex", "receptor_complex"}.issubset(df.columns):
+        out["route_family"] = [
+            _liana_route_family(lig, rec)
+            for lig, rec in zip(df["ligand_complex"], df["receptor_complex"])
+        ]
+    return out
+
+
+def _summarize_liana_route_families(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or getattr(df, "empty", True):
+        return pd.DataFrame(columns=["source", "route_family", "n_interactions"])
+    if not {"source", "ligand_complex", "receptor_complex"}.issubset(df.columns):
+        return pd.DataFrame(columns=["source", "route_family", "n_interactions"])
+    work = df.copy()
+    work["source"] = work["source"].astype(str)
+    work["route_family"] = [
+        _liana_route_family(lig, rec)
+        for lig, rec in zip(work["ligand_complex"], work["receptor_complex"])
+    ]
+    out = (
+        work.groupby(["source", "route_family"], observed=False)
+        .size()
+        .rename("n_interactions")
+        .reset_index()
+        .sort_values(["source", "n_interactions", "route_family"], ascending=[True, False, True], kind="mergesort")
+        .reset_index(drop=True)
+    )
+    return out
+
+
+def _liana_plot_color_map(
+    adata: ad.AnnData,
+    *,
+    cluster_key: str,
+    display_map: Mapping[str, str],
+    round_id: Optional[str],
+    raw_labels: Sequence[str],
+) -> dict[str, Any]:
+    if not raw_labels:
+        return {}
+    colors = _resolve_cluster_colors(
+        adata,
+        cluster_key=str(cluster_key),
+        labels=[str(x) for x in raw_labels],
+        round_id=round_id,
+    )
+    out: dict[str, Any] = {}
+    for raw, color in zip(raw_labels, colors):
+        out[_liana_plot_label(raw, display_map)] = color
+    return out
+
+
 def _write_liana_settings(
     out_dir: Path,
     *,
@@ -2603,6 +2840,198 @@ def _write_liana_settings(
     )
 
 
+def _call_liana_safely(method_callable: Any, adata_in: ad.AnnData, **kwargs) -> pd.DataFrame:
+    implicit_mod_warn = getattr(ad, "ImplicitModificationWarning", UserWarning)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"The dtype argument is deprecated and will be removed.*",
+            category=FutureWarning,
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=r"Use uns .* AnnData\.uns_keys is deprecated.*",
+            category=FutureWarning,
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=r"The default of observed=False is deprecated.*",
+            category=FutureWarning,
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=r"Trying to modify attribute `?\.obs`? of view, initializing view as actual\.",
+            category=implicit_mod_warn,
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=r"Setting element `?\.layers\['scaled'\]`? of view, initializing view as actual\.",
+            category=implicit_mod_warn,
+        )
+        return method_callable(adata_in, **kwargs)
+
+
+def _effective_liana_use_raw(adata: ad.AnnData, *, requested_use_raw: bool, layer: Optional[str]) -> bool:
+    if layer is not None:
+        return False
+    if not requested_use_raw:
+        return False
+    if getattr(adata, "raw", None) is None:
+        LOGGER.warning(
+            "ccc liana: requested use_raw=True but adata.raw is not initialized; falling back to adata.X."
+        )
+        return False
+    return True
+
+
+def _effective_liana_layer(adata: ad.AnnData, *, requested_use_raw: bool, layer: Optional[str]) -> Optional[str]:
+    if layer is not None:
+        return str(layer)
+    if requested_use_raw:
+        return None
+    for preferred in ("counts_cb", "counts_raw"):
+        if preferred in adata.layers:
+            LOGGER.info("ccc liana: using adata.layers[%r] as LIANA input.", preferred)
+            return str(preferred)
+    LOGGER.info("ccc liana: no counts_cb/counts_raw layer found; using adata.X as LIANA input.")
+    return None
+
+
+def _liana_condition_spec_token(raw_spec: str) -> str:
+    token = str(raw_spec).strip()
+    token = token.replace("@", "_at_").replace(":", "_and_").replace("^", "_x_")
+    return _safe_combo_token(token)
+
+
+def _build_liana_condition_run_specs(adata: ad.AnnData, cfg) -> list[dict[str, Any]]:
+    cond_keys = [str(x).strip() for x in (getattr(cfg, "ccc_condition_keys", ()) or ()) if str(x).strip()]
+    if not cond_keys:
+        ck = getattr(cfg, "ccc_condition_key", None)
+        if ck:
+            cond_keys = [str(ck).strip()]
+    condition_values = tuple(str(x) for x in (getattr(cfg, "ccc_condition_values", ()) or ()) if str(x))
+    compare_levels = tuple(str(x) for x in (getattr(cfg, "ccc_compare_levels", ()) or ()) if str(x))
+
+    if not cond_keys:
+        return [
+            {
+                "run_id": "global",
+                "run_label": "global",
+                "adata": adata,
+                "condition_key": None,
+                "condition_value": None,
+                "condition_spec": None,
+                "condition_spec_token": "global",
+                "context_key": None,
+                "context_value": None,
+                "context_label": None,
+                "tables_rel": Path("."),
+                "figs_rel": Path("."),
+                "compare_rel": None,
+                "compare_bucket": None,
+                "compare_title": None,
+            }
+        ]
+
+    run_specs: list[dict[str, Any]] = []
+    for raw_spec in cond_keys:
+        spec_token = _liana_condition_spec_token(raw_spec)
+        spec_root = Path(f"condition__{spec_token}")
+        if "@" in raw_spec:
+            parts = [p.strip() for p in raw_spec.split("@") if p.strip()]
+            if len(parts) != 2:
+                raise RuntimeError(f"ccc liana: invalid A@B condition specification {raw_spec!r}.")
+            a_key = _resolve_condition_key(adata, parts[0])
+            b_key = _resolve_condition_key(adata, parts[1])
+            if a_key not in adata.obs or b_key not in adata.obs:
+                raise RuntimeError(f"ccc liana: condition keys not found in adata.obs: {[a_key, b_key]}")
+            b_series = _normalize_levels(adata.obs[b_key])
+            wanted_b = sorted(set(condition_values) if condition_values else set(b_series.unique().tolist()))
+            for b_level in wanted_b:
+                mask_b = b_series.astype(str).to_numpy() == str(b_level)
+                if not np.any(mask_b):
+                    LOGGER.warning("ccc liana: skipping empty within-level %r for %s", str(b_level), str(b_key))
+                    continue
+                adata_b = adata[mask_b].copy()
+                a_series = _normalize_levels(adata_b.obs[a_key])
+                wanted_a = sorted(set(compare_levels) if compare_levels else set(a_series.unique().tolist()))
+                context_label = f"{b_key}={b_level}"
+                context_token = f"{_safe_combo_token(b_key)}={_safe_combo_token(b_level)}"
+                compare_rel = spec_root / context_token / "compare"
+                compare_title = f"{a_key} within {b_key}={b_level}"
+                for a_level in wanted_a:
+                    mask_a = a_series.astype(str).to_numpy() == str(a_level)
+                    if not np.any(mask_a):
+                        LOGGER.warning(
+                            "ccc liana: skipping empty compare level %r for %s within %s=%r",
+                            str(a_level),
+                            str(a_key),
+                            str(b_key),
+                            str(b_level),
+                        )
+                        continue
+                    LOGGER.info(
+                        "ccc liana: expanded %r -> condition_key=%r within %s=%r at level=%r (n_cells=%d).",
+                        raw_spec,
+                        str(a_key),
+                        str(b_key),
+                        str(b_level),
+                        str(a_level),
+                        int(mask_a.sum()),
+                    )
+                    run_specs.append(
+                        {
+                            "run_id": f"{raw_spec}::{context_label}::{a_level}",
+                            "run_label": str(a_level),
+                            "adata": adata_b[mask_a].copy(),
+                            "condition_key": str(a_key),
+                            "condition_value": str(a_level),
+                            "condition_spec": raw_spec,
+                            "condition_spec_token": spec_token,
+                            "context_key": str(b_key),
+                            "context_value": str(b_level),
+                            "context_label": context_label,
+                            "tables_rel": spec_root / context_token / _safe_combo_token(a_level),
+                            "figs_rel": spec_root / context_token / _safe_combo_token(a_level),
+                            "compare_rel": compare_rel,
+                            "compare_bucket": f"{spec_token}::{context_token}",
+                            "compare_title": compare_title,
+                        }
+                    )
+        else:
+            condition_key = _resolve_condition_key(adata, raw_spec)
+            if condition_key not in adata.obs:
+                raise RuntimeError(f"ccc liana: condition_key={condition_key!r} not found in adata.obs")
+            cond_series = _normalize_levels(adata.obs[condition_key])
+            wanted = sorted(set(compare_levels) if compare_levels else set(condition_values) if condition_values else set(cond_series.unique().tolist()))
+            compare_rel = spec_root / "compare"
+            for condition_value in wanted:
+                mask = cond_series.astype(str).to_numpy() == str(condition_value)
+                if not np.any(mask):
+                    LOGGER.warning("ccc liana: skipping empty condition_value=%r for spec=%r", str(condition_value), raw_spec)
+                    continue
+                run_specs.append(
+                    {
+                        "run_id": f"{raw_spec}::{condition_value}",
+                        "run_label": str(condition_value),
+                        "adata": adata[mask].copy(),
+                        "condition_key": str(condition_key),
+                        "condition_value": str(condition_value),
+                        "condition_spec": raw_spec,
+                        "condition_spec_token": spec_token,
+                        "context_key": None,
+                        "context_value": None,
+                        "context_label": None,
+                        "tables_rel": spec_root / _safe_combo_token(condition_value),
+                        "figs_rel": spec_root / _safe_combo_token(condition_value),
+                        "compare_rel": compare_rel,
+                        "compare_bucket": str(spec_token),
+                        "compare_title": str(condition_key),
+                    }
+                )
+    return run_specs
+
+
 def run_liana_ccc(cfg) -> ad.AnnData:
     init_logging(getattr(cfg, "logfile", None))
     LOGGER.info("Starting markers-and-de (ccc liana)...")
@@ -2632,27 +3061,29 @@ def run_liana_ccc(cfg) -> ad.AnnData:
     bad_methods = [m for m in non_aggregate_methods if m not in method_specs]
     if bad_methods:
         raise RuntimeError(f"ccc liana: unsupported methods requested: {bad_methods}")
+    aggregate_methods = non_aggregate_methods or _LIANA_DEFAULT_AGGREGATE_METHODS
+    if "connectome" in aggregate_methods:
+        LOGGER.warning(
+            "ccc liana: aggregate methods include 'connectome', which triggers scaling and may densify sparse input. "
+            "This can be memory-intensive on large datasets."
+        )
 
-    if bool(getattr(cfg, "liana_use_raw", True)) and getattr(cfg, "liana_layer", None):
+    if bool(getattr(cfg, "liana_use_raw", False)) and getattr(cfg, "liana_layer", None):
         raise RuntimeError("ccc liana: cannot use both liana_use_raw=True and liana_layer.")
+    requested_use_raw = bool(getattr(cfg, "liana_use_raw", False))
+    requested_layer = getattr(cfg, "liana_layer", None)
+    liana_layer = _effective_liana_layer(
+        adata,
+        requested_use_raw=requested_use_raw,
+        layer=requested_layer,
+    )
+    global_use_raw = _effective_liana_use_raw(
+        adata,
+        requested_use_raw=requested_use_raw,
+        layer=liana_layer,
+    )
 
-    condition_key_raw = getattr(cfg, "ccc_condition_key", None)
-    condition_values = tuple(str(x) for x in (getattr(cfg, "ccc_condition_values", ()) or ()) if str(x))
-    run_specs: list[tuple[str, ad.AnnData, Optional[str], Optional[str]]] = []
-    if condition_key_raw:
-        condition_key = _resolve_condition_key(adata, str(condition_key_raw))
-        if condition_key not in adata.obs:
-            raise RuntimeError(f"ccc liana: condition_key={condition_key!r} not found in adata.obs")
-        cond_series = _normalize_levels(adata.obs[condition_key])
-        wanted = set(condition_values) if condition_values else set(cond_series.unique().tolist())
-        for condition_value in sorted(wanted):
-            mask = cond_series.astype(str).to_numpy() == str(condition_value)
-            if not np.any(mask):
-                LOGGER.warning("ccc liana: skipping empty condition_value=%r", str(condition_value))
-                continue
-            run_specs.append((str(condition_value), adata[mask].copy(), str(condition_key), str(condition_value)))
-    else:
-        run_specs.append(("global", adata, None, None))
+    run_specs = _build_liana_condition_run_specs(adata, cfg)
 
     run_namespace = _run_namespace_for_round(
         adata,
@@ -2667,26 +3098,37 @@ def run_liana_ccc(cfg) -> ad.AnnData:
     ccc_block = adata.uns["markers_and_de"].setdefault("ccc", {})
     liana_block = ccc_block.setdefault("liana", {})
     runs_store = liana_block.setdefault("runs", {})
+    comparison_buckets: dict[str, dict[str, Any]] = {}
 
     rank_callable = _make_liana_rank_aggregate(li, methods)
     aggregate_score_col = "magnitude_rank"
     aggregate_specificity_col = "specificity_rank"
 
-    for condition_label, adata_run, condition_key, condition_value in run_specs:
-        cond_tag = _safe_combo_token(condition_label)
-        run_tables_dir = tables_root / cond_tag
+    for run_spec in run_specs:
+        condition_label = str(run_spec["run_label"])
+        adata_run = run_spec["adata"]
+        condition_key = run_spec["condition_key"]
+        condition_value = run_spec["condition_value"]
+        use_raw = _effective_liana_use_raw(
+            adata_run,
+            requested_use_raw=global_use_raw,
+            layer=liana_layer,
+        )
+        cond_fig_rel = Path(run_spec["figs_rel"])
+        run_tables_dir = tables_root / Path(run_spec["tables_rel"])
         run_tables_dir.mkdir(parents=True, exist_ok=True)
 
         per_method_results: dict[str, pd.DataFrame] = {}
         if "rank_aggregate" in methods:
             agg_key = "rank_aggregate"
-            agg_df = rank_callable(
+            agg_df = _call_liana_safely(
+                rank_callable,
                 adata_run,
                 groupby=str(groupby),
                 resource_name=str(getattr(cfg, "liana_resource", "consensus")),
                 expr_prop=float(getattr(cfg, "liana_expr_prop", 0.1)),
-                use_raw=bool(getattr(cfg, "liana_use_raw", True)),
-                layer=getattr(cfg, "liana_layer", None),
+                use_raw=use_raw,
+                layer=liana_layer,
                 n_perms=getattr(cfg, "liana_n_perms", None),
                 seed=int(getattr(cfg, "liana_seed", 42)),
                 n_jobs=int(getattr(cfg, "n_jobs", 1)),
@@ -2704,13 +3146,14 @@ def run_liana_ccc(cfg) -> ad.AnnData:
 
         for method_name in non_aggregate_methods:
             spec = method_specs[str(method_name)]
-            res_df = spec["callable"](
+            res_df = _call_liana_safely(
+                spec["callable"],
                 adata_run,
                 groupby=str(groupby),
                 resource_name=str(getattr(cfg, "liana_resource", "consensus")),
                 expr_prop=float(getattr(cfg, "liana_expr_prop", 0.1)),
-                use_raw=bool(getattr(cfg, "liana_use_raw", True)),
-                layer=getattr(cfg, "liana_layer", None),
+                use_raw=use_raw,
+                layer=liana_layer,
                 n_perms=getattr(cfg, "liana_n_perms", None),
                 seed=int(getattr(cfg, "liana_seed", 42)),
                 n_jobs=int(getattr(cfg, "n_jobs", 1)),
@@ -2735,30 +3178,100 @@ def run_liana_ccc(cfg) -> ad.AnnData:
             LOGGER.warning("ccc liana: no interactions returned for condition=%r", str(condition_label))
             primary_top = pd.DataFrame()
             source_target_summary = pd.DataFrame(columns=["source", "target", "n_interactions"])
+            route_family_summary = pd.DataFrame(columns=["source", "route_family", "n_interactions"])
         else:
             primary_top = primary_df.head(int(getattr(cfg, "liana_top_n", 250))).copy()
             score_col = aggregate_score_col if primary_method == "rank_aggregate" else method_specs[primary_method]["score_col"]
             source_target_summary = _summarize_liana_source_targets(primary_top, score_col=score_col)
+            route_family_summary = _summarize_liana_route_families(primary_top)
             primary_top.to_csv(run_tables_dir / f"liana_{primary_method}_top.tsv", sep="\t", index=False)
             source_target_summary.to_csv(run_tables_dir / "source_target_summary.tsv", sep="\t", index=False)
+            route_family_summary.to_csv(run_tables_dir / "route_family_summary.tsv", sep="\t", index=False)
 
             if bool(getattr(cfg, "make_figures", True)):
                 plot_top_n = int(getattr(cfg, "liana_plot_top_n", 60))
                 primary_score_col = aggregate_score_col if primary_method == "rank_aggregate" else method_specs[primary_method]["score_col"]
                 primary_score_ascending = True if primary_method == "rank_aggregate" else bool(method_specs[primary_method]["score_ascending"])
+                plot_primary_df = _prepare_liana_plot_df(primary_df, display_map=display_map)
+                plot_primary_family_df = _prepare_liana_family_plot_df(primary_df, display_map=display_map)
+                plot_source_target_summary = _prepare_liana_plot_df(source_target_summary, display_map=display_map)
+                plot_primary_df["run_label"] = str(condition_label)
+                plot_primary_family_df["run_label"] = str(condition_label)
+                raw_labels = sorted(
+                    set(primary_df["source"].astype(str)).union(set(primary_df["target"].astype(str)))
+                ) if not primary_df.empty else []
+                plot_color_map = _liana_plot_color_map(
+                    adata,
+                    cluster_key=str(groupby),
+                    display_map=display_map,
+                    round_id=getattr(cfg, "round_id", None),
+                    raw_labels=raw_labels,
+                )
                 artifacts = []
                 artifacts.extend(
                     plot_utils.plot_liana_source_target_heatmap(
-                        source_target_summary,
-                        figdir=Path(run_round) / cond_tag,
+                        plot_source_target_summary,
+                        figdir=cond_fig_rel,
                         stem="liana_source_target_heatmap",
                         title=f"LIANA source-target summary ({condition_label})",
                     )
                 )
+                if "mean_score" in plot_source_target_summary.columns:
+                    artifacts.extend(
+                        plot_utils.plot_liana_source_target_heatmap(
+                            plot_source_target_summary,
+                            figdir=cond_fig_rel,
+                            stem="liana_source_target_mean_score_heatmap",
+                            title=f"LIANA source-target mean score ({condition_label})",
+                            value_col="mean_score",
+                            cmap="mako",
+                        )
+                    )
+                artifacts.extend(
+                    plot_utils.plot_liana_send_receive_summary(
+                        plot_source_target_summary,
+                        figdir=cond_fig_rel,
+                        stem="liana_send_receive_n_interactions",
+                        title=f"LIANA send/receive counts ({condition_label})",
+                        value_col="n_interactions",
+                    )
+                )
+                if "mean_score" in plot_source_target_summary.columns:
+                    artifacts.extend(
+                        plot_utils.plot_liana_send_receive_summary(
+                            plot_source_target_summary,
+                            figdir=cond_fig_rel,
+                            stem="liana_send_receive_mean_score",
+                            title=f"LIANA send/receive mean score ({condition_label})",
+                            value_col="mean_score",
+                        )
+                    )
+                artifacts.extend(
+                    plot_utils.plot_liana_circos(
+                        plot_primary_df,
+                        figdir=cond_fig_rel,
+                        stem="liana_circos_n_interactions",
+                        title=f"LIANA circos ({condition_label})",
+                        value_col=None,
+                        node_color_map=plot_color_map,
+                    )
+                )
+                if primary_score_col in plot_primary_df.columns:
+                    artifacts.extend(
+                        plot_utils.plot_liana_circos(
+                            plot_primary_df,
+                            figdir=cond_fig_rel,
+                            stem="liana_circos_mean_score",
+                            title=f"LIANA circos mean score ({condition_label})",
+                            value_col=primary_score_col,
+                            node_color_map=plot_color_map,
+                            inverse_score=primary_score_ascending,
+                        )
+                    )
                 artifacts.extend(
                     plot_utils.plot_liana_top_interactions(
-                        primary_df,
-                        figdir=Path(run_round) / cond_tag,
+                        plot_primary_df,
+                        figdir=cond_fig_rel,
                         stem=f"liana_top_{primary_method}",
                         title=f"Top LIANA interactions ({condition_label})",
                         top_n=plot_top_n,
@@ -2766,7 +3279,46 @@ def run_liana_ccc(cfg) -> ad.AnnData:
                         ascending=primary_score_ascending,
                     )
                 )
+                artifacts.extend(
+                    plot_utils.plot_liana_top_interactions_by_family(
+                        plot_primary_family_df,
+                        figdir=cond_fig_rel,
+                        stem=f"liana_top_{primary_method}_route_families",
+                        title=f"Top LIANA route families ({condition_label})",
+                        top_n=min(plot_top_n, 12),
+                        family_col="route_family",
+                    )
+                )
+                artifacts.extend(
+                    plot_utils.plot_liana_top_interactions_by_target_cluster(
+                        plot_primary_df,
+                        figdir=cond_fig_rel,
+                        stem=f"liana_top_{primary_method}_target_clusters",
+                        title=f"Top LIANA target clusters ({condition_label})",
+                        top_n=min(plot_top_n, 12),
+                    )
+                )
                 plot_utils.persist_plot_artifacts(artifacts)
+                compare_bucket = run_spec.get("compare_bucket")
+                if compare_bucket:
+                    bucket = comparison_buckets.setdefault(
+                        str(compare_bucket),
+                        {
+                            "compare_rel": Path(run_spec["compare_rel"]),
+                            "title": run_spec.get("compare_title"),
+                            "summaries": [],
+                            "primary": [],
+                            "primary_family": [],
+                        },
+                    )
+                    if not plot_source_target_summary.empty:
+                        plot_compare_df = plot_source_target_summary.copy()
+                        plot_compare_df["run_label"] = str(condition_label)
+                        bucket["summaries"].append(plot_compare_df)
+                    if not plot_primary_df.empty:
+                        bucket["primary"].append(plot_primary_df.copy())
+                    if not plot_primary_family_df.empty:
+                        bucket["primary_family"].append(plot_primary_family_df.copy())
 
         _write_liana_settings(
             run_tables_dir,
@@ -2774,16 +3326,16 @@ def run_liana_ccc(cfg) -> ad.AnnData:
             condition_key=condition_key,
             condition_value=condition_value,
             methods=methods,
-            aggregated_methods=non_aggregate_methods,
+            aggregated_methods=aggregate_methods,
             resource=str(getattr(cfg, "liana_resource", "consensus")),
             groupby=str(groupby),
-            use_raw=bool(getattr(cfg, "liana_use_raw", True)),
-            layer=getattr(cfg, "liana_layer", None),
+            use_raw=use_raw,
+            layer=liana_layer,
             expr_prop=float(getattr(cfg, "liana_expr_prop", 0.1)),
             n_perms=getattr(cfg, "liana_n_perms", None),
         )
 
-        runs_store[str(condition_label)] = {
+        runs_store[str(run_spec["run_id"])] = {
             "version": __version__,
             "timestamp_utc": datetime.utcnow().isoformat(),
             "round_id": getattr(cfg, "round_id", None),
@@ -2791,14 +3343,140 @@ def run_liana_ccc(cfg) -> ad.AnnData:
             "display_map": dict(display_map),
             "condition_key": condition_key,
             "condition_value": condition_value,
+            "condition_spec": run_spec.get("condition_spec"),
+            "context_key": run_spec.get("context_key"),
+            "context_value": run_spec.get("context_value"),
             "resource": str(getattr(cfg, "liana_resource", "consensus")),
             "methods": list(methods),
-            "aggregated_methods": list(non_aggregate_methods),
+            "aggregated_methods": list(aggregate_methods),
             "primary_method": str(primary_method),
             "top_interactions": primary_top,
             "source_target_summary": source_target_summary,
+            "route_family_summary": route_family_summary,
             "n_interactions": int(len(primary_df)) if primary_df is not None else 0,
         }
+
+    if bool(getattr(cfg, "make_figures", True)):
+        for bucket in comparison_buckets.values():
+            combined_summary = pd.concat(bucket["summaries"], ignore_index=True) if bucket["summaries"] else pd.DataFrame()
+            if combined_summary.empty or combined_summary["run_label"].astype(str).nunique() < 2:
+                continue
+            comparison_artifacts = []
+            title_suffix = f" [{bucket['title']}]" if bucket.get("title") else ""
+            comparison_artifacts.extend(
+                plot_utils.plot_liana_condition_heatmap_grid(
+                    combined_summary,
+                    figdir=Path(bucket["compare_rel"]),
+                    stem="liana_source_target_compare_heatmap",
+                    title=f"LIANA source-target summary by run{title_suffix}",
+                    value_col="n_interactions",
+                )
+            )
+            if "mean_score" in combined_summary.columns:
+                comparison_artifacts.extend(
+                    plot_utils.plot_liana_condition_heatmap_grid(
+                        combined_summary,
+                        figdir=Path(bucket["compare_rel"]),
+                        stem="liana_source_target_compare_mean_score_heatmap",
+                        title=f"LIANA source-target mean score by run{title_suffix}",
+                        value_col="mean_score",
+                        cmap="mako",
+                    )
+                )
+            primary_method_name = None
+            for run_payload in runs_store.values():
+                primary_method_name = str(run_payload.get("primary_method", "") or "")
+                if primary_method_name:
+                    break
+            if primary_method_name and bucket["primary"]:
+                combined_primary = pd.concat(bucket["primary"], ignore_index=True)
+                primary_score_col = aggregate_score_col if primary_method_name == "rank_aggregate" else method_specs[primary_method_name]["score_col"]
+                primary_score_ascending = True if primary_method_name == "rank_aggregate" else bool(method_specs[primary_method_name]["score_ascending"])
+                raw_labels = sorted(
+                    set(combined_primary["source"].astype(str)).union(set(combined_primary["target"].astype(str)))
+                )
+                compare_color_map = _liana_plot_color_map(
+                    adata,
+                    cluster_key=str(groupby),
+                    display_map=display_map,
+                    round_id=getattr(cfg, "round_id", None),
+                    raw_labels=raw_labels,
+                )
+                comparison_artifacts.extend(
+                    plot_utils.plot_liana_condition_circos_grid(
+                        combined_primary,
+                        figdir=Path(bucket["compare_rel"]),
+                        stem="liana_circos_by_condition",
+                        title=f"LIANA circos by condition{title_suffix}",
+                        node_color_map=compare_color_map,
+                    )
+                )
+                if primary_score_col in combined_primary.columns:
+                    comparison_artifacts.extend(
+                        plot_utils.plot_liana_condition_circos_grid(
+                            combined_primary,
+                            figdir=Path(bucket["compare_rel"]),
+                            stem="liana_circos_mean_score_by_condition",
+                            title=f"LIANA circos mean score by condition{title_suffix}",
+                            value_col=primary_score_col,
+                            node_color_map=compare_color_map,
+                            inverse_score=primary_score_ascending,
+                        )
+                    )
+                comparison_artifacts.extend(
+                    plot_utils.plot_liana_condition_split_top_interactions(
+                        combined_primary,
+                        figdir=Path(bucket["compare_rel"]),
+                        stem=f"liana_top_{primary_method_name}_by_condition",
+                        title=f"LIANA condition-split top interactions{title_suffix}",
+                        top_n=min(int(getattr(cfg, "liana_plot_top_n", 60)), 6),
+                        score_col=primary_score_col,
+                        ascending=primary_score_ascending,
+                    )
+                )
+                comparison_artifacts.extend(
+                    plot_utils.plot_liana_condition_split_target_clusters(
+                        combined_primary,
+                        figdir=Path(bucket["compare_rel"]),
+                        stem=f"liana_top_{primary_method_name}_target_clusters_by_condition",
+                        title=f"LIANA condition-split target clusters{title_suffix}",
+                        top_n=min(int(getattr(cfg, "liana_plot_top_n", 60)), 12),
+                    )
+                )
+            comparison_artifacts.extend(
+                plot_utils.plot_liana_condition_alluvial_grid(
+                    combined_summary,
+                    figdir=Path(bucket["compare_rel"]),
+                    stem="liana_source_target_alluvial_by_condition",
+                    title=f"LIANA source-target alluvial by condition{title_suffix}",
+                    value_col="n_interactions",
+                    top_n=min(int(getattr(cfg, "liana_plot_top_n", 60)), 10),
+                )
+            )
+            if "mean_score" in combined_summary.columns:
+                comparison_artifacts.extend(
+                    plot_utils.plot_liana_condition_alluvial_grid(
+                        combined_summary,
+                        figdir=Path(bucket["compare_rel"]),
+                        stem="liana_source_target_mean_score_alluvial_by_condition",
+                        title=f"LIANA source-target mean score alluvial by condition{title_suffix}",
+                        value_col="mean_score",
+                        top_n=min(int(getattr(cfg, "liana_plot_top_n", 60)), 10),
+                    )
+                )
+            if primary_method_name and bucket["primary_family"]:
+                combined_primary_family = pd.concat(bucket["primary_family"], ignore_index=True)
+                comparison_artifacts.extend(
+                    plot_utils.plot_liana_condition_split_family_counts(
+                        combined_primary_family,
+                        figdir=Path(bucket["compare_rel"]),
+                        stem=f"liana_top_{primary_method_name}_route_families_by_condition",
+                        title=f"LIANA condition-split route families{title_suffix}",
+                        top_n=min(int(getattr(cfg, "liana_plot_top_n", 60)), 12),
+                        family_col="route_family",
+                    )
+                )
+            plot_utils.persist_plot_artifacts(comparison_artifacts)
 
     out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.ccc_liana")) + ".zarr")
     LOGGER.info("Saving dataset → %s", out_zarr)
@@ -3950,11 +4628,19 @@ def run_within_cluster(cfg) -> ad.AnnData:
             total = int(len(tasks))
             total_cpus = int(getattr(cfg, "n_jobs", 1))
             worker_cap = int(getattr(cfg, "max_workers", 16) or 16)
-            max_workers = min(int(total_cpus), max(1, total), int(max(1, worker_cap)))
+            requested_workers = min(int(total_cpus), max(1, total), int(max(1, worker_cap)))
+            max_workers = 1
+            if requested_workers > 1:
+                LOGGER.warning(
+                    "within-cluster: pseudobulk requested workers=%d, but PyDESeq2 fits in thread pools "
+                    "have shown native instability here; forcing serial execution for stability.",
+                    int(requested_workers),
+                )
             LOGGER.info(
-                "within-cluster: pseudobulk parallel run (tasks=%d, workers=%d, total_cpus=%d, worker_cap=%d).",
+                "within-cluster: pseudobulk execution mode (tasks=%d, workers=%d, requested_workers=%d, total_cpus=%d, worker_cap=%d).",
                 int(total),
                 int(max_workers),
+                int(requested_workers),
                 int(total_cpus),
                 int(max(1, worker_cap)),
             )

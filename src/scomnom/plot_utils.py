@@ -13,6 +13,7 @@ from sklearn.metrics import silhouette_samples
 import math
 import matplotlib as mpl
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 import numpy as np
 import scanpy as sc
 import pandas as pd
@@ -21,6 +22,7 @@ import re
 
 import textwrap
 import seaborn as sns
+import warnings
 
 LOGGER = logging.getLogger(__name__)
 
@@ -5739,27 +5741,836 @@ def plot_liana_top_interactions(
         + " -> "
         + df["receptor_complex"].astype(str)
     )
-    if score_col and score_col in df.columns:
-        df[score_col] = pd.to_numeric(df[score_col], errors="coerce")
-        df = df.sort_values(score_col, ascending=ascending, kind="mergesort")
-    df = df.head(int(max(1, top_n)))
-    if df.empty:
+    cluster_order = df["source"].astype(str).drop_duplicates().tolist()
+    for cluster in cluster_order:
+        cluster_df = df[df["source"].astype(str) == str(cluster)].copy()
+        if score_col and score_col in cluster_df.columns:
+            cluster_df[score_col] = pd.to_numeric(cluster_df[score_col], errors="coerce")
+            cluster_df = cluster_df.sort_values(score_col, ascending=ascending, kind="mergesort")
+        cluster_df = cluster_df.head(int(max(1, top_n)))
+        if cluster_df.empty:
+            continue
+        plot_df = cluster_df.iloc[::-1].copy()
+
+        if score_col and score_col in cluster_df.columns:
+            values = pd.to_numeric(plot_df[score_col], errors="coerce").fillna(0.0)
+            x_label = score_col
+        else:
+            values = np.arange(len(plot_df), 0, -1, dtype=float)
+            x_label = "Rank"
+
+        fig_h = min(18.0, max(4.0, 1.0 + 0.36 * float(len(plot_df))))
+        fig, ax = plt.subplots(figsize=(11, fig_h))
+        ax.barh(plot_df["interaction"].astype(str), values, color="#3b7ea1")
+        ax.invert_yaxis()
+        ax.set_xlabel(x_label)
+        ax.set_ylabel("Interaction")
+        ax.set_title(f"{title or 'Top LIANA interactions'} [{cluster}]")
+        fig.tight_layout()
+        stem_cluster = f"{stem}__{re.sub(r'[^A-Za-z0-9]+', '_', str(cluster)).strip('_') or 'cluster'}"
+        record_plot_artifact(stem_cluster, figdir, fig)
+        close_plot(fig)
+
+
+@collect_plot_artifacts
+def plot_liana_top_interactions_by_family(
+    interactions: pd.DataFrame,
+    figdir: Path,
+    *,
+    stem: str = "liana_top_interactions_by_family",
+    title: str | None = None,
+    top_n: int = 8,
+    family_col: str = "ligand_family",
+) -> None:
+    if interactions is None or getattr(interactions, "empty", True):
+        LOGGER.warning("plot_liana_top_interactions_by_family: interactions are empty; skipping.")
+        return
+    cols_needed = {"source", family_col}
+    if not cols_needed.issubset(interactions.columns):
+        LOGGER.warning("plot_liana_top_interactions_by_family: required columns missing; skipping.")
         return
 
-    if score_col and score_col in df.columns:
-        values = pd.to_numeric(df[score_col], errors="coerce").fillna(0.0)
-        x_label = score_col
-    else:
-        values = np.arange(len(df), 0, -1, dtype=float)
-        x_label = "Rank"
+    df = interactions.copy()
+    df[family_col] = df[family_col].astype(str)
+    cluster_order = df["source"].astype(str).drop_duplicates().tolist()
+    for cluster in cluster_order:
+        cluster_slice = df[df["source"].astype(str) == str(cluster)].copy()
+        fam_df = (
+            cluster_slice
+            .groupby(family_col, observed=False)
+            .size()
+            .rename("n_interactions")
+            .sort_values(ascending=False, kind="mergesort")
+            .head(int(max(1, top_n)))
+            .reset_index()
+        )
+        if fam_df.empty:
+            continue
+        source_family = str(cluster)
+        if "source_family" in cluster_slice.columns:
+            source_families = cluster_slice["source_family"].astype(str).dropna().unique().tolist()
+            if len(source_families) == 1 and str(source_families[0]).strip():
+                source_family = str(source_families[0])
+        fig_h = min(12.0, max(4.0, 1.0 + 0.4 * float(len(fam_df))))
+        fig, ax = plt.subplots(figsize=(9, fig_h))
+        ax.barh(fam_df[family_col].astype(str), fam_df["n_interactions"].astype(float), color="#6c8f3b")
+        ax.invert_yaxis()
+        ax.set_xlabel("n_interactions")
+        ax.set_ylabel("Family")
+        ax.set_title(f"{title or 'Top LIANA ligand families'} [{source_family}]")
+        fig.tight_layout()
+        stem_cluster = f"{stem}__{re.sub(r'[^A-Za-z0-9]+', '_', str(cluster)).strip('_') or 'cluster'}"
+        record_plot_artifact(stem_cluster, figdir, fig)
+        close_plot(fig)
 
-    fig_h = min(18.0, max(4.0, 1.0 + 0.36 * float(len(df))))
-    fig, ax = plt.subplots(figsize=(11, fig_h))
-    ax.barh(df["interaction"].astype(str), values, color="#3b7ea1")
-    ax.invert_yaxis()
-    ax.set_xlabel(x_label)
-    ax.set_ylabel("Interaction")
-    ax.set_title(title or "Top LIANA interactions")
+
+@collect_plot_artifacts
+def plot_liana_top_interactions_by_target_cluster(
+    interactions: pd.DataFrame,
+    figdir: Path,
+    *,
+    stem: str = "liana_top_interactions_by_target_cluster",
+    title: str | None = None,
+    top_n: int = 8,
+) -> None:
+    if interactions is None or getattr(interactions, "empty", True):
+        LOGGER.warning("plot_liana_top_interactions_by_target_cluster: interactions are empty; skipping.")
+        return
+    cols_needed = {"source", "target"}
+    if not cols_needed.issubset(interactions.columns):
+        LOGGER.warning("plot_liana_top_interactions_by_target_cluster: required columns missing; skipping.")
+        return
+
+    df = interactions.copy()
+    cluster_order = df["source"].astype(str).drop_duplicates().tolist()
+    for cluster in cluster_order:
+        target_df = (
+            df[df["source"].astype(str) == str(cluster)]
+            .groupby("target", observed=False)
+            .size()
+            .rename("n_interactions")
+            .sort_values(ascending=False, kind="mergesort")
+            .head(int(max(1, top_n)))
+            .reset_index()
+        )
+        if target_df.empty:
+            continue
+        fig_h = min(12.0, max(4.0, 1.0 + 0.4 * float(len(target_df))))
+        fig, ax = plt.subplots(figsize=(9, fig_h))
+        ax.barh(target_df["target"].astype(str), target_df["n_interactions"].astype(float), color="#8a5ca3")
+        ax.invert_yaxis()
+        ax.set_xlabel("n_interactions")
+        ax.set_ylabel("Target cluster")
+        ax.set_title(f"{title or 'Top LIANA target clusters'} [{cluster}]")
+        fig.tight_layout()
+        stem_cluster = f"{stem}__{re.sub(r'[^A-Za-z0-9]+', '_', str(cluster)).strip('_') or 'cluster'}"
+        record_plot_artifact(stem_cluster, figdir, fig)
+        close_plot(fig)
+
+
+def _liana_condition_palette(run_labels: Sequence[str]) -> dict[str, tuple[float, float, float, float]]:
+    labels = [str(x) for x in run_labels]
+    cmap = mpl.cm.get_cmap("tab10", max(len(labels), 1))
+    return {label: cmap(i) for i, label in enumerate(labels)}
+
+
+@collect_plot_artifacts
+def plot_liana_condition_split_top_interactions(
+    interactions: pd.DataFrame,
+    figdir: Path,
+    *,
+    stem: str = "liana_condition_split_top_interactions",
+    title: str | None = None,
+    top_n: int = 6,
+    score_col: str = "magnitude_rank",
+    ascending: bool = False,
+) -> None:
+    if interactions is None or getattr(interactions, "empty", True):
+        LOGGER.warning("plot_liana_condition_split_top_interactions: interactions are empty; skipping.")
+        return
+    cols_needed = {"run_label", "source", "target", "ligand_complex", "receptor_complex", score_col}
+    if not cols_needed.issubset(interactions.columns):
+        LOGGER.warning("plot_liana_condition_split_top_interactions: required columns missing; skipping.")
+        return
+
+    df = interactions.copy()
+    df["run_label"] = df["run_label"].astype(str)
+    df["source"] = df["source"].astype(str)
+    df["interaction"] = (
+        df["source"].astype(str)
+        + " -> "
+        + df["target"].astype(str)
+        + " | "
+        + df["ligand_complex"].astype(str)
+        + " -> "
+        + df["receptor_complex"].astype(str)
+    )
+    df[score_col] = pd.to_numeric(df[score_col], errors="coerce")
+    run_order = df["run_label"].drop_duplicates().tolist()
+    palette = _liana_condition_palette(run_order)
+    cluster_order = df["source"].drop_duplicates().tolist()
+
+    for cluster in cluster_order:
+        cluster_df = df[df["source"] == str(cluster)].copy()
+        selector = cluster_df.groupby("interaction", observed=False)[score_col].agg("min" if ascending else "max")
+        selected = selector.sort_values(ascending=ascending, kind="mergesort").head(int(max(1, top_n)))
+        if selected.empty:
+            continue
+        selected_labels = selected.index.astype(str).tolist()
+        plot_df = (
+            cluster_df[cluster_df["interaction"].isin(selected_labels)]
+            .groupby(["interaction", "run_label"], observed=False)[score_col]
+            .agg("min" if ascending else "max")
+            .reset_index()
+        )
+        pivot = (
+            plot_df.pivot(index="interaction", columns="run_label", values=score_col)
+            .reindex(index=selected_labels, columns=run_order)
+            .fillna(0.0)
+        )
+        n_rows = len(pivot.index)
+        base_y = np.arange(n_rows, dtype=float)
+        height = 0.8 / max(len(run_order), 1)
+        offsets = np.linspace(-0.4 + height / 2.0, 0.4 - height / 2.0, num=max(len(run_order), 1))
+
+        fig_h = min(12.0, max(4.0, 1.0 + 0.42 * float(n_rows)))
+        fig, ax = plt.subplots(figsize=(11, fig_h))
+        for idx, run_label in enumerate(run_order):
+            vals = pd.to_numeric(pivot[run_label], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+            ax.barh(base_y + offsets[idx], vals, height=height, color=palette[run_label], label=run_label)
+        ax.set_yticks(base_y)
+        ax.set_yticklabels(selected_labels, fontsize=9.0)
+        ax.invert_yaxis()
+        ax.set_xlabel(score_col)
+        ax.set_ylabel("Interaction")
+        ax.set_title(f"{title or 'LIANA condition-split top interactions'} [{cluster}]")
+        ax.grid(axis="x", color="#D9D9D9", linewidth=0.8)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_visible(False)
+        ax.legend(loc="lower right", frameon=False, fontsize=9.0, ncol=min(3, len(run_order)))
+        fig.tight_layout()
+        stem_cluster = f"{stem}__{re.sub(r'[^A-Za-z0-9]+', '_', str(cluster)).strip('_') or 'cluster'}"
+        record_plot_artifact(stem_cluster, figdir, fig)
+        close_plot(fig)
+
+
+@collect_plot_artifacts
+def plot_liana_condition_split_family_counts(
+    interactions: pd.DataFrame,
+    figdir: Path,
+    *,
+    stem: str = "liana_condition_split_family_counts",
+    title: str | None = None,
+    top_n: int = 8,
+    family_col: str = "route_family",
+) -> None:
+    if interactions is None or getattr(interactions, "empty", True):
+        LOGGER.warning("plot_liana_condition_split_family_counts: interactions are empty; skipping.")
+        return
+    cols_needed = {"run_label", "source", family_col}
+    if not cols_needed.issubset(interactions.columns):
+        LOGGER.warning("plot_liana_condition_split_family_counts: required columns missing; skipping.")
+        return
+
+    df = interactions.copy()
+    df["run_label"] = df["run_label"].astype(str)
+    df["source"] = df["source"].astype(str)
+    df[family_col] = df[family_col].astype(str)
+    run_order = df["run_label"].drop_duplicates().tolist()
+    palette = _liana_condition_palette(run_order)
+    cluster_order = df["source"].drop_duplicates().tolist()
+
+    for cluster in cluster_order:
+        cluster_df = df[df["source"] == str(cluster)].copy()
+        family_counts = (
+            cluster_df.groupby([family_col, "run_label"], observed=False)
+            .size()
+            .rename("n_interactions")
+            .reset_index()
+        )
+        totals = (
+            family_counts.groupby(family_col, observed=False)["n_interactions"]
+            .sum()
+            .sort_values(ascending=False, kind="mergesort")
+            .head(int(max(1, top_n)))
+        )
+        if totals.empty:
+            continue
+        selected_labels = totals.index.astype(str).tolist()
+        pivot = (
+            family_counts[family_counts[family_col].isin(selected_labels)]
+            .pivot(index=family_col, columns="run_label", values="n_interactions")
+            .reindex(index=selected_labels, columns=run_order)
+            .fillna(0.0)
+        )
+        n_rows = len(pivot.index)
+        base_y = np.arange(n_rows, dtype=float)
+        height = 0.8 / max(len(run_order), 1)
+        offsets = np.linspace(-0.4 + height / 2.0, 0.4 - height / 2.0, num=max(len(run_order), 1))
+        source_family = str(cluster)
+        if "source_family" in cluster_df.columns:
+            source_families = cluster_df["source_family"].astype(str).dropna().unique().tolist()
+            if len(source_families) == 1 and str(source_families[0]).strip():
+                source_family = str(source_families[0])
+
+        fig_h = min(10.0, max(4.0, 1.0 + 0.42 * float(n_rows)))
+        fig, ax = plt.subplots(figsize=(9.5, fig_h))
+        for idx, run_label in enumerate(run_order):
+            vals = pd.to_numeric(pivot[run_label], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+            ax.barh(base_y + offsets[idx], vals, height=height, color=palette[run_label], label=run_label)
+        ax.set_yticks(base_y)
+        ax.set_yticklabels(selected_labels, fontsize=9.5)
+        ax.invert_yaxis()
+        ax.set_xlabel("n_interactions")
+        ax.set_ylabel("Route family")
+        ax.set_title(f"{title or 'LIANA condition-split route families'} [{source_family}]")
+        ax.grid(axis="x", color="#D9D9D9", linewidth=0.8)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_visible(False)
+        ax.legend(loc="lower right", frameon=False, fontsize=9.0, ncol=min(3, len(run_order)))
+        fig.tight_layout()
+        stem_cluster = f"{stem}__{re.sub(r'[^A-Za-z0-9]+', '_', str(cluster)).strip('_') or 'cluster'}"
+        record_plot_artifact(stem_cluster, figdir, fig)
+        close_plot(fig)
+
+
+@collect_plot_artifacts
+def plot_liana_condition_split_target_clusters(
+    interactions: pd.DataFrame,
+    figdir: Path,
+    *,
+    stem: str = "liana_condition_split_target_clusters",
+    title: str | None = None,
+    top_n: int = 8,
+) -> None:
+    if interactions is None or getattr(interactions, "empty", True):
+        LOGGER.warning("plot_liana_condition_split_target_clusters: interactions are empty; skipping.")
+        return
+    cols_needed = {"run_label", "source", "target"}
+    if not cols_needed.issubset(interactions.columns):
+        LOGGER.warning("plot_liana_condition_split_target_clusters: required columns missing; skipping.")
+        return
+
+    df = interactions.copy()
+    df["run_label"] = df["run_label"].astype(str)
+    df["source"] = df["source"].astype(str)
+    df["target"] = df["target"].astype(str)
+    run_order = df["run_label"].drop_duplicates().tolist()
+    palette = _liana_condition_palette(run_order)
+    cluster_order = df["source"].drop_duplicates().tolist()
+
+    for cluster in cluster_order:
+        cluster_df = df[df["source"] == str(cluster)].copy()
+        target_counts = (
+            cluster_df.groupby(["target", "run_label"], observed=False)
+            .size()
+            .rename("n_interactions")
+            .reset_index()
+        )
+        totals = (
+            target_counts.groupby("target", observed=False)["n_interactions"]
+            .sum()
+            .sort_values(ascending=False, kind="mergesort")
+            .head(int(max(1, top_n)))
+        )
+        if totals.empty:
+            continue
+        selected_labels = totals.index.astype(str).tolist()
+        pivot = (
+            target_counts[target_counts["target"].isin(selected_labels)]
+            .pivot(index="target", columns="run_label", values="n_interactions")
+            .reindex(index=selected_labels, columns=run_order)
+            .fillna(0.0)
+        )
+        n_rows = len(pivot.index)
+        base_y = np.arange(n_rows, dtype=float)
+        height = 0.8 / max(len(run_order), 1)
+        offsets = np.linspace(-0.4 + height / 2.0, 0.4 - height / 2.0, num=max(len(run_order), 1))
+
+        fig_h = min(10.0, max(4.0, 1.0 + 0.42 * float(n_rows)))
+        fig, ax = plt.subplots(figsize=(9.5, fig_h))
+        for idx, run_label in enumerate(run_order):
+            vals = pd.to_numeric(pivot[run_label], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+            ax.barh(base_y + offsets[idx], vals, height=height, color=palette[run_label], label=run_label)
+        ax.set_yticks(base_y)
+        ax.set_yticklabels(selected_labels, fontsize=9.5)
+        ax.invert_yaxis()
+        ax.set_xlabel("n_interactions")
+        ax.set_ylabel("Target cluster")
+        ax.set_title(f"{title or 'LIANA condition-split target clusters'} [{cluster}]")
+        ax.grid(axis="x", color="#D9D9D9", linewidth=0.8)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_visible(False)
+        ax.legend(loc="lower right", frameon=False, fontsize=9.0, ncol=min(3, len(run_order)))
+        fig.tight_layout()
+        stem_cluster = f"{stem}__{re.sub(r'[^A-Za-z0-9]+', '_', str(cluster)).strip('_') or 'cluster'}"
+        record_plot_artifact(stem_cluster, figdir, fig)
+        close_plot(fig)
+
+
+@collect_plot_artifacts
+def plot_liana_send_receive_summary(
+    summary: pd.DataFrame,
+    figdir: Path,
+    *,
+    stem: str = "liana_send_receive_summary",
+    title: str | None = None,
+    value_col: str = "n_interactions",
+    top_n: int = 20,
+) -> None:
+    if summary is None or getattr(summary, "empty", True):
+        LOGGER.warning("plot_liana_send_receive_summary: summary is empty; skipping.")
+        return
+    if not {"source", "target", value_col}.issubset(summary.columns):
+        LOGGER.warning("plot_liana_send_receive_summary: required columns missing; skipping.")
+        return
+
+    out_df = (
+        summary.groupby("source", observed=False)[value_col]
+        .sum()
+        .sort_values(ascending=False)
+        .head(int(max(1, top_n)))
+        .rename("outgoing")
+        .reset_index()
+        .rename(columns={"source": "cluster"})
+    )
+    in_df = (
+        summary.groupby("target", observed=False)[value_col]
+        .sum()
+        .sort_values(ascending=False)
+        .head(int(max(1, top_n)))
+        .rename("incoming")
+        .reset_index()
+        .rename(columns={"target": "cluster"})
+    )
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, max(4.0, 0.35 * float(max(len(out_df), len(in_df), 6)))))
+    for ax, df_plot, col, panel_title, color in (
+        (axes[0], out_df, "outgoing", "Outgoing", "#2f6c8f"),
+        (axes[1], in_df, "incoming", "Incoming", "#b35c44"),
+    ):
+        if df_plot.empty:
+            ax.text(0.5, 0.5, "No data", ha="center", va="center")
+            ax.set_axis_off()
+            continue
+        ax.barh(df_plot["cluster"].astype(str), pd.to_numeric(df_plot[col], errors="coerce").fillna(0.0), color=color)
+        ax.invert_yaxis()
+        ax.set_title(panel_title)
+        ax.set_xlabel(value_col)
+        ax.set_ylabel("Cluster")
+    fig.suptitle(title or "LIANA send/receive summary")
+    fig.tight_layout()
+    record_plot_artifact(stem, figdir, fig)
+    close_plot(fig)
+
+
+@collect_plot_artifacts
+def plot_liana_condition_heatmap_grid(
+    summary: pd.DataFrame,
+    figdir: Path,
+    *,
+    stem: str = "liana_condition_heatmap_grid",
+    title: str | None = None,
+    value_col: str = "n_interactions",
+    cmap: str = "crest",
+) -> None:
+    if summary is None or getattr(summary, "empty", True):
+        LOGGER.warning("plot_liana_condition_heatmap_grid: summary is empty; skipping.")
+        return
+    if not {"run_label", "source", "target", value_col}.issubset(summary.columns):
+        LOGGER.warning("plot_liana_condition_heatmap_grid: required columns missing; skipping.")
+        return
+
+    df = summary.copy()
+    runs = df["run_label"].astype(str).drop_duplicates().tolist()
+    if len(runs) < 2:
+        return
+    sources = sorted(df["source"].astype(str).unique().tolist())
+    targets = sorted(df["target"].astype(str).unique().tolist())
+    if not sources or not targets:
+        return
+
+    ncols = min(3, len(runs))
+    nrows = int(math.ceil(float(len(runs)) / float(ncols)))
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(max(5.0 * float(ncols), 7.5), max(4.0 * float(nrows), 4.5)),
+        squeeze=False,
+    )
+    axes_flat = axes.ravel()
+
+    vmax = pd.to_numeric(df[value_col], errors="coerce").max()
+    vmax = float(vmax) if pd.notna(vmax) else 0.0
+    vmax = max(vmax, 1e-12)
+
+    for ax, run in zip(axes_flat, runs):
+        run_df = df[df["run_label"].astype(str) == str(run)]
+        heatmap_df = (
+            run_df.pivot(index="source", columns="target", values=value_col)
+            .reindex(index=sources, columns=targets)
+            .fillna(0.0)
+        )
+        sns.heatmap(
+            heatmap_df,
+            cmap=cmap,
+            linewidths=0.2,
+            linecolor="white",
+            vmin=0.0,
+            vmax=vmax,
+            cbar=ax is axes_flat[min(len(runs), len(axes_flat)) - 1],
+            cbar_kws={"label": value_col},
+            ax=ax,
+        )
+        ax.set_title(str(run))
+        ax.set_xlabel("Target")
+        ax.set_ylabel("Source")
+
+    for ax in axes_flat[len(runs):]:
+        ax.set_axis_off()
+
+    fig.suptitle(title or "LIANA source-target summary by run")
+    fig.tight_layout()
+    record_plot_artifact(stem, figdir, fig)
+    close_plot(fig)
+
+
+def _prepare_liana_circos_inputs(
+    interactions: pd.DataFrame,
+    *,
+    value_col: str | None = None,
+    max_edges: int = 40,
+) -> tuple[pd.DataFrame, list[str]] | None:
+    if interactions is None or getattr(interactions, "empty", True):
+        return None
+    cols_needed = {"source", "target", "ligand_complex", "receptor_complex"}
+    if value_col is not None:
+        cols_needed.add(value_col)
+    if not cols_needed.issubset(interactions.columns):
+        return None
+
+    circ = interactions.copy()
+    if value_col is not None and value_col in circ.columns:
+        circ[value_col] = pd.to_numeric(circ[value_col], errors="coerce")
+        circ = circ.dropna(subset=[value_col])
+    if circ.empty:
+        return None
+
+    if value_col is not None and value_col in circ.columns:
+        circ = circ.sort_values(value_col, ascending=False, kind="mergesort").head(int(max(1, max_edges)))
+    else:
+        circ = circ.head(int(max(1, max_edges)))
+    nodes = sorted(set(circ["source"].astype(str)).union(set(circ["target"].astype(str))))
+    if len(nodes) < 2:
+        return None
+    if value_col is not None and value_col in circ.columns:
+        src_present = set(circ["source"].astype(str))
+        tgt_present = set(circ["target"].astype(str))
+        missing_nodes = [node for node in nodes if node not in src_present or node not in tgt_present]
+        if missing_nodes:
+            dummy_rows = pd.DataFrame(
+                {
+                    "source": missing_nodes,
+                    "target": missing_nodes,
+                    "ligand_complex": ["__dummy__"] * len(missing_nodes),
+                    "receptor_complex": ["__dummy__"] * len(missing_nodes),
+                    value_col: [0.0] * len(missing_nodes),
+                }
+            )
+            circ = pd.concat([circ, dummy_rows], ignore_index=True, copy=False)
+    circ["source"] = pd.Categorical(circ["source"].astype(str), categories=nodes, ordered=True)
+    circ["target"] = pd.Categorical(circ["target"].astype(str), categories=nodes, ordered=True)
+    return circ, nodes
+
+
+def _make_liana_circos_figure(
+    interactions: pd.DataFrame,
+    *,
+    title: str | None = None,
+    value_col: str | None = None,
+    node_color_map: Mapping[str, Any] | None = None,
+    groupby: str = "cluster",
+    max_edges: int = 40,
+    inverse_score: bool = False,
+    figure_size: tuple[float, float] = (8, 8),
+):
+    prepared = _prepare_liana_circos_inputs(
+        interactions,
+        value_col=value_col,
+        max_edges=max_edges,
+    )
+    if prepared is None:
+        return None
+    circ, nodes = prepared
+
+    try:
+        import liana
+    except Exception as e:
+        LOGGER.warning("plot_liana_circos: failed to import liana plotting API: %s", e)
+        return None
+
+    adata_plot = ad.AnnData(X=np.zeros((len(nodes), 1), dtype=float))
+    adata_plot.obs[groupby] = pd.Categorical(nodes, categories=nodes, ordered=True)
+    if node_color_map:
+        adata_plot.uns[f"{groupby}_colors"] = [node_color_map.get(node, "#5b7fa3") for node in nodes]
+    adata_plot.uns["liana_res"] = circ
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"invalid value encountered in divide",
+                category=RuntimeWarning,
+            )
+            ax = liana.pl.circle_plot(
+                adata=adata_plot,
+                uns_key="liana_res",
+                groupby=groupby,
+                score_key=value_col if (value_col is not None and value_col in circ.columns) else None,
+                inverse_score=bool(inverse_score),
+                top_n=None,
+                pivot_mode="mean" if (value_col is not None and value_col in circ.columns) else "counts",
+                figure_size=figure_size,
+                node_label_size=10,
+                edge_alpha=0.6,
+            )
+    except Exception as e:
+        LOGGER.warning("plot_liana_circos: LIANA circle_plot failed: %s", e)
+        return None
+    fig = ax.figure
+    ax.set_title(title or "LIANA circos")
+    fig.tight_layout()
+    return fig
+
+
+@collect_plot_artifacts
+def plot_liana_circos(
+    interactions: pd.DataFrame,
+    figdir: Path,
+    *,
+    stem: str = "liana_circos",
+    title: str | None = None,
+    value_col: str | None = None,
+    node_color_map: Mapping[str, Any] | None = None,
+    groupby: str = "cluster",
+    max_edges: int = 40,
+    inverse_score: bool = False,
+) -> None:
+    fig = _make_liana_circos_figure(
+        interactions,
+        title=title,
+        value_col=value_col,
+        node_color_map=node_color_map,
+        groupby=groupby,
+        max_edges=max_edges,
+        inverse_score=inverse_score,
+    )
+    if fig is None:
+        return
+    record_plot_artifact(stem, figdir, fig)
+    close_plot(fig)
+
+
+@collect_plot_artifacts
+def plot_liana_condition_circos_grid(
+    interactions: pd.DataFrame,
+    figdir: Path,
+    *,
+    stem: str = "liana_condition_circos_grid",
+    title: str | None = None,
+    value_col: str | None = None,
+    node_color_map: Mapping[str, Any] | None = None,
+    groupby: str = "cluster",
+    max_edges: int = 40,
+    inverse_score: bool = False,
+) -> None:
+    if interactions is None or getattr(interactions, "empty", True):
+        LOGGER.warning("plot_liana_condition_circos_grid: interactions are empty; skipping.")
+        return
+    if "run_label" not in interactions.columns:
+        LOGGER.warning("plot_liana_condition_circos_grid: run_label column missing; skipping.")
+        return
+
+    df = interactions.copy()
+    df["run_label"] = df["run_label"].astype(str)
+    runs = df["run_label"].drop_duplicates().tolist()
+    if len(runs) < 2:
+        return
+    ncols = min(3, len(runs))
+    nrows = int(math.ceil(float(len(runs)) / float(ncols)))
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(max(4.2 * float(ncols), 7.0), max(4.2 * float(nrows), 4.5)),
+        squeeze=False,
+    )
+    axes_flat = axes.ravel()
+
+    for ax, run in zip(axes_flat, runs):
+        run_df = df[df["run_label"] == str(run)].copy()
+        subfig = _make_liana_circos_figure(
+            run_df,
+            title=str(run),
+            value_col=value_col,
+            node_color_map=node_color_map,
+            groupby=groupby,
+            max_edges=max_edges,
+            inverse_score=inverse_score,
+            figure_size=(4.5, 4.5),
+        )
+        if subfig is None:
+            ax.text(0.5, 0.5, "No data", ha="center", va="center")
+            ax.set_axis_off()
+            continue
+        canvas = FigureCanvasAgg(subfig)
+        canvas.draw()
+        rgba = np.asarray(canvas.buffer_rgba())
+        ax.imshow(rgba)
+        ax.set_axis_off()
+        plt.close(subfig)
+
+    for ax in axes_flat[len(runs):]:
+        ax.set_axis_off()
+
+    fig.suptitle(title or "LIANA circos by condition")
+    fig.tight_layout()
+    record_plot_artifact(stem, figdir, fig)
+    close_plot(fig)
+
+
+@collect_plot_artifacts
+def plot_liana_condition_alluvial_grid(
+    summary: pd.DataFrame,
+    figdir: Path,
+    *,
+    stem: str = "liana_condition_alluvial_grid",
+    title: str | None = None,
+    value_col: str = "n_interactions",
+    top_n: int = 10,
+) -> None:
+    if summary is None or getattr(summary, "empty", True):
+        LOGGER.warning("plot_liana_condition_alluvial_grid: summary is empty; skipping.")
+        return
+    if not {"run_label", "source", "target", value_col}.issubset(summary.columns):
+        LOGGER.warning("plot_liana_condition_alluvial_grid: required columns missing; skipping.")
+        return
+
+    df = summary.copy()
+    df["run_label"] = df["run_label"].astype(str)
+    runs = df["run_label"].drop_duplicates().tolist()
+    if len(runs) < 2:
+        return
+    ncols = min(3, len(runs))
+    nrows = int(math.ceil(float(len(runs)) / float(ncols)))
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(max(5.0 * float(ncols), 8.5), max(4.8 * float(nrows), 5.0)),
+        squeeze=False,
+    )
+    axes_flat = axes.ravel()
+    palette = sns.color_palette("tab20", 20)
+
+    for ax, run in zip(axes_flat, runs):
+        run_df = df[df["run_label"] == str(run)].copy()
+        run_df[value_col] = pd.to_numeric(run_df[value_col], errors="coerce").fillna(0.0)
+        run_df = run_df[run_df[value_col] > 0].copy()
+        if run_df.empty:
+            ax.text(0.5, 0.5, "No data", ha="center", va="center")
+            ax.set_axis_off()
+            continue
+        totals = (
+            run_df.sort_values(value_col, ascending=False, kind="mergesort")
+            .head(int(max(1, top_n)))
+            .reset_index(drop=True)
+        )
+        left_totals = totals.groupby("source", observed=False)[value_col].sum().sort_values(ascending=False)
+        right_totals = totals.groupby("target", observed=False)[value_col].sum().sort_values(ascending=False)
+        if left_totals.empty or right_totals.empty:
+            ax.set_axis_off()
+            continue
+
+        left_order = left_totals.index.astype(str).tolist()
+        right_order = right_totals.index.astype(str).tolist()
+        left_colors = {lab: palette[i % len(palette)] for i, lab in enumerate(left_order)}
+        total_mass = max(float(totals[value_col].sum()), 1e-12)
+
+        left_bottoms: dict[str, float] = {}
+        acc = 0.0
+        for lab in left_order:
+            height = float(left_totals.loc[lab]) / total_mass
+            left_bottoms[lab] = acc
+            acc += height
+        right_bottoms: dict[str, float] = {}
+        acc = 0.0
+        for lab in right_order:
+            height = float(right_totals.loc[lab]) / total_mass
+            right_bottoms[lab] = acc
+            acc += height
+
+        left_running = dict(left_bottoms)
+        right_running = dict(right_bottoms)
+        x_left = 0.0
+        x_right = 1.0
+        bar_width = 0.2
+        left_edge = x_left + bar_width / 2.0
+        right_edge = x_right - bar_width / 2.0
+
+        for _, row in totals.iterrows():
+            src = str(row["source"])
+            tgt = str(row["target"])
+            frac = float(row[value_col]) / total_mass
+            y0_l = left_running[src]
+            y1_l = y0_l + frac
+            y0_r = right_running[tgt]
+            y1_r = y0_r + frac
+            poly = mpl.patches.Polygon(
+                [
+                    (left_edge, y0_l),
+                    (left_edge, y1_l),
+                    (right_edge, y1_r),
+                    (right_edge, y0_r),
+                ],
+                closed=True,
+                facecolor=left_colors[src],
+                edgecolor="none",
+                alpha=0.55,
+            )
+            ax.add_patch(poly)
+            left_running[src] = y1_l
+            right_running[tgt] = y1_r
+
+        for src in left_order:
+            height = float(left_totals.loc[src]) / total_mass
+            ax.bar(x_left, height, bottom=left_bottoms[src], color=left_colors[src], width=bar_width, edgecolor="white", linewidth=0.4)
+        right_colors = {lab: "#7a7a7a" for lab in right_order}
+        for tgt in right_order:
+            height = float(right_totals.loc[tgt]) / total_mass
+            ax.bar(x_right, height, bottom=right_bottoms[tgt], color=right_colors[tgt], width=bar_width, edgecolor="white", linewidth=0.4)
+
+        ax.set_xlim(-0.35, 1.35)
+        ax.set_ylim(0.0, 1.0)
+        ax.set_xticks([x_left, x_right])
+        ax.set_xticklabels(["Source", "Target"])
+        ax.set_yticks([])
+        ax.set_title(str(run))
+        for src in left_order:
+            y_mid = left_bottoms[src] + (float(left_totals.loc[src]) / total_mass) / 2.0
+            ax.text(-0.02, y_mid, src, ha="right", va="center", fontsize=8.5)
+        for tgt in right_order:
+            y_mid = right_bottoms[tgt] + (float(right_totals.loc[tgt]) / total_mass) / 2.0
+            ax.text(1.02, y_mid, tgt, ha="left", va="center", fontsize=8.5)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_visible(False)
+        ax.grid(False)
+
+    for ax in axes_flat[len(runs):]:
+        ax.set_axis_off()
+
+    fig.suptitle(title or "LIANA source-target alluvial by condition")
     fig.tight_layout()
     record_plot_artifact(stem, figdir, fig)
     close_plot(fig)

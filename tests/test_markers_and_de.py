@@ -5,10 +5,13 @@ import numpy as np
 import pandas as pd
 import pytest
 import sys
+import importlib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 import scomnom.annotation_utils as au
+
+md_mod = importlib.import_module("scomnom.markers_and_de")
 
 from scomnom.composition_utils import _resolve_active_cluster_key
 from scomnom.markers_and_de import (
@@ -16,8 +19,11 @@ from scomnom.markers_and_de import (
     _collect_pseudobulk_de_tables_from_dir,
     _collect_cell_contrast_tables_from_dir,
     _build_stats_matrix_from_tables,
+    _liana_family_label,
     _load_de_enrichment_payload_from_tables,
     _load_module_definitions,
+    _liana_plot_color_map,
+    _prepare_liana_plot_df,
     _prune_uns_de,
     _compute_module_score_on_adata,
     _write_de_enrichment_tables,
@@ -1053,11 +1059,14 @@ def test_run_decoupler_for_round_drops_persisted_pseudobulk_store(
 
 
 def test_run_liana_ccc_writes_tables_and_uns(monkeypatch, tmp_path: Path) -> None:
+    calls: list[dict[str, object]] = []
+
     class _FakeMethod:
         def __init__(self, score_col: str):
             self.score_col = score_col
 
         def __call__(self, adata, **kwargs):
+            calls.append({"kind": self.score_col, **kwargs})
             return pd.DataFrame(
                 {
                     "source": ["C00", "C01"],
@@ -1073,6 +1082,7 @@ def test_run_liana_ccc_writes_tables_and_uns(monkeypatch, tmp_path: Path) -> Non
             self.methods = methods or []
 
         def __call__(self, adata, **kwargs):
+            calls.append({"kind": "rank_aggregate", **kwargs})
             return pd.DataFrame(
                 {
                     "source": ["C00", "C01"],
@@ -1102,6 +1112,8 @@ def test_run_liana_ccc_writes_tables_and_uns(monkeypatch, tmp_path: Path) -> Non
 
     adata = ad.AnnData(X=np.ones((4, 3)))
     adata.var_names = ["G1", "G2", "G3"]
+    adata.layers["counts_cb"] = adata.X.copy()
+    adata.layers["counts_raw"] = adata.X.copy() * 2
     adata.obs["leiden__r5"] = ["C00", "C00", "C01", "C01"]
     adata.obs["cluster_label__r5"] = [
         "C00: Kupffer",
@@ -1119,9 +1131,10 @@ def test_run_liana_ccc_writes_tables_and_uns(monkeypatch, tmp_path: Path) -> Non
 
     saved: list[tuple[str, str]] = []
 
-    monkeypatch.setattr("scomnom.markers_and_de.io_utils.load_dataset", lambda path: adata)
+    monkeypatch.setattr(md_mod.io_utils, "load_dataset", lambda path: adata)
     monkeypatch.setattr(
-        "scomnom.markers_and_de.io_utils.save_dataset",
+        md_mod.io_utils,
+        "save_dataset",
         lambda _adata, path, fmt: saved.append((str(path), str(fmt))),
     )
 
@@ -1139,7 +1152,9 @@ def test_run_liana_ccc_writes_tables_and_uns(monkeypatch, tmp_path: Path) -> Non
         label_source="pretty",
         round_id="r5",
         ccc_condition_key="sex",
+        ccc_condition_keys=("sex",),
         ccc_condition_values=("female", "male"),
+        ccc_compare_levels=(),
         liana_resource="consensus",
         liana_methods=("rank_aggregate", "cellphonedb"),
         liana_expr_prop=0.1,
@@ -1158,8 +1173,262 @@ def test_run_liana_ccc_writes_tables_and_uns(monkeypatch, tmp_path: Path) -> Non
     assert saved
     assert saved[0][0].endswith("adata.ccc_liana.zarr")
     runs = adata.uns["markers_and_de"]["ccc"]["liana"]["runs"]
-    assert set(runs.keys()) == {"female", "male"}
-    assert runs["female"]["primary_method"] == "rank_aggregate"
-    assert isinstance(runs["female"]["top_interactions"], pd.DataFrame)
-    assert isinstance(runs["female"]["source_target_summary"], pd.DataFrame)
+    assert set(runs.keys()) == {"sex::female", "sex::male"}
+    assert runs["sex::female"]["primary_method"] == "rank_aggregate"
+    assert runs["sex::female"]["aggregated_methods"] == ["cellphonedb"]
+    assert isinstance(runs["sex::female"]["top_interactions"], pd.DataFrame)
+    assert isinstance(runs["sex::female"]["source_target_summary"], pd.DataFrame)
+    assert isinstance(runs["sex::female"]["route_family_summary"], pd.DataFrame)
     assert (tmp_path / "out" / "tables").exists()
+    assert list((tmp_path / "out" / "tables").glob("**/route_family_summary.tsv"))
+    assert all(call["use_raw"] is False for call in calls)
+    assert all(call["layer"] == "counts_cb" for call in calls)
+
+
+def test_liana_route_family_prefers_cellchat_pathway_lookup() -> None:
+    assert md_mod._liana_route_family("BMP2", "BMPR1A_BMPR2") == "BMP"
+    assert md_mod._liana_route_family("TGFB1", "TGFBR1_TGFBR2") == "TGFb"
+
+
+def test_run_liana_ccc_expands_a_within_b_condition_spec(monkeypatch, tmp_path: Path) -> None:
+    calls: list[dict[str, object]] = []
+
+    class _FakeAggregate:
+        def __call__(self, adata, **kwargs):
+            calls.append({"n_obs": int(adata.n_obs), **kwargs})
+            return pd.DataFrame(
+                {
+                    "source": ["C00"],
+                    "target": ["C01"],
+                    "ligand_complex": ["LIG1"],
+                    "receptor_complex": ["REC1"],
+                    "magnitude_rank": [0.001],
+                    "specificity_rank": [0.002],
+                }
+            )
+
+    fake_liana = SimpleNamespace(
+        mt=SimpleNamespace(
+            rank_aggregate=_FakeAggregate(),
+            AggregateClass=lambda meta, methods: _FakeAggregate(),
+            aggregate_meta=object(),
+        ),
+        method=SimpleNamespace(
+            cellphonedb=lambda *args, **kwargs: pd.DataFrame(),
+            connectome=lambda *args, **kwargs: pd.DataFrame(),
+            natmi=lambda *args, **kwargs: pd.DataFrame(),
+            singlecellsignalr=lambda *args, **kwargs: pd.DataFrame(),
+            logfc=lambda *args, **kwargs: pd.DataFrame(),
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "liana", fake_liana)
+
+    adata = ad.AnnData(X=np.ones((6, 2)))
+    adata.var_names = ["G1", "G2"]
+    adata.layers["counts_cb"] = adata.X.copy()
+    adata.obs["leiden__r5"] = ["C00", "C00", "C01", "C01", "C00", "C01"]
+    adata.obs["cluster_label__r5"] = ["C00: A", "C00: A", "C01: B", "C01: B", "C00: A", "C01: B"]
+    adata.obs["sex"] = ["female", "male", "female", "male", "female", "male"]
+    adata.obs["MASLD"] = ["yes", "yes", "yes", "yes", "no", "no"]
+    adata.uns["cluster_rounds"] = {
+        "r5": {
+            "labels_obs_key": "leiden__r5",
+            "cluster_display_map": {"C00": "C00: A", "C01": "C01: B"},
+        }
+    }
+
+    monkeypatch.setattr(md_mod.io_utils, "load_dataset", lambda path: adata)
+    monkeypatch.setattr(md_mod.io_utils, "save_dataset", lambda *args, **kwargs: None)
+
+    cfg = SimpleNamespace(
+        input_path=tmp_path / "input.zarr",
+        output_dir=tmp_path / "out",
+        output_name="adata.ccc_liana",
+        save_h5ad=False,
+        n_jobs=1,
+        logfile=tmp_path / "out" / "logs" / "markers-and-de.ccc.liana.log",
+        make_figures=False,
+        figdir_name="figures",
+        figure_formats=["png"],
+        groupby=None,
+        label_source="pretty",
+        round_id="r5",
+        ccc_condition_key="sex@MASLD",
+        ccc_condition_keys=("sex@MASLD",),
+        ccc_condition_values=(),
+        ccc_compare_levels=(),
+        liana_resource="consensus",
+        liana_methods=("rank_aggregate",),
+        liana_expr_prop=0.1,
+        liana_use_raw=False,
+        liana_layer=None,
+        liana_n_perms=None,
+        liana_seed=42,
+        liana_return_all_lrs=False,
+        liana_top_n=25,
+        liana_plot_top_n=10,
+    )
+
+    run_liana_ccc(cfg)
+
+    runs = adata.uns["markers_and_de"]["ccc"]["liana"]["runs"]
+    assert set(runs.keys()) == {
+        "sex@MASLD::MASLD=no::female",
+        "sex@MASLD::MASLD=no::male",
+        "sex@MASLD::MASLD=yes::female",
+        "sex@MASLD::MASLD=yes::male",
+    }
+    assert runs["sex@MASLD::MASLD=yes::female"]["condition_key"] == "sex"
+    assert runs["sex@MASLD::MASLD=yes::female"]["condition_value"] == "female"
+    assert runs["sex@MASLD::MASLD=yes::female"]["context_key"] == "MASLD"
+    assert runs["sex@MASLD::MASLD=yes::female"]["context_value"] == "yes"
+    assert sorted(call["n_obs"] for call in calls) == [1, 1, 2, 2]
+
+
+def test_prepare_liana_plot_df_uses_cnn_tokens_from_display_map() -> None:
+    df = pd.DataFrame(
+        {
+            "source": ["0", "1"],
+            "target": ["1", "0"],
+            "value": [1, 2],
+        }
+    )
+    display_map = {"0": "C00: Kupffer cells", "1": "C01: T cells"}
+
+    got = _prepare_liana_plot_df(df, display_map=display_map)
+
+    assert got["source"].tolist() == ["C00", "C01"]
+    assert got["target"].tolist() == ["C01", "C00"]
+
+
+def test_liana_plot_color_map_uses_cnn_tokens() -> None:
+    adata = ad.AnnData(X=np.zeros((2, 1)))
+    adata.obs["leiden__r5"] = ["0", "1"]
+    adata.uns["leiden__r5_colors"] = ["#112233", "#445566"]
+    display_map = {"0": "C00: Kupffer cells", "1": "C01: T cells"}
+
+    got = _liana_plot_color_map(
+        adata,
+        cluster_key="leiden__r5",
+        display_map=display_map,
+        round_id=None,
+        raw_labels=["0", "1"],
+    )
+
+    assert got == {"C00": "#112233", "C01": "#445566"}
+
+
+def test_liana_family_label_uses_pretty_label_tail() -> None:
+    display_map = {"0": "C00: Kupffer cells", "1": "C01 - T cells"}
+
+    assert _liana_family_label("0", display_map) == "Kupffer cells"
+    assert _liana_family_label("1", display_map) == "T cells"
+
+
+def test_run_liana_ccc_emits_comparison_heatmap_for_multiple_runs(monkeypatch, tmp_path: Path) -> None:
+    class _FakeAggregate:
+        def __call__(self, adata, **kwargs):
+            return pd.DataFrame(
+                {
+                    "source": ["C00", "C01"],
+                    "target": ["C01", "C00"],
+                    "ligand_complex": ["LIG1", "LIG2"],
+                    "receptor_complex": ["REC1", "REC2"],
+                    "magnitude_rank": [0.001, 0.01],
+                    "specificity_rank": [0.002, 0.02],
+                }
+            )
+
+    fake_liana = SimpleNamespace(
+        mt=SimpleNamespace(
+            rank_aggregate=_FakeAggregate(),
+            AggregateClass=lambda meta, methods: _FakeAggregate(),
+            aggregate_meta=object(),
+        ),
+        method=SimpleNamespace(
+            cellphonedb=lambda *args, **kwargs: pd.DataFrame(),
+            connectome=lambda *args, **kwargs: pd.DataFrame(),
+            natmi=lambda *args, **kwargs: pd.DataFrame(),
+            singlecellsignalr=lambda *args, **kwargs: pd.DataFrame(),
+            logfc=lambda *args, **kwargs: pd.DataFrame(),
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "liana", fake_liana)
+
+    adata = ad.AnnData(X=np.ones((4, 2)))
+    adata.var_names = ["G1", "G2"]
+    adata.layers["counts_cb"] = adata.X.copy()
+    adata.obs["leiden__r5"] = ["C00", "C00", "C01", "C01"]
+    adata.obs["cluster_label__r5"] = ["C00: Kupffer", "C00: Kupffer", "C01: T cells", "C01: T cells"]
+    adata.obs["sex"] = ["female", "female", "male", "male"]
+    adata.uns["cluster_rounds"] = {
+        "r5": {
+            "labels_obs_key": "leiden__r5",
+            "cluster_display_map": {"C00": "C00: Kupffer", "C01": "C01: T cells"},
+        }
+    }
+
+    calls: list[str] = []
+
+    def _fake_plot(*args, **kwargs):
+        stem = kwargs.get("stem", "unknown")
+        calls.append(str(stem))
+        return []
+
+    monkeypatch.setattr(md_mod.io_utils, "load_dataset", lambda path: adata)
+    monkeypatch.setattr(md_mod.io_utils, "save_dataset", lambda *args, **kwargs: None)
+    monkeypatch.setattr(md_mod.plot_utils, "persist_plot_artifacts", lambda artifacts: None)
+    monkeypatch.setattr(md_mod.plot_utils, "plot_liana_source_target_heatmap", _fake_plot)
+    monkeypatch.setattr(md_mod.plot_utils, "plot_liana_send_receive_summary", _fake_plot)
+    monkeypatch.setattr(md_mod.plot_utils, "plot_liana_circos", _fake_plot)
+    monkeypatch.setattr(md_mod.plot_utils, "plot_liana_top_interactions", _fake_plot)
+    monkeypatch.setattr(md_mod.plot_utils, "plot_liana_top_interactions_by_family", _fake_plot)
+    monkeypatch.setattr(md_mod.plot_utils, "plot_liana_top_interactions_by_target_cluster", _fake_plot)
+    monkeypatch.setattr(md_mod.plot_utils, "plot_liana_condition_heatmap_grid", _fake_plot)
+    monkeypatch.setattr(md_mod.plot_utils, "plot_liana_condition_circos_grid", _fake_plot)
+    monkeypatch.setattr(md_mod.plot_utils, "plot_liana_condition_alluvial_grid", _fake_plot)
+    monkeypatch.setattr(md_mod.plot_utils, "plot_liana_condition_split_top_interactions", _fake_plot)
+    monkeypatch.setattr(md_mod.plot_utils, "plot_liana_condition_split_family_counts", _fake_plot)
+    monkeypatch.setattr(md_mod.plot_utils, "plot_liana_condition_split_target_clusters", _fake_plot)
+
+    cfg = SimpleNamespace(
+        input_path=tmp_path / "input.zarr",
+        output_dir=tmp_path / "out",
+        output_name="adata.ccc_liana",
+        save_h5ad=False,
+        n_jobs=1,
+        logfile=tmp_path / "out" / "logs" / "markers-and-de.ccc.liana.log",
+        make_figures=True,
+        figdir_name="figures",
+        figure_formats=["png"],
+        groupby=None,
+        label_source="pretty",
+        round_id="r5",
+        ccc_condition_key="sex",
+        ccc_condition_keys=("sex",),
+        ccc_condition_values=("female", "male"),
+        ccc_compare_levels=(),
+        liana_resource="consensus",
+        liana_methods=("rank_aggregate",),
+        liana_expr_prop=0.1,
+        liana_use_raw=False,
+        liana_layer=None,
+        liana_n_perms=None,
+        liana_seed=42,
+        liana_return_all_lrs=False,
+        liana_top_n=25,
+        liana_plot_top_n=10,
+    )
+
+    run_liana_ccc(cfg)
+
+    assert "liana_source_target_compare_heatmap" in calls
+    assert "liana_source_target_compare_mean_score_heatmap" in calls
+    assert "liana_circos_by_condition" in calls
+    assert "liana_circos_mean_score_by_condition" in calls
+    assert "liana_source_target_alluvial_by_condition" in calls
+    assert "liana_source_target_mean_score_alluvial_by_condition" in calls
+    assert "liana_top_rank_aggregate_route_families" in calls
+    assert "liana_top_rank_aggregate_by_condition" in calls
+    assert "liana_top_rank_aggregate_route_families_by_condition" in calls
+    assert "liana_top_rank_aggregate_target_clusters_by_condition" in calls
