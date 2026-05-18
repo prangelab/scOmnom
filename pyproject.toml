@@ -42,6 +42,7 @@ dependencies = [
   "pertpy",
   "pybiomart",
   "gseapy",
+  "liana",
 ]
 
 [project.scripts]

@@ -10,7 +10,7 @@ import gc
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import anndata as ad
 import numpy as np
@@ -2234,7 +2234,7 @@ def _compute_de_enrichment_from_dir(
                 stats = _build_stats_matrix_from_tables(
                     tables,
                     preferred_col=stat_col,
-                    fallback_cols=("log2FoldChange", "cell_wilcoxon_logfc", "cell_logreg_coef"),
+                    fallback_cols=("log2FoldChange", "cell_wilcoxon_score", "cell_wilcoxon_logfc", "cell_logreg_coef"),
                 )
                 if stats is None or stats.empty:
                     continue
@@ -2449,6 +2449,368 @@ def run_enrichment_de(cfg) -> None:
 
     LOGGER.info("Finished markers-and-de (DE enrichment); runs=%d", int(total_runs))
     return None
+
+
+def _import_liana_module() -> Any:
+    try:
+        import liana as li
+    except ImportError as exc:
+        raise RuntimeError(
+            "markers-and-de ccc liana requires the Python package `liana`. "
+            "Install it in the scOmnom environment before running this command."
+        ) from exc
+    return li
+
+
+def _liana_method_specs(li: Any) -> dict[str, dict[str, Any]]:
+    method_mod = getattr(li, "method")
+    return {
+        "cellphonedb": {
+            "callable": getattr(method_mod, "cellphonedb"),
+            "score_col": "lr_means",
+            "score_ascending": False,
+            "specificity_col": "cellphone_pvals",
+            "specificity_ascending": True,
+        },
+        "connectome": {
+            "callable": getattr(method_mod, "connectome"),
+            "score_col": "scaled_weight",
+            "score_ascending": False,
+            "specificity_col": None,
+            "specificity_ascending": True,
+        },
+        "natmi": {
+            "callable": getattr(method_mod, "natmi"),
+            "score_col": "spec_weight",
+            "score_ascending": False,
+            "specificity_col": None,
+            "specificity_ascending": True,
+        },
+        "sca": {
+            "callable": getattr(method_mod, "singlecellsignalr"),
+            "score_col": "lrscore",
+            "score_ascending": False,
+            "specificity_col": None,
+            "specificity_ascending": True,
+        },
+        "logfc": {
+            "callable": getattr(method_mod, "logfc"),
+            "score_col": "lr_logfc",
+            "score_ascending": False,
+            "specificity_col": None,
+            "specificity_ascending": True,
+        },
+    }
+
+
+def _make_liana_rank_aggregate(li: Any, method_names: Sequence[str]) -> Any:
+    selected = [m for m in method_names if str(m) != "rank_aggregate"]
+    if not selected:
+        return getattr(li, "mt").rank_aggregate
+
+    specs = _liana_method_specs(li)
+    methods = [specs[str(name)]["callable"] for name in selected]
+    return getattr(li, "mt").AggregateClass(getattr(li, "mt").aggregate_meta, methods=methods)
+
+
+def _sort_liana_results(
+    df: pd.DataFrame,
+    *,
+    score_col: Optional[str],
+    score_ascending: bool,
+    specificity_col: Optional[str],
+    specificity_ascending: bool,
+) -> pd.DataFrame:
+    if df is None or getattr(df, "empty", True):
+        return pd.DataFrame()
+    out = df.copy()
+    sort_cols: list[str] = []
+    ascending: list[bool] = []
+    if specificity_col and specificity_col in out.columns:
+        out[specificity_col] = pd.to_numeric(out[specificity_col], errors="coerce")
+        sort_cols.append(str(specificity_col))
+        ascending.append(bool(specificity_ascending))
+    if score_col and score_col in out.columns:
+        out[score_col] = pd.to_numeric(out[score_col], errors="coerce")
+        sort_cols.append(str(score_col))
+        ascending.append(bool(score_ascending))
+    if sort_cols:
+        out = out.sort_values(sort_cols, ascending=ascending, kind="mergesort")
+    return out.reset_index(drop=True)
+
+
+def _summarize_liana_source_targets(
+    df: pd.DataFrame,
+    *,
+    score_col: Optional[str],
+) -> pd.DataFrame:
+    if df is None or getattr(df, "empty", True):
+        return pd.DataFrame(columns=["source", "target", "n_interactions"])
+    if "source" not in df.columns or "target" not in df.columns:
+        return pd.DataFrame(columns=["source", "target", "n_interactions"])
+
+    work = df.copy()
+    work["source"] = work["source"].astype(str)
+    work["target"] = work["target"].astype(str)
+    agg = (
+        work.groupby(["source", "target"], observed=False)
+        .size()
+        .rename("n_interactions")
+        .reset_index()
+    )
+    if score_col and score_col in work.columns:
+        score = (
+            work.groupby(["source", "target"], observed=False)[score_col]
+            .mean()
+            .rename("mean_score")
+            .reset_index()
+        )
+        agg = agg.merge(score, on=["source", "target"], how="left")
+    return agg.sort_values(["n_interactions", "source", "target"], ascending=[False, True, True], kind="mergesort")
+
+
+def _write_liana_settings(
+    out_dir: Path,
+    *,
+    condition_label: str,
+    condition_key: Optional[str],
+    condition_value: Optional[str],
+    methods: Sequence[str],
+    aggregated_methods: Sequence[str],
+    resource: str,
+    groupby: str,
+    use_raw: bool,
+    layer: Optional[str],
+    expr_prop: float,
+    n_perms: Optional[int],
+) -> None:
+    _write_settings(
+        out_dir,
+        "__settings.txt",
+        [
+            f"condition_label={condition_label}",
+            f"condition_key={condition_key}",
+            f"condition_value={condition_value}",
+            f"methods={list(methods)}",
+            f"aggregated_methods={list(aggregated_methods)}",
+            f"resource={resource}",
+            f"groupby={groupby}",
+            f"use_raw={use_raw}",
+            f"layer={layer}",
+            f"expr_prop={expr_prop}",
+            f"n_perms={n_perms}",
+        ],
+    )
+
+
+def run_liana_ccc(cfg) -> ad.AnnData:
+    init_logging(getattr(cfg, "logfile", None))
+    LOGGER.info("Starting markers-and-de (ccc liana)...")
+
+    li = _import_liana_module()
+    output_dir = Path(getattr(cfg, "output_dir"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    figdir = output_dir / str(getattr(cfg, "figdir_name", "figures"))
+    plot_utils.setup_scanpy_figs(figdir, getattr(cfg, "figure_formats", ["png", "pdf"]))
+
+    adata = io_utils.load_dataset(getattr(cfg, "input_path"))
+    groupby, display_map = _resolve_stable_groupby_and_display_map(
+        adata,
+        groupby=getattr(cfg, "groupby", None),
+        round_id=getattr(cfg, "round_id", None),
+        label_source=str(getattr(cfg, "label_source", "pretty")),
+    )
+    if str(groupby) not in adata.obs:
+        raise RuntimeError(f"ccc liana: groupby={groupby!r} not found in adata.obs")
+
+    methods = tuple(str(x).strip().lower() for x in (getattr(cfg, "liana_methods", ()) or ()) if str(x).strip())
+    if not methods:
+        methods = ("rank_aggregate",)
+    non_aggregate_methods = tuple(m for m in methods if m != "rank_aggregate")
+    method_specs = _liana_method_specs(li)
+    bad_methods = [m for m in non_aggregate_methods if m not in method_specs]
+    if bad_methods:
+        raise RuntimeError(f"ccc liana: unsupported methods requested: {bad_methods}")
+
+    if bool(getattr(cfg, "liana_use_raw", True)) and getattr(cfg, "liana_layer", None):
+        raise RuntimeError("ccc liana: cannot use both liana_use_raw=True and liana_layer.")
+
+    condition_key_raw = getattr(cfg, "ccc_condition_key", None)
+    condition_values = tuple(str(x) for x in (getattr(cfg, "ccc_condition_values", ()) or ()) if str(x))
+    run_specs: list[tuple[str, ad.AnnData, Optional[str], Optional[str]]] = []
+    if condition_key_raw:
+        condition_key = _resolve_condition_key(adata, str(condition_key_raw))
+        if condition_key not in adata.obs:
+            raise RuntimeError(f"ccc liana: condition_key={condition_key!r} not found in adata.obs")
+        cond_series = _normalize_levels(adata.obs[condition_key])
+        wanted = set(condition_values) if condition_values else set(cond_series.unique().tolist())
+        for condition_value in sorted(wanted):
+            mask = cond_series.astype(str).to_numpy() == str(condition_value)
+            if not np.any(mask):
+                LOGGER.warning("ccc liana: skipping empty condition_value=%r", str(condition_value))
+                continue
+            run_specs.append((str(condition_value), adata[mask].copy(), str(condition_key), str(condition_value)))
+    else:
+        run_specs.append(("global", adata, None, None))
+
+    run_namespace = _run_namespace_for_round(
+        adata,
+        prefix="ccc_liana",
+        round_id=getattr(cfg, "round_id", None),
+    )
+    run_round = str(plot_utils.get_run_subdir(run_namespace))
+    tables_root = output_dir / "tables" / run_round
+    tables_root.mkdir(parents=True, exist_ok=True)
+
+    adata.uns.setdefault("markers_and_de", {})
+    ccc_block = adata.uns["markers_and_de"].setdefault("ccc", {})
+    liana_block = ccc_block.setdefault("liana", {})
+    runs_store = liana_block.setdefault("runs", {})
+
+    rank_callable = _make_liana_rank_aggregate(li, methods)
+    aggregate_score_col = "magnitude_rank"
+    aggregate_specificity_col = "specificity_rank"
+
+    for condition_label, adata_run, condition_key, condition_value in run_specs:
+        cond_tag = _safe_combo_token(condition_label)
+        run_tables_dir = tables_root / cond_tag
+        run_tables_dir.mkdir(parents=True, exist_ok=True)
+
+        per_method_results: dict[str, pd.DataFrame] = {}
+        if "rank_aggregate" in methods:
+            agg_key = "rank_aggregate"
+            agg_df = rank_callable(
+                adata_run,
+                groupby=str(groupby),
+                resource_name=str(getattr(cfg, "liana_resource", "consensus")),
+                expr_prop=float(getattr(cfg, "liana_expr_prop", 0.1)),
+                use_raw=bool(getattr(cfg, "liana_use_raw", True)),
+                layer=getattr(cfg, "liana_layer", None),
+                n_perms=getattr(cfg, "liana_n_perms", None),
+                seed=int(getattr(cfg, "liana_seed", 42)),
+                n_jobs=int(getattr(cfg, "n_jobs", 1)),
+                return_all_lrs=bool(getattr(cfg, "liana_return_all_lrs", False)),
+                inplace=False,
+                verbose=False,
+            )
+            per_method_results[agg_key] = _sort_liana_results(
+                agg_df,
+                score_col=aggregate_score_col,
+                score_ascending=True,
+                specificity_col=aggregate_specificity_col,
+                specificity_ascending=True,
+            )
+
+        for method_name in non_aggregate_methods:
+            spec = method_specs[str(method_name)]
+            res_df = spec["callable"](
+                adata_run,
+                groupby=str(groupby),
+                resource_name=str(getattr(cfg, "liana_resource", "consensus")),
+                expr_prop=float(getattr(cfg, "liana_expr_prop", 0.1)),
+                use_raw=bool(getattr(cfg, "liana_use_raw", True)),
+                layer=getattr(cfg, "liana_layer", None),
+                n_perms=getattr(cfg, "liana_n_perms", None),
+                seed=int(getattr(cfg, "liana_seed", 42)),
+                n_jobs=int(getattr(cfg, "n_jobs", 1)),
+                return_all_lrs=bool(getattr(cfg, "liana_return_all_lrs", False)),
+                inplace=False,
+                verbose=False,
+            )
+            per_method_results[str(method_name)] = _sort_liana_results(
+                res_df,
+                score_col=spec["score_col"],
+                score_ascending=bool(spec["score_ascending"]),
+                specificity_col=spec["specificity_col"],
+                specificity_ascending=bool(spec["specificity_ascending"]),
+            )
+
+        for method_name, df in per_method_results.items():
+            df.to_csv(run_tables_dir / f"liana_{method_name}.tsv", sep="\t", index=False)
+
+        primary_method = "rank_aggregate" if "rank_aggregate" in per_method_results else next(iter(per_method_results.keys()))
+        primary_df = per_method_results.get(primary_method, pd.DataFrame())
+        if primary_df is None or primary_df.empty:
+            LOGGER.warning("ccc liana: no interactions returned for condition=%r", str(condition_label))
+            primary_top = pd.DataFrame()
+            source_target_summary = pd.DataFrame(columns=["source", "target", "n_interactions"])
+        else:
+            primary_top = primary_df.head(int(getattr(cfg, "liana_top_n", 250))).copy()
+            score_col = aggregate_score_col if primary_method == "rank_aggregate" else method_specs[primary_method]["score_col"]
+            source_target_summary = _summarize_liana_source_targets(primary_top, score_col=score_col)
+            primary_top.to_csv(run_tables_dir / f"liana_{primary_method}_top.tsv", sep="\t", index=False)
+            source_target_summary.to_csv(run_tables_dir / "source_target_summary.tsv", sep="\t", index=False)
+
+            if bool(getattr(cfg, "make_figures", True)):
+                plot_top_n = int(getattr(cfg, "liana_plot_top_n", 60))
+                primary_score_col = aggregate_score_col if primary_method == "rank_aggregate" else method_specs[primary_method]["score_col"]
+                primary_score_ascending = True if primary_method == "rank_aggregate" else bool(method_specs[primary_method]["score_ascending"])
+                artifacts = []
+                artifacts.extend(
+                    plot_utils.plot_liana_source_target_heatmap(
+                        source_target_summary,
+                        figdir=Path(run_round) / cond_tag,
+                        stem="liana_source_target_heatmap",
+                        title=f"LIANA source-target summary ({condition_label})",
+                    )
+                )
+                artifacts.extend(
+                    plot_utils.plot_liana_top_interactions(
+                        primary_df,
+                        figdir=Path(run_round) / cond_tag,
+                        stem=f"liana_top_{primary_method}",
+                        title=f"Top LIANA interactions ({condition_label})",
+                        top_n=plot_top_n,
+                        score_col=primary_score_col,
+                        ascending=primary_score_ascending,
+                    )
+                )
+                plot_utils.persist_plot_artifacts(artifacts)
+
+        _write_liana_settings(
+            run_tables_dir,
+            condition_label=str(condition_label),
+            condition_key=condition_key,
+            condition_value=condition_value,
+            methods=methods,
+            aggregated_methods=non_aggregate_methods,
+            resource=str(getattr(cfg, "liana_resource", "consensus")),
+            groupby=str(groupby),
+            use_raw=bool(getattr(cfg, "liana_use_raw", True)),
+            layer=getattr(cfg, "liana_layer", None),
+            expr_prop=float(getattr(cfg, "liana_expr_prop", 0.1)),
+            n_perms=getattr(cfg, "liana_n_perms", None),
+        )
+
+        runs_store[str(condition_label)] = {
+            "version": __version__,
+            "timestamp_utc": datetime.utcnow().isoformat(),
+            "round_id": getattr(cfg, "round_id", None),
+            "groupby": str(groupby),
+            "display_map": dict(display_map),
+            "condition_key": condition_key,
+            "condition_value": condition_value,
+            "resource": str(getattr(cfg, "liana_resource", "consensus")),
+            "methods": list(methods),
+            "aggregated_methods": list(non_aggregate_methods),
+            "primary_method": str(primary_method),
+            "top_interactions": primary_top,
+            "source_target_summary": source_target_summary,
+            "n_interactions": int(len(primary_df)) if primary_df is not None else 0,
+        }
+
+    out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.ccc_liana")) + ".zarr")
+    LOGGER.info("Saving dataset → %s", out_zarr)
+    io_utils.save_dataset(adata, out_zarr, fmt="zarr")
+
+    if bool(getattr(cfg, "save_h5ad", False)):
+        out_h5ad = output_dir / (str(getattr(cfg, "output_name", "adata.ccc_liana")) + ".h5ad")
+        LOGGER.warning("Writing additional H5AD output (loads full matrix into RAM): %s", out_h5ad)
+        io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
+
+    LOGGER.info("Finished markers-and-de (ccc liana).")
+    return adata
 
 
 def run_composition(cfg) -> ad.AnnData:
@@ -4135,7 +4497,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                     stats = _build_stats_matrix_from_tables(
                         tables,
                         preferred_col=stat_col,
-                        fallback_cols=("log2FoldChange", "cell_wilcoxon_logfc", "cell_logreg_coef"),
+                        fallback_cols=("log2FoldChange", "cell_wilcoxon_score", "cell_wilcoxon_logfc", "cell_logreg_coef"),
                     )
                     if stats is None or stats.empty:
                         continue

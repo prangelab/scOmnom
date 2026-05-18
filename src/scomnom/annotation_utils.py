@@ -1256,15 +1256,6 @@ def _run_msigdb_gsea_from_stats(
         LOGGER.warning("MSigDB GSEA: no gene set files resolved; skipping.")
         return None
 
-    try:
-        gene_sets = _load_msigdb_gene_sets_cached(gmt_files)
-    except Exception as e:
-        LOGGER.warning("MSigDB GSEA: failed to parse GMT gene sets: %s", e)
-        return None
-    if not gene_sets:
-        LOGGER.warning("MSigDB GSEA: parsed gene set collection is empty; skipping.")
-        return None
-
     min_size = int(getattr(cfg, "gsea_min_size", 10) or 10)
     max_size = int(getattr(cfg, "gsea_max_size", 500) or 500)
     eps = float(getattr(cfg, "gsea_eps", 1e-10) or 1e-10)
@@ -1273,15 +1264,8 @@ def _run_msigdb_gsea_from_stats(
     cluster_names = stats.columns.astype(str).tolist()
     requested_workers = int(getattr(cfg, "n_jobs", 1) or 1)
     max_workers = min(max(1, requested_workers), 8, len(cluster_names))
-    LOGGER.info(
-        "MSigDB GSEA: input=%r clusters=%d workers=%d gene_sets=%d",
-        str(input_label),
-        int(len(cluster_names)),
-        int(max_workers),
-        int(len(gene_sets)),
-    )
 
-    def _run_cluster(cluster: str) -> list[dict[str, object]]:
+    def _run_cluster(cluster: str, *, gene_sets: dict[str, list[str]], gmt_label: str) -> list[dict[str, object]]:
         rnk = (
             pd.DataFrame(
                 {
@@ -1375,10 +1359,12 @@ def _run_msigdb_gsea_from_stats(
             "up",
             "down",
         )
+        d["gmt"] = str(gmt_label)
 
         cols = [
             "cluster",
             "pathway",
+            "gmt",
             "NES",
             "ES",
             "pval",
@@ -1397,20 +1383,48 @@ def _run_msigdb_gsea_from_stats(
         return d.loc[:, [c for c in cols if c in d.columns]].to_dict(orient="records")
 
     result_rows: list[dict[str, object]] = []
-    if max_workers > 1 and len(cluster_names) > 1:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+    gmt_labels_run: list[str] = []
+    gmt_pairs = list(zip(gmt_files, used_keywords))
+    if not gmt_pairs:
+        gmt_pairs = [(str(g), Path(str(g)).stem) for g in gmt_files]
 
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = {ex.submit(_run_cluster, cluster): cluster for cluster in cluster_names}
-            for fut in as_completed(futures):
-                cluster_rows = fut.result()
+    for gmt_file, gmt_label in gmt_pairs:
+        try:
+            gene_sets = _load_msigdb_gene_sets_cached([gmt_file])
+        except Exception as e:
+            LOGGER.warning("MSigDB GSEA: failed to parse GMT gene sets for %r: %s", str(gmt_file), e)
+            continue
+        if not gene_sets:
+            LOGGER.warning("MSigDB GSEA: parsed gene set collection is empty for %r; skipping.", str(gmt_file))
+            continue
+
+        gmt_labels_run.append(str(gmt_label))
+        LOGGER.info(
+            "MSigDB GSEA: input=%r set=%r clusters=%d workers=%d gene_sets=%d",
+            str(input_label),
+            str(gmt_label),
+            int(len(cluster_names)),
+            int(max_workers),
+            int(len(gene_sets)),
+        )
+
+        if max_workers > 1 and len(cluster_names) > 1:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futures = {
+                    ex.submit(_run_cluster, cluster, gene_sets=gene_sets, gmt_label=str(gmt_label)): cluster
+                    for cluster in cluster_names
+                }
+                for fut in as_completed(futures):
+                    cluster_rows = fut.result()
+                    if cluster_rows:
+                        result_rows.extend(cluster_rows)
+        else:
+            for cluster in cluster_names:
+                cluster_rows = _run_cluster(cluster, gene_sets=gene_sets, gmt_label=str(gmt_label))
                 if cluster_rows:
                     result_rows.extend(cluster_rows)
-    else:
-        for cluster in cluster_names:
-            cluster_rows = _run_cluster(cluster)
-            if cluster_rows:
-                result_rows.extend(cluster_rows)
 
     if not result_rows:
         return None
@@ -1418,9 +1432,11 @@ def _run_msigdb_gsea_from_stats(
     results = pd.DataFrame(result_rows)
     results["pathway"] = results["pathway"].astype(str)
     results["cluster"] = results["cluster"].astype(str)
+    if "gmt" in results.columns:
+        results["gmt"] = results["gmt"].astype(str)
     results = results.sort_values(
-        by=["cluster", "padj", "NES"],
-        ascending=[True, True, False],
+        by=["cluster", "gmt", "padj", "NES"] if "gmt" in results.columns else ["cluster", "padj", "NES"],
+        ascending=[True, True, True, False] if "gmt" in results.columns else [True, True, False],
         kind="mergesort",
     ).reset_index(drop=True)
 
@@ -1431,7 +1447,7 @@ def _run_msigdb_gsea_from_stats(
             "resource": "msigdb_gsea",
             "msigdb_release": msigdb_release,
             "gene_sets": [str(g) for g in gmt_files],
-            "used_keywords": used_keywords,
+            "used_keywords": [str(x) for x in gmt_labels_run] if gmt_labels_run else [str(x) for x in used_keywords],
             "min_size": int(min_size),
             "max_size": int(max_size),
             "eps": float(eps),
@@ -1458,7 +1474,7 @@ def _merge_msigdb_decoupler_and_gsea(
         .apply(pd.to_numeric, errors="coerce")
         .fillna(0.0)
         .rename_axis(index="cluster", columns="pathway")
-        .stack(dropna=False)
+        .stack(future_stack=True)
         .reset_index(name="decoupler_score")
     )
     dec["cluster"] = dec["cluster"].astype(str)

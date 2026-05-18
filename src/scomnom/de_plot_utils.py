@@ -3502,7 +3502,11 @@ def plot_de_gsea_payload(
     ).fillna(0).astype(int)
     d["pathway"] = d.get("pathway", pd.Series("", index=d.index)).astype(str)
     d["cluster"] = d.get("cluster", pd.Series("", index=d.index)).astype(str)
-    d["gmt"] = d["pathway"].map(_infer_msigdb_gmt).astype(str)
+    if "gmt" in d.columns:
+        d["gmt"] = d["gmt"].fillna("").astype(str)
+        d.loc[d["gmt"] == "", "gmt"] = d.loc[d["gmt"] == "", "pathway"].map(_infer_msigdb_gmt).astype(str)
+    else:
+        d["gmt"] = d["pathway"].map(_infer_msigdb_gmt).astype(str)
     if "leading_edge_preview" not in d.columns:
         d["leading_edge_preview"] = ""
 
@@ -3571,7 +3575,11 @@ def plot_de_msigdb_joint_payload(
     d["gsea_sig"] = d.get("gsea_sig", False).fillna(False).astype(bool)
     d["pathway"] = d.get("pathway", pd.Series("", index=d.index)).astype(str)
     d["cluster"] = d.get("cluster", pd.Series("", index=d.index)).astype(str)
-    d["gmt"] = d["pathway"].map(_infer_msigdb_gmt).astype(str)
+    if "gmt" in d.columns:
+        d["gmt"] = d["gmt"].fillna("").astype(str)
+        d.loc[d["gmt"] == "", "gmt"] = d.loc[d["gmt"] == "", "pathway"].map(_infer_msigdb_gmt).astype(str)
+    else:
+        d["gmt"] = d["pathway"].map(_infer_msigdb_gmt).astype(str)
     d = d.loc[d["sign_concordant"]].copy()
     if require_gsea_sig:
         d = d.loc[d["gsea_sig"]].copy()

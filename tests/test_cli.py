@@ -234,6 +234,7 @@ def test_markers_and_de_help_includes_enrichment():
     result = runner.invoke(app, ["markers-and-de", "--help"])
     assert result.exit_code == 0
     assert "enrichment" in result.output
+    assert "ccc" in result.output
 
 
 def test_adata_ops_rename_requires_mapping():
@@ -406,6 +407,58 @@ def test_enrichment_cluster_default_output_name_includes_round_id(mock_run):
     mock_run.assert_called_once()
     cfg = mock_run.call_args[0][0]
     assert cfg.output_name == "adata.enrichment_r5_archetypes"
+
+
+@patch("scomnom.cli.run_liana_ccc")
+def test_ccc_liana_default_output_name_includes_round_id(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "markers-and-de",
+            "ccc",
+            "liana",
+            "--input-path", "adata.zarr.tar.zst",
+            "--round-id", "r5_archetypes",
+        ],
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.output_name == "adata.ccc_liana_r5_archetypes"
+
+
+@patch("scomnom.cli.run_liana_ccc")
+def test_ccc_liana_method_and_resource_propagate_to_config(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "markers-and-de",
+            "ccc",
+            "liana",
+            "--input-path", "adata.zarr.tar.zst",
+            "--condition-key", "sex",
+            "--condition-value", "female,male",
+            "--liana-method", "rank_aggregate",
+            "--liana-method", "cellphonedb",
+            "--liana-method", "natmi",
+            "--resource", "CellPhoneDB",
+            "--expr-prop", "0.2",
+            "--no-use-raw",
+            "--layer", "lognorm",
+            "--n-perms", "0",
+        ],
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.ccc_condition_key == "sex"
+    assert cfg.ccc_condition_values == ("female", "male")
+    assert cfg.liana_methods == ("rank_aggregate", "cellphonedb", "natmi")
+    assert cfg.liana_resource == "cellphonedb"
+    assert cfg.liana_expr_prop == pytest.approx(0.2)
+    assert cfg.liana_use_raw is False
+    assert cfg.liana_layer == "lognorm"
+    assert cfg.liana_n_perms is None
 
 
 @patch("scomnom.cli.run_enrichment_cluster")

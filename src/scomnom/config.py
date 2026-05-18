@@ -838,6 +838,23 @@ class MarkersAndDEConfig(BaseModel):
     module_score_max_umaps: int = 12
 
     # ------------------------------------------------------------------
+    # Cell-cell communication (LIANA)
+    # ------------------------------------------------------------------
+    ccc_backend: Optional[str] = None
+    ccc_condition_key: Optional[str] = None
+    ccc_condition_values: Tuple[str, ...] = ()
+    liana_resource: str = "consensus"
+    liana_methods: Tuple[str, ...] = ("rank_aggregate",)
+    liana_expr_prop: float = 0.1
+    liana_use_raw: bool = True
+    liana_layer: Optional[str] = None
+    liana_n_perms: Optional[int] = 1000
+    liana_seed: int = 42
+    liana_return_all_lrs: bool = False
+    liana_top_n: int = 250
+    liana_plot_top_n: int = 60
+
+    # ------------------------------------------------------------------
     # Optional contrast-conditional mode
     # ------------------------------------------------------------------
     contrast_conditional_de: bool = False

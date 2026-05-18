@@ -72,3 +72,4 @@ dependencies:
       - pydeseq2
       - pertpy
       - pybiomart
+      - liana

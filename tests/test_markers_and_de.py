@@ -4,6 +4,7 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -14,6 +15,7 @@ from scomnom.markers_and_de import (
     _run_namespace_for_round,
     _collect_pseudobulk_de_tables_from_dir,
     _collect_cell_contrast_tables_from_dir,
+    _build_stats_matrix_from_tables,
     _load_de_enrichment_payload_from_tables,
     _load_module_definitions,
     _prune_uns_de,
@@ -21,6 +23,7 @@ from scomnom.markers_and_de import (
     _write_de_enrichment_tables,
     run_enrichment_cluster,
     run_module_score,
+    run_liana_ccc,
 )
 from scomnom.annotation_utils import (
     _apply_gene_filters_to_expr,
@@ -78,11 +81,67 @@ def test_run_msigdb_gsea_from_stats_returns_long_results(monkeypatch, tmp_path: 
 
     assert payload is not None
     results = payload["results"]
-    assert list(results.columns[:6]) == ["cluster", "pathway", "NES", "ES", "pval", "padj"]
+    assert list(results.columns[:7]) == ["cluster", "pathway", "gmt", "NES", "ES", "pval", "padj"]
     assert results.loc[0, "cluster"] == "C00"
     assert results.loc[0, "pathway"] == "HALLMARK_TEST"
+    assert results.loc[0, "gmt"] == "HALLMARK"
     assert results.loc[0, "leading_edge_n"] == 2
     assert "G1" in results.loc[0, "leading_edge_preview"]
+
+
+def test_run_msigdb_gsea_from_stats_runs_each_selected_set_separately(monkeypatch, tmp_path: Path) -> None:
+    hallmark = tmp_path / "hallmark.gmt"
+    hallmark.write_text("HALLMARK_TEST\tna\tG1\tG2\tG3\n", encoding="utf-8")
+    reactome = tmp_path / "reactome.gmt"
+    reactome.write_text("REACTOME_TEST\tna\tG1\tG2\tG3\n", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    class _FakePrerankRes:
+        def __init__(self, term: str):
+            self.res2d = pd.DataFrame(
+                {
+                    "Term": [term],
+                    "ES": [0.6],
+                    "NES": [1.8],
+                    "NOM p-val": [0.01],
+                    "FDR q-val": [0.03],
+                    "Lead_genes": ["G1;G2"],
+                }
+            )
+
+    class _FakeGseapy:
+        @staticmethod
+        def prerank(**kwargs):
+            gene_sets = kwargs["gene_sets"]
+            calls.append(sorted(gene_sets.keys()))
+            term = sorted(gene_sets.keys())[0]
+            return _FakePrerankRes(term)
+
+    monkeypatch.setitem(sys.modules, "gseapy", _FakeGseapy)
+    monkeypatch.setattr(au, "_MSIGDB_RESOLUTION_CACHE", {}, raising=False)
+    monkeypatch.setattr(au, "_MSIGDB_GENE_SET_CACHE", {}, raising=False)
+    monkeypatch.setattr(
+        "scomnom.annotation_utils.resolve_msigdb_gene_sets",
+        lambda gene_sets: ([str(hallmark), str(reactome)], ["HALLMARK", "REACTOME"], "vX"),
+    )
+
+    stats = pd.DataFrame({"C00": [3.0, 1.0, -1.0]}, index=["G1", "G2", "G3"])
+    cfg = SimpleNamespace(
+        msigdb_gene_sets=["HALLMARK", "REACTOME"],
+        gsea_min_size=1,
+        gsea_max_size=500,
+        gsea_eps=1e-10,
+        random_state=42,
+        joint_enrichment_leading_edge_top_n=5,
+        n_jobs=1,
+    )
+
+    payload = _run_msigdb_gsea_from_stats(stats, cfg, input_label="demo")
+
+    assert payload is not None
+    assert sorted(calls) == [["HALLMARK_TEST"], ["REACTOME_TEST"]]
+    assert sorted(payload["results"]["gmt"].unique().tolist()) == ["HALLMARK", "REACTOME"]
 
 
 def test_run_msigdb_gsea_from_stats_caches_msigdb_resolution(monkeypatch, tmp_path: Path) -> None:
@@ -138,6 +197,27 @@ def test_run_msigdb_gsea_from_stats_caches_msigdb_resolution(monkeypatch, tmp_pa
     assert payload1 is not None
     assert payload2 is not None
     assert calls["n"] == 1
+
+
+def test_build_stats_matrix_from_tables_prefers_cell_wilcoxon_score_over_logfc() -> None:
+    tables = {
+        "C00": pd.DataFrame(
+            {
+                "gene": ["G1", "G2"],
+                "cell_wilcoxon_logfc": [0.2, 0.1],
+                "cell_wilcoxon_score": [5.0, -3.0],
+            }
+        )
+    }
+
+    got = _build_stats_matrix_from_tables(
+        tables,
+        preferred_col="stat",
+        fallback_cols=("log2FoldChange", "cell_wilcoxon_score", "cell_wilcoxon_logfc"),
+    )
+
+    assert got.loc["G1", "C00"] == 5.0
+    assert got.loc["G2", "C00"] == -3.0
 
 
 def test_merge_msigdb_decoupler_and_gsea_marks_concordance() -> None:
@@ -970,3 +1050,116 @@ def test_run_decoupler_for_round_drops_persisted_pseudobulk_store(
 
     assert "pseudobulk__r4_subset_annotation" not in adata.uns
     assert "pseudobulk_store_key" not in adata.uns["cluster_rounds"]["r4_subset_annotation"]["decoupler"]
+
+
+def test_run_liana_ccc_writes_tables_and_uns(monkeypatch, tmp_path: Path) -> None:
+    class _FakeMethod:
+        def __init__(self, score_col: str):
+            self.score_col = score_col
+
+        def __call__(self, adata, **kwargs):
+            return pd.DataFrame(
+                {
+                    "source": ["C00", "C01"],
+                    "target": ["C01", "C00"],
+                    "ligand_complex": ["LIG1", "LIG2"],
+                    "receptor_complex": ["REC1", "REC2"],
+                    self.score_col: [0.9, 0.7],
+                }
+            )
+
+    class _FakeAggregate:
+        def __init__(self, methods=None):
+            self.methods = methods or []
+
+        def __call__(self, adata, **kwargs):
+            return pd.DataFrame(
+                {
+                    "source": ["C00", "C01"],
+                    "target": ["C01", "C00"],
+                    "ligand_complex": ["LIG1", "LIG2"],
+                    "receptor_complex": ["REC1", "REC2"],
+                    "magnitude_rank": [0.001, 0.01],
+                    "specificity_rank": [0.002, 0.02],
+                }
+            )
+
+    fake_liana = SimpleNamespace(
+        mt=SimpleNamespace(
+            rank_aggregate=_FakeAggregate(),
+            AggregateClass=lambda meta, methods: _FakeAggregate(methods=methods),
+            aggregate_meta=object(),
+        ),
+        method=SimpleNamespace(
+            cellphonedb=_FakeMethod("lr_means"),
+            connectome=_FakeMethod("scaled_weight"),
+            natmi=_FakeMethod("spec_weight"),
+            singlecellsignalr=_FakeMethod("lrscore"),
+            logfc=_FakeMethod("lr_logfc"),
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "liana", fake_liana)
+
+    adata = ad.AnnData(X=np.ones((4, 3)))
+    adata.var_names = ["G1", "G2", "G3"]
+    adata.obs["leiden__r5"] = ["C00", "C00", "C01", "C01"]
+    adata.obs["cluster_label__r5"] = [
+        "C00: Kupffer",
+        "C00: Kupffer",
+        "C01: T cells",
+        "C01: T cells",
+    ]
+    adata.obs["sex"] = ["female", "female", "male", "male"]
+    adata.uns["cluster_rounds"] = {
+        "r5": {
+            "labels_obs_key": "leiden__r5",
+            "cluster_display_map": {"C00": "C00: Kupffer", "C01": "C01: T cells"},
+        }
+    }
+
+    saved: list[tuple[str, str]] = []
+
+    monkeypatch.setattr("scomnom.markers_and_de.io_utils.load_dataset", lambda path: adata)
+    monkeypatch.setattr(
+        "scomnom.markers_and_de.io_utils.save_dataset",
+        lambda _adata, path, fmt: saved.append((str(path), str(fmt))),
+    )
+
+    cfg = SimpleNamespace(
+        input_path=tmp_path / "input.zarr",
+        output_dir=tmp_path / "out",
+        output_name="adata.ccc_liana",
+        save_h5ad=False,
+        n_jobs=1,
+        logfile=tmp_path / "out" / "logs" / "markers-and-de.ccc.liana.log",
+        make_figures=False,
+        figdir_name="figures",
+        figure_formats=["png"],
+        groupby=None,
+        label_source="pretty",
+        round_id="r5",
+        ccc_condition_key="sex",
+        ccc_condition_values=("female", "male"),
+        liana_resource="consensus",
+        liana_methods=("rank_aggregate", "cellphonedb"),
+        liana_expr_prop=0.1,
+        liana_use_raw=False,
+        liana_layer=None,
+        liana_n_perms=None,
+        liana_seed=42,
+        liana_return_all_lrs=False,
+        liana_top_n=25,
+        liana_plot_top_n=10,
+    )
+
+    out = run_liana_ccc(cfg)
+
+    assert out is adata
+    assert saved
+    assert saved[0][0].endswith("adata.ccc_liana.zarr")
+    runs = adata.uns["markers_and_de"]["ccc"]["liana"]["runs"]
+    assert set(runs.keys()) == {"female", "male"}
+    assert runs["female"]["primary_method"] == "rank_aggregate"
+    assert isinstance(runs["female"]["top_interactions"], pd.DataFrame)
+    assert isinstance(runs["female"]["source_target_summary"], pd.DataFrame)
+    assert (tmp_path / "out" / "tables").exists()

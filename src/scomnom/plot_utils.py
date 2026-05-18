@@ -5665,6 +5665,106 @@ def plot_module_score_summary_heatmap(
     close_plot(fig)
 
 
+@collect_plot_artifacts
+def plot_liana_source_target_heatmap(
+    summary: pd.DataFrame,
+    figdir: Path,
+    *,
+    stem: str = "liana_source_target_heatmap",
+    title: str | None = None,
+    value_col: str = "n_interactions",
+    cmap: str = "crest",
+) -> None:
+    if summary is None or getattr(summary, "empty", True):
+        LOGGER.warning("plot_liana_source_target_heatmap: summary is empty; skipping.")
+        return
+    if not {"source", "target", value_col}.issubset(summary.columns):
+        LOGGER.warning("plot_liana_source_target_heatmap: required columns missing; skipping.")
+        return
+
+    heatmap_df = (
+        summary.pivot(index="source", columns="target", values=value_col)
+        .fillna(0.0)
+        .sort_index(axis=0)
+        .sort_index(axis=1)
+    )
+    if heatmap_df.empty:
+        return
+
+    fig_w = min(20.0, max(5.0, 1.5 + 0.7 * float(heatmap_df.shape[1])))
+    fig_h = min(20.0, max(4.0, 1.5 + 0.5 * float(heatmap_df.shape[0])))
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    sns.heatmap(
+        heatmap_df,
+        cmap=cmap,
+        linewidths=0.2,
+        linecolor="white",
+        cbar_kws={"label": value_col},
+        ax=ax,
+    )
+    ax.set_xlabel("Target")
+    ax.set_ylabel("Source")
+    ax.set_title(title or "LIANA source-target summary")
+    fig.tight_layout()
+    record_plot_artifact(stem, figdir, fig)
+    close_plot(fig)
+
+
+@collect_plot_artifacts
+def plot_liana_top_interactions(
+    interactions: pd.DataFrame,
+    figdir: Path,
+    *,
+    stem: str = "liana_top_interactions",
+    title: str | None = None,
+    top_n: int = 20,
+    score_col: str | None = None,
+    ascending: bool = False,
+) -> None:
+    if interactions is None or getattr(interactions, "empty", True):
+        LOGGER.warning("plot_liana_top_interactions: interactions are empty; skipping.")
+        return
+    cols_needed = {"source", "target", "ligand_complex", "receptor_complex"}
+    if not cols_needed.issubset(interactions.columns):
+        LOGGER.warning("plot_liana_top_interactions: required columns missing; skipping.")
+        return
+
+    df = interactions.copy()
+    df["interaction"] = (
+        df["source"].astype(str)
+        + " -> "
+        + df["target"].astype(str)
+        + " | "
+        + df["ligand_complex"].astype(str)
+        + " -> "
+        + df["receptor_complex"].astype(str)
+    )
+    if score_col and score_col in df.columns:
+        df[score_col] = pd.to_numeric(df[score_col], errors="coerce")
+        df = df.sort_values(score_col, ascending=ascending, kind="mergesort")
+    df = df.head(int(max(1, top_n)))
+    if df.empty:
+        return
+
+    if score_col and score_col in df.columns:
+        values = pd.to_numeric(df[score_col], errors="coerce").fillna(0.0)
+        x_label = score_col
+    else:
+        values = np.arange(len(df), 0, -1, dtype=float)
+        x_label = "Rank"
+
+    fig_h = min(18.0, max(4.0, 1.0 + 0.36 * float(len(df))))
+    fig, ax = plt.subplots(figsize=(11, fig_h))
+    ax.barh(df["interaction"].astype(str), values, color="#3b7ea1")
+    ax.invert_yaxis()
+    ax.set_xlabel(x_label)
+    ax.set_ylabel("Interaction")
+    ax.set_title(title or "Top LIANA interactions")
+    fig.tight_layout()
+    record_plot_artifact(stem, figdir, fig)
+    close_plot(fig)
+
+
 def _round_display_map(round_snapshot: dict) -> dict[str, str]:
     """
     Best-effort fetch of cluster pretty labels for a round.

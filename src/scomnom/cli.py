@@ -18,6 +18,7 @@ from .markers_and_de import (
     run_enrichment_cluster,
     run_enrichment_de as run_enrichment_de_from_tables,
     run_module_score,
+    run_liana_ccc,
 )
 
 from .config import (
@@ -34,6 +35,7 @@ from .logging_utils import init_logging
 ALLOWED_METHODS = {"scVI", "scANVI", "Harmony", "Scanorama", "BBKNN"}
 ALLOWED_DECOUPLER_METHODS = {"ulm", "mlm", "wsum", "aucell"}
 ALLOWED_COMP_METHODS = {"sccoda", "glm", "clr", "graph"}
+ALLOWED_LIANA_METHODS = {"rank_aggregate", "cellphonedb", "connectome", "natmi", "sca", "logfc"}
 app = typer.Typer(help="scOmnom CLI — high-throughput scRNA-seq preprocessing and analysis pipeline.")
 
 # Globally suppress noisy warnings
@@ -110,6 +112,35 @@ def validate_decoupler_consensus_methods(
         raise typer.BadParameter(
             "--decoupler-consensus-methods must contain at least one valid method."
         )
+
+    return methods
+
+
+def validate_liana_methods(
+    value: Optional[List[str]],
+) -> Optional[List[str]]:
+    if value is None:
+        return None
+
+    seen = set()
+    methods: list[str] = []
+    for raw in value:
+        if raw is None:
+            continue
+        for part in str(raw).split(","):
+            method = part.strip().lower()
+            if not method:
+                continue
+            if method not in ALLOWED_LIANA_METHODS:
+                raise typer.BadParameter(
+                    f"Invalid LIANA method '{method}'. Allowed methods: {sorted(ALLOWED_LIANA_METHODS)}"
+                )
+            if method not in seen:
+                seen.add(method)
+                methods.append(method)
+
+    if not methods:
+        raise typer.BadParameter("Provide at least one valid --liana-method.")
 
     return methods
 
@@ -1463,8 +1494,12 @@ markers_and_de_app = typer.Typer(
 enrichment_app = typer.Typer(
     help="Pathway and TF enrichment from either clustering rounds or DE result tables.",
 )
+ccc_app = typer.Typer(
+    help="Cell-cell communication analysis backends.",
+)
 app.add_typer(markers_and_de_app, name="markers-and-de")
 markers_and_de_app.add_typer(enrichment_app, name="enrichment")
+markers_and_de_app.add_typer(ccc_app, name="ccc")
 
 
 @markers_and_de_app.callback()
@@ -1975,6 +2010,70 @@ def _build_cfg_module_score(
     )
 
 
+def _build_cfg_ccc_liana(
+    *,
+    input_path: Path,
+    output_dir: Optional[Path],
+    output_name: str,
+    save_h5ad: bool,
+    n_jobs: int,
+    make_figures: bool,
+    figdir_name: str,
+    figure_formats: Sequence[str],
+    round_id: Optional[str],
+    group_key: Optional[str],
+    label_source: str,
+    condition_key: Optional[str],
+    condition_values: Optional[List[str]],
+    liana_methods: Sequence[str],
+    liana_resource: str,
+    liana_expr_prop: float,
+    liana_use_raw: bool,
+    liana_layer: Optional[str],
+    liana_n_perms: Optional[int],
+    liana_seed: int,
+    liana_return_all_lrs: bool,
+    liana_top_n: int,
+    liana_plot_top_n: int,
+) -> MarkersAndDEConfig:
+    out_dir = output_dir or input_path.parent
+    log_dir = out_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "markers-and-de.ccc.liana.log"
+    init_logging(log_path)
+
+    return MarkersAndDEConfig(
+        input_path=input_path,
+        input_dir=None,
+        output_dir=out_dir,
+        output_name=output_name,
+        save_h5ad=save_h5ad,
+        run="pseudobulk",
+        n_jobs=n_jobs,
+        logfile=log_path,
+        make_figures=make_figures,
+        regenerate_figures=False,
+        figdir_name=figdir_name,
+        figure_formats=figure_formats,
+        groupby=group_key,
+        label_source=label_source,
+        round_id=round_id,
+        ccc_backend="liana",
+        ccc_condition_key=(str(condition_key).strip() if condition_key else None),
+        ccc_condition_values=tuple(_parse_csv_repeat(condition_values) or ()),
+        liana_resource=str(liana_resource).strip().lower(),
+        liana_methods=tuple(str(x).strip().lower() for x in liana_methods if str(x).strip()),
+        liana_expr_prop=float(liana_expr_prop),
+        liana_use_raw=bool(liana_use_raw),
+        liana_layer=(str(liana_layer) if liana_layer else None),
+        liana_n_perms=(None if liana_n_perms is None else int(liana_n_perms)),
+        liana_seed=int(liana_seed),
+        liana_return_all_lrs=bool(liana_return_all_lrs),
+        liana_top_n=int(liana_top_n),
+        liana_plot_top_n=int(liana_plot_top_n),
+    )
+
+
 def _default_output_name(input_path: Path, suffix: str, round_id: Optional[str] = None) -> str:
     name = input_path.name
     for ext in (".zarr.tar.zst", ".zarr", ".h5ad", ".h5", ".hdf5"):
@@ -1985,6 +2084,89 @@ def _default_output_name(input_path: Path, suffix: str, round_id: Optional[str] 
         round_token = re.sub(r"[^A-Za-z0-9._-]+", "_", str(round_id).strip())
         suffix = f"{suffix}_{round_token}"
     return f"{name}.{suffix}"
+
+
+@ccc_app.command(
+    "liana",
+    help="Run LIANA cell-cell communication inference on cluster labels.",
+)
+def ccc_liana(
+    input_path: Path = typer.Option(..., "--input-path", "-i"),
+    output_dir: Optional[Path] = typer.Option(None, "--output-dir", "-o"),
+    output_name: Optional[str] = typer.Option(None, "--output-name"),
+    save_h5ad: bool = typer.Option(False, "--save-h5ad/--no-save-h5ad"),
+    n_jobs: int = typer.Option(1, "--n-jobs"),
+    make_figures: bool = typer.Option(True, "--make-figures/--no-make-figures"),
+    figdir_name: str = typer.Option("figures", "--figdir-name"),
+    figure_formats: List[str] = typer.Option(["png", "pdf"], "--figure-formats", "-F"),
+    group_key: Optional[str] = typer.Option(None, "--group-key"),
+    label_source: str = typer.Option("pretty", "--label-source"),
+    round_id: Optional[str] = typer.Option(None, "--round-id"),
+    condition_key: Optional[str] = typer.Option(
+        None,
+        "--condition-key",
+        help="Optional obs key; if provided, LIANA is run separately for each condition level.",
+    ),
+    condition_values: List[str] = typer.Option(
+        [],
+        "--condition-value",
+        help="Restrict to selected condition levels (repeatable/comma-separated).",
+    ),
+    liana_method: List[str] = typer.Option(
+        ["rank_aggregate"],
+        "--liana-method",
+        callback=validate_liana_methods,
+        help="LIANA method(s) to run. Use rank_aggregate for consensus.",
+    ),
+    liana_resource: str = typer.Option("consensus", "--resource"),
+    liana_expr_prop: float = typer.Option(0.1, "--expr-prop"),
+    liana_use_raw: bool = typer.Option(True, "--use-raw/--no-use-raw"),
+    liana_layer: Optional[str] = typer.Option(None, "--layer"),
+    liana_n_perms: Optional[int] = typer.Option(
+        1000,
+        "--n-perms",
+        help="Permutation count for permutation-based LIANA methods. Use 0 to disable.",
+    ),
+    liana_seed: int = typer.Option(42, "--seed"),
+    liana_return_all_lrs: bool = typer.Option(
+        False,
+        "--return-all-lrs/--no-return-all-lrs",
+    ),
+    liana_top_n: int = typer.Option(250, "--top-n"),
+    liana_plot_top_n: int = typer.Option(60, "--plot-top-n"),
+):
+    if liana_use_raw and liana_layer:
+        raise typer.BadParameter("Cannot use both --use-raw and --layer.")
+    if output_name is None:
+        output_name = _default_output_name(input_path, "ccc_liana", round_id=round_id)
+
+    cfg = _build_cfg_ccc_liana(
+        input_path=input_path,
+        output_dir=output_dir,
+        output_name=str(output_name),
+        save_h5ad=save_h5ad,
+        n_jobs=n_jobs,
+        make_figures=make_figures,
+        figdir_name=figdir_name,
+        figure_formats=figure_formats,
+        round_id=round_id,
+        group_key=group_key,
+        label_source=label_source,
+        condition_key=condition_key,
+        condition_values=condition_values,
+        liana_methods=liana_method,
+        liana_resource=liana_resource,
+        liana_expr_prop=liana_expr_prop,
+        liana_use_raw=liana_use_raw,
+        liana_layer=liana_layer,
+        liana_n_perms=None if liana_n_perms in (None, 0) else liana_n_perms,
+        liana_seed=liana_seed,
+        liana_return_all_lrs=liana_return_all_lrs,
+        liana_top_n=liana_top_n,
+        liana_plot_top_n=liana_plot_top_n,
+    )
+
+    run_liana_ccc(cfg)
 
 
 @markers_and_de_app.command(
