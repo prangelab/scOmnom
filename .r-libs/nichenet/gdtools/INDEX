@@ -1,0 +1,29 @@
+addGFontHtmlDependency
+                        Use a Font in Shiny or Markdown
+font_family_exists      Check if font family exists.
+font_google             Google Font specification
+font_liberation         Liberation Font specification
+font_set                Create a font set
+font_set_auto           Automatic font set
+font_set_liberation     Liberation font set
+fonts_cache_dir         Manage Font Working Directory
+gfontHtmlDependency     'Google Font' HTML dependency
+install_gfont_script    Shell command to install a font from 'Google
+                        Fonts'
+installed_gfonts        List installed 'Google Fonts'
+liberationmonoHtmlDependency
+                        'Liberation Mono' Font HTML dependency
+liberationsansHtmlDependency
+                        'Liberation Sans' Font HTML dependency
+liberationserifHtmlDependency
+                        'Liberation Serif' Font HTML dependency
+register_gfont          Register a 'Google Font'
+register_liberationmono
+                        Register font 'Liberation Mono'
+register_liberationsans
+                        Register font 'Liberation Sans'
+register_liberationserif
+                        Register font 'Liberation Serif'
+strings_sizes           Compute strings sizes
+sys_fonts               List fonts for 'systemfonts'.
+version_freetype        Version numbers of C libraries

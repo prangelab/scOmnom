@@ -501,11 +501,104 @@ def test_plot_cluster_umaps(tmp_path, reset_root_figdir, mock_scanpy_plots, mock
     adata.obs["cluster"] = ["0"] * adata.n_obs
     adata.obs["batch"] = ["A"] * adata.n_obs
 
-    pu.plot_cluster_umaps(adata, label_key="cluster", batch_key="batch", figdir=figdir)
-    stems = [s for s, _ in mock_save_multi]
+    artifacts = pu.plot_cluster_umaps(adata, label_key="cluster", batch_key="batch", figdir=figdir)
+    stems = [artifact.stem for artifact in artifacts]
     assert f"cluster_umap_cluster" in stems
     assert f"cluster_umap_batch" in stems
     assert f"cluster_umap_batch_and_cluster" in stems
+
+
+def test_umap_by_two_legend_styles_passes_visible_marker_defaults(tmp_path, reset_root_figdir, monkeypatch):
+    figdir = tmp_path / "figs"
+    pu.setup_scanpy_figs(figdir)
+
+    adata = synthetic_adata(n=5000)
+    adata.obsm["X_umap"] = np.random.randn(adata.n_obs, 2)
+    adata.obs["cluster_label"] = pd.Categorical(np.where(np.arange(adata.n_obs) % 2 == 0, "C00 alpha", "C01 beta"))
+
+    calls = []
+
+    def _fake_umap(*args, **kwargs):
+        calls.append(dict(kwargs))
+        return None
+
+    monkeypatch.setattr(pu.sc.pl, "umap", _fake_umap, raising=False)
+    monkeypatch.setattr(pu, "save_umap_multi", lambda *args, **kwargs: None)
+
+    pu.umap_by_two_legend_styles(
+        adata,
+        key="cluster_label",
+        figdir=figdir,
+        stem="umap_pretty_cluster_label",
+    )
+
+    assert len(calls) == 3
+    for kwargs in calls:
+        assert kwargs["alpha"] == pytest.approx(0.94)
+        assert 5.0 <= float(kwargs["size"]) <= 16.0
+        assert kwargs["edgecolors"] == "none"
+        assert kwargs["linewidths"] == pytest.approx(0.0)
+        assert kwargs["rasterized"] is True
+
+
+def test_plot_de_umap_single_uses_shared_umap_style_defaults(monkeypatch):
+    adata = synthetic_adata(n=5000)
+    adata.obsm["X_umap"] = np.random.randn(adata.n_obs, 2)
+    adata.obs["cluster_label"] = pd.Categorical(np.where(np.arange(adata.n_obs) % 2 == 0, "C00", "C01"))
+
+    fig = plt.figure()
+    calls = []
+
+    def _fake_umap(*args, **kwargs):
+        calls.append(dict(kwargs))
+        return fig
+
+    monkeypatch.setattr(dpu.sc.pl, "umap", _fake_umap, raising=False)
+
+    artifacts = dpu.umap_single(
+        adata,
+        color="cluster_label",
+        show=False,
+        artifact_figdir=Path("figs"),
+        artifact_stem="umap_single_test",
+    )
+
+    assert len(artifacts) == 1
+    assert artifacts[0].stem == "umap_single_test"
+    assert calls
+    kwargs = calls[0]
+    assert kwargs["alpha"] == pytest.approx(0.94)
+    assert 5.0 <= float(kwargs["size"]) <= 16.0
+    assert kwargs["edges"] is False
+
+
+def test_plot_de_umap_single_styles_on_data_labels(monkeypatch):
+    adata = synthetic_adata(n=50)
+    adata.obsm["X_umap"] = np.random.randn(adata.n_obs, 2)
+    adata.obs["cluster_label"] = pd.Categorical(np.where(np.arange(adata.n_obs) % 2 == 0, "C00", "C01"))
+
+    fig, ax = plt.subplots()
+    ax.scatter(np.arange(5), np.arange(5), s=5)
+    txt = ax.text(0.5, 0.5, "C00")
+
+    def _fake_umap(*args, **kwargs):
+        return fig
+
+    monkeypatch.setattr(dpu.sc.pl, "umap", _fake_umap, raising=False)
+
+    artifacts = dpu.umap_single(
+        adata,
+        color="cluster_label",
+        legend_loc="on data",
+        show=False,
+        artifact_figdir=Path("figs"),
+        artifact_stem="umap_single_on_data",
+    )
+
+    assert len(artifacts) == 1
+    bbox = txt.get_bbox_patch()
+    assert bbox is not None
+    assert bbox.get_alpha() == pytest.approx(0.65)
 
 
 # ---------------------------------------------------------------------

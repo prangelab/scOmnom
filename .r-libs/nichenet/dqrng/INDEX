@@ -1,0 +1,6 @@
+dqRNGkind               R interface
+dqrmvnorm               Multivariate Distributions
+dqrng-package           dqrng: Fast Pseudo Random Number Generators
+dqsample                Unbiased Random Samples and Permutations
+generateSeedVectors     Generate seed as a integer vector
+register_methods        Registering as user-supplied RNG

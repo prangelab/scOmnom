@@ -440,11 +440,17 @@ def test_ccc_liana_method_and_resource_propagate_to_config(mock_run):
             "--condition-value", "female,male",
             "--compare-level", "female",
             "--compare-level", "male",
+            "--dataset-key", "tissue",
+            "--source-level", "liver",
+            "--target-level", "fat",
+            "--signal-scope", "secreted",
             "--liana-method", "rank_aggregate",
             "--liana-method", "cellphonedb",
             "--liana-method", "natmi",
             "--resource", "CellPhoneDB",
             "--expr-prop", "0.2",
+            "--input-mode", "lognorm",
+            "--lognorm-target-sum", "5000",
             "--no-use-raw",
             "--layer", "lognorm",
             "--n-perms", "0",
@@ -457,12 +463,235 @@ def test_ccc_liana_method_and_resource_propagate_to_config(mock_run):
     assert cfg.ccc_condition_keys == ("sex",)
     assert cfg.ccc_condition_values == ("female", "male")
     assert cfg.ccc_compare_levels == ("female", "male")
+    assert cfg.ccc_dataset_key == "tissue"
+    assert cfg.ccc_source_levels == ("liver",)
+    assert cfg.ccc_target_levels == ("fat",)
+    assert cfg.ccc_signal_scope == "secreted"
     assert cfg.liana_methods == ("rank_aggregate", "cellphonedb", "natmi")
     assert cfg.liana_resource == "cellphonedb"
     assert cfg.liana_expr_prop == pytest.approx(0.2)
-    assert cfg.liana_use_raw is False
-    assert cfg.liana_layer == "lognorm"
-    assert cfg.liana_n_perms is None
+    assert cfg.liana_input_mode == "lognorm"
+    assert cfg.liana_lognorm_target_sum == pytest.approx(5000.0)
+
+
+@patch("scomnom.cli.run_liana_paired_rescore")
+def test_ccc_liana_paired_config_propagates(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "markers-and-de",
+            "ccc",
+            "liana-paired",
+            "--input-path", "adata.zarr.tar.zst",
+            "--candidate-events", "liana_rank_aggregate.tsv",
+            "--condition-key", "sex@MASLD",
+            "--condition-value", "yes",
+            "--compare-level", "female",
+            "--compare-level", "male",
+            "--dataset-key", "tissue",
+            "--source-level", "vfat",
+            "--target-level", "liv",
+            "--pairing-key", "sample_id",
+            "--input-mode", "lognorm",
+            "--lognorm-target-sum", "7000",
+            "--source-filter", "C05",
+            "--target-filter", "C00",
+            "--ligand-filter", "ADIPOQ",
+            "--receptor-filter", "ADIPOR2",
+            "--route-family-filter", "Adiponectin",
+            "--max-edges", "25",
+            "--min-sender-cells", "4",
+            "--min-receiver-cells", "6",
+            "--min-scored-donors-per-group", "2",
+        ],
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.ccc_backend == "liana_paired_rescore"
+    assert cfg.ccc_condition_keys == ("sex@MASLD",)
+    assert cfg.ccc_condition_values == ("yes",)
+    assert cfg.ccc_compare_levels == ("female", "male")
+    assert cfg.ccc_dataset_key == "tissue"
+    assert cfg.ccc_source_levels == ("vfat",)
+    assert cfg.ccc_target_levels == ("liv",)
+    assert cfg.liana_candidate_events == "liana_rank_aggregate.tsv"
+    assert cfg.liana_pairing_key == "sample_id"
+    assert cfg.liana_input_mode == "lognorm"
+    assert cfg.liana_lognorm_target_sum == pytest.approx(7000.0)
+    assert cfg.liana_source_filter == ("C05",)
+    assert cfg.liana_target_filter == ("C00",)
+    assert cfg.liana_ligand_filter == ("ADIPOQ",)
+    assert cfg.liana_receptor_filter == ("ADIPOR2",)
+    assert cfg.liana_route_family_filter == ("Adiponectin",)
+    assert cfg.liana_max_edges == 25
+    assert cfg.liana_min_sender_cells == 4
+    assert cfg.liana_min_receiver_cells == 6
+    assert cfg.liana_min_scored_donors_per_group == 2
+
+
+@patch("scomnom.cli.run_nichenet_ccc")
+def test_ccc_nichenet_config_propagates(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "markers-and-de",
+            "ccc",
+            "nichenet",
+            "--input-path", "adata.zarr.tar.zst",
+            "--condition-key", "sex@MASLD",
+            "--condition-value", "yes",
+            "--compare-level", "female",
+            "--compare-level", "male",
+            "--dataset-key", "tissue",
+            "--source-level", "liver",
+            "--target-level", "fat",
+            "--signal-scope", "secreted",
+            "--sender-cluster", "C00,C01",
+            "--expression-pct", "0.2",
+            "--input-mode", "lognorm",
+            "--lognorm-target-sum", "7500",
+            "--top-n-ligands", "12",
+            "--top-n-targets", "80",
+            "--min-logfc", "0.5",
+            "--padj-threshold", "0.01",
+            "--install-missing-r-deps",
+        ],
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.ccc_backend == "nichenet"
+    assert cfg.ccc_condition_keys == ("sex@MASLD",)
+    assert cfg.ccc_condition_values == ("yes",)
+    assert cfg.ccc_compare_levels == ("female", "male")
+    assert cfg.ccc_dataset_key == "tissue"
+    assert cfg.ccc_source_levels == ("liver",)
+    assert cfg.ccc_target_levels == ("fat",)
+    assert cfg.ccc_signal_scope == "secreted"
+    assert cfg.nichenet_receiver_cluster == "all"
+    assert cfg.nichenet_sender_clusters == ("C00", "C01")
+    assert cfg.nichenet_expression_pct == pytest.approx(0.2)
+    assert cfg.nichenet_input_mode == "lognorm"
+    assert cfg.nichenet_lognorm_target_sum == pytest.approx(7500.0)
+    assert cfg.nichenet_top_n_ligands == 12
+    assert cfg.nichenet_top_n_targets == 80
+    assert cfg.nichenet_min_logfc == pytest.approx(0.5)
+    assert cfg.nichenet_padj_threshold == pytest.approx(0.01)
+    assert cfg.nichenet_install_missing_r_deps is True
+
+
+@patch("scomnom.cli.run_mebocost_ccc")
+def test_ccc_mebocost_config_propagates(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "markers-and-de",
+            "ccc",
+            "mebocost",
+            "--input-path", "adata.zarr.tar.zst",
+            "--condition-key", "masld_status@timepoint",
+            "--condition-value", "5_years_post",
+            "--compare-level", "better",
+            "--compare-level", "worse",
+            "--dataset-key", "tissue",
+            "--source-level", "liver",
+            "--target-level", "fat",
+            "--organism", "mouse",
+            "--input-mode", "lognorm",
+            "--lognorm-target-sum", "7500",
+            "--n-shuffle", "250",
+            "--seed", "123",
+            "--min-cell-number", "15",
+            "--pval-cutoff", "0.01",
+            "--plot-top-n", "18",
+            "--install-missing-python-deps",
+        ],
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.ccc_backend == "mebocost"
+    assert cfg.ccc_condition_keys == ("masld_status@timepoint",)
+    assert cfg.ccc_condition_values == ("5_years_post",)
+    assert cfg.ccc_compare_levels == ("better", "worse")
+    assert cfg.ccc_dataset_key == "tissue"
+    assert cfg.ccc_source_levels == ("liver",)
+    assert cfg.ccc_target_levels == ("fat",)
+    assert cfg.mebocost_organism == "mouse"
+    assert cfg.mebocost_input_mode == "lognorm"
+    assert cfg.mebocost_lognorm_target_sum == pytest.approx(7500.0)
+    assert cfg.mebocost_n_shuffle == 250
+    assert cfg.mebocost_seed == 123
+    assert cfg.mebocost_min_cell_number == 15
+    assert cfg.mebocost_pval_cutoff == pytest.approx(0.01)
+    assert cfg.mebocost_plot_top_n == 18
+    assert cfg.mebocost_install_missing_python_deps is True
+
+
+@patch("scomnom.cli.run_mebocost_paired_rescore")
+def test_ccc_mebocost_paired_config_propagates(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "markers-and-de",
+            "ccc",
+            "mebocost-paired",
+            "--input-path", "adata.zarr.tar.zst",
+            "--candidate-events", "mebocost_sig_res.tsv",
+            "--condition-key", "sex@MASLD",
+            "--condition-value", "yes",
+            "--compare-level", "female",
+            "--compare-level", "male",
+            "--dataset-key", "tissue",
+            "--source-level", "vfat",
+            "--target-level", "liv",
+            "--pairing-key", "sample_id",
+            "--organism", "human",
+            "--input-mode", "lognorm",
+            "--lognorm-target-sum", "6000",
+            "--source-filter", "C05,C03",
+            "--target-filter", "C00,C01",
+            "--metabolite-filter", "HMDB0001",
+            "--sensor-filter", "CD36",
+            "--superclass-filter", "Lipids and lipid-like molecules",
+            "--class-filter", "Fatty acyls",
+            "--subclass-filter", "Fatty acids",
+            "--max-events", "50",
+            "--score-method", "associated-gene-proxy",
+            "--min-sender-cells", "12",
+            "--min-receiver-cells", "14",
+            "--min-scored-donors-per-group", "4",
+            "--install-missing-python-deps",
+        ],
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.ccc_backend == "mebocost_paired_rescore"
+    assert cfg.mebocost_candidate_events == "mebocost_sig_res.tsv"
+    assert cfg.ccc_condition_keys == ("sex@MASLD",)
+    assert cfg.ccc_condition_values == ("yes",)
+    assert cfg.ccc_compare_levels == ("female", "male")
+    assert cfg.ccc_dataset_key == "tissue"
+    assert cfg.ccc_source_levels == ("vfat",)
+    assert cfg.ccc_target_levels == ("liv",)
+    assert cfg.mebocost_pairing_key == "sample_id"
+    assert cfg.mebocost_input_mode == "lognorm"
+    assert cfg.mebocost_lognorm_target_sum == pytest.approx(6000.0)
+    assert cfg.mebocost_source_filter == ("C05", "C03")
+    assert cfg.mebocost_target_filter == ("C00", "C01")
+    assert cfg.mebocost_metabolite_filter == ("HMDB0001",)
+    assert cfg.mebocost_sensor_filter == ("CD36",)
+    assert cfg.mebocost_superclass_filter == ("Lipids and lipid-like molecules",)
+    assert cfg.mebocost_class_filter == ("Fatty acyls",)
+    assert cfg.mebocost_subclass_filter == ("Fatty acids",)
+    assert cfg.mebocost_max_events == 50
+    assert cfg.mebocost_score_method == "associated-gene-proxy"
+    assert cfg.mebocost_min_sender_cells == 12
+    assert cfg.mebocost_min_receiver_cells == 14
+    assert cfg.mebocost_min_scored_donors_per_group == 4
+    assert cfg.mebocost_install_missing_python_deps is True
 
 
 @patch("scomnom.cli.run_enrichment_cluster")

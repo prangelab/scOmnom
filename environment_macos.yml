@@ -53,6 +53,35 @@ dependencies:
   # Testing
   - pytest
 
+  # R runtime for NicheNet backend
+  - r-base
+  - r-devtools
+  - r-rcpphnsw
+  - r-uwot
+  - r-seurat
+  - r-seuratobject
+  - r-jsonlite
+  - r-tidyverse
+  - r-dplyr
+  - r-purrr
+  - r-readr
+  - r-tibble
+  - r-fdrtool
+  - r-hmisc
+  - r-caret
+  - r-randomforest
+  - r-diagrammer
+  - r-mlrmbo
+  - r-parallelmap
+  - r-emoa
+  - r-e1071
+  - r-ggpubr
+  - r-circlize
+  - bioconductor-complexheatmap
+  - r-ggnewscale
+  - r-ggforce
+  - r-shadowtext
+
   # Pin pip packages to the working Linux/HPC stack where needed.
   - pip:
       - scvi-tools==1.4.1
@@ -71,3 +100,4 @@ dependencies:
       - pertpy
       - pybiomart
       - liana
+      - git+https://github.com/kaifuchenlab/MEBOCOST.git

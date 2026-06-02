@@ -1,0 +1,16 @@
+dqrng-package	dqrng-package
+dqrexp	dqrng-functions
+dqrmvnorm	dqrmv
+dqrng	dqrng-package
+dqRNGkind	dqrng-functions
+dqrng_get_state	dqrng-functions
+dqrng_set_state	dqrng-functions
+dqrnorm	dqrng-functions
+dqrrademacher	dqrng-functions
+dqrunif	dqrng-functions
+dqsample	dqsample
+dqsample.int	dqsample
+dqset.seed	dqrng-functions
+generateSeedVectors	generateSeedVectors
+register_methods	user-supplied-rng
+restore_methods	user-supplied-rng

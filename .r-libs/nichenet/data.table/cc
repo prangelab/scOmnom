@@ -1,0 +1,2 @@
+CC=clang -std=gnu23
+CFLAGS=-g -O2

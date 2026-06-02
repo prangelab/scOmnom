@@ -1,0 +1,5 @@
+belegundu               MCO test problems
+generationalDistance    Quality measures for MCO solutions
+normalizeFront          Normalize a pareto front
+nsga2                   NSGA II MOEA
+paretoFront             Pareto Front and pareto set getters

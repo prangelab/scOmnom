@@ -153,3 +153,29 @@ OOM/stability and provenance hardening:
 API and docs:
 - exposed merge API wrapper as `scomnom.adata_ops.merge_datasets(...)`
 - updated API reference and README merge section with subset TSV format, short-label usage, and emitted metadata/diagnostics
+
+## 0.8.1 [02-06-2026]
+Cell-cell communication expansion and documentation cleanup release:
+- extended `markers-and-de ccc liana` with cross-tissue sender/receiver filtering via `--dataset-key`, `--source-level`, and `--target-level`
+- added LIANA `--signal-scope secreted` filtering backed by CellChatDB route annotations
+- added LIANA `--input-mode lognorm`, which builds and reuses cached `lognorm_counts_cb` / `lognorm_counts_raw` layers from preferred count assays
+- added donor/sample-level focused LIANA rescoring through `markers-and-de ccc liana-paired`, including candidate LR table normalization, sender/receiver support filters, route-level summaries, missingness tables, group-effect tables, and paired effect plots
+
+New CCC backends:
+- added sender-focused NicheNet support through `markers-and-de ccc nichenet`, with receiver-cluster batching, optional gene-list input, receiver-DE-derived gene sets, sender/receiver expressed-gene filtering, cross-tissue restrictions, and an R helper script packaged with scOmnom
+- added MEBOCOST support through `markers-and-de ccc mebocost`, including condition expansion, cross-tissue sender/receiver filtering, optional log-normalized input layers, HMDB/sensor annotation handling, summary tables, and baseline plots
+- added donor/sample-level focused MEBOCOST rescoring through `markers-and-de ccc mebocost-paired`, with candidate event normalization, event/route scores, missingness outputs, group-effect tables, and paired route plots
+- added local dependency bootstrap/cache handling for NicheNet R dependencies and MEBOCOST resources
+
+Plotting and ergonomics:
+- improved UMAP marker defaults for large datasets by applying shared point-size, alpha, rasterization, and no-edge styling across cluster and DE UMAP plotting paths
+- improved on-data UMAP label readability with bold black labels on translucent white backgrounds
+- added CCC comparison/condition-split plots for LIANA and MEBOCOST route, source-target, and paired-effect summaries
+
+Packaging, environments, tests, and docs:
+- added R runtime dependencies for NicheNet to the Linux and macOS environment files
+- added MEBOCOST installation from GitHub to the environment files
+- included packaged R resources in `pyproject.toml`
+- expanded CLI/config and analysis tests for the new CCC modes, log-normalized input paths, cross-tissue filtering, paired rescoring, candidate normalization, and plotting behavior
+- split the repository documentation into a concise root `README.md` and a full workflow manual at `docs/manual.md`
+- fixed the README filename casing so the package `readme = "README.md"` path resolves on case-sensitive systems

@@ -1,0 +1,4 @@
+if test -n "-L/Users/k.h.prange/miniconda3/envs/scOmnom_env/lib -lxml2 -L/Users/k.h.prange/miniconda3/envs/scOmnom_env/lib -lz -L/Users/k.h.prange/miniconda3/envs/scOmnom_env/lib -liconv -L/Users/k.h.prange/miniconda3/envs/scOmnom_env/lib -licuuc" ; then
+ LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:-L/Users/k.h.prange/miniconda3/envs/scOmnom_env/lib -lxml2 -L/Users/k.h.prange/miniconda3/envs/scOmnom_env/lib -lz -L/Users/k.h.prange/miniconda3/envs/scOmnom_env/lib -liconv -L/Users/k.h.prange/miniconda3/envs/scOmnom_env/lib -licuuc
+ export LD_LIBRARY_PATH 
+fi

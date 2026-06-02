@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="utf-8" />
+<meta name="generator" content="pandoc" />
+<meta http-equiv="X-UA-Compatible" content="IE=EDGE" />
+
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+
+
+<title>Using reticulate in an R Package</title>
+
+<script>// Pandoc 2.9 adds attributes on both header and div. We remove the former (to
+// be compatible with the behavior of Pandoc < 2.8).
+document.addEventListener('DOMContentLoaded', function(e) {
+  var hs = document.querySelectorAll("div.section[class*='level'] > :first-child");
+  var i, h, a;
+  for (i = 0; i < hs.length; i++) {
+    h = hs[i];
+    if (!/^h[1-6]$/i.test(h.tagName)) continue;  // it should be a header h1-h6
+    a = h.attributes;
+    while (a.length > 0) h.removeAttribute(a[0].name);
+  }
+});
+</script>
+
+<style type="text/css">
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+span.underline{text-decoration: underline;}
+div.column{display: inline-block; vertical-align: top; width: 50%;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+</style>
+
+
+
+<style type="text/css">
+code {
+white-space: pre;
+}
+.sourceCode {
+overflow: visible;
+}
+</style>
+<style type="text/css" data-origin="pandoc">
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+{ counter-reset: source-line 0; }
+pre.numberSource code > span
+{ position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+{ content: counter(source-line);
+position: relative; left: -1em; text-align: right; vertical-align: baseline;
+border: none; display: inline-block;
+-webkit-touch-callout: none; -webkit-user-select: none;
+-khtml-user-select: none; -moz-user-select: none;
+-ms-user-select: none; user-select: none;
+padding: 0 4px; width: 4em;
+color: #aaaaaa;
+}
+pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa; padding-left: 4px; }
+div.sourceCode
+{ }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+code span.al { color: #ff0000; font-weight: bold; } 
+code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.at { color: #7d9029; } 
+code span.bn { color: #40a070; } 
+code span.bu { color: #008000; } 
+code span.cf { color: #007020; font-weight: bold; } 
+code span.ch { color: #4070a0; } 
+code span.cn { color: #880000; } 
+code span.co { color: #60a0b0; font-style: italic; } 
+code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.do { color: #ba2121; font-style: italic; } 
+code span.dt { color: #902000; } 
+code span.dv { color: #40a070; } 
+code span.er { color: #ff0000; font-weight: bold; } 
+code span.ex { } 
+code span.fl { color: #40a070; } 
+code span.fu { color: #06287e; } 
+code span.im { color: #008000; font-weight: bold; } 
+code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.kw { color: #007020; font-weight: bold; } 
+code span.op { color: #666666; } 
+code span.ot { color: #007020; } 
+code span.pp { color: #bc7a00; } 
+code span.sc { color: #4070a0; } 
+code span.ss { color: #bb6688; } 
+code span.st { color: #4070a0; } 
+code span.va { color: #19177c; } 
+code span.vs { color: #4070a0; } 
+code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } 
+</style>
+<script>
+// apply pandoc div.sourceCode style to pre.sourceCode instead
+(function() {
+  var sheets = document.styleSheets;
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].ownerNode.dataset["origin"] !== "pandoc") continue;
+    try { var rules = sheets[i].cssRules; } catch (e) { continue; }
+    var j = 0;
+    while (j < rules.length) {
+      var rule = rules[j];
+      // check if there is a div.sourceCode rule
+      if (rule.type !== rule.STYLE_RULE || rule.selectorText !== "div.sourceCode") {
+        j++;
+        continue;
+      }
+      var style = rule.style.cssText;
+      // check if color or background-color is set
+      if (rule.style.color === '' && rule.style.backgroundColor === '') {
+        j++;
+        continue;
+      }
+      // replace div.sourceCode by a pre.sourceCode rule
+      sheets[i].deleteRule(j);
+      sheets[i].insertRule('pre.sourceCode{' + style + '}', j);
+    }
+  }
+})();
+</script>
+
+
+
+
+<style type="text/css">body {
+background-color: #fff;
+margin: 1em auto;
+max-width: 700px;
+overflow: visible;
+padding-left: 2em;
+padding-right: 2em;
+font-family: "Open Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+font-size: 14px;
+line-height: 1.35;
+}
+#TOC {
+clear: both;
+margin: 0 0 10px 10px;
+padding: 4px;
+width: 400px;
+border: 1px solid #CCCCCC;
+border-radius: 5px;
+background-color: #f6f6f6;
+font-size: 13px;
+line-height: 1.3;
+}
+#TOC .toctitle {
+font-weight: bold;
+font-size: 15px;
+margin-left: 5px;
+}
+#TOC ul {
+padding-left: 40px;
+margin-left: -1.5em;
+margin-top: 5px;
+margin-bottom: 5px;
+}
+#TOC ul ul {
+margin-left: -2em;
+}
+#TOC li {
+line-height: 16px;
+}
+table {
+margin: 1em auto;
+border-width: 1px;
+border-color: #DDDDDD;
+border-style: outset;
+border-collapse: collapse;
+}
+table th {
+border-width: 2px;
+padding: 5px;
+border-style: inset;
+}
+table td {
+border-width: 1px;
+border-style: inset;
+line-height: 18px;
+padding: 5px 5px;
+}
+table, table th, table td {
+border-left-style: none;
+border-right-style: none;
+}
+table thead, table tr.even {
+background-color: #f7f7f7;
+}
+p {
+margin: 0.5em 0;
+}
+blockquote {
+background-color: #f6f6f6;
+padding: 0.25em 0.75em;
+}
+hr {
+border-style: solid;
+border: none;
+border-top: 1px solid #777;
+margin: 28px 0;
+}
+dl {
+margin-left: 0;
+}
+dl dd {
+margin-bottom: 13px;
+margin-left: 13px;
+}
+dl dt {
+font-weight: bold;
+}
+ul {
+margin-top: 0;
+}
+ul li {
+list-style: circle outside;
+}
+ul ul {
+margin-bottom: 0;
+}
+pre, code {
+background-color: #f7f7f7;
+border-radius: 3px;
+color: #333;
+white-space: pre-wrap; 
+}
+pre {
+border-radius: 3px;
+margin: 5px 0px 10px 0px;
+padding: 10px;
+}
+pre:not([class]) {
+background-color: #f7f7f7;
+}
+code {
+font-family: Consolas, Monaco, 'Courier New', monospace;
+font-size: 85%;
+}
+p > code, li > code {
+padding: 2px 0px;
+}
+div.figure {
+text-align: center;
+}
+img {
+background-color: #FFFFFF;
+padding: 2px;
+border: 1px solid #DDDDDD;
+border-radius: 3px;
+border: 1px solid #CCCCCC;
+margin: 0 5px;
+}
+h1 {
+margin-top: 0;
+font-size: 35px;
+line-height: 40px;
+}
+h2 {
+border-bottom: 4px solid #f7f7f7;
+padding-top: 10px;
+padding-bottom: 2px;
+font-size: 145%;
+}
+h3 {
+border-bottom: 2px solid #f7f7f7;
+padding-top: 10px;
+font-size: 120%;
+}
+h4 {
+border-bottom: 1px solid #f7f7f7;
+margin-left: 8px;
+font-size: 105%;
+}
+h5, h6 {
+border-bottom: 1px solid #ccc;
+font-size: 105%;
+}
+a {
+color: #0033dd;
+text-decoration: none;
+}
+a:hover {
+color: #6666ff; }
+a:visited {
+color: #800080; }
+a:visited:hover {
+color: #BB00BB; }
+a[href^="http:"] {
+text-decoration: underline; }
+a[href^="https:"] {
+text-decoration: underline; }
+
+code > span.kw { color: #555; font-weight: bold; } 
+code > span.dt { color: #902000; } 
+code > span.dv { color: #40a070; } 
+code > span.bn { color: #d14; } 
+code > span.fl { color: #d14; } 
+code > span.ch { color: #d14; } 
+code > span.st { color: #d14; } 
+code > span.co { color: #888888; font-style: italic; } 
+code > span.ot { color: #007020; } 
+code > span.al { color: #ff0000; font-weight: bold; } 
+code > span.fu { color: #900; font-weight: bold; } 
+code > span.er { color: #a61717; background-color: #e3d2d2; } 
+</style>
+
+
+
+
+</head>
+
+<body>
+
+
+
+
+<h1 class="title toc-ignore">Using reticulate in an R Package</h1>
+
+
+
+<div id="declaring-python-requirements" class="section level2">
+<h2>Declaring Python Requirements</h2>
+<p>R package authors can use reticulate to make Python packages
+accessible to users from R. This vignette documents best practices for
+how package authors can declare and import their package’s Python
+dependencies.</p>
+<p>While <code>reticulate::import()</code> can be used to load a Python
+module, it does not provide any mechanism for installing a Python
+package and actually making sure the module is available.
+<code>reticulate::py_require()</code> helps fill that gap, by giving R
+package authors a way to declare their Python package dependencies in a
+way that can be collated and respected across multiple packages using
+reticulate, each with their own unique requirements.</p>
+<p>Beginning with Reticulate version 1.41, R packages can declare Python
+requirements with <code>py_require()</code>. Python package dependencies
+requested via <code>py_require()</code> will automatically be
+provisioned and made available for the user when the Python session is
+later initialized, via an ephemeral Python virtual environment. These
+requested packages can then be imported and used within your R package
+as required.</p>
+<div id="typical-usage" class="section level3">
+<h3>Typical Usage</h3>
+<p><code>py_require()</code> is typically called from
+<code>.onLoad()</code>, as shown below:</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a>.onLoad <span class="ot">&lt;-</span> <span class="cf">function</span>(libname, pkgname) {</span>
+<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a>  reticulate<span class="sc">::</span><span class="fu">py_require</span>(<span class="st">&quot;scipy&quot;</span>)</span>
+<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a>}</span></code></pre></div>
+<p><code>py_require()</code> can also be called from other package
+functions to modify dependencies after the package has loaded. This is
+useful for packages that support multiple configurations.</p>
+<p>For example, the <code>keras3</code> R package supports multiple
+backends. In <code>.onLoad()</code>, <code>keras3</code> configures a
+default backend, but users can choose a different one using the
+<code>use_backend()</code> function. This function calls
+<code>py_require()</code> with different values based on the selected
+backend:</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a>.onLoad <span class="ot">&lt;-</span> <span class="cf">function</span>(...) {</span>
+<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a>  <span class="fu">py_require</span>(<span class="st">&quot;keras&quot;</span>)</span>
+<span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a>  <span class="fu">use_backend</span>(<span class="st">&quot;tensorflow&quot;</span>) <span class="co"># Default to TensorFlow</span></span>
+<span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a>}</span>
+<span id="cb2-5"><a href="#cb2-5" tabindex="-1"></a></span>
+<span id="cb2-6"><a href="#cb2-6" tabindex="-1"></a><span class="co">#&#39; @export</span></span>
+<span id="cb2-7"><a href="#cb2-7" tabindex="-1"></a>use_backend <span class="ot">&lt;-</span> <span class="cf">function</span>(backend, <span class="at">gpu =</span> <span class="cn">TRUE</span>) {</span>
+<span id="cb2-8"><a href="#cb2-8" tabindex="-1"></a>  <span class="fu">py_require</span>(<span class="st">&quot;tensorflow&quot;</span>, <span class="at">action =</span> <span class="st">&quot;remove&quot;</span>) <span class="co"># Remove default backend</span></span>
+<span id="cb2-9"><a href="#cb2-9" tabindex="-1"></a></span>
+<span id="cb2-10"><a href="#cb2-10" tabindex="-1"></a>  <span class="cf">switch</span>(<span class="fu">paste0</span>(backend, <span class="st">&quot;_&quot;</span>, <span class="fu">get_os</span>()),</span>
+<span id="cb2-11"><a href="#cb2-11" tabindex="-1"></a>    <span class="at">jax_Linux =</span> <span class="cf">if</span> (gpu) <span class="fu">py_require</span>(<span class="st">&quot;jax[cuda12]&quot;</span>) <span class="cf">else</span> <span class="fu">py_require</span>(<span class="st">&quot;jax[cpu]&quot;</span>),</span>
+<span id="cb2-12"><a href="#cb2-12" tabindex="-1"></a>    <span class="at">jax_macOS =</span> <span class="fu">py_require</span>(<span class="fu">c</span>(<span class="st">&quot;jax&quot;</span>, <span class="cf">if</span> (gpu) <span class="st">&quot;jax-metal&quot;</span>)),</span>
+<span id="cb2-13"><a href="#cb2-13" tabindex="-1"></a>    <span class="at">jax_Windows =</span> <span class="fu">py_require</span>(<span class="st">&quot;jax&quot;</span>),</span>
+<span id="cb2-14"><a href="#cb2-14" tabindex="-1"></a>    <span class="at">tensorflow_Linux =</span> { ... },</span>
+<span id="cb2-15"><a href="#cb2-15" tabindex="-1"></a>    <span class="at">tensorflow_macOS =</span> { ... },</span>
+<span id="cb2-16"><a href="#cb2-16" tabindex="-1"></a>    <span class="at">tensorflow_Windows =</span> { ... },</span>
+<span id="cb2-17"><a href="#cb2-17" tabindex="-1"></a>    <span class="at">torch_Linux =</span> { ... },</span>
+<span id="cb2-18"><a href="#cb2-18" tabindex="-1"></a>    <span class="at">torch_macOS =</span> { ... },</span>
+<span id="cb2-19"><a href="#cb2-19" tabindex="-1"></a>    <span class="at">torch_Windows =</span> { ... }</span>
+<span id="cb2-20"><a href="#cb2-20" tabindex="-1"></a>  )</span>
+<span id="cb2-21"><a href="#cb2-21" tabindex="-1"></a>}</span></code></pre></div>
+<p><code>keras3</code> users can then specify a backend like this:</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a><span class="fu">library</span>(keras3)</span>
+<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a><span class="fu">use_backend</span>(<span class="st">&quot;jax&quot;</span>)</span></code></pre></div>
+</div>
+<div id="best-practices" class="section level3">
+<h3>Best Practices</h3>
+<p>Calling <code>py_require()</code> from a package is generally safe
+and recommended. It ensures dependencies are declared while having no
+effect on users who manage their own Python environments.
+<code>py_require()</code> replaces older approaches, such as listing
+dependencies in the <code>DESCRIPTION</code> file or calling
+<code>use_virtualenv(required = FALSE)</code> in
+<code>.onLoad()</code>.</p>
+<p>Be mindful that other R packages and users may also declare Python
+requirements. Avoid restrictive version constraints. If a version
+constraint is necessary, prefer <code>&gt;=</code> and <code>!=</code>
+over <code>&lt;=</code>, as the latter can quickly become outdated.
+Also, be mindful that an R package’s requirements will be combined with
+a potentially wide variety of user requirements, like
+<code>exclude_newer</code>.</p>
+<p>An example user script header:</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a><span class="fu">library</span>(pysparklyr) <span class="co"># declares requirements for PySpark</span></span>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a><span class="fu">library</span>(keras3)     <span class="co"># declares requirements for default &#39;tensorflow&#39; backend</span></span>
+<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a><span class="fu">use_backend</span>(<span class="st">&quot;jax&quot;</span>)  <span class="co"># removes &#39;tensorflow&#39; requirements, adds &#39;jax&#39; requirements</span></span>
+<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a></span>
+<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a><span class="fu">library</span>(reticulate)</span>
+<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a><span class="fu">py_require</span>(<span class="fu">c</span>(<span class="st">&quot;scipy&quot;</span>, <span class="st">&quot;polars&quot;</span>))         <span class="co"># user-declared requirements</span></span>
+<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a><span class="fu">py_require</span>(<span class="at">python_version =</span> <span class="st">&quot;&gt;=3.12&quot;</span>)</span>
+<span id="cb4-8"><a href="#cb4-8" tabindex="-1"></a><span class="fu">py_require</span>(<span class="at">exclude_newer =</span> <span class="st">&quot;2025-02-20&quot;</span>)</span>
+<span id="cb4-9"><a href="#cb4-9" tabindex="-1"></a></span>
+<span id="cb4-10"><a href="#cb4-10" tabindex="-1"></a>np <span class="ot">&lt;-</span> <span class="fu">import</span>(<span class="st">&quot;numpy&quot;</span>)  <span class="co"># &lt;-- Python initialized</span></span>
+<span id="cb4-11"><a href="#cb4-11" tabindex="-1"></a>...</span></code></pre></div>
+</div>
+<div id="declaring-optional-dependencies" class="section level3">
+<h3>Declaring Optional Dependencies</h3>
+<p>It’s recommended that all <code>py_require()</code> calls be made
+before reticulate initializes the Python session. However, for rarely
+used optional dependencies, the requirement can be declared right before
+use:</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a>model_to_dot <span class="ot">&lt;-</span> <span class="cf">function</span>(x, ...) {</span>
+<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a>  reticulate<span class="sc">::</span><span class="fu">py_require</span>(<span class="st">&quot;pydot&quot;</span>)</span>
+<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a>  keras<span class="sc">$</span>utils<span class="sc">$</span><span class="fu">model_to_dot</span>(x, ...)</span>
+<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a>}</span></code></pre></div>
+<p>Calling <code>py_require()</code> after Python has initialized causes
+reticulate to activate a new ephemeral virtual environment containing
+the additional requirements. Only adding packages is permitted after
+Python has initialized; calling <code>py_require()</code> with
+<code>action=&quot;set&quot;</code> or <code>action=&quot;remove&quot;</code> is not
+possible.</p>
+</div>
+</div>
+<div id="delay-loading-python-modules" class="section level2">
+<h2>Delay Loading Python Modules</h2>
+<p>If your R package wraps Python modules, it’s common to import them
+within <code>.onLoad()</code>. Use the <code>delay_load</code> flag in
+<code>import()</code> to allow:</p>
+<ol style="list-style-type: decimal">
+<li>Successful R package loading even when Python packages are not
+installed (important for CRAN testing).</li>
+<li>Users to specify their Python installation before using your
+package.</li>
+</ol>
+<p>Example:</p>
+<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a>scipy <span class="ot">&lt;-</span> <span class="cn">NULL</span></span>
+<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a></span>
+<span id="cb6-3"><a href="#cb6-3" tabindex="-1"></a>.onLoad <span class="ot">&lt;-</span> <span class="cf">function</span>(libname, pkgname) {</span>
+<span id="cb6-4"><a href="#cb6-4" tabindex="-1"></a>  reticulate<span class="sc">::</span><span class="fu">py_require</span>(<span class="st">&quot;scipy&quot;</span>)</span>
+<span id="cb6-5"><a href="#cb6-5" tabindex="-1"></a>  scipy <span class="ot">&lt;&lt;-</span> reticulate<span class="sc">::</span><span class="fu">import</span>(<span class="st">&quot;scipy&quot;</span>, <span class="at">delay_load =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb6-6"><a href="#cb6-6" tabindex="-1"></a>}</span></code></pre></div>
+<p>Without <code>delay_load</code>, Python would load immediately,
+preventing users from configuring their environment.</p>
+</div>
+<div id="installing-python-dependencies" class="section level2">
+<h2>Installing Python Dependencies</h2>
+<p><code>py_require()</code> is the recommended approach for managing
+Python dependencies. However, for users who prefer to manually manage a
+Python installation, you can document what Python packages are
+required.</p>
+<p>The <code>py_install()</code> function provides a high-level
+interface for installing Python packages. The packages will by default
+be installed within the currently active Python installation.</p>
+<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a><span class="fu">library</span>(reticulate)</span>
+<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a><span class="fu">py_install</span>(<span class="st">&quot;scipy&quot;</span>)</span></code></pre></div>
+<p>Alternatively, create a wrapper function for
+<code>py_install()</code> (or <code>virtualenv_create()</code>) that
+installs dependencies in a dedicated environment:</p>
+<div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a>install_scipy <span class="ot">&lt;-</span> <span class="cf">function</span>(<span class="at">envname =</span> <span class="st">&quot;r-scipy&quot;</span>, <span class="at">method =</span> <span class="st">&quot;auto&quot;</span>, ...) {</span>
+<span id="cb8-2"><a href="#cb8-2" tabindex="-1"></a>  reticulate<span class="sc">::</span><span class="fu">py_install</span>(<span class="st">&quot;scipy&quot;</span>, <span class="at">envname =</span> envname, <span class="at">method =</span> method, ...)</span>
+<span id="cb8-3"><a href="#cb8-3" tabindex="-1"></a>}</span></code></pre></div>
+<p>Note that calling <code>py_install()</code> on an ephemeral
+environment generated from <code>py_require()</code> declared
+requirements will generate a warning.</p>
+</div>
+<div id="checking-and-testing-on-cran" class="section level2">
+<h2>Checking and Testing on CRAN</h2>
+<p>To ensure your package is well behaved on CRAN:</p>
+<ol style="list-style-type: decimal">
+<li><p>Use <code>delay_load</code> to defer module loading:</p>
+<div class="sourceCode" id="cb9"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" tabindex="-1"></a>scipy <span class="ot">&lt;-</span> <span class="cn">NULL</span></span>
+<span id="cb9-2"><a href="#cb9-2" tabindex="-1"></a></span>
+<span id="cb9-3"><a href="#cb9-3" tabindex="-1"></a>.onLoad <span class="ot">&lt;-</span> <span class="cf">function</span>(libname, pkgname) {</span>
+<span id="cb9-4"><a href="#cb9-4" tabindex="-1"></a>  <span class="co"># delay load foo module (will only be loaded when accessed via $)</span></span>
+<span id="cb9-5"><a href="#cb9-5" tabindex="-1"></a>  scipy <span class="ot">&lt;&lt;-</span> reticulate<span class="sc">::</span><span class="fu">import</span>(<span class="st">&quot;scipy&quot;</span>, <span class="at">delay_load =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb9-6"><a href="#cb9-6" tabindex="-1"></a>}</span></code></pre></div></li>
+<li><p>Skip tests when required modules are unavailable:</p>
+<div class="sourceCode" id="cb10"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb10-1"><a href="#cb10-1" tabindex="-1"></a>skip_if_no_scipy <span class="ot">&lt;-</span> <span class="cf">function</span>() {</span>
+<span id="cb10-2"><a href="#cb10-2" tabindex="-1"></a>  <span class="cf">if</span> (<span class="sc">!</span>reticulate<span class="sc">::</span><span class="fu">py_module_available</span>(<span class="st">&quot;scipy&quot;</span>))</span>
+<span id="cb10-3"><a href="#cb10-3" tabindex="-1"></a>    <span class="fu">skip</span>(<span class="st">&quot;scipy not available for testing&quot;</span>)</span>
+<span id="cb10-4"><a href="#cb10-4" tabindex="-1"></a>}</span>
+<span id="cb10-5"><a href="#cb10-5" tabindex="-1"></a></span>
+<span id="cb10-6"><a href="#cb10-6" tabindex="-1"></a><span class="fu">test_that</span>(<span class="st">&quot;Things work as expected&quot;</span>, {</span>
+<span id="cb10-7"><a href="#cb10-7" tabindex="-1"></a>  <span class="fu">skip_if_no_scipy</span>()</span>
+<span id="cb10-8"><a href="#cb10-8" tabindex="-1"></a>  <span class="co"># test code here...</span></span>
+<span id="cb10-9"><a href="#cb10-9" tabindex="-1"></a>})</span></code></pre></div></li>
+</ol>
+</div>
+<div id="implementing-s3-methods" class="section level2">
+<h2>Implementing S3 Methods</h2>
+<p>Python objects exposed by <strong>reticulate</strong> retain their
+Python classes in R, allowing you to define S3 methods for them. This
+can be useful for customizing how objects are printed or structured in
+R. However, Python objects do not persist across R sessions, meaning an
+R object that previously pointed to a Python object will become a
+<code>NULL</code> external pointer when reloaded.</p>
+<p>To safely handle these cases, use <code>py_is_null_xptr()</code>, as
+shown in this example:</p>
+<div class="sourceCode" id="cb11"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb11-1"><a href="#cb11-1" tabindex="-1"></a>print.my_python_object <span class="ot">&lt;-</span> <span class="cf">function</span>(x, ...) {</span>
+<span id="cb11-2"><a href="#cb11-2" tabindex="-1"></a>  <span class="cf">if</span> (<span class="fu">py_is_null_xptr</span>(x)) {</span>
+<span id="cb11-3"><a href="#cb11-3" tabindex="-1"></a>    <span class="fu">cat</span>(<span class="st">&quot;&lt;Python object is no longer available&gt;</span><span class="sc">\n</span><span class="st">&quot;</span>)</span>
+<span id="cb11-4"><a href="#cb11-4" tabindex="-1"></a>  } <span class="cf">else</span> {</span>
+<span id="cb11-5"><a href="#cb11-5" tabindex="-1"></a>    <span class="fu">cat</span>(<span class="fu">py_to_r</span>(x))</span>
+<span id="cb11-6"><a href="#cb11-6" tabindex="-1"></a>  }</span>
+<span id="cb11-7"><a href="#cb11-7" tabindex="-1"></a>}</span></code></pre></div>
+<p>This prevents errors when interacting with a Python object from a
+previous session.</p>
+<p>This prevents errors when attempting to interact with a Python object
+from a previous session.</p>
+<div id="supporting-versions-with-different-s3-classes" class="section level3">
+<h3>Supporting Versions with Different S3 Classes</h3>
+<p>The Python S3 method for an object is generated from the Python
+modules and submodules where the object is defined. In sophisticated
+Python packages, this path might change between package versions. For
+instance, you can access the <code>Model</code> object from
+<code>keras.Model</code> in Python. However, depending on the Keras
+Python package version, the actual class definition for
+<code>Model</code> may be located in a submodule like
+<code>keras._internals.src</code> or
+<code>keras._internals.models</code>, and since the class module path is
+considered an internal implementation detail of the Python package, it
+can vary across Python package versions. As a result, the S3 class for
+the Python object will also change, depending on the Python package
+version.</p>
+<p>To support changing S3 classes, instead of registering methods in
+NAMESPACE with roxygen, manually register them in
+<code>.onLoad()</code>:</p>
+<div class="sourceCode" id="cb12"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb12-1"><a href="#cb12-1" tabindex="-1"></a><span class="co"># Python class `DocumentConverterResult` changes with different MarkItDown versions.</span></span>
+<span id="cb12-2"><a href="#cb12-2" tabindex="-1"></a>py_to_r.markitdown.DocumentConverterResult <span class="ot">&lt;-</span> <span class="cf">function</span>(x) {</span>
+<span id="cb12-3"><a href="#cb12-3" tabindex="-1"></a>  <span class="fu">paste0</span>(<span class="st">&quot;# &quot;</span>, x<span class="sc">$</span>title, <span class="st">&quot;</span><span class="sc">\n\n</span><span class="st">&quot;</span>, x<span class="sc">$</span>text_content)</span>
+<span id="cb12-4"><a href="#cb12-4" tabindex="-1"></a>}</span>
+<span id="cb12-5"><a href="#cb12-5" tabindex="-1"></a></span>
+<span id="cb12-6"><a href="#cb12-6" tabindex="-1"></a>.onLoad <span class="ot">&lt;-</span> <span class="cf">function</span>(libname, pkgname) {</span>
+<span id="cb12-7"><a href="#cb12-7" tabindex="-1"></a>  reticulate<span class="sc">::</span><span class="fu">py_require</span>(<span class="st">&quot;markitdown&quot;</span>)</span>
+<span id="cb12-8"><a href="#cb12-8" tabindex="-1"></a></span>
+<span id="cb12-9"><a href="#cb12-9" tabindex="-1"></a>  reticulate<span class="sc">::</span><span class="fu">py_register_load_hook</span>(<span class="st">&quot;markitdown&quot;</span>, <span class="cf">function</span>() {</span>
+<span id="cb12-10"><a href="#cb12-10" tabindex="-1"></a>    markitdown <span class="ot">&lt;-</span> reticulate<span class="sc">::</span><span class="fu">import</span>(<span class="st">&quot;markitdown&quot;</span>)</span>
+<span id="cb12-11"><a href="#cb12-11" tabindex="-1"></a>    <span class="fu">registerS3method</span>(</span>
+<span id="cb12-12"><a href="#cb12-12" tabindex="-1"></a>      <span class="st">&quot;py_to_r&quot;</span>,</span>
+<span id="cb12-13"><a href="#cb12-13" tabindex="-1"></a>      <span class="fu">nameOfClass</span>(markitdown<span class="sc">$</span>DocumentConverterResult),</span>
+<span id="cb12-14"><a href="#cb12-14" tabindex="-1"></a>      py_to_r.markitdown.DocumentConverterResult,</span>
+<span id="cb12-15"><a href="#cb12-15" tabindex="-1"></a>      <span class="fu">environment</span>(reticulate<span class="sc">::</span>py_to_r)</span>
+<span id="cb12-16"><a href="#cb12-16" tabindex="-1"></a>    )</span>
+<span id="cb12-17"><a href="#cb12-17" tabindex="-1"></a>  })</span>
+<span id="cb12-18"><a href="#cb12-18" tabindex="-1"></a>}</span></code></pre></div>
+</div>
+<div id="converting-between-r-and-python" class="section level3">
+<h3>Converting between R and Python</h3>
+<p><strong>reticulate</strong> provides the generics
+<code>r_to_py()</code> for converting R objects into Python objects, and
+<code>py_to_r()</code> for converting Python objects back into R
+objects. Package authors can provide methods for these generics to
+convert Python and R objects otherwise not handled by
+<strong>reticulate</strong>.</p>
+<p><strong>reticulate</strong> provides conversion operators for some of
+the most commonly used Python objects, including:</p>
+<ul>
+<li>Built-in Python objects (lists, dictionaries, numbers, strings,
+tuples)</li>
+<li>NumPy arrays,</li>
+<li>Pandas objects (<code>Index</code>, <code>Series</code>,
+<code>DataFrame</code>),</li>
+<li>Python <code>datetime</code> objects.</li>
+</ul>
+<p>If you see that <strong>reticulate</strong> is missing support for
+conversion of one or more objects from these packages, please <a href="https://github.com/rstudio/reticulate/issues">let us know</a> and
+we’ll try to implement the missing converter. For Python packages not in
+this set, you can provide conversion operators in your own extension
+package.</p>
+</div>
+<div id="writing-your-own-r_to_py-methods" class="section level3">
+<h3>Writing your own <code>r_to_py()</code> methods</h3>
+<p><code>r_to_py()</code> accepts a <code>convert</code> argument, which
+controls how objects generated from the created Python object are
+converted. To illustrate, consider the difference between these two
+cases:</p>
+<div class="sourceCode" id="cb13"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb13-1"><a href="#cb13-1" tabindex="-1"></a><span class="fu">library</span>(reticulate)</span>
+<span id="cb13-2"><a href="#cb13-2" tabindex="-1"></a></span>
+<span id="cb13-3"><a href="#cb13-3" tabindex="-1"></a><span class="co"># [convert = TRUE] =&gt; convert Python objects to R when appropriate</span></span>
+<span id="cb13-4"><a href="#cb13-4" tabindex="-1"></a>sys <span class="ot">&lt;-</span> <span class="fu">import</span>(<span class="st">&quot;sys&quot;</span>, <span class="at">convert =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb13-5"><a href="#cb13-5" tabindex="-1"></a><span class="fu">class</span>(sys<span class="sc">$</span>path)</span>
+<span id="cb13-6"><a href="#cb13-6" tabindex="-1"></a><span class="co"># [1] &quot;character&quot;</span></span>
+<span id="cb13-7"><a href="#cb13-7" tabindex="-1"></a></span>
+<span id="cb13-8"><a href="#cb13-8" tabindex="-1"></a><span class="co"># [convert = FALSE] =&gt; always return Python objects</span></span>
+<span id="cb13-9"><a href="#cb13-9" tabindex="-1"></a>sys <span class="ot">&lt;-</span> <span class="fu">import</span>(<span class="st">&quot;sys&quot;</span>, <span class="at">convert =</span> <span class="cn">FALSE</span>)</span>
+<span id="cb13-10"><a href="#cb13-10" tabindex="-1"></a><span class="fu">class</span>(sys<span class="sc">$</span>path)</span>
+<span id="cb13-11"><a href="#cb13-11" tabindex="-1"></a><span class="co"># [1] &quot;python.builtin.list&quot; &quot;python.builtin.object&quot;</span></span></code></pre></div>
+<p>This is accomplished through the use of a <code>convert</code> flag,
+which is set on the Python object wrappers used by
+<code>reticulate</code>. Therefore, if you’re writing a method
+<code>r_to_py.foo()</code> for an object of class <code>foo</code>, you
+should take care to preserve the <code>convert</code> flag on the
+generated object. This is typically done by:</p>
+<ol style="list-style-type: decimal">
+<li><p>Passing <code>convert</code> along to the appropriate lower-level
+<code>r_to_py()</code> method;</p></li>
+<li><p>Explicitly setting the <code>convert</code> attribute on the
+returned Python object.</p></li>
+</ol>
+<p>As an example of the second:</p>
+<div class="sourceCode" id="cb14"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb14-1"><a href="#cb14-1" tabindex="-1"></a><span class="co"># suppose &#39;make_python_object()&#39; creates a Python object</span></span>
+<span id="cb14-2"><a href="#cb14-2" tabindex="-1"></a><span class="co"># from R objects of class &#39;my_r_object&#39;.</span></span>
+<span id="cb14-3"><a href="#cb14-3" tabindex="-1"></a>r_to_py.my_r_object <span class="ot">&lt;-</span> <span class="cf">function</span>(x, convert) {</span>
+<span id="cb14-4"><a href="#cb14-4" tabindex="-1"></a>  object <span class="ot">&lt;-</span> <span class="fu">make_python_object</span>(x)</span>
+<span id="cb14-5"><a href="#cb14-5" tabindex="-1"></a>  <span class="fu">assign</span>(<span class="st">&quot;convert&quot;</span>, convert, <span class="at">envir =</span> object)</span>
+<span id="cb14-6"><a href="#cb14-6" tabindex="-1"></a>  object</span>
+<span id="cb14-7"><a href="#cb14-7" tabindex="-1"></a>}</span></code></pre></div>
+</div>
+</div>
+<div id="using-github-actions" class="section level2">
+<h2>Using GitHub Actions</h2>
+<p>For testing R packages with GitHub Actions, dependencies declared via
+<code>py_require()</code> will resolve automatically with no additional
+steps. If there are extra Python test dependencies, declare them using
+<code>py_require()</code> in <code>tests/testthat/helper.R</code>. The
+standard R-CMD-check workflow should work:</p>
+<div class="sourceCode" id="cb15"><pre class="sourceCode yaml"><code class="sourceCode yaml"><span id="cb15-1"><a href="#cb15-1" tabindex="-1"></a><span class="kw">-</span><span class="at"> </span><span class="fu">uses</span><span class="kw">:</span><span class="at"> r-lib/actions/setup-r@v2</span></span>
+<span id="cb15-2"><a href="#cb15-2" tabindex="-1"></a></span>
+<span id="cb15-3"><a href="#cb15-3" tabindex="-1"></a><span class="kw">-</span><span class="at"> </span><span class="fu">uses</span><span class="kw">:</span><span class="at"> r-lib/actions/setup-r-dependencies@v2</span></span>
+<span id="cb15-4"><a href="#cb15-4" tabindex="-1"></a><span class="at">  </span><span class="fu">with</span><span class="kw">:</span></span>
+<span id="cb15-5"><a href="#cb15-5" tabindex="-1"></a><span class="at">    </span><span class="fu">extra-packages</span><span class="kw">:</span><span class="at"> rcmdcheck</span></span>
+<span id="cb15-6"><a href="#cb15-6" tabindex="-1"></a></span>
+<span id="cb15-7"><a href="#cb15-7" tabindex="-1"></a><span class="kw">-</span><span class="at"> </span><span class="fu">uses</span><span class="kw">:</span><span class="at"> r-lib/actions/check-r-package@v2</span></span></code></pre></div>
+<p>Optionally, you can pre-download Python dependencies in a separate
+step for cleaner CI logs:</p>
+<div class="sourceCode" id="cb16"><pre class="sourceCode yaml"><code class="sourceCode yaml"><span id="cb16-1"><a href="#cb16-1" tabindex="-1"></a><span class="kw">-</span><span class="at"> </span><span class="fu">uses</span><span class="kw">:</span><span class="at"> r-lib/actions/setup-r@v2</span></span>
+<span id="cb16-2"><a href="#cb16-2" tabindex="-1"></a><span class="at">  </span><span class="fu">with</span><span class="kw">:</span></span>
+<span id="cb16-3"><a href="#cb16-3" tabindex="-1"></a><span class="at">    </span><span class="fu">r-version</span><span class="kw">:</span><span class="at"> release</span></span>
+<span id="cb16-4"><a href="#cb16-4" tabindex="-1"></a></span>
+<span id="cb16-5"><a href="#cb16-5" tabindex="-1"></a><span class="kw">-</span><span class="at"> </span><span class="fu">uses</span><span class="kw">:</span><span class="at"> r-lib/actions/setup-r-dependencies@v2</span></span>
+<span id="cb16-6"><a href="#cb16-6" tabindex="-1"></a><span class="at">  </span><span class="fu">with</span><span class="kw">:</span></span>
+<span id="cb16-7"><a href="#cb16-7" tabindex="-1"></a><span class="at">    </span><span class="fu">extra-packages</span><span class="kw">:</span><span class="at"> rcmdcheck local::.</span></span>
+<span id="cb16-8"><a href="#cb16-8" tabindex="-1"></a></span>
+<span id="cb16-9"><a href="#cb16-9" tabindex="-1"></a><span class="kw">- </span><span class="fu">run</span><span class="kw">:</span><span class="at"> </span><span class="ch">|</span></span>
+<span id="cb16-10"><a href="#cb16-10" tabindex="-1"></a>    library(mypackage)      # &lt;-- declare requirements in .onLoad()</span>
+<span id="cb16-11"><a href="#cb16-11" tabindex="-1"></a>    reticulate::py_config() # &lt;-- resolves the ephemeral python environment</span>
+<span id="cb16-12"><a href="#cb16-12" tabindex="-1"></a></span>
+<span id="cb16-13"><a href="#cb16-13" tabindex="-1"></a><span class="kw">-</span><span class="at"> </span><span class="fu">uses</span><span class="kw">:</span><span class="at"> r-lib/actions/check-r-package@v2</span></span>
+<span id="cb16-14"><a href="#cb16-14" tabindex="-1"></a><span class="co">  # The ephemeral python environment from previous step is reused from cache.</span></span></code></pre></div>
+<p>If you prefer to use a manually managed Python environment, you can
+do this:</p>
+<div class="sourceCode" id="cb17"><pre class="sourceCode yaml"><code class="sourceCode yaml"><span id="cb17-1"><a href="#cb17-1" tabindex="-1"></a><span class="kw">-</span><span class="at"> </span><span class="fu">uses</span><span class="kw">:</span><span class="at"> actions/setup-python@v4</span></span>
+<span id="cb17-2"><a href="#cb17-2" tabindex="-1"></a><span class="at">  </span><span class="fu">with</span><span class="kw">:</span></span>
+<span id="cb17-3"><a href="#cb17-3" tabindex="-1"></a><span class="at">    </span><span class="fu">python-version</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;3.x&quot;</span></span>
+<span id="cb17-4"><a href="#cb17-4" tabindex="-1"></a></span>
+<span id="cb17-5"><a href="#cb17-5" tabindex="-1"></a><span class="kw">-</span><span class="at"> </span><span class="fu">name</span><span class="kw">:</span><span class="at"> setup r-reticulate venv</span></span>
+<span id="cb17-6"><a href="#cb17-6" tabindex="-1"></a><span class="at">  </span><span class="fu">shell</span><span class="kw">:</span><span class="at"> Rscript {0}</span></span>
+<span id="cb17-7"><a href="#cb17-7" tabindex="-1"></a><span class="fu">  run</span><span class="kw">: </span><span class="ch">|</span></span>
+<span id="cb17-8"><a href="#cb17-8" tabindex="-1"></a>    path_to_python &lt;- reticulate::virtualenv_create(</span>
+<span id="cb17-9"><a href="#cb17-9" tabindex="-1"></a>      envname = &quot;r-reticulate&quot;,</span>
+<span id="cb17-10"><a href="#cb17-10" tabindex="-1"></a>      python = Sys.which(&quot;python&quot;),</span>
+<span id="cb17-11"><a href="#cb17-11" tabindex="-1"></a>      packages = c(&quot;numpy&quot;, &quot;other-packages&quot;)</span>
+<span id="cb17-12"><a href="#cb17-12" tabindex="-1"></a>    )</span>
+<span id="cb17-13"><a href="#cb17-13" tabindex="-1"></a>    writeLines(sprintf(&quot;RETICULATE_PYTHON=%s&quot;, path_to_python),</span>
+<span id="cb17-14"><a href="#cb17-14" tabindex="-1"></a>               Sys.getenv(&quot;GITHUB_ENV&quot;))</span>
+<span id="cb17-15"><a href="#cb17-15" tabindex="-1"></a></span>
+<span id="cb17-16"><a href="#cb17-16" tabindex="-1"></a><span class="kw">-</span><span class="at"> </span><span class="fu">uses</span><span class="kw">:</span><span class="at"> r-lib/actions/check-r-package@v2</span></span></code></pre></div>
+</div>
+
+
+
+<!-- code folding -->
+
+
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+  (function () {
+    var script = document.createElement("script");
+    script.type = "text/javascript";
+    script.src  = "https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML";
+    document.getElementsByTagName("head")[0].appendChild(script);
+  })();
+</script>
+
+</body>
+</html>

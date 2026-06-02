@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html>
+<head><title>R: Single and Multi-Objective Optimization Test Functions</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+<link rel="stylesheet" type="text/css" href="R.css">
+</head><body><div class="container">
+<h1> Single and Multi-Objective Optimization Test Functions
+<img class="toplogo" src="../../../doc/html/Rlogo.svg" alt="[R logo]">
+</h1>
+<hr>
+<div style="text-align: center;">
+<a href="../../../doc/html/packages.html"><img class="arrow" src="../../../doc/html/left.jpg" alt="[Up]"></a>
+<a href="../../../doc/html/index.html"><img class="arrow" src="../../../doc/html/up.jpg" alt="[Top]"></a>
+</div><h2>Documentation for package &lsquo;smoof&rsquo; version 1.7.0</h2>
+
+<ul><li><a href="../DESCRIPTION" type="text/plain; charset=utf-8">DESCRIPTION file</a>.</li>
+<li><a href="../NEWS">Package NEWS</a>.</li>
+</ul>
+
+<h2>Help Pages</h2>
+
+
+<p style="text-align: center;">
+<a href="#A">A</a>
+<a href="#C">C</a>
+<a href="#D">D</a>
+<a href="#E">E</a>
+<a href="#F">F</a>
+<a href="#G">G</a>
+<a href="#H">H</a>
+<a href="#I">I</a>
+<a href="#M">M</a>
+<a href="#P">P</a>
+<a href="#R">R</a>
+<a href="#S">S</a>
+<a href="#V">V</a>
+</p>
+
+
+<h2><a id="A">-- A --</a></h2>
+
+<table style="width: 100%;">
+<tr><td style="width: 25%;"><a href="addCountingWrapper.html">addCountingWrapper</a></td>
+<td>Return a function which counts its function evaluations</td></tr>
+<tr><td style="width: 25%;"><a href="addLoggingWrapper.html">addLoggingWrapper</a></td>
+<td>Return a function which internally stores x or y values</td></tr>
+<tr><td style="width: 25%;"><a href="autoplot.smoof_function.html">autoplot.smoof_function</a></td>
+<td>Generate ggplot2 object</td></tr>
+</table>
+
+<h2><a id="C">-- C --</a></h2>
+
+<table style="width: 100%;">
+<tr><td style="width: 25%;"><a href="computeExpectedRunningTime.html">computeExpectedRunningTime</a></td>
+<td>Compute the Expected Running Time (ERT) performance measure</td></tr>
+<tr><td style="width: 25%;"><a href="conversion.html">conversion</a></td>
+<td>Conversion between minimization and maximization problems</td></tr>
+<tr><td style="width: 25%;"><a href="conversion.html">convertToMaximization</a></td>
+<td>Conversion between minimization and maximization problems</td></tr>
+<tr><td style="width: 25%;"><a href="conversion.html">convertToMinimization</a></td>
+<td>Conversion between minimization and maximization problems</td></tr>
+</table>
+
+<h2><a id="D">-- D --</a></h2>
+
+<table style="width: 100%;">
+<tr><td style="width: 25%;"><a href="doesCountEvaluations.html">doesCountEvaluations</a></td>
+<td>Check whether the function is counting its function evaluations</td></tr>
+</table>
+
+<h2><a id="E">-- E --</a></h2>
+
+<table style="width: 100%;">
+<tr><td style="width: 25%;"><a href="exportNKFunction.html">exportNKFunction</a></td>
+<td>Export/import (rM)NK-landscapes</td></tr>
+</table>
+
+<h2><a id="F">-- F --</a></h2>
+
+<table style="width: 100%;">
+<tr><td style="width: 25%;"><a href="filterFunctionsByTags.html">filterFunctionsByTags</a></td>
+<td>Get a list of implemented test functions with specific tags</td></tr>
+</table>
+
+<h2><a id="G">-- G --</a></h2>
+
+<table style="width: 100%;">
+<tr><td style="width: 25%;"><a href="getAvailableTags.html">getAvailableTags</a></td>
+<td>Returns a character vector of possible function tags</td></tr>
+<tr><td style="width: 25%;"><a href="getDescription.html">getDescription</a></td>
+<td>Returns the description of the function</td></tr>
+<tr><td style="width: 25%;"><a href="getGlobalOptimum.html">getGlobalOptimum</a></td>
+<td>Returns the global optimum and its value</td></tr>
+<tr><td style="width: 25%;"><a href="getID.html">getID</a></td>
+<td>Returns the ID / short name of the function</td></tr>
+<tr><td style="width: 25%;"><a href="getLocalOptimum.html">getLocalOptimum</a></td>
+<td>Returns the local optima of a single objective smoof function</td></tr>
+<tr><td style="width: 25%;"><a href="getLoggedValues.html">getLoggedValues</a></td>
+<td>Extracts the logged values of a function wrapped by a logging wrapper</td></tr>
+<tr><td style="width: 25%;"><a href="getLowerBoxConstraints.html">getLowerBoxConstraints</a></td>
+<td>Returns lower box constraints for a Smoof function</td></tr>
+<tr><td style="width: 25%;"><a href="getMeanFunction.html">getMeanFunction</a></td>
+<td>Returns the true mean function in the noisy case</td></tr>
+<tr><td style="width: 25%;"><a href="getName.html">getName</a></td>
+<td>Returns the name of the function</td></tr>
+<tr><td style="width: 25%;"><a href="getNumberOfEvaluations.html">getNumberOfEvaluations</a></td>
+<td>Returns the number of function evaluations performed by the wrapped 'smoof_function'</td></tr>
+<tr><td style="width: 25%;"><a href="getNumberOfObjectives.html">getNumberOfObjectives</a></td>
+<td>Determines the number of objectives</td></tr>
+<tr><td style="width: 25%;"><a href="getNumberOfParameters.html">getNumberOfParameters</a></td>
+<td>Determines the number of parameters</td></tr>
+<tr><td style="width: 25%;"><a href="getOptimaDf.html">getOptimaDf</a></td>
+<td>Get Data Frame of optima</td></tr>
+<tr><td style="width: 25%;"><a href="getParamSet.html">getParamSet</a></td>
+<td>Get parameter set</td></tr>
+<tr><td style="width: 25%;"><a href="getRefPoint.html">getRefPoint</a></td>
+<td>Returns the reference point of a multi-objective function</td></tr>
+<tr><td style="width: 25%;"><a href="getTags.html">getTags</a></td>
+<td>Returns the vector of associated tags</td></tr>
+<tr><td style="width: 25%;"><a href="getUpperBoxConstraints.html">getUpperBoxConstraints</a></td>
+<td>Return upper box constraints</td></tr>
+<tr><td style="width: 25%;"><a href="getWrappedFunction.html">getWrappedFunction</a></td>
+<td>Extract wrapped function</td></tr>
+</table>
+
+<h2><a id="H">-- H --</a></h2>
+
+<table style="width: 100%;">
+<tr><td style="width: 25%;"><a href="hasBoxConstraints.html">hasBoxConstraints</a></td>
+<td>Checks whether the objective function has box constraints</td></tr>
+<tr><td style="width: 25%;"><a href="hasConstraints.html">hasConstraints</a></td>
+<td>Checks whether the objective function has constraints</td></tr>
+<tr><td style="width: 25%;"><a href="hasGlobalOptimum.html">hasGlobalOptimum</a></td>
+<td>Checks whether the global optimum is known</td></tr>
+<tr><td style="width: 25%;"><a href="hasLocalOptimum.html">hasLocalOptimum</a></td>
+<td>Checks whether local optima are known</td></tr>
+<tr><td style="width: 25%;"><a href="hasOtherConstraints.html">hasOtherConstraints</a></td>
+<td>Checks whether the objective function has other constraints</td></tr>
+<tr><td style="width: 25%;"><a href="hasTags.html">hasTags</a></td>
+<td>Checks if the function has assigned special tags</td></tr>
+</table>
+
+<h2><a id="I">-- I --</a></h2>
+
+<table style="width: 100%;">
+<tr><td style="width: 25%;"><a href="exportNKFunction.html">importNKFunction</a></td>
+<td>Export/import (rM)NK-landscapes</td></tr>
+<tr><td style="width: 25%;"><a href="isMultiobjective.html">isMultiobjective</a></td>
+<td>Checks whether the given function is multi-objective</td></tr>
+<tr><td style="width: 25%;"><a href="isNoisy.html">isNoisy</a></td>
+<td>Checks whether the given function is noisy</td></tr>
+<tr><td style="width: 25%;"><a href="isSingleobjective.html">isSingleobjective</a></td>
+<td>Checks whether the given function is single-objective</td></tr>
+<tr><td style="width: 25%;"><a href="isSmoofFunction.html">isSmoofFunction</a></td>
+<td>Checks whether the given object is a 'smoof_function' or a 'smoof_wrapped_function'</td></tr>
+<tr><td style="width: 25%;"><a href="isVectorized.html">isVectorized</a></td>
+<td>Checks whether the given function accepts "vectorized" input</td></tr>
+<tr><td style="width: 25%;"><a href="isWrappedSmoofFunction.html">isWrappedSmoofFunction</a></td>
+<td>Checks whether the function is of type 'smoof_wrapped_function'</td></tr>
+</table>
+
+<h2><a id="M">-- M --</a></h2>
+
+<table style="width: 100%;">
+<tr><td style="width: 25%;"><a href="makeAckleyFunction.html">makeAckleyFunction</a></td>
+<td>Ackley Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeAdjimanFunction.html">makeAdjimanFunction</a></td>
+<td>Adjiman function</td></tr>
+<tr><td style="width: 25%;"><a href="makeAlpine01Function.html">makeAlpine01Function</a></td>
+<td>Alpine01 function</td></tr>
+<tr><td style="width: 25%;"><a href="makeAlpine02Function.html">makeAlpine02Function</a></td>
+<td>Alpine02 function</td></tr>
+<tr><td style="width: 25%;"><a href="makeAluffiPentiniFunction.html">makeAluffiPentiniFunction</a></td>
+<td>Aluffi-Pentini function</td></tr>
+<tr><td style="width: 25%;"><a href="makeBartelsConnFunction.html">makeBartelsConnFunction</a></td>
+<td>Bartels Conn Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeBBOBFunction.html">makeBBOBFunction</a></td>
+<td>Generator for noiseless function set of the real-parameter BBOB</td></tr>
+<tr><td style="width: 25%;"><a href="makeBealeFunction.html">makeBealeFunction</a></td>
+<td>Beale Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeBentCigarFunction.html">makeBentCigarFunction</a></td>
+<td>Bent-Cigar Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeBiObjBBOBFunction.html">makeBiObjBBOBFunction</a></td>
+<td>Generate Bi-Objective Function from the Real-Parameter Bi-Objective Black-Box Optimization Benchmarking (BBOB)</td></tr>
+<tr><td style="width: 25%;"><a href="makeBirdFunction.html">makeBirdFunction</a></td>
+<td>Bird Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeBiSphereFunction.html">makeBiSphereFunction</a></td>
+<td>Bi-objective Sphere function</td></tr>
+<tr><td style="width: 25%;"><a href="makeBK1Function.html">makeBK1Function</a></td>
+<td>BK1 function generator</td></tr>
+<tr><td style="width: 25%;"><a href="makeBohachevskyN1Function.html">makeBohachevskyN1Function</a></td>
+<td>Bohachevsky function N. 1</td></tr>
+<tr><td style="width: 25%;"><a href="makeBoothFunction.html">makeBoothFunction</a></td>
+<td>Booth Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeBraninFunction.html">makeBraninFunction</a></td>
+<td>Branin RCOS function</td></tr>
+<tr><td style="width: 25%;"><a href="makeBrentFunction.html">makeBrentFunction</a></td>
+<td>Brent Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeBrownFunction.html">makeBrownFunction</a></td>
+<td>Brown Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeBukinN2Function.html">makeBukinN2Function</a></td>
+<td>Bukin function N. 2</td></tr>
+<tr><td style="width: 25%;"><a href="makeBukinN4Function.html">makeBukinN4Function</a></td>
+<td>Bukin function N. 4</td></tr>
+<tr><td style="width: 25%;"><a href="makeBukinN6Function.html">makeBukinN6Function</a></td>
+<td>Bukin function N. 6</td></tr>
+<tr><td style="width: 25%;"><a href="makeCarromTableFunction.html">makeCarromTableFunction</a></td>
+<td>Carrom Table Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeChichinadzeFunction.html">makeChichinadzeFunction</a></td>
+<td>Chichinadze Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeChungReynoldsFunction.html">makeChungReynoldsFunction</a></td>
+<td>Chung Reynolds Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeComplexFunction.html">makeComplexFunction</a></td>
+<td>Complex function</td></tr>
+<tr><td style="width: 25%;"><a href="makeCosineMixtureFunction.html">makeCosineMixtureFunction</a></td>
+<td>Cosine Mixture Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeCrossInTrayFunction.html">makeCrossInTrayFunction</a></td>
+<td>Cross-In-Tray Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeCubeFunction.html">makeCubeFunction</a></td>
+<td>Cube Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeDeckkersAartsFunction.html">makeDeckkersAartsFunction</a></td>
+<td>Deckkers-Aarts Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeDeflectedCorrugatedSpringFunction.html">makeDeflectedCorrugatedSpringFunction</a></td>
+<td>Deflected Corrugated Spring function</td></tr>
+<tr><td style="width: 25%;"><a href="makeDentFunction.html">makeDentFunction</a></td>
+<td>Dent Function Generator</td></tr>
+<tr><td style="width: 25%;"><a href="makeDixonPriceFunction.html">makeDixonPriceFunction</a></td>
+<td>Dixon-Price Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeDoubleSumFunction.html">makeDoubleSumFunction</a></td>
+<td>Double-Sum Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeDTLZ1Function.html">makeDTLZ1Function</a></td>
+<td>DTLZ1 Function (family)</td></tr>
+<tr><td style="width: 25%;"><a href="makeDTLZ2Function.html">makeDTLZ2Function</a></td>
+<td>DTLZ2 Function (family)</td></tr>
+<tr><td style="width: 25%;"><a href="makeDTLZ3Function.html">makeDTLZ3Function</a></td>
+<td>DTLZ3 Function (family)</td></tr>
+<tr><td style="width: 25%;"><a href="makeDTLZ4Function.html">makeDTLZ4Function</a></td>
+<td>DTLZ4 Function (family)</td></tr>
+<tr><td style="width: 25%;"><a href="makeDTLZ5Function.html">makeDTLZ5Function</a></td>
+<td>DTLZ5 Function (family)</td></tr>
+<tr><td style="width: 25%;"><a href="makeDTLZ6Function.html">makeDTLZ6Function</a></td>
+<td>DTLZ6 Function (family)</td></tr>
+<tr><td style="width: 25%;"><a href="makeDTLZ7Function.html">makeDTLZ7Function</a></td>
+<td>DTLZ7 Function (family)</td></tr>
+<tr><td style="width: 25%;"><a href="makeEasomFunction.html">makeEasomFunction</a></td>
+<td>Easom Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeED1Function.html">makeED1Function</a></td>
+<td>ED1 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeED2Function.html">makeED2Function</a></td>
+<td>ED2 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeEggCrateFunction.html">makeEggCrateFunction</a></td>
+<td>Egg Crate Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeEggholderFunction.html">makeEggholderFunction</a></td>
+<td>Egg Holder function</td></tr>
+<tr><td style="width: 25%;"><a href="makeElAttarVidyasagarDuttaFunction.html">makeElAttarVidyasagarDuttaFunction</a></td>
+<td>El-Attar-Vidyasagar-Dutta Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeEngvallFunction.html">makeEngvallFunction</a></td>
+<td>Complex function</td></tr>
+<tr><td style="width: 25%;"><a href="makeExponentialFunction.html">makeExponentialFunction</a></td>
+<td>Exponential Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeFreudensteinRothFunction.html">makeFreudensteinRothFunction</a></td>
+<td>Freudenstein Roth Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeFunctionsByName.html">makeFunctionsByName</a></td>
+<td>Generate smoof function by passing a character vector of generator names</td></tr>
+<tr><td style="width: 25%;"><a href="makeGeneralizedDropWaveFunction.html">makeGeneralizedDropWaveFunction</a></td>
+<td>Generalized Drop-Wave Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeGiuntaFunction.html">makeGiuntaFunction</a></td>
+<td>Giunta Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeGoldsteinPriceFunction.html">makeGoldsteinPriceFunction</a></td>
+<td>Goldstein-Price Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeGOMOPFunction.html">makeGOMOPFunction</a></td>
+<td>GOMOP function generator</td></tr>
+<tr><td style="width: 25%;"><a href="makeGriewankFunction.html">makeGriewankFunction</a></td>
+<td>Griewank Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeHansenFunction.html">makeHansenFunction</a></td>
+<td>Hansen Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeHartmannFunction.html">makeHartmannFunction</a></td>
+<td>Hartmann Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeHimmelblauFunction.html">makeHimmelblauFunction</a></td>
+<td>Himmelblau Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeHolderTableN1Function.html">makeHolderTableN1Function</a></td>
+<td>Holder Table function N. 1</td></tr>
+<tr><td style="width: 25%;"><a href="makeHolderTableN2Function.html">makeHolderTableN2Function</a></td>
+<td>Holder Table function N. 2</td></tr>
+<tr><td style="width: 25%;"><a href="makeHosakiFunction.html">makeHosakiFunction</a></td>
+<td>Hosaki Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeHyperEllipsoidFunction.html">makeHyperEllipsoidFunction</a></td>
+<td>Hyper-Ellipsoid function</td></tr>
+<tr><td style="width: 25%;"><a href="makeInvertedVincentFunction.html">makeInvertedVincentFunction</a></td>
+<td>Inverted Vincent Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeJennrichSampsonFunction.html">makeJennrichSampsonFunction</a></td>
+<td>Jennrich-Sampson function</td></tr>
+<tr><td style="width: 25%;"><a href="makeJudgeFunction.html">makeJudgeFunction</a></td>
+<td>Judge function</td></tr>
+<tr><td style="width: 25%;"><a href="makeKeaneFunction.html">makeKeaneFunction</a></td>
+<td>Keane Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeKearfottFunction.html">makeKearfottFunction</a></td>
+<td>Kearfott function</td></tr>
+<tr><td style="width: 25%;"><a href="makeKursaweFunction.html">makeKursaweFunction</a></td>
+<td>Kursawe Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeLeonFunction.html">makeLeonFunction</a></td>
+<td>Leon Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeMatyasFunction.html">makeMatyasFunction</a></td>
+<td>Matyas Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeMcCormickFunction.html">makeMcCormickFunction</a></td>
+<td>McCormick Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeMichalewiczFunction.html">makeMichalewiczFunction</a></td>
+<td>Michalewicz Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeMMF10Function.html">makeMMF10Function</a></td>
+<td>MMF10 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeMMF11Function.html">makeMMF11Function</a></td>
+<td>MMF11 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeMMF12Function.html">makeMMF12Function</a></td>
+<td>MMF12 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeMMF13Function.html">makeMMF13Function</a></td>
+<td>MMF13 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeMMF14aFunction.html">makeMMF14aFunction</a></td>
+<td>MMF14a Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeMMF14Function.html">makeMMF14Function</a></td>
+<td>MMF14 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeMMF15aFunction.html">makeMMF15aFunction</a></td>
+<td>MMF15a Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeMMF15Function.html">makeMMF15Function</a></td>
+<td>MMF15 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeMMF1eFunction.html">makeMMF1eFunction</a></td>
+<td>MMF1e Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeMMF1Function.html">makeMMF1Function</a></td>
+<td>MMF1 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeMMF1zFunction.html">makeMMF1zFunction</a></td>
+<td>MMF1z Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeMMF2Function.html">makeMMF2Function</a></td>
+<td>MMF2 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeMMF3Function.html">makeMMF3Function</a></td>
+<td>MMF3 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeMMF4Function.html">makeMMF4Function</a></td>
+<td>MMF4 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeMMF5Function.html">makeMMF5Function</a></td>
+<td>MMF5 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeMMF6Function.html">makeMMF6Function</a></td>
+<td>MMF6 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeMMF7Function.html">makeMMF7Function</a></td>
+<td>MMF7 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeMMF8Function.html">makeMMF8Function</a></td>
+<td>MMF8 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeMMF9Function.html">makeMMF9Function</a></td>
+<td>MMF9 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeMNKFunction.html">makeMNKFunction</a></td>
+<td>Generators for (r)MNK-landscapes</td></tr>
+<tr><td style="width: 25%;"><a href="makeModifiedRastriginFunction.html">makeModifiedRastriginFunction</a></td>
+<td>Rastrigin Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeMOP1Function.html">makeMOP1Function</a></td>
+<td>MOP1 function generator</td></tr>
+<tr><td style="width: 25%;"><a href="makeMOP2Function.html">makeMOP2Function</a></td>
+<td>MOP2 function generator</td></tr>
+<tr><td style="width: 25%;"><a href="makeMOP3Function.html">makeMOP3Function</a></td>
+<td>MOP3 function generator</td></tr>
+<tr><td style="width: 25%;"><a href="makeMOP4Function.html">makeMOP4Function</a></td>
+<td>MOP4 function generator</td></tr>
+<tr><td style="width: 25%;"><a href="makeMOP5Function.html">makeMOP5Function</a></td>
+<td>MOP5 function generator</td></tr>
+<tr><td style="width: 25%;"><a href="makeMOP6Function.html">makeMOP6Function</a></td>
+<td>MOP6 function generator</td></tr>
+<tr><td style="width: 25%;"><a href="makeMOP7Function.html">makeMOP7Function</a></td>
+<td>MOP7 function generator</td></tr>
+<tr><td style="width: 25%;"><a href="makeMPM2Function.html">makeMPM2Function</a></td>
+<td>Generator for function with multiple peaks following the multiple peaks model 2</td></tr>
+<tr><td style="width: 25%;"><a href="makeMultiObjectiveFunction.html">makeMultiObjectiveFunction</a></td>
+<td>Generator for multi-objective target functions</td></tr>
+<tr><td style="width: 25%;"><a href="makeNKFunction.html">makeNKFunction</a></td>
+<td>Generator for NK-landscapes</td></tr>
+<tr><td style="width: 25%;"><a href="makeObjectiveFunction.html">makeObjectiveFunction</a></td>
+<td>Internal generator for function of smoof type</td></tr>
+<tr><td style="width: 25%;"><a href="makeOmniTestFunction.html">makeOmniTestFunction</a></td>
+<td>MMF13 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makePeriodicFunction.html">makePeriodicFunction</a></td>
+<td>Periodic Function</td></tr>
+<tr><td style="width: 25%;"><a href="makePowellSumFunction.html">makePowellSumFunction</a></td>
+<td>Powell-Sum Function</td></tr>
+<tr><td style="width: 25%;"><a href="makePriceN1Function.html">makePriceN1Function</a></td>
+<td>Price Function N. 1</td></tr>
+<tr><td style="width: 25%;"><a href="makePriceN2Function.html">makePriceN2Function</a></td>
+<td>Price Function N. 2</td></tr>
+<tr><td style="width: 25%;"><a href="makePriceN4Function.html">makePriceN4Function</a></td>
+<td>Price Function N. 4</td></tr>
+<tr><td style="width: 25%;"><a href="makeRastriginFunction.html">makeRastriginFunction</a></td>
+<td>Rastrigin Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeMNKFunction.html">makeRMNKFunction</a></td>
+<td>Generators for (r)MNK-landscapes</td></tr>
+<tr><td style="width: 25%;"><a href="makeRosenbrockFunction.html">makeRosenbrockFunction</a></td>
+<td>Rosenbrock Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeSchafferN2Function.html">makeSchafferN2Function</a></td>
+<td>Modified Schaffer Function N. 2</td></tr>
+<tr><td style="width: 25%;"><a href="makeSchafferN4Function.html">makeSchafferN4Function</a></td>
+<td>Schaffer Function N. 4</td></tr>
+<tr><td style="width: 25%;"><a href="makeSchwefelFunction.html">makeSchwefelFunction</a></td>
+<td>Schwefel function</td></tr>
+<tr><td style="width: 25%;"><a href="makeShekelFunction.html">makeShekelFunction</a></td>
+<td>Shekel functions</td></tr>
+<tr><td style="width: 25%;"><a href="makeShubertFunction.html">makeShubertFunction</a></td>
+<td>Shubert Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeSingleObjectiveFunction.html">makeSingleObjectiveFunction</a></td>
+<td>Generator for single-objective target functions</td></tr>
+<tr><td style="width: 25%;"><a href="makeSixHumpCamelFunction.html">makeSixHumpCamelFunction</a></td>
+<td>Three-Hump Camel Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeSphereFunction.html">makeSphereFunction</a></td>
+<td>Sphere Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeStyblinkskiTangFunction.html">makeStyblinkskiTangFunction</a></td>
+<td>Styblinkski-Tang function</td></tr>
+<tr><td style="width: 25%;"><a href="makeSumOfDifferentSquaresFunction.html">makeSumOfDifferentSquaresFunction</a></td>
+<td>Sum of Different Squares Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeSwiler2014Function.html">makeSwiler2014Function</a></td>
+<td>Swiler2014 function</td></tr>
+<tr><td style="width: 25%;"><a href="makeSYMPARTrotatedFunction.html">makeSYMPARTrotatedFunction</a></td>
+<td>SYM-PART Rotated Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeSYMPARTsimpleFunction.html">makeSYMPARTsimpleFunction</a></td>
+<td>SYM-PART Simple Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeThreeHumpCamelFunction.html">makeThreeHumpCamelFunction</a></td>
+<td>Three-Hump Camel Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeTrecanniFunction.html">makeTrecanniFunction</a></td>
+<td>Trecanni Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeUFFunction.html">makeUFFunction</a></td>
+<td>Generator for the functions UF1, ..., UF10 of the CEC 2009</td></tr>
+<tr><td style="width: 25%;"><a href="makeViennetFunction.html">makeViennetFunction</a></td>
+<td>Viennet function generator</td></tr>
+<tr><td style="width: 25%;"><a href="makeWFG1Function.html">makeWFG1Function</a></td>
+<td>WFG1 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeWFG2Function.html">makeWFG2Function</a></td>
+<td>WFG2 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeWFG3Function.html">makeWFG3Function</a></td>
+<td>WFG3 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeWFG4Function.html">makeWFG4Function</a></td>
+<td>WFG4 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeWFG5Function.html">makeWFG5Function</a></td>
+<td>WFG5 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeWFG6Function.html">makeWFG6Function</a></td>
+<td>WFG6 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeWFG7Function.html">makeWFG7Function</a></td>
+<td>WFG7 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeWFG8Function.html">makeWFG8Function</a></td>
+<td>WFG8 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeWFG9Function.html">makeWFG9Function</a></td>
+<td>WFG9 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeZDT1Function.html">makeZDT1Function</a></td>
+<td>ZDT1 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeZDT2Function.html">makeZDT2Function</a></td>
+<td>ZDT2 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeZDT3Function.html">makeZDT3Function</a></td>
+<td>ZDT3 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeZDT4Function.html">makeZDT4Function</a></td>
+<td>ZDT4 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeZDT6Function.html">makeZDT6Function</a></td>
+<td>ZDT6 Function</td></tr>
+<tr><td style="width: 25%;"><a href="makeZettlFunction.html">makeZettlFunction</a></td>
+<td>Zettl Function</td></tr>
+<tr><td style="width: 25%;"><a href="mnof.html">mnof</a></td>
+<td>Helper function to create a numeric multi-objective optimization test function</td></tr>
+</table>
+
+<h2><a id="P">-- P --</a></h2>
+
+<table style="width: 100%;">
+<tr><td style="width: 25%;"><a href="plot.smoof_function.html">plot.smoof_function</a></td>
+<td>Generate ggplot2 object</td></tr>
+<tr><td style="width: 25%;"><a href="plot1DNumeric.html">plot1DNumeric</a></td>
+<td>Plot an one-dimensional function</td></tr>
+<tr><td style="width: 25%;"><a href="plot2DNumeric.html">plot2DNumeric</a></td>
+<td>Plot a two-dimensional numeric function</td></tr>
+<tr><td style="width: 25%;"><a href="plot3D.html">plot3D</a></td>
+<td>Surface plot of two-dimensional test function</td></tr>
+</table>
+
+<h2><a id="R">-- R --</a></h2>
+
+<table style="width: 100%;">
+<tr><td style="width: 25%;"><a href="resetEvaluationCounter.html">resetEvaluationCounter</a></td>
+<td>Reset evaluation counter</td></tr>
+</table>
+
+<h2><a id="S">-- S --</a></h2>
+
+<table style="width: 100%;">
+<tr><td style="width: 25%;"><a href="shouldBeMinimized.html">shouldBeMinimized</a></td>
+<td>Check if function should be minimized</td></tr>
+<tr><td style="width: 25%;"><a href="smoof_function.html">smoof_function</a></td>
+<td>Smoof function</td></tr>
+<tr><td style="width: 25%;"><a href="smoof_function.html">smoof_multi_objective_function</a></td>
+<td>Smoof function</td></tr>
+<tr><td style="width: 25%;"><a href="smoof_function.html">smoof_single_objective_function</a></td>
+<td>Smoof function</td></tr>
+<tr><td style="width: 25%;"><a href="snof.html">snof</a></td>
+<td>Helper function to create numeric single-objective optimization test function</td></tr>
+</table>
+
+<h2><a id="V">-- V --</a></h2>
+
+<table style="width: 100%;">
+<tr><td style="width: 25%;"><a href="violatesConstraints.html">violatesConstraints</a></td>
+<td>Checks whether constraints are violated</td></tr>
+<tr><td style="width: 25%;"><a href="visualizeParetoOptimalFront.html">visualizeParetoOptimalFront</a></td>
+<td>Pareto-optimal front visualization</td></tr>
+</table>
+</div></body></html>

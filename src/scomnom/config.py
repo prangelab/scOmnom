@@ -838,16 +838,22 @@ class MarkersAndDEConfig(BaseModel):
     module_score_max_umaps: int = 12
 
     # ------------------------------------------------------------------
-    # Cell-cell communication (LIANA)
+    # Cell-cell communication
     # ------------------------------------------------------------------
     ccc_backend: Optional[str] = None
     ccc_condition_key: Optional[str] = None
     ccc_condition_keys: Tuple[str, ...] = ()
     ccc_condition_values: Tuple[str, ...] = ()
     ccc_compare_levels: Tuple[str, ...] = ()
+    ccc_dataset_key: Optional[str] = None
+    ccc_source_levels: Tuple[str, ...] = ()
+    ccc_target_levels: Tuple[str, ...] = ()
+    ccc_signal_scope: str = "all"
     liana_resource: str = "consensus"
     liana_methods: Tuple[str, ...] = ("rank_aggregate",)
     liana_expr_prop: float = 0.1
+    liana_input_mode: str = "counts"
+    liana_lognorm_target_sum: float = 1e4
     liana_use_raw: bool = False
     liana_layer: Optional[str] = None
     liana_n_perms: Optional[int] = 1000
@@ -855,6 +861,52 @@ class MarkersAndDEConfig(BaseModel):
     liana_return_all_lrs: bool = False
     liana_top_n: int = 250
     liana_plot_top_n: int = 60
+    liana_candidate_events: Optional[str] = None
+    liana_pairing_key: Optional[str] = None
+    liana_source_filter: Tuple[str, ...] = ()
+    liana_target_filter: Tuple[str, ...] = ()
+    liana_ligand_filter: Tuple[str, ...] = ()
+    liana_receptor_filter: Tuple[str, ...] = ()
+    liana_route_family_filter: Tuple[str, ...] = ()
+    liana_max_edges: int = 200
+    liana_min_sender_cells: int = 5
+    liana_min_receiver_cells: int = 5
+    liana_min_scored_donors_per_group: int = 3
+    nichenet_receiver_cluster: Optional[str] = None
+    nichenet_sender_clusters: Tuple[str, ...] = ()
+    nichenet_gene_list_file: Optional[str] = None
+    nichenet_expression_pct: float = 0.10
+    nichenet_input_mode: str = "counts"
+    nichenet_lognorm_target_sum: float = 1e4
+    nichenet_top_n_ligands: int = 30
+    nichenet_top_n_targets: int = 200
+    nichenet_min_logfc: float = 0.25
+    nichenet_padj_threshold: float = 0.05
+    nichenet_organism: str = "human"
+    nichenet_install_missing_r_deps: bool = False
+    mebocost_organism: str = "human"
+    mebocost_input_mode: str = "counts"
+    mebocost_lognorm_target_sum: float = 1e4
+    mebocost_n_shuffle: int = 1000
+    mebocost_seed: int = 42
+    mebocost_min_cell_number: int = 10
+    mebocost_pval_cutoff: float = 0.05
+    mebocost_plot_top_n: int = 40
+    mebocost_install_missing_python_deps: bool = False
+    mebocost_candidate_events: Optional[str] = None
+    mebocost_pairing_key: Optional[str] = None
+    mebocost_source_filter: Tuple[str, ...] = ()
+    mebocost_target_filter: Tuple[str, ...] = ()
+    mebocost_metabolite_filter: Tuple[str, ...] = ()
+    mebocost_sensor_filter: Tuple[str, ...] = ()
+    mebocost_superclass_filter: Tuple[str, ...] = ()
+    mebocost_class_filter: Tuple[str, ...] = ()
+    mebocost_subclass_filter: Tuple[str, ...] = ()
+    mebocost_max_events: int = 200
+    mebocost_score_method: str = "mebocost-metabolite-sensor"
+    mebocost_min_sender_cells: int = 5
+    mebocost_min_receiver_cells: int = 5
+    mebocost_min_scored_donors_per_group: int = 3
 
     # ------------------------------------------------------------------
     # Optional contrast-conditional mode

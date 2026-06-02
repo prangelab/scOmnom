@@ -2,11 +2,20 @@
 from __future__ import annotations
 
 import logging
+import importlib
+import inspect
+import json
+import os
+import configparser
 import re
+import sys
 import threading
 import time
 import traceback
 import gc
+import shutil
+import subprocess
+import tempfile
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
@@ -17,6 +26,8 @@ from typing import Any, Mapping, Optional, Sequence
 import anndata as ad
 import numpy as np
 import pandas as pd
+from scipy import sparse as sp
+from scipy import stats as sstats
 
 from scomnom import __version__
 from . import io_utils, plot_utils, reporting
@@ -59,6 +70,24 @@ _LIANA_DEFAULT_AGGREGATE_METHODS = ("cellphonedb", "natmi", "sca", "logfc")
 _CELLCHATDB_INTERACTION_ANNOTATIONS = (
     Path(__file__).resolve().parent / "resources" / "cellchatdb_interaction_annotations.tsv"
 )
+_NICHENET_R_HELPER = (
+    Path(__file__).resolve().parent / "resources" / "run_nichenet_sender_focused.R"
+)
+_MEBOCOST_GIT_SPEC = "git+https://github.com/kaifuchenlab/MEBOCOST.git"
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_NICHENET_R_LIB_DIR = (
+    Path.home() / "Library" / "Caches" / "scOmnom" / "r-libs" / "nichenet"
+    if sys.platform == "darwin"
+    else Path.home() / ".cache" / "scOmnom" / "r-libs" / "nichenet"
+)
+_NICHENET_R_BOOTSTRAP_CRAN_PACKAGES = ("DiceKriging", "emoa", "fdrtool", "mlrMBO")
+_MEBOCOST_CACHE_ROOT = (
+    Path.home() / "Library" / "Caches" / "scOmnom" / "mebocost"
+    if sys.platform == "darwin"
+    else Path.home() / ".cache" / "scOmnom" / "mebocost"
+)
+_MEBOCOST_RESOURCE_REPO = _MEBOCOST_CACHE_ROOT / "MEBOCOST"
+_MEBOCOST_RESOURCE_CONFIG = _MEBOCOST_CACHE_ROOT / "mebocost.conf"
 
 # -----------------------------------------------------------------------------
 # Internal policy guard
@@ -2680,6 +2709,17 @@ def _lookup_cellchat_route_family(ligand: object, receptor: object) -> tuple[str
     return _load_cellchatdb_pathway_lookup().get((ligand_key, receptor_key))
 
 
+def _lookup_cellchat_route_info(ligand: object, receptor: object) -> dict[str, str]:
+    hit = _lookup_cellchat_route_family(ligand, receptor)
+    if hit is None:
+        return {"pathway_name": "", "annotation": ""}
+    pathway_name, annotation = hit
+    return {
+        "pathway_name": str(pathway_name or ""),
+        "annotation": str(annotation or ""),
+    }
+
+
 def _liana_route_family_heuristic(ligand: object, receptor: object) -> str:
     ligand = str(ligand or "").strip()
     receptor = str(receptor or "").strip()
@@ -2755,6 +2795,11 @@ def _prepare_liana_family_plot_df(df: pd.DataFrame, *, display_map: Mapping[str,
     if "receptor_complex" in df.columns:
         out["receptor_family"] = df["receptor_complex"].astype(str).map(_liana_signal_family)
     if {"ligand_complex", "receptor_complex"}.issubset(df.columns):
+        route_info = [
+            _lookup_cellchat_route_info(lig, rec)
+            for lig, rec in zip(df["ligand_complex"], df["receptor_complex"])
+        ]
+        out["route_annotation"] = [x.get("annotation", "") for x in route_info]
         out["route_family"] = [
             _liana_route_family(lig, rec)
             for lig, rec in zip(df["ligand_complex"], df["receptor_complex"])
@@ -2782,6 +2827,1966 @@ def _summarize_liana_route_families(df: pd.DataFrame) -> pd.DataFrame:
         .reset_index(drop=True)
     )
     return out
+
+
+def _resolve_liana_cluster_dataset_levels(
+    adata: ad.AnnData,
+    *,
+    cluster_key: str,
+    dataset_key: str,
+) -> dict[str, str]:
+    if str(cluster_key) not in adata.obs or str(dataset_key) not in adata.obs:
+        raise RuntimeError(
+            f"ccc liana: cluster_key={cluster_key!r} or dataset_key={dataset_key!r} not found in adata.obs"
+        )
+    tab = pd.crosstab(
+        adata.obs[str(cluster_key)].astype(str),
+        adata.obs[str(dataset_key)].astype(str),
+        dropna=False,
+    )
+    out: dict[str, str] = {}
+    for cluster in tab.index.astype(str):
+        counts = tab.loc[cluster]
+        counts = counts[counts > 0]
+        if counts.empty:
+            continue
+        if len(counts.index) > 1:
+            LOGGER.warning(
+                "ccc liana: cluster %r spans multiple %s levels %s; using dominant level %r for cross-tissue filtering.",
+                str(cluster),
+                str(dataset_key),
+                list(counts.index.astype(str)),
+                str(counts.sort_values(ascending=False).index[0]),
+            )
+        out[str(cluster)] = str(counts.sort_values(ascending=False).index[0])
+    return out
+
+
+def _filter_liana_results_cross_tissue(
+    df: pd.DataFrame,
+    *,
+    cluster_dataset_map: Mapping[str, str],
+    source_levels: Sequence[str],
+    target_levels: Sequence[str],
+    signal_scope: str,
+) -> pd.DataFrame:
+    if df is None or getattr(df, "empty", True):
+        return pd.DataFrame() if df is None else df.copy()
+    if not {"source", "target"}.issubset(df.columns):
+        return df.copy()
+
+    out = df.copy()
+    out["source_dataset_level"] = out["source"].astype(str).map(lambda x: cluster_dataset_map.get(str(x), ""))
+    out["target_dataset_level"] = out["target"].astype(str).map(lambda x: cluster_dataset_map.get(str(x), ""))
+    source_allowed = {str(x) for x in source_levels if str(x)}
+    target_allowed = {str(x) for x in target_levels if str(x)}
+    mask = (
+        out["source_dataset_level"].astype(str).isin(source_allowed)
+        & out["target_dataset_level"].astype(str).isin(target_allowed)
+    )
+    out = out.loc[mask].copy()
+    if out.empty:
+        return out
+
+    if str(signal_scope).strip().lower() == "secreted" and {"ligand_complex", "receptor_complex"}.issubset(out.columns):
+        route_info = [
+            _lookup_cellchat_route_info(lig, rec)
+            for lig, rec in zip(out["ligand_complex"], out["receptor_complex"])
+        ]
+        out["route_annotation"] = [x.get("annotation", "") for x in route_info]
+        out = out[out["route_annotation"].astype(str) == "Secreted Signaling"].copy()
+    return out.reset_index(drop=True)
+
+
+def _resolve_cluster_request(requested: str, display_map: Mapping[str, str]) -> str:
+    raw = str(requested).strip()
+    if not raw:
+        raise RuntimeError("Empty cluster label request.")
+    if raw in display_map:
+        return raw
+    requested_token = plot_utils._extract_cnn_token(raw)
+    for cluster_id, label in display_map.items():
+        label_str = str(label)
+        if raw == label_str:
+            return str(cluster_id)
+        label_token = plot_utils._extract_cnn_token(label_str)
+        if requested_token and requested_token == label_token:
+            return str(cluster_id)
+    raise RuntimeError(f"Requested cluster {requested!r} could not be matched to the active round labels.")
+
+
+def _get_matrix_slice(
+    adata: ad.AnnData,
+    *,
+    layer: Optional[str],
+    use_raw: bool,
+    mask: np.ndarray,
+):
+    if layer:
+        matrix = adata.layers[str(layer)]
+    elif use_raw:
+        if adata.raw is None:
+            raise RuntimeError("Requested use_raw=True but adata.raw is not initialized.")
+        matrix = adata.raw.X
+    else:
+        matrix = adata.X
+    return matrix[mask]
+
+
+def _compute_expressed_genes(
+    adata: ad.AnnData,
+    *,
+    mask: np.ndarray,
+    layer: Optional[str],
+    use_raw: bool,
+    min_fraction: float,
+) -> list[str]:
+    if mask.dtype != bool:
+        mask = mask.astype(bool)
+    if int(mask.sum()) == 0:
+        return []
+    matrix = _get_matrix_slice(adata, layer=layer, use_raw=use_raw, mask=mask)
+    if sp.issparse(matrix):
+        detected = np.asarray((matrix > 0).sum(axis=0)).ravel()
+    else:
+        detected = np.asarray(matrix > 0).sum(axis=0)
+    frac = detected / float(mask.sum())
+    return [str(g) for g, keep in zip(adata.var_names.astype(str), frac >= float(min_fraction)) if bool(keep)]
+
+
+def _load_gene_list_file(path: Path) -> list[str]:
+    genes: list[str] = []
+    for line in Path(path).read_text().splitlines():
+        gene = str(line).strip()
+        if gene:
+            genes.append(gene)
+    return sorted(dict.fromkeys(genes))
+
+
+def _extract_receiver_de_geneset(
+    adata_receiver: ad.AnnData,
+    *,
+    compare_key: str,
+    condition_oi: str,
+    condition_reference: str,
+    min_logfc: float,
+    padj_threshold: float,
+) -> tuple[list[str], list[str], pd.DataFrame]:
+    import scanpy as sc
+
+    if str(compare_key) not in adata_receiver.obs:
+        raise RuntimeError(f"NicheNet compare_key={compare_key!r} not found in receiver obs.")
+    work = adata_receiver.copy()
+    work.obs[str(compare_key)] = _normalize_levels(work.obs[str(compare_key)]).astype(str)
+    sc.tl.rank_genes_groups(
+        work,
+        groupby=str(compare_key),
+        groups=[str(condition_oi)],
+        reference=str(condition_reference),
+        method="wilcoxon",
+        use_raw=False,
+        pts=False,
+    )
+    de_df = sc.get.rank_genes_groups_df(work, group=str(condition_oi))
+    if "names" in de_df.columns:
+        de_df = de_df.rename(columns={"names": "gene"})
+    de_df["gene"] = de_df["gene"].astype(str)
+    bg_genes = sorted(dict.fromkeys(work.var_names.astype(str).tolist()))
+    keep = pd.Series(True, index=de_df.index)
+    if "logfoldchanges" in de_df.columns:
+        keep &= de_df["logfoldchanges"].fillna(-np.inf) >= float(min_logfc)
+    if "pvals_adj" in de_df.columns:
+        keep &= de_df["pvals_adj"].fillna(np.inf) <= float(padj_threshold)
+    geneset = sorted(dict.fromkeys(de_df.loc[keep, "gene"].astype(str).tolist()))
+    return geneset, bg_genes, de_df
+
+
+def _nichenet_condition_spec_token(raw_spec: str) -> str:
+    token = str(raw_spec).strip()
+    token = token.replace("@", "_at_").replace(":", "_and_").replace("^", "_x_")
+    return _safe_combo_token(token)
+
+
+def _build_nichenet_condition_run_specs(adata: ad.AnnData, cfg) -> list[dict[str, Any]]:
+    cond_keys = [str(x).strip() for x in (getattr(cfg, "ccc_condition_keys", ()) or ()) if str(x).strip()]
+    if not cond_keys:
+        ck = getattr(cfg, "ccc_condition_key", None)
+        if ck:
+            cond_keys = [str(ck).strip()]
+    condition_values = tuple(str(x) for x in (getattr(cfg, "ccc_condition_values", ()) or ()) if str(x))
+    compare_levels = tuple(str(x) for x in (getattr(cfg, "ccc_compare_levels", ()) or ()) if str(x))
+    gene_list_file = getattr(cfg, "nichenet_gene_list_file", None)
+
+    if gene_list_file and not cond_keys:
+        return [
+            {
+                "run_id": "global",
+                "run_label": "global",
+                "adata": adata,
+                "compare_key": None,
+                "condition_oi": None,
+                "condition_reference": None,
+                "condition_spec": None,
+                "context_key": None,
+                "context_value": None,
+                "tables_rel": Path("."),
+                "figs_rel": Path("."),
+            }
+        ]
+
+    if not cond_keys:
+        raise RuntimeError("NicheNet requires either a gene list file or at least one condition spec.")
+    if len(compare_levels) != 2:
+        raise RuntimeError("NicheNet receiver-DE mode requires exactly two compare levels.")
+
+    run_specs: list[dict[str, Any]] = []
+    condition_oi, condition_reference = str(compare_levels[0]), str(compare_levels[1])
+    for raw_spec in cond_keys:
+        spec_token = _nichenet_condition_spec_token(raw_spec)
+        spec_root = Path(f"condition__{spec_token}")
+        if "@" in raw_spec:
+            parts = [p.strip() for p in raw_spec.split("@") if p.strip()]
+            if len(parts) != 2:
+                raise RuntimeError(f"ccc nichenet: invalid A@B condition specification {raw_spec!r}.")
+            a_key = _resolve_condition_key(adata, parts[0])
+            b_key = _resolve_condition_key(adata, parts[1])
+            b_series = _normalize_levels(adata.obs[b_key])
+            wanted_b = sorted(set(condition_values) if condition_values else set(b_series.unique().tolist()))
+            for b_level in wanted_b:
+                mask_b = b_series.astype(str).to_numpy() == str(b_level)
+                if not np.any(mask_b):
+                    continue
+                adata_b = adata[mask_b].copy()
+                a_levels = set(_normalize_levels(adata_b.obs[a_key]).astype(str).unique().tolist())
+                if str(condition_oi) not in a_levels or str(condition_reference) not in a_levels:
+                    LOGGER.warning(
+                        "ccc nichenet: skipping %s=%r because compare levels %r and %r are not both present.",
+                        str(b_key),
+                        str(b_level),
+                        str(condition_oi),
+                        str(condition_reference),
+                    )
+                    continue
+                context_token = f"{_safe_combo_token(b_key)}={_safe_combo_token(b_level)}"
+                run_specs.append(
+                    {
+                        "run_id": f"{raw_spec}::{context_token}::{condition_oi}_vs_{condition_reference}",
+                        "run_label": f"{condition_oi}_vs_{condition_reference}",
+                        "adata": adata_b,
+                        "compare_key": str(a_key),
+                        "condition_oi": str(condition_oi),
+                        "condition_reference": str(condition_reference),
+                        "condition_spec": raw_spec,
+                        "context_key": str(b_key),
+                        "context_value": str(b_level),
+                        "tables_rel": spec_root / context_token,
+                        "figs_rel": spec_root / context_token,
+                    }
+                )
+        else:
+            compare_key = _resolve_condition_key(adata, raw_spec)
+            levels = set(_normalize_levels(adata.obs[compare_key]).astype(str).unique().tolist())
+            if str(condition_oi) not in levels or str(condition_reference) not in levels:
+                LOGGER.warning(
+                    "ccc nichenet: skipping spec=%r because compare levels %r and %r are not both present.",
+                    raw_spec,
+                    str(condition_oi),
+                    str(condition_reference),
+                )
+                continue
+            run_specs.append(
+                {
+                    "run_id": f"{raw_spec}::{condition_oi}_vs_{condition_reference}",
+                    "run_label": f"{condition_oi}_vs_{condition_reference}",
+                    "adata": adata,
+                    "compare_key": str(compare_key),
+                    "condition_oi": str(condition_oi),
+                    "condition_reference": str(condition_reference),
+                    "condition_spec": raw_spec,
+                    "context_key": None,
+                    "context_value": None,
+                    "tables_rel": spec_root,
+                    "figs_rel": spec_root,
+                }
+            )
+    return run_specs
+
+
+def _run_nichenet_sender_focused(
+    *,
+    sender_expressed_genes: Sequence[str],
+    receiver_expressed_genes: Sequence[str],
+    geneset_oi: Sequence[str],
+    background_genes: Sequence[str],
+    top_n_ligands: int,
+    top_n_targets: int,
+    organism: str,
+    signal_scope: str,
+    r_env: Optional[Mapping[str, str]] = None,
+) -> dict[str, pd.DataFrame]:
+    rscript = _resolve_rscript()
+    if not rscript:
+        raise RuntimeError("NicheNet requires `Rscript` on PATH.")
+    if not _NICHENET_R_HELPER.exists():
+        raise RuntimeError(f"NicheNet helper script not found at {_NICHENET_R_HELPER}.")
+
+    with tempfile.TemporaryDirectory(prefix="scomnom_nichenet_") as tmpdir:
+        tmp = Path(tmpdir)
+        sender_path = tmp / "sender_expressed_genes.txt"
+        receiver_path = tmp / "receiver_expressed_genes.txt"
+        geneset_path = tmp / "geneset_oi.txt"
+        bg_path = tmp / "background_genes.txt"
+        out_dir = tmp / "out"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        sender_path.write_text("\n".join(str(x) for x in sender_expressed_genes))
+        receiver_path.write_text("\n".join(str(x) for x in receiver_expressed_genes))
+        geneset_path.write_text("\n".join(str(x) for x in geneset_oi))
+        bg_path.write_text("\n".join(str(x) for x in background_genes))
+        cfg_path = tmp / "config.json"
+        cfg_path.write_text(
+            json.dumps(
+                {
+                    "sender_expressed_genes_file": str(sender_path),
+                    "receiver_expressed_genes_file": str(receiver_path),
+                    "geneset_file": str(geneset_path),
+                    "background_genes_file": str(bg_path),
+                    "output_dir": str(out_dir),
+                    "top_n_ligands": int(top_n_ligands),
+                    "top_n_targets": int(top_n_targets),
+                    "organism": str(organism),
+                    "signal_scope": str(signal_scope),
+                }
+            )
+        )
+        res = subprocess.run(
+            [str(rscript), str(_NICHENET_R_HELPER), str(cfg_path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=dict(r_env) if r_env is not None else None,
+        )
+        if res.returncode != 0:
+            stderr = str(res.stderr or "").strip()
+            stdout = str(res.stdout or "").strip()
+            raise RuntimeError(
+                "NicheNet R helper failed."
+                + (f"\nSTDERR:\n{stderr}" if stderr else "")
+                + (f"\nSTDOUT:\n{stdout}" if stdout else "")
+            )
+        outputs = {
+            "ligand_activity": out_dir / "ligand_activity.tsv",
+            "ligand_target_links": out_dir / "ligand_target_links.tsv",
+            "ligand_receptor_links": out_dir / "ligand_receptor_links.tsv",
+            "potential_ligands": out_dir / "potential_ligands.tsv",
+        }
+        result: dict[str, pd.DataFrame] = {}
+        for key, path in outputs.items():
+            result[key] = pd.read_csv(path, sep="\t") if path.exists() else pd.DataFrame()
+        return result
+
+
+def _import_mebocost_api(*, install_missing: bool) -> Any:
+    os.environ.setdefault("NUMBA_CACHE_DIR", str(Path(tempfile.gettempdir()) / "numba_cache"))
+
+    def _resolve_loaded_api() -> Any:
+        candidates = [
+            ("mebocost.mebocost", None),
+            ("mebocost", None),
+            ("mebocost", "mebocost"),
+            ("MEBOCOST.mebocost", None),
+            ("MEBOCOST", None),
+            ("MEBOCOST", "mebocost"),
+        ]
+        errors: list[str] = []
+        for module_name, attr_name in candidates:
+            try:
+                mod = importlib.import_module(module_name)
+            except Exception as e:
+                errors.append(f"{module_name}: {type(e).__name__}: {e}")
+                continue
+            api = getattr(mod, attr_name, None) if attr_name else mod
+            if api is not None and hasattr(api, "create_obj"):
+                return api
+        return errors
+
+    api_or_errors = _resolve_loaded_api()
+    if not isinstance(api_or_errors, list):
+        return api_or_errors
+    import_errors = api_or_errors
+
+    api = None
+    if api is not None:
+        return api
+
+    install_hint = f"{sys.executable} -m pip install '{_MEBOCOST_GIT_SPEC}'"
+    if not install_missing:
+        raise RuntimeError(
+            "markers-and-de ccc mebocost requires the Python package `MEBOCOST`.\n"
+            "Install it into the active environment, or rerun with `--install-missing-python-deps`.\n"
+            f"Suggested install command:\n{install_hint}"
+            + (f"\nImport attempts:\n" + "\n".join(import_errors) if import_errors else "")
+        )
+
+    res = subprocess.run(
+        [sys.executable, "-m", "pip", "install", _MEBOCOST_GIT_SPEC],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if res.returncode != 0:
+        stderr = str(res.stderr or "").strip()
+        stdout = str(res.stdout or "").strip()
+        raise RuntimeError(
+            "Automatic MEBOCOST dependency installation failed.\n"
+            f"Suggested install command:\n{install_hint}"
+            + (f"\nSTDERR:\n{stderr}" if stderr else "")
+            + (f"\nSTDOUT:\n{stdout}" if stdout else "")
+        )
+
+    api_or_errors = _resolve_loaded_api()
+    if isinstance(api_or_errors, list):
+        raise RuntimeError(
+            "Automatic MEBOCOST dependency installation completed without a detectable MEBOCOST import.\n"
+            f"Suggested install command:\n{install_hint}"
+            + (f"\nImport attempts:\n" + "\n".join(api_or_errors) if api_or_errors else "")
+        )
+    api = api_or_errors
+    LOGGER.warning("Installed `MEBOCOST` into the active Python environment.")
+    return api
+
+
+def _mebocost_resource_file_map(repo_dir: Path) -> dict[str, Path]:
+    data_dir = repo_dir / "data"
+    human_dir = data_dir / "mebocost_db" / "human"
+    mouse_dir = data_dir / "mebocost_db" / "mouse"
+
+    def _resolve_sensor_file(base_dir: Path, patterns: Sequence[str]) -> Path:
+        matches: list[Path] = []
+        for pattern in patterns:
+            matches.extend(sorted(base_dir.glob(pattern)))
+        if matches:
+            return matches[-1]
+        fallback = base_dir / patterns[0]
+        return fallback
+
+    return {
+        "hmdb_info_path": data_dir / "mebocost_db" / "common" / "metabolite_annotation_HMDB_summary.tsv",
+        "scfea_info_path": data_dir / "scFEA" / "Human_M168_information.symbols.csv",
+        "compass_rxt_ann_path": data_dir / "Compass" / "rxn_md.csv",
+        "compass_met_ann_path": data_dir / "Compass" / "met_md.csv",
+        "human_met_enzyme_path": human_dir / "metabolite_associated_gene_reaction_HMDB_summary.tsv",
+        "human_met_sensor_path": _resolve_sensor_file(
+            human_dir,
+            ("human_met_sensor_update_*.tsv", "met_sen_*.tsv"),
+        ),
+        "mouse_met_enzyme_path": mouse_dir / "metabolite_associated_gene_reaction_HMDB_summary_mouse.tsv",
+        "mouse_met_sensor_path": _resolve_sensor_file(
+            mouse_dir,
+            ("mouse_met_sensor_update_*.tsv", "mouse_met_sen_*.tsv"),
+        ),
+    }
+
+
+def _write_mebocost_resource_config(repo_dir: Path, config_path: Path) -> Path:
+    files = _mebocost_resource_file_map(repo_dir)
+    missing = [str(path) for path in files.values() if not path.exists()]
+    if missing:
+        raise RuntimeError(
+            "MEBOCOST resource bootstrap is incomplete; required files are missing.\n"
+            + "\n".join(missing)
+        )
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_text = "\n".join(
+        [
+            "[common]",
+            f"hmdb_info_path = {files['hmdb_info_path']}",
+            f"scfea_info_path = {files['scfea_info_path']}",
+            f"compass_rxt_ann_path = {files['compass_rxt_ann_path']}",
+            f"compass_met_ann_path = {files['compass_met_ann_path']}",
+            "",
+            "[human]",
+            f"met_enzyme_path = {files['human_met_enzyme_path']}",
+            f"met_sensor_path = {files['human_met_sensor_path']}",
+            "",
+            "[mouse]",
+            f"met_enzyme_path = {files['mouse_met_enzyme_path']}",
+            f"met_sensor_path = {files['mouse_met_sensor_path']}",
+            "",
+        ]
+    )
+    config_path.write_text(config_text, encoding="utf-8")
+    return config_path
+
+
+def _read_mebocost_resource_config(config_path: Path | str) -> dict[str, dict[str, str]]:
+    parser = configparser.ConfigParser()
+    parser.read(str(config_path))
+    out: dict[str, dict[str, str]] = {}
+    for section in parser.sections():
+        out[str(section)] = {str(k): str(v) for k, v in parser.items(section)}
+    return out
+
+
+@lru_cache(maxsize=4)
+def _load_mebocost_annotation_tables(config_path: str, species: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    config = _read_mebocost_resource_config(config_path)
+    common = config.get("common", {})
+    species_key = str(species).strip().lower()
+    species_cfg = config.get(species_key, {})
+    hmdb_path = common.get("hmdb_info_path", "")
+    sensor_path = species_cfg.get("met_sensor_path", "")
+    hmdb = pd.read_csv(hmdb_path, sep="\t") if hmdb_path else pd.DataFrame()
+    sensor = pd.read_csv(sensor_path, sep="\t") if sensor_path else pd.DataFrame()
+    return hmdb, sensor
+
+
+def _ensure_mebocost_resource_config(*, install_missing: bool) -> Path:
+    repo_dir = _MEBOCOST_RESOURCE_REPO
+    config_path = _MEBOCOST_RESOURCE_CONFIG
+    file_map = _mebocost_resource_file_map(repo_dir)
+    if config_path.exists() and all(path.exists() for path in file_map.values()):
+        return config_path
+
+    clone_hint = (
+        f"tmpdir=$(mktemp -d) && git clone --depth 1 https://github.com/kaifuchenlab/MEBOCOST.git "
+        f"\"$tmpdir/MEBOCOST\" && mkdir -p \"{_MEBOCOST_CACHE_ROOT}\" && "
+        f"rm -rf \"{repo_dir}\" && mv \"$tmpdir/MEBOCOST\" \"{repo_dir}\""
+    )
+    if not install_missing:
+        raise RuntimeError(
+            "markers-and-de ccc mebocost requires the upstream MEBOCOST resource database and config files.\n"
+            "Install them into the local cache by rerunning with `--install-missing-python-deps`, or bootstrap them manually.\n"
+            f"Suggested bootstrap command:\n{clone_hint}"
+        )
+
+    git_bin = shutil.which("git")
+    if not git_bin:
+        raise RuntimeError(
+            "Automatic MEBOCOST resource bootstrap failed because `git` is not available on PATH.\n"
+            f"Suggested bootstrap command:\n{clone_hint}"
+        )
+    _MEBOCOST_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+    if not repo_dir.exists():
+        tmp_root = Path(tempfile.mkdtemp(prefix="scomnom_mebocost_"))
+        clone_dir = tmp_root / "MEBOCOST"
+        try:
+            res = subprocess.run(
+                [git_bin, "clone", "--depth", "1", "https://github.com/kaifuchenlab/MEBOCOST.git", str(clone_dir)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if res.returncode != 0:
+                stderr = str(res.stderr or "").strip()
+                stdout = str(res.stdout or "").strip()
+                raise RuntimeError(
+                    "Automatic MEBOCOST resource bootstrap failed.\n"
+                    f"Suggested bootstrap command:\n{clone_hint}"
+                    + (f"\nSTDERR:\n{stderr}" if stderr else "")
+                    + (f"\nSTDOUT:\n{stdout}" if stdout else "")
+                )
+            shutil.move(str(clone_dir), str(repo_dir))
+        finally:
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
+    config_path = _write_mebocost_resource_config(repo_dir, config_path)
+    LOGGER.warning("Bootstrapped MEBOCOST resources into local cache: %s", str(repo_dir))
+    return config_path
+
+
+def _call_with_supported_kwargs(func, **kwargs):
+    try:
+        sig = inspect.signature(func)
+    except Exception:
+        return func(**kwargs)
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+        return func(**kwargs)
+    accepted = {k: v for k, v in kwargs.items() if k in sig.parameters}
+    return func(**accepted)
+
+
+def _standardize_mebocost_commu_table(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or getattr(df, "empty", True):
+        return pd.DataFrame()
+    out = df.copy()
+    rename_map: dict[str, str] = {}
+    candidates = {
+        "source": ("sender", "Sender", "cell_type_sender", "Cell_Type_Sender"),
+        "target": ("receiver", "Receiver", "cell_type_receiver", "Cell_Type_Receiver"),
+        "metabolite": ("metabolite", "Metabolite"),
+        "sensor": ("sensor", "Sensor", "receptor", "Receptor"),
+        "enzyme": ("enzyme", "Enzyme"),
+        "commu_score": ("commu_score", "Commu_Score", "score", "Score"),
+        "pval": ("pval", "Pvalue", "p_value", "fdr", "FDR", "permutation_test_fdr"),
+    }
+    for dest, options in candidates.items():
+        for option in options:
+            if option in out.columns:
+                rename_map[option] = dest
+                break
+    out = out.rename(columns=rename_map)
+    for col in ("source", "target", "metabolite", "sensor", "enzyme"):
+        if col in out.columns:
+            out[col] = out[col].astype(str)
+    for col in ("commu_score", "pval"):
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+    return out
+
+
+def _summarize_mebocost_source_target(commu_res: pd.DataFrame) -> pd.DataFrame:
+    if commu_res is None or getattr(commu_res, "empty", True):
+        return pd.DataFrame(columns=["source", "target", "n_events", "mean_score"])
+    if not {"source", "target"}.issubset(commu_res.columns):
+        return pd.DataFrame(columns=["source", "target", "n_events", "mean_score"])
+    work = commu_res.copy()
+    group = work.groupby(["source", "target"], observed=False)
+    out = group.size().rename("n_events").reset_index()
+    if "commu_score" in work.columns:
+        mean_score = (
+            group["commu_score"]
+            .mean()
+            .rename("mean_score")
+            .reset_index()
+        )
+        out = out.merge(mean_score, on=["source", "target"], how="left")
+    else:
+        out["mean_score"] = np.nan
+    out = out.sort_values(
+        ["n_events", "mean_score", "source", "target"],
+        ascending=[False, False, True, True],
+        kind="mergesort",
+    ).reset_index(drop=True)
+    return out
+
+
+def _prepare_mebocost_plot_df(
+    df: pd.DataFrame,
+    *,
+    display_map: Mapping[str, str],
+    valid_group_tokens: Optional[Sequence[str]] = None,
+) -> pd.DataFrame:
+    if df is None or getattr(df, "empty", True):
+        return pd.DataFrame() if df is None else df.copy()
+    out = df.copy()
+    valid_tokens = {str(x) for x in (valid_group_tokens or ()) if str(x)}
+
+    def _resolve_plot_group(value: object) -> str:
+        raw = str(value).strip()
+        if not raw:
+            return raw
+        if raw in valid_tokens:
+            return raw
+        raw_token = plot_utils._extract_cnn_token(raw)
+        if raw_token and raw_token in valid_tokens:
+            return raw_token
+        return _resolve_cluster_request(raw, display_map)
+
+    if "metabolite" in out.columns:
+        met_raw = out["metabolite"].astype(str)
+        met_name = (
+            out["Metabolite_Name"].astype(str)
+            if "Metabolite_Name" in out.columns
+            else pd.Series([""] * len(out), index=out.index, dtype=object)
+        )
+        out["metabolite_label"] = [
+            f"{name} [{raw}]" if name and name != "nan" and name != raw else raw
+            for raw, name in zip(met_raw, met_name)
+        ]
+    if "sensor" in out.columns:
+        sensor_raw = out["sensor"].astype(str)
+        sensor_name = (
+            out["sensor_protein_name"].astype(str)
+            if "sensor_protein_name" in out.columns
+            else pd.Series([""] * len(out), index=out.index, dtype=object)
+        )
+        out["sensor_label"] = [
+            f"{raw}"
+            if not name or name == "nan"
+            else f"{raw}"
+            for raw, name in zip(sensor_raw, sensor_name)
+        ]
+    for axis in ("source", "target"):
+        token_col = f"{axis}_token"
+        label_col = f"{axis}_label"
+        if token_col in out.columns:
+            tokens = out[token_col].map(_resolve_plot_group)
+        elif axis in out.columns:
+            tokens = out[axis].map(_resolve_plot_group)
+        else:
+            continue
+        out[token_col] = tokens.astype(str)
+        if axis in out.columns:
+            out[f"{axis}_id"] = out[axis].astype(str)
+        else:
+            out[f"{axis}_id"] = out[token_col].astype(str)
+        if label_col in out.columns:
+            labels = out[label_col].astype(str)
+            missing_mask = labels.str.strip().eq("") | labels.str.lower().eq("nan")
+            labels = labels.where(~missing_mask, out[token_col].map(lambda x: str(display_map.get(str(x), str(x)))))
+            out[label_col] = labels
+        else:
+            out[label_col] = out[token_col].map(lambda x: str(display_map.get(str(x), str(x))))
+    return out
+
+
+def _normalize_join_text(series: pd.Series) -> pd.Series:
+    return (
+        series.astype(str)
+        .str.strip()
+        .str.lower()
+        .str.replace(r"\s+", " ", regex=True)
+    )
+
+
+def _annotate_mebocost_commu_table(
+    df: pd.DataFrame,
+    *,
+    config_path: Path,
+    species: str,
+) -> pd.DataFrame:
+    if df is None or getattr(df, "empty", True):
+        return pd.DataFrame() if df is None else df.copy()
+    out = df.copy()
+    if "HMDB_ID" not in out.columns:
+        out["HMDB_ID"] = pd.Series([np.nan] * len(out), index=out.index, dtype=object)
+    hmdb_missing = out["HMDB_ID"].isna() | (out["HMDB_ID"].astype(str).str.strip() == "") | (out["HMDB_ID"].astype(str).str.lower() == "nan")
+    if "metabolite" in out.columns:
+        metabolite_as_id = out["metabolite"].astype(str).str.strip()
+        hmdb_like = metabolite_as_id.str.match(r"^HMDB\d+$", na=False)
+        out.loc[hmdb_missing & hmdb_like, "HMDB_ID"] = metabolite_as_id.loc[hmdb_missing & hmdb_like]
+    if "sensor" in out.columns and "sensor_gene" not in out.columns:
+        out["sensor_gene"] = out["sensor"].astype(str)
+    if "Annotation" in out.columns and "sensor_annotation" not in out.columns:
+        out["sensor_annotation"] = out["Annotation"].astype(str)
+    hmdb, sensor = _load_mebocost_annotation_tables(str(config_path), str(species))
+
+    if not hmdb.empty:
+        hmdb_keep = [
+            "HMDB_ID",
+            "metabolite",
+            "kingdom",
+            "super_class",
+            "class",
+            "sub_class",
+            "BioLocation_Summary",
+            "Subcellular",
+            "Kegg_ID",
+            "associated_gene",
+        ]
+        hmdb_sub = hmdb[[c for c in hmdb_keep if c in hmdb.columns]].copy()
+        if "HMDB_ID" in out.columns and "HMDB_ID" in hmdb_sub.columns:
+            out = out.merge(hmdb_sub.drop_duplicates(subset=["HMDB_ID"]), on="HMDB_ID", how="left")
+        elif "metabolite" in out.columns and "metabolite" in hmdb_sub.columns:
+            left = out.assign(_met_key=_normalize_join_text(out["metabolite"]))
+            right = hmdb_sub.assign(_met_key=_normalize_join_text(hmdb_sub["metabolite"]))
+            out = left.merge(
+                right.drop_duplicates(subset=["_met_key"]),
+                on="_met_key",
+                how="left",
+                suffixes=("", "_hmdb"),
+            ).drop(columns=["_met_key"])
+            if "metabolite_hmdb" in out.columns:
+                out = out.drop(columns=["metabolite_hmdb"])
+        if "metabolite_x" in out.columns:
+            out = out.rename(columns={"metabolite_x": "metabolite"})
+        if "metabolite_y" in out.columns:
+            out = out.drop(columns=["metabolite_y"])
+
+    if not sensor.empty:
+        sensor_keep = [
+            "HMDB_ID",
+            "standard_metName",
+            "Gene_name",
+            "Protein_name",
+            "Annotation",
+            "Evidence",
+        ]
+        sensor_sub = sensor[[c for c in sensor_keep if c in sensor.columns]].copy()
+        sensor_sub = sensor_sub.rename(
+            columns={
+                "Gene_name": "sensor_gene",
+                "Protein_name": "sensor_protein_name",
+                "Annotation": "sensor_annotation",
+                "Evidence": "sensor_evidence",
+                "standard_metName": "sensor_metabolite_name",
+            }
+        )
+        left = out.copy()
+        if "HMDB_ID" in left.columns and "HMDB_ID" in sensor_sub.columns:
+            left["_hmdb_key"] = left["HMDB_ID"].astype(str)
+            sensor_sub["_hmdb_key"] = sensor_sub["HMDB_ID"].astype(str)
+        else:
+            left["_hmdb_key"] = ""
+            sensor_sub["_hmdb_key"] = ""
+        left["_sensor_key"] = _normalize_join_text(left["sensor_gene"]) if "sensor_gene" in left.columns else ""
+        sensor_sub["_sensor_key"] = _normalize_join_text(sensor_sub["sensor_gene"])
+        if "metabolite" in left.columns:
+            left["_met_key"] = _normalize_join_text(left["metabolite"])
+        else:
+            left["_met_key"] = ""
+        sensor_sub["_met_key"] = _normalize_join_text(sensor_sub["sensor_metabolite_name"]) if "sensor_metabolite_name" in sensor_sub.columns else ""
+
+        primary = left.merge(
+            sensor_sub.drop_duplicates(subset=["_hmdb_key", "_sensor_key"]),
+            on=["_hmdb_key", "_sensor_key"],
+            how="left",
+            suffixes=("", "_sensordb"),
+        )
+        need_fallback = primary["sensor_annotation"].isna() if "sensor_annotation" in primary.columns else pd.Series(False, index=primary.index)
+        if need_fallback.any():
+            fallback = left.loc[need_fallback].merge(
+                sensor_sub.drop_duplicates(subset=["_met_key", "_sensor_key"]),
+                on=["_met_key", "_sensor_key"],
+                how="left",
+                suffixes=("", "_sensordb"),
+            )
+            for col in ("sensor_protein_name", "sensor_annotation", "sensor_evidence", "HMDB_ID_sensordb", "sensor_metabolite_name"):
+                if col in fallback.columns and col in primary.columns:
+                    primary.loc[need_fallback, col] = fallback[col].to_numpy()
+        out = primary.drop(columns=[c for c in ("_hmdb_key", "_sensor_key", "_met_key") if c in primary.columns])
+        if "sensor_annotation" in out.columns and "Annotation" in out.columns:
+            out["sensor_annotation"] = out["sensor_annotation"].where(out["sensor_annotation"].notna(), out["Annotation"])
+
+    return out
+
+
+def _summarize_mebocost_annotation(
+    commu_res: pd.DataFrame,
+    annotation_col: str,
+    *,
+    focus_col: str | None = None,
+) -> pd.DataFrame:
+    cols = [str(annotation_col)]
+    if focus_col:
+        cols.insert(0, str(focus_col))
+    base_cols = [c for c in cols if c in (commu_res.columns if commu_res is not None else [])]
+    if commu_res is None or getattr(commu_res, "empty", True) or len(base_cols) != len(cols):
+        out_cols = ([] if not focus_col else [str(focus_col)]) + [str(annotation_col), "n_events", "mean_score"]
+        return pd.DataFrame(columns=out_cols)
+    work = commu_res.copy()
+    work[str(annotation_col)] = work[str(annotation_col)].fillna("Unannotated").astype(str)
+    if focus_col:
+        work[str(focus_col)] = work[str(focus_col)].astype(str)
+    group = work.groupby(cols, observed=False)
+    out = group.size().rename("n_events").reset_index()
+    if "commu_score" in work.columns:
+        mean_score = group["commu_score"].mean().rename("mean_score").reset_index()
+        out = out.merge(mean_score, on=cols, how="left")
+    else:
+        out["mean_score"] = np.nan
+    sort_cols = ["n_events", "mean_score"] + cols
+    asc = [False, False] + [True] * len(cols)
+    out = out.sort_values(sort_cols, ascending=asc, kind="mergesort").reset_index(drop=True)
+    return out
+
+
+def _read_mebocost_candidate_events(path: Path) -> pd.DataFrame:
+    path = Path(path)
+    if not path.exists():
+        raise RuntimeError(f"ccc mebocost paired-rescore: candidate event file not found: {path}")
+    if path.suffix.lower() == ".csv":
+        return pd.read_csv(path)
+    return pd.read_csv(path, sep="\t")
+
+
+def _read_liana_candidate_events(path: Path) -> pd.DataFrame:
+    path = Path(path)
+    if not path.exists():
+        raise RuntimeError(f"ccc liana paired-rescore: candidate event file not found: {path}")
+    if path.suffix.lower() == ".csv":
+        return pd.read_csv(path)
+    return pd.read_csv(path, sep="\t")
+
+
+def _split_liana_complex_genes(value: object) -> list[str]:
+    raw = str(value or "").strip()
+    if not raw or raw.lower() == "nan":
+        return []
+    genes = [part.strip() for part in raw.split("_") if part.strip()]
+    return sorted(dict.fromkeys(genes))
+
+
+def _normalize_liana_candidate_events(
+    candidate_df: pd.DataFrame,
+    *,
+    display_map: Mapping[str, str],
+    valid_group_tokens: Optional[Sequence[str]] = None,
+) -> pd.DataFrame:
+    if candidate_df is None or getattr(candidate_df, "empty", True):
+        raise RuntimeError("ccc liana paired-rescore: candidate event table is empty.")
+    required = {"source", "target", "ligand_complex", "receptor_complex"}
+    missing = [col for col in required if col not in candidate_df.columns]
+    if missing:
+        raise RuntimeError(
+            "ccc liana paired-rescore: candidate events require columns: "
+            + ", ".join(sorted(required))
+            + f". Missing: {', '.join(missing)}"
+        )
+    out = candidate_df.copy()
+    valid_tokens = {str(x) for x in (valid_group_tokens or ()) if str(x)}
+
+    def _resolve_event_group(value: object) -> str:
+        raw = str(value).strip()
+        if not raw:
+            raise RuntimeError("ccc liana paired-rescore: empty candidate cluster label.")
+        if raw in valid_tokens:
+            return raw
+        raw_token = plot_utils._extract_cnn_token(raw)
+        if raw_token and raw_token in valid_tokens:
+            return raw_token
+        return _resolve_cluster_request(raw, display_map)
+
+    if "source_token" in out.columns:
+        out["source_token"] = out["source_token"].map(_resolve_event_group)
+    else:
+        out["source_token"] = out["source"].map(_resolve_event_group)
+    if "target_token" in out.columns:
+        out["target_token"] = out["target_token"].map(_resolve_event_group)
+    else:
+        out["target_token"] = out["target"].map(_resolve_event_group)
+    out["source_label"] = out["source_token"].map(lambda x: str(display_map.get(str(x), str(x))))
+    out["target_label"] = out["target_token"].map(lambda x: str(display_map.get(str(x), str(x))))
+    if "source" not in out.columns:
+        out["source"] = out["source_token"].astype(str)
+    if "target" not in out.columns:
+        out["target"] = out["target_token"].astype(str)
+    if "route_family" not in out.columns:
+        out["route_family"] = [
+            _liana_route_family(lig, rec)
+            for lig, rec in zip(out["ligand_complex"], out["receptor_complex"], strict=False)
+        ]
+    out["branch_pair"] = out["source_label"].astype(str) + " -> " + out["target_label"].astype(str)
+    return out
+
+
+def _filter_liana_candidate_events(candidate_df: pd.DataFrame, cfg) -> pd.DataFrame:
+    out = candidate_df.copy()
+    for col_name, cfg_name in (
+        ("source_token", "liana_source_filter"),
+        ("target_token", "liana_target_filter"),
+        ("ligand_complex", "liana_ligand_filter"),
+        ("receptor_complex", "liana_receptor_filter"),
+        ("route_family", "liana_route_family_filter"),
+    ):
+        allowed = {str(x) for x in (getattr(cfg, cfg_name, ()) or ()) if str(x)}
+        if allowed and col_name in out.columns:
+            out = out[out[col_name].astype(str).isin(allowed)].copy()
+
+    sort_col = None
+    ascending = False
+    for candidate_col in (
+        "magnitude_rank",
+        "specificity_rank",
+        "rank",
+        "lr_means",
+        "lrscore",
+        "score",
+        "magnitude",
+    ):
+        if candidate_col in out.columns:
+            sort_col = candidate_col
+            ascending = "rank" in candidate_col.lower()
+            break
+    dedupe_cols = ["source_token", "target_token", "ligand_complex", "receptor_complex"]
+    if sort_col is not None:
+        out[sort_col] = pd.to_numeric(out[sort_col], errors="coerce")
+        out = out.sort_values(sort_col, ascending=ascending, kind="mergesort")
+    out = out.drop_duplicates(subset=[c for c in dedupe_cols if c in out.columns], keep="first").reset_index(drop=True)
+    max_edges = int(getattr(cfg, "liana_max_edges", 200))
+    if max_edges > 0:
+        out = out.head(max_edges).copy()
+    if out.empty:
+        raise RuntimeError("ccc liana paired-rescore: no candidate events remain after filtering.")
+    return out
+
+
+def _mean_complex_expression(
+    matrix,
+    *,
+    row_idx: np.ndarray,
+    gene_idx: Sequence[int],
+    values_logged: bool,
+) -> tuple[float, float]:
+    if row_idx.size == 0 or len(gene_idx) == 0:
+        return float("nan"), float("nan")
+    sub = matrix[row_idx][:, list(gene_idx)]
+    if sp.issparse(sub):
+        detect = np.asarray((sub > 0).mean(axis=0)).ravel().astype(float)
+        work = sub.copy().tocsr()
+        if not values_logged:
+            work.data = np.log1p(work.data)
+        means = np.asarray(work.mean(axis=0)).ravel().astype(float)
+    else:
+        arr = np.asarray(sub, dtype=np.float64)
+        detect = np.mean(arr > 0, axis=0, dtype=np.float64)
+        if not values_logged:
+            arr = np.log1p(arr)
+        means = np.mean(arr, axis=0, dtype=np.float64)
+    return float(np.mean(means)), float(np.mean(detect))
+
+
+def _score_liana_paired_edges(
+    adata: ad.AnnData,
+    *,
+    candidate_df: pd.DataFrame,
+    groupby: str,
+    pairing_key: str,
+    condition_cols: Sequence[str],
+    dataset_key: Optional[str],
+    source_levels: Sequence[str],
+    target_levels: Sequence[str],
+    layer: Optional[str],
+    values_logged: bool,
+    min_sender_cells: int,
+    min_receiver_cells: int,
+) -> pd.DataFrame:
+    if pairing_key not in adata.obs:
+        raise RuntimeError(f"ccc liana paired-rescore: pairing_key={pairing_key!r} not found in adata.obs.")
+    matrix = adata.layers[layer] if layer else adata.X
+    gene_to_idx = {str(g): i for i, g in enumerate(adata.var_names.astype(str))}
+    rows: list[dict[str, Any]] = []
+    source_level_set = {str(x) for x in source_levels if str(x)}
+    target_level_set = {str(x) for x in target_levels if str(x)}
+
+    for sample_id, sample_cells in adata.obs.groupby(str(pairing_key), observed=False).groups.items():
+        sample_pos = adata.obs_names.get_indexer(list(sample_cells))
+        if sample_pos.size == 0:
+            continue
+        sample_obs = adata.obs.iloc[sample_pos].copy()
+        sample_clusters = sample_obs[str(groupby)].astype(str)
+        sample_datasets = sample_obs[str(dataset_key)].astype(str) if dataset_key else None
+        sample_counts = sample_clusters.value_counts()
+        meta_row: dict[str, Any] = {"sample_id": str(sample_id)}
+        for col in condition_cols:
+            if col in sample_obs.columns:
+                vals = sample_obs[col].astype(str).dropna().unique().tolist()
+                meta_row[str(col)] = vals[0] if vals else ""
+
+        for _, event in candidate_df.iterrows():
+            row = dict(meta_row)
+            row.update(event.to_dict())
+            source_token = str(event["source_token"])
+            target_token = str(event["target_token"])
+            source_mask = sample_clusters.to_numpy() == source_token
+            target_mask = sample_clusters.to_numpy() == target_token
+            if sample_datasets is not None:
+                source_allowed = {str(event.get("source_dataset_level", ""))} if str(event.get("source_dataset_level", "")).strip() else source_level_set
+                target_allowed = {str(event.get("target_dataset_level", ""))} if str(event.get("target_dataset_level", "")).strip() else target_level_set
+                if source_allowed:
+                    source_mask &= sample_datasets.isin(list(source_allowed)).to_numpy()
+                if target_allowed:
+                    target_mask &= sample_datasets.isin(list(target_allowed)).to_numpy()
+
+            sender_n = int(np.sum(source_mask))
+            receiver_n = int(np.sum(target_mask))
+            row["sample_id"] = str(sample_id)
+            row["sender_n_cells"] = sender_n
+            row["receiver_n_cells"] = receiver_n
+            row["ligand_expr"] = np.nan
+            row["ligand_prop"] = np.nan
+            row["receptor_expr"] = np.nan
+            row["receptor_prop"] = np.nan
+            row["edge_score"] = np.nan
+            row["edge_score_log1p"] = np.nan
+            row["missing_reason"] = ""
+            prior_col = next(
+                (col for col in ("magnitude_rank", "specificity_rank", "rank", "lr_means", "lrscore", "score", "magnitude") if col in row),
+                None,
+            )
+            row["candidate_prior_score"] = row.get(prior_col, np.nan) if prior_col else np.nan
+
+            if sender_n < int(min_sender_cells):
+                row["missing_reason"] = "too_few_sender_cells"
+                rows.append(row)
+                continue
+            if receiver_n < int(min_receiver_cells):
+                row["missing_reason"] = "too_few_receiver_cells"
+                rows.append(row)
+                continue
+
+            ligand_genes = [gene for gene in _split_liana_complex_genes(event["ligand_complex"]) if gene in gene_to_idx]
+            receptor_genes = [gene for gene in _split_liana_complex_genes(event["receptor_complex"]) if gene in gene_to_idx]
+            row["n_ligand_genes_total"] = len(_split_liana_complex_genes(event["ligand_complex"]))
+            row["n_receptor_genes_total"] = len(_split_liana_complex_genes(event["receptor_complex"]))
+            row["n_ligand_genes_detected"] = len(ligand_genes)
+            row["n_receptor_genes_detected"] = len(receptor_genes)
+            if not ligand_genes:
+                row["missing_reason"] = "ligand_genes_absent"
+                rows.append(row)
+                continue
+            if not receptor_genes:
+                row["missing_reason"] = "receptor_genes_absent"
+                rows.append(row)
+                continue
+
+            ligand_expr, ligand_prop = _mean_complex_expression(
+                matrix,
+                row_idx=sample_pos[source_mask],
+                gene_idx=[gene_to_idx[g] for g in ligand_genes],
+                values_logged=values_logged,
+            )
+            receptor_expr, receptor_prop = _mean_complex_expression(
+                matrix,
+                row_idx=sample_pos[target_mask],
+                gene_idx=[gene_to_idx[g] for g in receptor_genes],
+                values_logged=values_logged,
+            )
+            row["ligand_expr"] = ligand_expr
+            row["ligand_prop"] = ligand_prop
+            row["receptor_expr"] = receptor_expr
+            row["receptor_prop"] = receptor_prop
+            if not np.isfinite(ligand_expr):
+                row["missing_reason"] = "ligand_score_missing"
+                rows.append(row)
+                continue
+            if not np.isfinite(receptor_expr):
+                row["missing_reason"] = "receptor_score_missing"
+                rows.append(row)
+                continue
+            edge_score = float(np.sqrt(max(ligand_expr, 0.0) * max(receptor_expr, 0.0)))
+            row["edge_score"] = edge_score
+            row["edge_score_log1p"] = float(np.log1p(edge_score))
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _summarize_liana_paired_routes(event_scores: pd.DataFrame) -> pd.DataFrame:
+    if event_scores is None or getattr(event_scores, "empty", True):
+        return pd.DataFrame()
+    group_cols = ["sample_id"]
+    for col in (
+        "source_token",
+        "target_token",
+        "source_label",
+        "target_label",
+        "branch_pair",
+        "route_family",
+        "sex",
+        "MASLD",
+        "timepoint",
+    ):
+        if col in event_scores.columns:
+            group_cols.append(col)
+    out = (
+        event_scores.groupby(group_cols, observed=False)
+        .agg(
+            n_edges_scored=("edge_score", lambda s: int(s.notna().sum())),
+            n_edges_missing=("edge_score", lambda s: int(s.isna().sum())),
+            mean_edge_score=("edge_score", "mean"),
+            median_edge_score=("edge_score", "median"),
+            sum_edge_score=("edge_score", "sum"),
+            mean_ligand_expr=("ligand_expr", "mean"),
+            mean_receptor_expr=("receptor_expr", "mean"),
+            mean_edge_score_log1p=("edge_score_log1p", "mean"),
+        )
+        .reset_index()
+    )
+    return out
+
+
+def _summarize_paired_missingness(
+    scores_df: pd.DataFrame,
+    *,
+    group_by: Sequence[str],
+    score_col: str,
+    primary_condition_key: Optional[str],
+) -> pd.DataFrame:
+    if scores_df is None or getattr(scores_df, "empty", True):
+        return pd.DataFrame()
+    df = scores_df.copy()
+    cols = [str(c) for c in group_by if str(c) in df.columns]
+    if primary_condition_key and str(primary_condition_key) in df.columns:
+        cols.append(str(primary_condition_key))
+    if not cols or score_col not in df.columns:
+        return pd.DataFrame()
+    work = df.copy()
+    if "missing_reason" in work.columns:
+        work["missing_reason"] = work["missing_reason"].fillna("").astype(str)
+    else:
+        work["missing_reason"] = ""
+    work["_is_scored"] = pd.to_numeric(work[score_col], errors="coerce").notna()
+    grouped = work.groupby(cols, observed=False)
+    out = grouped.size().rename("n_total").reset_index()
+    out = out.merge(grouped["_is_scored"].sum().rename("n_scored").reset_index(), on=cols, how="left")
+    out["n_scored"] = pd.to_numeric(out["n_scored"], errors="coerce").fillna(0).astype(int)
+    out["n_missing"] = out["n_total"].astype(int) - out["n_scored"]
+    for reason in sorted({str(x).strip() for x in work["missing_reason"].unique().tolist() if str(x).strip()}):
+        token = re.sub(r"[^A-Za-z0-9]+", "_", reason).strip("_").lower() or "missing"
+        col = f"n_{token}"
+        tmp = (
+            work[work["missing_reason"] == reason]
+            .groupby(cols, observed=False)
+            .size()
+            .rename(col)
+            .reset_index()
+        )
+        out = out.merge(tmp, on=cols, how="left")
+        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0).astype(int)
+    sort_cols = ["n_scored", "n_missing"] + cols
+    asc = [False, False] + [True] * len(cols)
+    out = out.sort_values(sort_cols, ascending=asc, kind="mergesort").reset_index(drop=True)
+    return out
+
+
+def _summarize_liana_paired_effects(
+    scores_df: pd.DataFrame,
+    *,
+    primary_condition_key: Optional[str],
+    condition_cols: Sequence[str],
+    compare_levels: Sequence[str],
+    value_col: str,
+    group_by: Sequence[str],
+    median_support_cols: Sequence[str] = (),
+    min_scored_donors_per_group: int = 1,
+) -> pd.DataFrame:
+    if (
+        scores_df is None
+        or getattr(scores_df, "empty", True)
+        or not primary_condition_key
+        or primary_condition_key not in scores_df.columns
+        or value_col not in scores_df.columns
+    ):
+        return pd.DataFrame()
+    df = scores_df.copy()
+    df = df[df[value_col].notna()].copy()
+    if df.empty:
+        return pd.DataFrame()
+    requested_levels = [str(x) for x in compare_levels if str(x)]
+    levels = [str(x) for x in df[primary_condition_key].dropna().astype(str).unique().tolist()]
+    if requested_levels:
+        levels = [lv for lv in levels if lv in set(requested_levels)]
+    if len(levels) < 2:
+        return pd.DataFrame()
+    pairs = _select_pairs(levels, None)
+    context_cols = [str(c) for c in condition_cols if str(c) != str(primary_condition_key) and str(c) in df.columns]
+    rows: list[dict[str, Any]] = []
+    context_groups = [([], df)] if not context_cols else list(df.groupby(context_cols, observed=False))
+    for context_key, context_df in context_groups:
+        context_map: dict[str, Any] = {}
+        if context_cols:
+            if not isinstance(context_key, tuple):
+                context_key = (context_key,)
+            context_map = {col: val for col, val in zip(context_cols, context_key, strict=False)}
+        for pair_a, pair_b in pairs:
+            left = context_df[context_df[primary_condition_key].astype(str) == str(pair_a)]
+            right = context_df[context_df[primary_condition_key].astype(str) == str(pair_b)]
+            merged = pd.concat([left, right], ignore_index=True)
+            for keys, sub in merged.groupby(list(group_by), observed=False):
+                if not isinstance(keys, tuple):
+                    keys = (keys,)
+                row = {col: val for col, val in zip(group_by, keys, strict=False)}
+                row.update(context_map)
+                x = sub.loc[sub[primary_condition_key].astype(str) == str(pair_a), value_col].dropna().to_numpy(dtype=float)
+                y = sub.loc[sub[primary_condition_key].astype(str) == str(pair_b), value_col].dropna().to_numpy(dtype=float)
+                row["contrast"] = f"{pair_a}_vs_{pair_b}"
+                row["group_a"] = str(pair_a)
+                row["group_b"] = str(pair_b)
+                row["n_group_a"] = int(x.size)
+                row["n_group_b"] = int(y.size)
+                row["mean_group_a"] = float(np.mean(x)) if x.size else np.nan
+                row["mean_group_b"] = float(np.mean(y)) if y.size else np.nan
+                row["median_group_a"] = float(np.median(x)) if x.size else np.nan
+                row["median_group_b"] = float(np.median(y)) if y.size else np.nan
+                row["min_scored_donors_per_group"] = int(max(1, min_scored_donors_per_group))
+                if x.size < int(max(1, min_scored_donors_per_group)) or y.size < int(max(1, min_scored_donors_per_group)):
+                    row["cliffs_delta"] = np.nan
+                    row["mannwhitney_pval"] = np.nan
+                    row["insufficient_scored_donors"] = True
+                    for support_col in median_support_cols:
+                        if support_col in sub.columns:
+                            row[f"{support_col}_median"] = float(pd.to_numeric(sub[support_col], errors="coerce").median())
+                    rows.append(row)
+                    continue
+                row["cliffs_delta"] = _cliffs_delta(x, y)
+                if x.size and y.size:
+                    row["mannwhitney_pval"] = float(sstats.mannwhitneyu(x, y, alternative="two-sided").pvalue)
+                else:
+                    row["mannwhitney_pval"] = np.nan
+                row["insufficient_scored_donors"] = False
+                for support_col in median_support_cols:
+                    if support_col in sub.columns:
+                        row[f"{support_col}_median"] = float(pd.to_numeric(sub[support_col], errors="coerce").median())
+                rows.append(row)
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    out = out[out["insufficient_scored_donors"].astype(bool) == False].copy()
+    if out.empty:
+        return out
+    pvals = pd.to_numeric(out["mannwhitney_pval"], errors="coerce").to_numpy(dtype=float)
+    valid = np.isfinite(pvals)
+    fdr = np.full_like(pvals, np.nan, dtype=float)
+    if valid.any():
+        order = np.argsort(pvals[valid])
+        ranked = pvals[valid][order]
+        m = float(len(ranked))
+        adj = np.minimum.accumulate((ranked * m / (np.arange(len(ranked)) + 1))[::-1])[::-1]
+        fdr_vals = np.empty_like(ranked)
+        fdr_vals[order] = np.clip(adj, 0.0, 1.0)
+        fdr[valid] = fdr_vals
+    out["fdr"] = fdr
+    return out
+
+
+def _resolve_condition_filter_context(
+    adata: ad.AnnData,
+    *,
+    condition_spec: Optional[str],
+    condition_values: Sequence[str],
+) -> tuple[ad.AnnData, Optional[str], list[str], str]:
+    if not condition_spec:
+        return adata, None, [], "all"
+    spec = str(condition_spec).strip()
+    values = [str(x).strip() for x in condition_values if str(x).strip()]
+    if "@" not in spec:
+        if spec not in adata.obs:
+            raise RuntimeError(f"ccc mebocost paired-rescore: condition_key={spec!r} not found in adata.obs.")
+        if values:
+            mask = _normalize_levels(adata.obs[spec]).astype(str).isin(values)
+            return adata[mask].copy(), spec, [spec], f"{spec}=" + ",".join(values)
+        return adata, spec, [spec], spec
+    a_key, b_key = [str(x).strip() for x in spec.split("@", 1)]
+    if a_key not in adata.obs or b_key not in adata.obs:
+        raise RuntimeError(f"ccc mebocost paired-rescore: condition spec {spec!r} requires both columns in adata.obs.")
+    if values:
+        mask = _normalize_levels(adata.obs[b_key]).astype(str).isin(values)
+        return adata[mask].copy(), a_key, [a_key, b_key], f"{a_key}@{b_key}=" + ",".join(values)
+    return adata, a_key, [a_key, b_key], spec
+
+
+def _normalize_mebocost_candidate_events(
+    candidate_df: pd.DataFrame,
+    *,
+    display_map: Mapping[str, str],
+    valid_group_tokens: Optional[Sequence[str]] = None,
+) -> pd.DataFrame:
+    if candidate_df is None or getattr(candidate_df, "empty", True):
+        raise RuntimeError("ccc mebocost paired-rescore: candidate event table is empty.")
+    out = candidate_df.copy()
+    valid_tokens = {str(x) for x in (valid_group_tokens or ()) if str(x)}
+
+    def _resolve_event_group(value: object) -> str:
+        raw = str(value).strip()
+        if not raw:
+            raise RuntimeError("ccc mebocost paired-rescore: empty candidate cluster label.")
+        if raw in valid_tokens:
+            return raw
+        raw_token = plot_utils._extract_cnn_token(raw)
+        if raw_token and raw_token in valid_tokens:
+            return raw_token
+        return _resolve_cluster_request(raw, display_map)
+
+    if "source_token" not in out.columns:
+        if "source" not in out.columns:
+            raise RuntimeError("ccc mebocost paired-rescore: candidate events require source or source_token.")
+        out["source_token"] = out["source"].map(_resolve_event_group)
+    else:
+        out["source_token"] = out["source_token"].map(_resolve_event_group)
+    if "target_token" not in out.columns:
+        if "target" not in out.columns:
+            raise RuntimeError("ccc mebocost paired-rescore: candidate events require target or target_token.")
+        out["target_token"] = out["target"].map(_resolve_event_group)
+    else:
+        out["target_token"] = out["target_token"].map(_resolve_event_group)
+    if "source" not in out.columns:
+        out["source"] = out["source_token"].astype(str)
+    if "target" not in out.columns:
+        out["target"] = out["target_token"].astype(str)
+    if "sensor_gene" not in out.columns:
+        if "sensor" in out.columns:
+            out["sensor_gene"] = out["sensor"].astype(str)
+        else:
+            raise RuntimeError("ccc mebocost paired-rescore: candidate events require sensor or sensor_gene.")
+    if "sensor" not in out.columns:
+        out["sensor"] = out["sensor_gene"].astype(str)
+    if "HMDB_ID" not in out.columns:
+        if "metabolite" in out.columns:
+            met = out["metabolite"].astype(str).str.strip()
+            out["HMDB_ID"] = met.where(met.str.match(r"^HMDB\d+$", na=False), np.nan)
+        else:
+            raise RuntimeError("ccc mebocost paired-rescore: candidate events require HMDB_ID or metabolite.")
+    if "metabolite" not in out.columns:
+        out["metabolite"] = out["HMDB_ID"].astype(str)
+    if "Metabolite_Name" not in out.columns:
+        out["Metabolite_Name"] = out.get("metabolite", pd.Series([""] * len(out), index=out.index))
+    out["source_token"] = out["source_token"].astype(str)
+    out["target_token"] = out["target_token"].astype(str)
+    out["source_label"] = out["source_token"].map(lambda x: str(display_map.get(str(x), str(x))))
+    out["target_label"] = out["target_token"].map(lambda x: str(display_map.get(str(x), str(x))))
+    return out
+
+
+def _filter_mebocost_candidate_events(candidate_df: pd.DataFrame, cfg) -> pd.DataFrame:
+    out = candidate_df.copy()
+    for col_name, cfg_name in (
+        ("source_token", "mebocost_source_filter"),
+        ("target_token", "mebocost_target_filter"),
+        ("HMDB_ID", "mebocost_metabolite_filter"),
+        ("sensor_gene", "mebocost_sensor_filter"),
+        ("super_class", "mebocost_superclass_filter"),
+        ("class", "mebocost_class_filter"),
+        ("sub_class", "mebocost_subclass_filter"),
+    ):
+        allowed = {str(x) for x in (getattr(cfg, cfg_name, ()) or ()) if str(x)}
+        if allowed and col_name in out.columns:
+            out = out[out[col_name].astype(str).isin(allowed)].copy()
+    sort_col = None
+    for candidate_col in ("Norm_Commu_Score", "commu_score", "Commu_Score", "candidate_prior_score"):
+        if candidate_col in out.columns:
+            sort_col = candidate_col
+            break
+    dedupe_cols = ["source_token", "target_token", "sensor_gene"]
+    if "HMDB_ID" in out.columns:
+        dedupe_cols.insert(2, "HMDB_ID")
+    else:
+        dedupe_cols.insert(2, "metabolite")
+    if sort_col is not None:
+        out[sort_col] = pd.to_numeric(out[sort_col], errors="coerce")
+        out = out.sort_values(sort_col, ascending=False, kind="mergesort")
+    out = out.drop_duplicates(subset=[c for c in dedupe_cols if c in out.columns], keep="first").reset_index(drop=True)
+    max_events = int(getattr(cfg, "mebocost_max_events", 200))
+    if max_events > 0:
+        out = out.head(max_events).copy()
+    if out.empty:
+        raise RuntimeError("ccc mebocost paired-rescore: no candidate events remain after filtering.")
+    return out
+
+
+def _make_mebocost_object_for_sample(
+    adata_sample: ad.AnnData,
+    *,
+    groupby: str,
+    organism: str,
+    config_path: Path,
+    mebocost_api,
+    layer: Optional[str],
+) -> Any:
+    adata_mebo = adata_sample.copy()
+    if layer:
+        if str(layer) not in adata_mebo.layers:
+            raise RuntimeError(f"ccc mebocost paired-rescore: layer={layer!r} not found in donor subset.")
+        adata_mebo.X = adata_mebo.layers[str(layer)].copy()
+    create_obj = getattr(mebocost_api, "create_obj", None)
+    if create_obj is None:
+        raise RuntimeError("ccc mebocost paired-rescore: imported MEBOCOST API does not expose create_obj().")
+    mebo_obj = _call_with_supported_kwargs(
+        create_obj,
+        adata=adata_mebo,
+        group_col=str(groupby),
+        species=str(organism).strip().lower(),
+        config_path=str(config_path),
+    )
+    mebo_obj._load_config_()
+    mebo_obj._avg_by_group_()
+    mebo_obj._get_gene_exp_()
+    mebo_obj.estimator()
+    mebo_obj._avg_met_group_()
+    mebo_obj._check_aboundance_()
+    return mebo_obj
+
+
+def _dense_scalar_from_group_matrix(matrix, row_index: Sequence[Any], col_index: Sequence[Any], row_key: str, col_key: str) -> float:
+    row_lookup = {str(x): i for i, x in enumerate(row_index)}
+    col_lookup = {str(x): i for i, x in enumerate(col_index)}
+    if str(row_key) not in row_lookup or str(col_key) not in col_lookup:
+        return float("nan")
+    value = matrix[row_lookup[str(row_key)], col_lookup[str(col_key)]]
+    if sp.issparse(value):
+        value = value.toarray()
+    return float(np.asarray(value).squeeze())
+
+
+def _split_associated_genes(value: object) -> list[str]:
+    raw = str(value).strip()
+    if not raw or raw.lower() == "nan":
+        return []
+    genes: list[str] = []
+    for chunk in re.split(r"[;,]", raw):
+        gene = str(chunk).strip()
+        if gene:
+            genes.append(gene)
+    return sorted(dict.fromkeys(genes))
+
+
+def _proxy_metabolite_score_for_event(
+    adata_sample: ad.AnnData,
+    *,
+    source_token: str,
+    source_mask: np.ndarray,
+    associated_genes: Sequence[str],
+    layer: Optional[str],
+) -> tuple[float, float, int, int, str]:
+    genes_total = len(associated_genes)
+    gene_to_idx = {str(g): i for i, g in enumerate(adata_sample.var_names.astype(str))}
+    detected = [g for g in associated_genes if g in gene_to_idx]
+    genes_detected = len(detected)
+    if genes_detected == 0:
+        return float("nan"), float("nan"), genes_total, genes_detected, "no_associated_genes_detected"
+    matrix = adata_sample.layers[layer] if layer else adata_sample.X
+    sub = matrix[source_mask][:, [gene_to_idx[g] for g in detected]]
+    if sp.issparse(sub):
+        expr = np.asarray(sub.mean(axis=1)).ravel()
+        score = float(np.asarray(sub.mean()).squeeze())
+        prop = float(np.mean(np.asarray((sub > 0).sum(axis=1)).ravel() > 0))
+    else:
+        expr = np.asarray(sub.mean(axis=1)).ravel()
+        score = float(np.asarray(sub.mean()).squeeze())
+        prop = float(np.mean(np.any(sub > 0, axis=1)))
+    return score, prop, genes_total, genes_detected, ""
+
+
+def _score_mebocost_paired_events(
+    adata: ad.AnnData,
+    *,
+    candidate_df: pd.DataFrame,
+    groupby: str,
+    pairing_key: str,
+    condition_cols: Sequence[str],
+    dataset_key: Optional[str],
+    source_levels: Sequence[str],
+    target_levels: Sequence[str],
+    organism: str,
+    config_path: Path,
+    mebocost_api,
+    layer: Optional[str],
+    score_method: str,
+    min_sender_cells: int,
+    min_receiver_cells: int,
+) -> pd.DataFrame:
+    if pairing_key not in adata.obs:
+        raise RuntimeError(f"ccc mebocost paired-rescore: pairing_key={pairing_key!r} not found in adata.obs.")
+    source_allowed = {str(x) for x in source_levels if str(x)}
+    target_allowed = {str(x) for x in target_levels if str(x)}
+    rows: list[dict[str, Any]] = []
+
+    for sample_id, sample_cells in adata.obs.groupby(str(pairing_key), observed=False).groups.items():
+        idx = np.asarray(list(sample_cells))
+        adata_sample = adata[idx].copy()
+        meta_row: dict[str, Any] = {str(pairing_key): str(sample_id)}
+        for col in condition_cols:
+            if col in adata_sample.obs:
+                vals = adata_sample.obs[col].astype(str).dropna().unique().tolist()
+                meta_row[str(col)] = vals[0] if vals else ""
+        sample_counts = adata_sample.obs[str(groupby)].astype(str).value_counts()
+
+        mebo_obj = None
+        if score_method == "mebocost-metabolite-sensor":
+            mebo_obj = _make_mebocost_object_for_sample(
+                adata_sample,
+                groupby=str(groupby),
+                organism=str(organism),
+                config_path=config_path,
+                mebocost_api=mebocost_api,
+                layer=layer,
+            )
+
+        for _, event in candidate_df.iterrows():
+            row = dict(meta_row)
+            row.update(event.to_dict())
+            source_token = str(event["source_token"])
+            target_token = str(event["target_token"])
+            hmdb_id = str(event.get("HMDB_ID", ""))
+            sensor_gene = str(event.get("sensor_gene", event.get("sensor", "")))
+            row["sample_id"] = str(sample_id)
+            row["source"] = source_token
+            row["target"] = target_token
+            row["source_token"] = source_token
+            row["target_token"] = target_token
+            row["sensor_gene"] = sensor_gene
+            row["source_dataset_level"] = row.get("source_dataset_level", source_allowed and next(iter(source_allowed)) or "")
+            row["target_dataset_level"] = row.get("target_dataset_level", target_allowed and next(iter(target_allowed)) or "")
+            row["sender_n_cells"] = int(sample_counts.get(source_token, 0))
+            row["receiver_n_cells"] = int(sample_counts.get(target_token, 0))
+            row["score_method"] = score_method
+            row["candidate_prior_score"] = row.get("Norm_Commu_Score", row.get("commu_score", row.get("Commu_Score", np.nan)))
+            row["candidate_prior_pval"] = row.get("pval", row.get("permutation_test_pval", row.get("permutation_test_fdr", np.nan)))
+            row["sender_metabolite_score"] = np.nan
+            row["sender_metabolite_prop"] = np.nan
+            row["receiver_sensor_score"] = np.nan
+            row["receiver_sensor_prop"] = np.nan
+            row["paired_commu_score"] = np.nan
+            row["paired_commu_score_log1p"] = np.nan
+            row["missing_reason"] = ""
+            if row["sender_n_cells"] < int(min_sender_cells):
+                row["missing_reason"] = "too_few_sender_cells"
+                rows.append(row)
+                continue
+            if row["receiver_n_cells"] < int(min_receiver_cells):
+                row["missing_reason"] = "too_few_receiver_cells"
+                rows.append(row)
+                continue
+
+            if score_method == "mebocost-metabolite-sensor":
+                row["sender_metabolite_score"] = _dense_scalar_from_group_matrix(
+                    mebo_obj.avg_met,
+                    mebo_obj.avg_met_indexer,
+                    mebo_obj.avg_met_columns,
+                    hmdb_id,
+                    source_token,
+                )
+                row["receiver_sensor_score"] = _dense_scalar_from_group_matrix(
+                    mebo_obj.avg_exp,
+                    mebo_obj.avg_exp_indexer,
+                    mebo_obj.avg_exp_columns,
+                    sensor_gene,
+                    target_token,
+                )
+                if source_token in mebo_obj.met_prop.index and hmdb_id in mebo_obj.met_prop.columns:
+                    row["sender_metabolite_prop"] = float(mebo_obj.met_prop.loc[source_token, hmdb_id])
+                if target_token in mebo_obj.exp_prop.index and sensor_gene in mebo_obj.exp_prop.columns:
+                    row["receiver_sensor_prop"] = float(mebo_obj.exp_prop.loc[target_token, sensor_gene])
+                if pd.isna(row["sender_metabolite_score"]):
+                    row["missing_reason"] = "metabolite_not_estimated"
+                elif pd.isna(row["receiver_sensor_score"]):
+                    row["missing_reason"] = "sensor_gene_absent"
+            else:
+                source_mask = adata_sample.obs[str(groupby)].astype(str).to_numpy() == str(source_token)
+                genes = _split_associated_genes(row.get("associated_gene", ""))
+                score, prop, n_total, n_detected, reason = _proxy_metabolite_score_for_event(
+                    adata_sample,
+                    source_token=source_token,
+                    source_mask=source_mask,
+                    associated_genes=genes,
+                    layer=layer,
+                )
+                row["n_associated_genes_total"] = int(n_total)
+                row["n_associated_genes_detected"] = int(n_detected)
+                row["sender_metabolite_score"] = score
+                row["sender_metabolite_prop"] = prop
+                receiver_mask = adata_sample.obs[str(groupby)].astype(str).to_numpy() == str(target_token)
+                receiver_genes = {str(g): i for i, g in enumerate(adata_sample.var_names.astype(str))}
+                if sensor_gene in receiver_genes:
+                    mat = adata_sample.layers[layer] if layer else adata_sample.X
+                    sub = mat[receiver_mask][:, receiver_genes[sensor_gene]]
+                    if sp.issparse(sub):
+                        arr = np.asarray(sub).ravel()
+                    else:
+                        arr = np.asarray(sub).ravel()
+                    row["receiver_sensor_score"] = float(np.mean(arr))
+                    row["receiver_sensor_prop"] = float(np.mean(arr > 0))
+                else:
+                    reason = reason or "sensor_gene_absent"
+                row["missing_reason"] = reason
+
+            if not row["missing_reason"]:
+                sender_score = max(float(row["sender_metabolite_score"]), 0.0)
+                receiver_score = max(float(row["receiver_sensor_score"]), 0.0)
+                paired = float(np.sqrt(sender_score * receiver_score))
+                row["paired_commu_score"] = paired
+                row["paired_commu_score_log1p"] = float(np.log1p(paired))
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _cliffs_delta(x: np.ndarray, y: np.ndarray) -> float:
+    if x.size == 0 or y.size == 0:
+        return float("nan")
+    return float(np.mean(np.sign(x[:, None] - y[None, :])))
+
+
+def _summarize_mebocost_paired_routes(event_scores: pd.DataFrame) -> pd.DataFrame:
+    if event_scores is None or getattr(event_scores, "empty", True):
+        return pd.DataFrame()
+    df = event_scores.copy()
+    if "super_class" in df.columns:
+        df["route"] = df["super_class"].fillna("Unannotated").astype(str)
+    else:
+        df["route"] = "all_events"
+    group_cols = ["sample_id"]
+    for col in ("source_token", "target_token", "source_label", "target_label", "route", "sex", "MASLD"):
+        if col in df.columns:
+            group_cols.append(col)
+    score_ok = df["paired_commu_score"].notna()
+    out = (
+        df.groupby(group_cols, observed=False)
+        .agg(
+            n_events_scored=("paired_commu_score", lambda s: int(s.notna().sum())),
+            n_events_missing=("paired_commu_score", lambda s: int(s.isna().sum())),
+            mean_paired_commu_score=("paired_commu_score", "mean"),
+            median_paired_commu_score=("paired_commu_score", "median"),
+            sum_paired_commu_score=("paired_commu_score", "sum"),
+            mean_paired_commu_score_log1p=("paired_commu_score_log1p", "mean"),
+        )
+        .reset_index()
+    )
+    return out
+
+
+def _summarize_mebocost_paired_group_effects(
+    scores_df: pd.DataFrame,
+    *,
+    primary_condition_key: Optional[str],
+    min_scored_donors_per_group: int = 1,
+) -> pd.DataFrame:
+    if scores_df is None or getattr(scores_df, "empty", True) or not primary_condition_key or primary_condition_key not in scores_df.columns:
+        return pd.DataFrame()
+    df = scores_df.copy()
+    df = df[df["paired_commu_score"].notna()].copy()
+    if df.empty:
+        return pd.DataFrame()
+    levels = [str(x) for x in df[primary_condition_key].dropna().astype(str).unique().tolist()]
+    if len(levels) < 2:
+        return pd.DataFrame()
+    pairs = _select_pairs(levels, None)
+    context_cols = [c for c in ("MASLD", "timepoint") if c in df.columns and c != primary_condition_key]
+    group_by = ["source_token", "target_token", "HMDB_ID", "sensor_gene"]
+    for col in ("Metabolite_Name", "super_class", "sensor_annotation"):
+        if col in df.columns:
+            group_by.append(col)
+    rows: list[dict[str, Any]] = []
+    context_groups = [([], df)] if not context_cols else list(df.groupby(context_cols, observed=False))
+    for context_key, context_df in context_groups:
+        context_map = {}
+        if context_cols:
+            if not isinstance(context_key, tuple):
+                context_key = (context_key,)
+            context_map = {col: val for col, val in zip(context_cols, context_key)}
+        for pair_a, pair_b in pairs:
+            left = context_df[context_df[primary_condition_key].astype(str) == str(pair_a)]
+            right = context_df[context_df[primary_condition_key].astype(str) == str(pair_b)]
+            merged = pd.concat([left, right], ignore_index=True)
+            for keys, sub in merged.groupby(group_by, observed=False):
+                if not isinstance(keys, tuple):
+                    keys = (keys,)
+                row = {col: val for col, val in zip(group_by, keys)}
+                row.update(context_map)
+                x = sub.loc[sub[primary_condition_key].astype(str) == str(pair_a), "paired_commu_score"].dropna().to_numpy(dtype=float)
+                y = sub.loc[sub[primary_condition_key].astype(str) == str(pair_b), "paired_commu_score"].dropna().to_numpy(dtype=float)
+                row["contrast"] = f"{pair_a}_vs_{pair_b}"
+                row["group_a"] = str(pair_a)
+                row["group_b"] = str(pair_b)
+                row["n_group_a"] = int(x.size)
+                row["n_group_b"] = int(y.size)
+                row["mean_group_a"] = float(np.mean(x)) if x.size else np.nan
+                row["mean_group_b"] = float(np.mean(y)) if y.size else np.nan
+                row["median_group_a"] = float(np.median(x)) if x.size else np.nan
+                row["median_group_b"] = float(np.median(y)) if y.size else np.nan
+                row["min_scored_donors_per_group"] = int(max(1, min_scored_donors_per_group))
+                if x.size < int(max(1, min_scored_donors_per_group)) or y.size < int(max(1, min_scored_donors_per_group)):
+                    row["cliffs_delta"] = np.nan
+                    row["mannwhitney_pval"] = np.nan
+                    row["insufficient_scored_donors"] = True
+                    rows.append(row)
+                    continue
+                row["cliffs_delta"] = _cliffs_delta(x, y)
+                if x.size and y.size:
+                    row["mannwhitney_pval"] = float(sstats.mannwhitneyu(x, y, alternative="two-sided").pvalue)
+                else:
+                    row["mannwhitney_pval"] = np.nan
+                row["insufficient_scored_donors"] = False
+                rows.append(row)
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    out = out[out["insufficient_scored_donors"].astype(bool) == False].copy()
+    if out.empty:
+        return out
+    pvals = pd.to_numeric(out["mannwhitney_pval"], errors="coerce").to_numpy(dtype=float)
+    valid = np.isfinite(pvals)
+    fdr = np.full_like(pvals, np.nan, dtype=float)
+    if valid.any():
+        order = np.argsort(pvals[valid])
+        ranked = pvals[valid][order]
+        m = float(len(ranked))
+        adj = np.minimum.accumulate((ranked * m / (np.arange(len(ranked)) + 1))[::-1])[::-1]
+        fdr_vals = np.empty_like(ranked)
+        fdr_vals[order] = np.clip(adj, 0.0, 1.0)
+        fdr[valid] = fdr_vals
+    out["fdr"] = fdr
+    return out
+
+
+def _nichenet_r_env(r_lib_dir: Path, *, install_only: bool = False) -> dict[str, str]:
+    env = os.environ.copy()
+    r_lib = str(r_lib_dir)
+    env["R_LIBS_USER"] = r_lib
+    if install_only:
+        env["R_LIBS"] = r_lib
+        env.pop("R_LIBS_SITE", None)
+    else:
+        env.pop("R_LIBS", None)
+    return env
+
+
+def _resolve_rscript() -> Optional[str]:
+    env_rscript = Path(sys.prefix) / "bin" / "Rscript"
+    if env_rscript.exists():
+        return str(env_rscript)
+    return shutil.which("Rscript")
+
+
+def _resolve_r_binary() -> Optional[str]:
+    env_r = Path(sys.prefix) / "bin" / "R"
+    if env_r.exists():
+        return str(env_r)
+    return shutil.which("R")
+
+
+def _nichenet_install_command_hint(r_lib_dir: Path) -> str:
+    r_lib = str(r_lib_dir)
+    r_bin = _resolve_r_binary() or "R"
+    cran_pkgs_expr = ", ".join(f'"{pkg}"' for pkg in _NICHENET_R_BOOTSTRAP_CRAN_PACKAGES)
+    return (
+        "tmpdir=$(mktemp -d) && "
+        + "R_LIBS_USER="
+        + r_lib
+        + " R_LIBS="
+        + r_lib
+        + " "
+        + (_resolve_rscript() or "Rscript")
+        + " -e 'dir.create(Sys.getenv(\"R_LIBS_USER\"), recursive=TRUE, showWarnings=FALSE); .libPaths(c(Sys.getenv(\"R_LIBS_USER\"), .Library, .Library.site)); pkgs <- c("
+        + cran_pkgs_expr
+        + "); missing_pkgs <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly=TRUE)]; if (length(missing_pkgs)) install.packages(missing_pkgs, repos=\"https://cloud.r-project.org\", lib=Sys.getenv(\"R_LIBS_USER\"))' && "
+        + "git clone --depth 1 https://github.com/saeyslab/nichenetr.git \"$tmpdir/nichenetr\" && "
+        + "mkdir -p "
+        + r_lib
+        + " && "
+        + "R_LIBS_USER="
+        + r_lib
+        + " R_LIBS="
+        + r_lib
+        + " "
+        + r_bin
+        + " CMD INSTALL --no-test-load -l "
+        + r_lib
+        + " \"$tmpdir/nichenetr\""
+    )
+
+
+def _ensure_nichenet_r_runtime(*, install_missing: bool) -> Path:
+    rscript = _resolve_rscript()
+    r_bin = _resolve_r_binary()
+    if not rscript:
+        raise RuntimeError("NicheNet requires `Rscript` on PATH.")
+    if not r_bin:
+        raise RuntimeError("NicheNet requires `R` on PATH.")
+
+    r_lib_dir = _NICHENET_R_LIB_DIR
+    r_lib_dir.mkdir(parents=True, exist_ok=True)
+    runtime_env = _nichenet_r_env(r_lib_dir, install_only=False)
+    check_expr = (
+        'dir.create(Sys.getenv("R_LIBS_USER"), recursive=TRUE, showWarnings=FALSE); '
+        '.libPaths(c(Sys.getenv("R_LIBS_USER"), .Library, .Library.site)); '
+        'quit(save="no", status=if (requireNamespace("nichenetr", quietly=TRUE)) 0 else 1)'
+    )
+    check_res = subprocess.run(
+        [str(rscript), "-e", check_expr],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=runtime_env,
+    )
+    if check_res.returncode == 0:
+        return r_lib_dir
+
+    manual_hint = _nichenet_install_command_hint(r_lib_dir)
+    if not install_missing:
+        raise RuntimeError(
+            "NicheNet requires the R package `nichenetr` in scOmnom's project-local R library.\n"
+            f"Expected library: {r_lib_dir}\n"
+            "Re-run with `--install-missing-r-deps` to bootstrap it automatically, or install it manually with:\n"
+            f"{manual_hint}"
+        )
+
+    git_bin = shutil.which("git")
+    if not git_bin:
+        raise RuntimeError(
+            "Automatic NicheNet dependency installation requires `git` on PATH.\n"
+            f"Project-local R library: {r_lib_dir}\n"
+            "You can retry manually with:\n"
+            f"{manual_hint}"
+        )
+    cran_pkgs_expr = ", ".join(f'"{pkg}"' for pkg in _NICHENET_R_BOOTSTRAP_CRAN_PACKAGES)
+    cran_bootstrap_expr = (
+        'dir.create(Sys.getenv("R_LIBS_USER"), recursive=TRUE, showWarnings=FALSE); '
+        '.libPaths(c(Sys.getenv("R_LIBS_USER"), .Library, .Library.site)); '
+        f'pkgs <- c({cran_pkgs_expr}); '
+        'missing_pkgs <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly=TRUE)]; '
+        'if (length(missing_pkgs)) install.packages(missing_pkgs, repos="https://cloud.r-project.org", lib=Sys.getenv("R_LIBS_USER")); '
+        'still_missing <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly=TRUE)]; '
+        'if (length(still_missing)) { write(paste(still_missing, collapse=", "), stderr()); quit(save="no", status=1) }'
+    )
+    cran_bootstrap_res = subprocess.run(
+        [str(rscript), "-e", cran_bootstrap_expr],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=install_env,
+    )
+    if cran_bootstrap_res.returncode != 0:
+        stderr = str(cran_bootstrap_res.stderr or "").strip()
+        stdout = str(cran_bootstrap_res.stdout or "").strip()
+        raise RuntimeError(
+            "Automatic NicheNet dependency installation failed while bootstrapping required CRAN packages.\n"
+            f"Project-local R library: {r_lib_dir}\n"
+            "You can retry manually with:\n"
+            f"{manual_hint}"
+            + (f"\nSTDERR:\n{stderr}" if stderr else "")
+            + (f"\nSTDOUT:\n{stdout}" if stdout else "")
+        )
+    with tempfile.TemporaryDirectory(prefix="scomnom_nichenetr_src_") as tmpdir:
+        src_dir = Path(tmpdir) / "nichenetr"
+        clone_res = subprocess.run(
+            [str(git_bin), "clone", "--depth", "1", "https://github.com/saeyslab/nichenetr.git", str(src_dir)],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=install_env,
+        )
+        if clone_res.returncode != 0:
+            stderr = str(clone_res.stderr or "").strip()
+            stdout = str(clone_res.stdout or "").strip()
+            raise RuntimeError(
+                "Automatic NicheNet source download failed.\n"
+                f"Project-local R library: {r_lib_dir}\n"
+                "You can retry manually with:\n"
+                f"{manual_hint}"
+                + (f"\nSTDERR:\n{stderr}" if stderr else "")
+                + (f"\nSTDOUT:\n{stdout}" if stdout else "")
+            )
+        install_res = subprocess.run(
+            [str(r_bin), "CMD", "INSTALL", "--no-test-load", "-l", str(r_lib_dir), str(src_dir)],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+    if install_res.returncode != 0:
+        stderr = str(install_res.stderr or "").strip()
+        stdout = str(install_res.stdout or "").strip()
+        raise RuntimeError(
+            "Automatic NicheNet dependency installation failed.\n"
+            f"Project-local R library: {r_lib_dir}\n"
+            "You can retry manually with:\n"
+            f"{manual_hint}"
+            + (f"\nSTDERR:\n{stderr}" if stderr else "")
+            + (f"\nSTDOUT:\n{stdout}" if stdout else "")
+        )
+
+    verify_res = subprocess.run(
+        [str(rscript), "-e", check_expr],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=runtime_env,
+    )
+    if verify_res.returncode != 0:
+        install_stderr = str(install_res.stderr or "").strip()
+        install_stdout = str(install_res.stdout or "").strip()
+        verify_stderr = str(verify_res.stderr or "").strip()
+        verify_stdout = str(verify_res.stdout or "").strip()
+        raise RuntimeError(
+            "Automatic NicheNet dependency installation completed without a detectable `nichenetr` import.\n"
+            f"Project-local R library: {r_lib_dir}\n"
+            "Please inspect the installation manually and retry."
+            + (f"\nINSTALL STDERR:\n{install_stderr}" if install_stderr else "")
+            + (f"\nINSTALL STDOUT:\n{install_stdout}" if install_stdout else "")
+            + (f"\nVERIFY STDERR:\n{verify_stderr}" if verify_stderr else "")
+            + (f"\nVERIFY STDOUT:\n{verify_stdout}" if verify_stdout else "")
+        )
+    LOGGER.warning("Installed `nichenetr` into project-local R library: %s", r_lib_dir)
+    return r_lib_dir
 
 
 def _liana_plot_color_map(
@@ -2818,8 +4823,15 @@ def _write_liana_settings(
     groupby: str,
     use_raw: bool,
     layer: Optional[str],
+    input_mode: str,
+    lognorm_target_sum: Optional[float],
     expr_prop: float,
     n_perms: Optional[int],
+    cross_tissue_mode: bool = False,
+    dataset_key: Optional[str] = None,
+    source_levels: Sequence[str] = (),
+    target_levels: Sequence[str] = (),
+    signal_scope: str = "all",
 ) -> None:
     _write_settings(
         out_dir,
@@ -2834,8 +4846,15 @@ def _write_liana_settings(
             f"groupby={groupby}",
             f"use_raw={use_raw}",
             f"layer={layer}",
+            f"input_mode={input_mode}",
+            f"lognorm_target_sum={lognorm_target_sum}",
             f"expr_prop={expr_prop}",
             f"n_perms={n_perms}",
+            f"cross_tissue_mode={cross_tissue_mode}",
+            f"dataset_key={dataset_key}",
+            f"source_levels={list(source_levels)}",
+            f"target_levels={list(target_levels)}",
+            f"signal_scope={signal_scope}",
         ],
     )
 
@@ -2868,6 +4887,11 @@ def _call_liana_safely(method_callable: Any, adata_in: ad.AnnData, **kwargs) -> 
             message=r"Setting element `?\.layers\['scaled'\]`? of view, initializing view as actual\.",
             category=implicit_mod_warn,
         )
+        warnings.filterwarnings(
+            "ignore",
+            message=r"Setting element `?\.layers\['normcounts'\]`? of view, initializing view as actual\.",
+            category=implicit_mod_warn,
+        )
         return method_callable(adata_in, **kwargs)
 
 
@@ -2884,11 +4908,98 @@ def _effective_liana_use_raw(adata: ad.AnnData, *, requested_use_raw: bool, laye
     return True
 
 
-def _effective_liana_layer(adata: ad.AnnData, *, requested_use_raw: bool, layer: Optional[str]) -> Optional[str]:
+def _build_liana_lognorm_layer(
+    adata: ad.AnnData,
+    *,
+    target_sum: float,
+) -> str:
+    source_layer = None
+    for candidate in ("counts_cb", "counts_raw"):
+        if candidate in adata.layers:
+            source_layer = str(candidate)
+            break
+    if source_layer is None:
+        raise RuntimeError(
+            "ccc liana: input_mode=lognorm requires adata.layers['counts_cb'] or adata.layers['counts_raw']."
+        )
+    target_layer = f"lognorm_{source_layer}"
+    if target_layer in adata.layers:
+        LOGGER.info("ccc liana: reusing adata.layers[%r] as LIANA input.", target_layer)
+        return target_layer
+
+    if target_sum <= 0:
+        raise RuntimeError("ccc liana: liana_lognorm_target_sum must be > 0.")
+
+    matrix = adata.layers[source_layer]
+    LOGGER.info(
+        "ccc liana: building adata.layers[%r] from adata.layers[%r] with normalize_total(target_sum=%s)+log1p.",
+        target_layer,
+        source_layer,
+        float(target_sum),
+    )
+    if sp.issparse(matrix):
+        work = matrix.copy().tocsr()
+        if work.dtype != np.float32:
+            work = work.astype(np.float32)
+        totals = np.asarray(work.sum(axis=1)).ravel().astype(np.float64, copy=False)
+        scale = np.ones_like(totals, dtype=np.float32)
+        mask = totals > 0
+        scale[mask] = (float(target_sum) / totals[mask]).astype(np.float32, copy=False)
+        for row_idx in np.flatnonzero(mask):
+            start = int(work.indptr[row_idx])
+            end = int(work.indptr[row_idx + 1])
+            if end > start:
+                work.data[start:end] *= scale[row_idx]
+        np.log1p(work.data, out=work.data)
+        adata.layers[target_layer] = work
+    else:
+        LOGGER.warning(
+            "ccc liana: source layer %r is dense; building %r will allocate a dense float32 copy.",
+            source_layer,
+            target_layer,
+        )
+        work = np.asarray(matrix, dtype=np.float32).copy()
+        totals = work.sum(axis=1, dtype=np.float64)
+        scale = np.ones(work.shape[0], dtype=np.float32)
+        mask = totals > 0
+        scale[mask] = (float(target_sum) / totals[mask]).astype(np.float32, copy=False)
+        work *= scale[:, None]
+        np.log1p(work, out=work)
+        adata.layers[target_layer] = work
+    return target_layer
+
+
+def _effective_mebocost_layer(
+    adata: ad.AnnData,
+    *,
+    input_mode: str,
+    lognorm_target_sum: float,
+) -> Optional[str]:
+    mode = str(input_mode).strip().lower()
+    if mode == "lognorm":
+        return _build_liana_lognorm_layer(adata, target_sum=float(lognorm_target_sum))
+    for preferred in ("counts_cb", "counts_raw"):
+        if preferred in adata.layers:
+            LOGGER.info("ccc mebocost: using adata.layers[%r] as MEBOCOST input.", preferred)
+            return str(preferred)
+    LOGGER.info("ccc mebocost: no counts_cb/counts_raw layer found; using adata.X as MEBOCOST input.")
+    return None
+
+
+def _effective_liana_layer(
+    adata: ad.AnnData,
+    *,
+    requested_use_raw: bool,
+    layer: Optional[str],
+    input_mode: str,
+    lognorm_target_sum: float,
+) -> Optional[str]:
     if layer is not None:
         return str(layer)
     if requested_use_raw:
         return None
+    if str(input_mode).strip().lower() == "lognorm":
+        return _build_liana_lognorm_layer(adata, target_sum=float(lognorm_target_sum))
     for preferred in ("counts_cb", "counts_raw"):
         if preferred in adata.layers:
             LOGGER.info("ccc liana: using adata.layers[%r] as LIANA input.", preferred)
@@ -2903,7 +5014,12 @@ def _liana_condition_spec_token(raw_spec: str) -> str:
     return _safe_combo_token(token)
 
 
-def _build_liana_condition_run_specs(adata: ad.AnnData, cfg) -> list[dict[str, Any]]:
+def _build_liana_condition_run_specs(
+    adata: ad.AnnData,
+    cfg,
+    *,
+    log_prefix: str = "ccc liana",
+) -> list[dict[str, Any]]:
     cond_keys = [str(x).strip() for x in (getattr(cfg, "ccc_condition_keys", ()) or ()) if str(x).strip()]
     if not cond_keys:
         ck = getattr(cfg, "ccc_condition_key", None)
@@ -2940,17 +5056,17 @@ def _build_liana_condition_run_specs(adata: ad.AnnData, cfg) -> list[dict[str, A
         if "@" in raw_spec:
             parts = [p.strip() for p in raw_spec.split("@") if p.strip()]
             if len(parts) != 2:
-                raise RuntimeError(f"ccc liana: invalid A@B condition specification {raw_spec!r}.")
+                raise RuntimeError(f"{log_prefix}: invalid A@B condition specification {raw_spec!r}.")
             a_key = _resolve_condition_key(adata, parts[0])
             b_key = _resolve_condition_key(adata, parts[1])
             if a_key not in adata.obs or b_key not in adata.obs:
-                raise RuntimeError(f"ccc liana: condition keys not found in adata.obs: {[a_key, b_key]}")
+                raise RuntimeError(f"{log_prefix}: condition keys not found in adata.obs: {[a_key, b_key]}")
             b_series = _normalize_levels(adata.obs[b_key])
             wanted_b = sorted(set(condition_values) if condition_values else set(b_series.unique().tolist()))
             for b_level in wanted_b:
                 mask_b = b_series.astype(str).to_numpy() == str(b_level)
                 if not np.any(mask_b):
-                    LOGGER.warning("ccc liana: skipping empty within-level %r for %s", str(b_level), str(b_key))
+                    LOGGER.warning("%s: skipping empty within-level %r for %s", log_prefix, str(b_level), str(b_key))
                     continue
                 adata_b = adata[mask_b].copy()
                 a_series = _normalize_levels(adata_b.obs[a_key])
@@ -2963,7 +5079,8 @@ def _build_liana_condition_run_specs(adata: ad.AnnData, cfg) -> list[dict[str, A
                     mask_a = a_series.astype(str).to_numpy() == str(a_level)
                     if not np.any(mask_a):
                         LOGGER.warning(
-                            "ccc liana: skipping empty compare level %r for %s within %s=%r",
+                            "%s: skipping empty compare level %r for %s within %s=%r",
+                            log_prefix,
                             str(a_level),
                             str(a_key),
                             str(b_key),
@@ -2971,7 +5088,8 @@ def _build_liana_condition_run_specs(adata: ad.AnnData, cfg) -> list[dict[str, A
                         )
                         continue
                     LOGGER.info(
-                        "ccc liana: expanded %r -> condition_key=%r within %s=%r at level=%r (n_cells=%d).",
+                        "%s: expanded %r -> condition_key=%r within %s=%r at level=%r (n_cells=%d).",
+                        log_prefix,
                         raw_spec,
                         str(a_key),
                         str(b_key),
@@ -3001,14 +5119,14 @@ def _build_liana_condition_run_specs(adata: ad.AnnData, cfg) -> list[dict[str, A
         else:
             condition_key = _resolve_condition_key(adata, raw_spec)
             if condition_key not in adata.obs:
-                raise RuntimeError(f"ccc liana: condition_key={condition_key!r} not found in adata.obs")
+                raise RuntimeError(f"{log_prefix}: condition_key={condition_key!r} not found in adata.obs")
             cond_series = _normalize_levels(adata.obs[condition_key])
             wanted = sorted(set(compare_levels) if compare_levels else set(condition_values) if condition_values else set(cond_series.unique().tolist()))
             compare_rel = spec_root / "compare"
             for condition_value in wanted:
                 mask = cond_series.astype(str).to_numpy() == str(condition_value)
                 if not np.any(mask):
-                    LOGGER.warning("ccc liana: skipping empty condition_value=%r for spec=%r", str(condition_value), raw_spec)
+                    LOGGER.warning("%s: skipping empty condition_value=%r for spec=%r", log_prefix, str(condition_value), raw_spec)
                     continue
                 run_specs.append(
                     {
@@ -3052,6 +5170,20 @@ def run_liana_ccc(cfg) -> ad.AnnData:
     )
     if str(groupby) not in adata.obs:
         raise RuntimeError(f"ccc liana: groupby={groupby!r} not found in adata.obs")
+    dataset_key = getattr(cfg, "ccc_dataset_key", None)
+    source_levels = tuple(str(x) for x in (getattr(cfg, "ccc_source_levels", ()) or ()) if str(x))
+    target_levels = tuple(str(x) for x in (getattr(cfg, "ccc_target_levels", ()) or ()) if str(x))
+    signal_scope = str(getattr(cfg, "ccc_signal_scope", "all") or "all").strip().lower()
+    cross_tissue_mode = bool(dataset_key)
+    cluster_dataset_map: dict[str, str] = {}
+    if cross_tissue_mode:
+        if not source_levels or not target_levels:
+            raise RuntimeError("ccc liana: cross-tissue mode requires at least one source level and one target level.")
+        cluster_dataset_map = _resolve_liana_cluster_dataset_levels(
+            adata,
+            cluster_key=str(groupby),
+            dataset_key=str(dataset_key),
+        )
 
     methods = tuple(str(x).strip().lower() for x in (getattr(cfg, "liana_methods", ()) or ()) if str(x).strip())
     if not methods:
@@ -3072,10 +5204,25 @@ def run_liana_ccc(cfg) -> ad.AnnData:
         raise RuntimeError("ccc liana: cannot use both liana_use_raw=True and liana_layer.")
     requested_use_raw = bool(getattr(cfg, "liana_use_raw", False))
     requested_layer = getattr(cfg, "liana_layer", None)
+    liana_input_mode = str(getattr(cfg, "liana_input_mode", "counts")).strip().lower()
+    if liana_input_mode not in {"counts", "lognorm"}:
+        raise RuntimeError("ccc liana: liana_input_mode must be one of {'counts', 'lognorm'}.")
+    liana_lognorm_target_sum = float(getattr(cfg, "liana_lognorm_target_sum", 1e4))
+    if requested_use_raw and liana_input_mode != "counts":
+        raise RuntimeError("ccc liana: liana_use_raw=True is only compatible with liana_input_mode='counts'.")
+    if cross_tissue_mode and liana_input_mode == "counts" and not requested_use_raw and requested_layer is None:
+        LOGGER.warning(
+            "ccc liana: cross-tissue mode is running on raw count-like input (%s). "
+            "If source datasets differ strongly in sequencing depth or chemistry, LIANA rankings can be biased by detection depth. "
+            "Consider rerunning with --input-mode lognorm for a depth-normalized expression layer.",
+            "counts_cb/counts_raw",
+        )
     liana_layer = _effective_liana_layer(
         adata,
         requested_use_raw=requested_use_raw,
         layer=requested_layer,
+        input_mode=liana_input_mode,
+        lognorm_target_sum=liana_lognorm_target_sum,
     )
     global_use_raw = _effective_liana_use_raw(
         adata,
@@ -3143,6 +5290,14 @@ def run_liana_ccc(cfg) -> ad.AnnData:
                 specificity_col=aggregate_specificity_col,
                 specificity_ascending=True,
             )
+            if cross_tissue_mode:
+                per_method_results[agg_key] = _filter_liana_results_cross_tissue(
+                    per_method_results[agg_key],
+                    cluster_dataset_map=cluster_dataset_map,
+                    source_levels=source_levels,
+                    target_levels=target_levels,
+                    signal_scope=signal_scope,
+                )
 
         for method_name in non_aggregate_methods:
             spec = method_specs[str(method_name)]
@@ -3168,6 +5323,14 @@ def run_liana_ccc(cfg) -> ad.AnnData:
                 specificity_col=spec["specificity_col"],
                 specificity_ascending=bool(spec["specificity_ascending"]),
             )
+            if cross_tissue_mode:
+                per_method_results[str(method_name)] = _filter_liana_results_cross_tissue(
+                    per_method_results[str(method_name)],
+                    cluster_dataset_map=cluster_dataset_map,
+                    source_levels=source_levels,
+                    target_levels=target_levels,
+                    signal_scope=signal_scope,
+                )
 
         for method_name, df in per_method_results.items():
             df.to_csv(run_tables_dir / f"liana_{method_name}.tsv", sep="\t", index=False)
@@ -3213,7 +5376,7 @@ def run_liana_ccc(cfg) -> ad.AnnData:
                         plot_source_target_summary,
                         figdir=cond_fig_rel,
                         stem="liana_source_target_heatmap",
-                        title=f"LIANA source-target summary ({condition_label})",
+                        title=f"{'LIANA cross-tissue signaling' if cross_tissue_mode else 'LIANA source-target summary'} ({condition_label})",
                     )
                 )
                 if "mean_score" in plot_source_target_summary.columns:
@@ -3222,7 +5385,7 @@ def run_liana_ccc(cfg) -> ad.AnnData:
                             plot_source_target_summary,
                             figdir=cond_fig_rel,
                             stem="liana_source_target_mean_score_heatmap",
-                            title=f"LIANA source-target mean score ({condition_label})",
+                            title=f"{'LIANA cross-tissue mean score' if cross_tissue_mode else 'LIANA source-target mean score'} ({condition_label})",
                             value_col="mean_score",
                             cmap="mako",
                         )
@@ -3232,7 +5395,7 @@ def run_liana_ccc(cfg) -> ad.AnnData:
                         plot_source_target_summary,
                         figdir=cond_fig_rel,
                         stem="liana_send_receive_n_interactions",
-                        title=f"LIANA send/receive counts ({condition_label})",
+                        title=f"{'LIANA cross-tissue send/receive counts' if cross_tissue_mode else 'LIANA send/receive counts'} ({condition_label})",
                         value_col="n_interactions",
                     )
                 )
@@ -3242,7 +5405,7 @@ def run_liana_ccc(cfg) -> ad.AnnData:
                             plot_source_target_summary,
                             figdir=cond_fig_rel,
                             stem="liana_send_receive_mean_score",
-                            title=f"LIANA send/receive mean score ({condition_label})",
+                            title=f"{'LIANA cross-tissue send/receive mean score' if cross_tissue_mode else 'LIANA send/receive mean score'} ({condition_label})",
                             value_col="mean_score",
                         )
                     )
@@ -3251,7 +5414,7 @@ def run_liana_ccc(cfg) -> ad.AnnData:
                         plot_primary_df,
                         figdir=cond_fig_rel,
                         stem="liana_circos_n_interactions",
-                        title=f"LIANA circos ({condition_label})",
+                        title=f"{'LIANA cross-tissue circos' if cross_tissue_mode else 'LIANA circos'} ({condition_label})",
                         value_col=None,
                         node_color_map=plot_color_map,
                     )
@@ -3262,7 +5425,7 @@ def run_liana_ccc(cfg) -> ad.AnnData:
                             plot_primary_df,
                             figdir=cond_fig_rel,
                             stem="liana_circos_mean_score",
-                            title=f"LIANA circos mean score ({condition_label})",
+                            title=f"{'LIANA cross-tissue circos mean score' if cross_tissue_mode else 'LIANA circos mean score'} ({condition_label})",
                             value_col=primary_score_col,
                             node_color_map=plot_color_map,
                             inverse_score=primary_score_ascending,
@@ -3273,7 +5436,7 @@ def run_liana_ccc(cfg) -> ad.AnnData:
                         plot_primary_df,
                         figdir=cond_fig_rel,
                         stem=f"liana_top_{primary_method}",
-                        title=f"Top LIANA interactions ({condition_label})",
+                        title=f"{'Top LIANA cross-tissue interactions' if cross_tissue_mode else 'Top LIANA interactions'} ({condition_label})",
                         top_n=plot_top_n,
                         score_col=primary_score_col,
                         ascending=primary_score_ascending,
@@ -3284,7 +5447,7 @@ def run_liana_ccc(cfg) -> ad.AnnData:
                         plot_primary_family_df,
                         figdir=cond_fig_rel,
                         stem=f"liana_top_{primary_method}_route_families",
-                        title=f"Top LIANA route families ({condition_label})",
+                        title=f"{'Top LIANA cross-tissue route families' if cross_tissue_mode else 'Top LIANA route families'} ({condition_label})",
                         top_n=min(plot_top_n, 12),
                         family_col="route_family",
                     )
@@ -3294,7 +5457,7 @@ def run_liana_ccc(cfg) -> ad.AnnData:
                         plot_primary_df,
                         figdir=cond_fig_rel,
                         stem=f"liana_top_{primary_method}_target_clusters",
-                        title=f"Top LIANA target clusters ({condition_label})",
+                        title=f"{'Top LIANA cross-tissue target clusters' if cross_tissue_mode else 'Top LIANA target clusters'} ({condition_label})",
                         top_n=min(plot_top_n, 12),
                     )
                 )
@@ -3331,8 +5494,15 @@ def run_liana_ccc(cfg) -> ad.AnnData:
             groupby=str(groupby),
             use_raw=use_raw,
             layer=liana_layer,
+            input_mode=liana_input_mode,
+            lognorm_target_sum=(liana_lognorm_target_sum if liana_input_mode == "lognorm" else None),
             expr_prop=float(getattr(cfg, "liana_expr_prop", 0.1)),
             n_perms=getattr(cfg, "liana_n_perms", None),
+            cross_tissue_mode=bool(cross_tissue_mode),
+            dataset_key=str(dataset_key) if dataset_key else None,
+            source_levels=source_levels,
+            target_levels=target_levels,
+            signal_scope=str(signal_scope),
         )
 
         runs_store[str(run_spec["run_id"])] = {
@@ -3346,9 +5516,16 @@ def run_liana_ccc(cfg) -> ad.AnnData:
             "condition_spec": run_spec.get("condition_spec"),
             "context_key": run_spec.get("context_key"),
             "context_value": run_spec.get("context_value"),
+            "cross_tissue_mode": bool(cross_tissue_mode),
+            "dataset_key": str(dataset_key) if dataset_key else None,
+            "source_levels": list(source_levels),
+            "target_levels": list(target_levels),
+            "signal_scope": str(signal_scope),
             "resource": str(getattr(cfg, "liana_resource", "consensus")),
             "methods": list(methods),
             "aggregated_methods": list(aggregate_methods),
+            "input_mode": liana_input_mode,
+            "lognorm_target_sum": liana_lognorm_target_sum if liana_input_mode == "lognorm" else None,
             "primary_method": str(primary_method),
             "top_interactions": primary_top,
             "source_target_summary": source_target_summary,
@@ -3443,6 +5620,29 @@ def run_liana_ccc(cfg) -> ad.AnnData:
                         top_n=min(int(getattr(cfg, "liana_plot_top_n", 60)), 12),
                     )
                 )
+                comparison_artifacts.extend(
+                    plot_utils.plot_liana_condition_split_target_clusters(
+                        combined_primary,
+                        figdir=Path(bucket["compare_rel"]),
+                        stem=f"liana_top_{primary_method_name}_target_cluster_share_by_condition",
+                        title="LIANA condition-split target cluster share",
+                        top_n=min(int(getattr(cfg, "liana_plot_top_n", 60)), 12),
+                        normalize=True,
+                        x_label="target share",
+                    )
+                )
+                if primary_score_col in combined_primary.columns:
+                    comparison_artifacts.extend(
+                        plot_utils.plot_liana_condition_split_target_clusters(
+                            combined_primary,
+                            figdir=Path(bucket["compare_rel"]),
+                            stem=f"liana_top_{primary_method_name}_target_cluster_mean_score_by_condition",
+                            title="LIANA condition-split target cluster mean score",
+                            top_n=min(int(getattr(cfg, "liana_plot_top_n", 60)), 12),
+                            value_col=primary_score_col,
+                            x_label="mean score",
+                        )
+                    )
             comparison_artifacts.extend(
                 plot_utils.plot_liana_condition_alluvial_grid(
                     combined_summary,
@@ -3488,6 +5688,1180 @@ def run_liana_ccc(cfg) -> ad.AnnData:
         io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
 
     LOGGER.info("Finished markers-and-de (ccc liana).")
+    return adata
+
+
+def run_nichenet_ccc(cfg) -> ad.AnnData:
+    init_logging(getattr(cfg, "logfile", None))
+    LOGGER.info("Starting markers-and-de (ccc nichenet)...")
+    nichenet_r_lib_dir = _ensure_nichenet_r_runtime(
+        install_missing=bool(getattr(cfg, "nichenet_install_missing_r_deps", False))
+    )
+    nichenet_r_env = _nichenet_r_env(nichenet_r_lib_dir)
+
+    output_dir = Path(getattr(cfg, "output_dir"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    figdir = output_dir / str(getattr(cfg, "figdir_name", "figures"))
+    plot_utils.setup_scanpy_figs(figdir, getattr(cfg, "figure_formats", ["png", "pdf"]))
+
+    adata = io_utils.load_dataset(getattr(cfg, "input_path"))
+    groupby, display_map = _resolve_stable_groupby_and_display_map(
+        adata,
+        groupby=getattr(cfg, "groupby", None),
+        round_id=getattr(cfg, "round_id", None),
+        label_source=str(getattr(cfg, "label_source", "pretty")),
+    )
+    if str(groupby) not in adata.obs:
+        raise RuntimeError(f"ccc nichenet: groupby={groupby!r} not found in adata.obs")
+
+    receiver_cluster_spec = str(getattr(cfg, "nichenet_receiver_cluster", "all") or "all").strip()
+    all_receiver_clusters = sorted(dict.fromkeys(adata.obs[str(groupby)].astype(str).tolist()))
+    if receiver_cluster_spec.lower() == "all":
+        receiver_clusters = tuple(all_receiver_clusters)
+    else:
+        receiver_clusters = (_resolve_cluster_request(receiver_cluster_spec, display_map),)
+    requested_sender_clusters = tuple(
+        _resolve_cluster_request(str(x), display_map)
+        for x in (getattr(cfg, "nichenet_sender_clusters", ()) or ())
+        if str(x).strip()
+    )
+    dataset_key = getattr(cfg, "ccc_dataset_key", None)
+    source_levels = tuple(str(x) for x in (getattr(cfg, "ccc_source_levels", ()) or ()) if str(x))
+    target_levels = tuple(str(x) for x in (getattr(cfg, "ccc_target_levels", ()) or ()) if str(x))
+    signal_scope = str(getattr(cfg, "ccc_signal_scope", "all") or "all").strip().lower()
+    cross_tissue_mode = bool(dataset_key)
+
+    requested_layer = _effective_liana_layer(
+        adata,
+        requested_use_raw=False,
+        layer=None,
+        input_mode=str(getattr(cfg, "nichenet_input_mode", "counts")),
+        lognorm_target_sum=float(getattr(cfg, "nichenet_lognorm_target_sum", 1e4)),
+    )
+    expressed_use_raw = _effective_liana_use_raw(
+        adata,
+        requested_use_raw=False,
+        layer=requested_layer,
+    )
+    min_fraction = float(getattr(cfg, "nichenet_expression_pct", 0.10))
+    run_specs = _build_nichenet_condition_run_specs(adata, cfg)
+
+    run_namespace = _run_namespace_for_round(
+        adata,
+        prefix="ccc_nichenet",
+        round_id=getattr(cfg, "round_id", None),
+    )
+    run_round = str(plot_utils.get_run_subdir(run_namespace))
+    tables_root = output_dir / "tables" / run_round
+    tables_root.mkdir(parents=True, exist_ok=True)
+
+    adata.uns.setdefault("markers_and_de", {})
+    ccc_block = adata.uns["markers_and_de"].setdefault("ccc", {})
+    nichenet_block = ccc_block.setdefault("nichenet", {})
+    runs_store = nichenet_block.setdefault("runs", {})
+
+    for run_spec in run_specs:
+        adata_run = run_spec["adata"]
+        run_tables_dir = tables_root / Path(run_spec["tables_rel"])
+        run_tables_dir.mkdir(parents=True, exist_ok=True)
+        run_fig_rel = Path(run_spec["figs_rel"])
+        compare_key = run_spec.get("compare_key")
+        condition_oi = run_spec.get("condition_oi")
+        condition_reference = run_spec.get("condition_reference")
+
+        cluster_series = adata_run.obs[str(groupby)].astype(str)
+        for receiver_cluster in receiver_clusters:
+            receiver_token = _safe_combo_token(receiver_cluster)
+            receiver_tables_dir = run_tables_dir / f"receiver__{receiver_token}"
+            receiver_tables_dir.mkdir(parents=True, exist_ok=True)
+            receiver_fig_rel = run_fig_rel / f"receiver__{receiver_token}"
+
+            receiver_mask = cluster_series.to_numpy() == str(receiver_cluster)
+            sender_mask = cluster_series.to_numpy() != str(receiver_cluster)
+            if requested_sender_clusters:
+                sender_mask &= cluster_series.isin(list(requested_sender_clusters)).to_numpy()
+            if cross_tissue_mode:
+                if str(dataset_key) not in adata_run.obs:
+                    raise RuntimeError(f"ccc nichenet: dataset_key={dataset_key!r} not found in adata.obs")
+                dataset_series = adata_run.obs[str(dataset_key)].astype(str)
+                sender_mask &= dataset_series.isin(list(source_levels)).to_numpy()
+                receiver_mask &= dataset_series.isin(list(target_levels)).to_numpy()
+            if int(receiver_mask.sum()) == 0:
+                LOGGER.warning(
+                    "ccc nichenet: skipping run=%r receiver=%r because no receiver cells matched.",
+                    str(run_spec["run_id"]),
+                    str(receiver_cluster),
+                )
+                continue
+            if int(sender_mask.sum()) == 0:
+                LOGGER.warning(
+                    "ccc nichenet: skipping run=%r receiver=%r because no sender cells matched.",
+                    str(run_spec["run_id"]),
+                    str(receiver_cluster),
+                )
+                continue
+
+            sender_expressed_genes = _compute_expressed_genes(
+                adata_run,
+                mask=sender_mask,
+                layer=requested_layer,
+                use_raw=expressed_use_raw,
+                min_fraction=min_fraction,
+            )
+            receiver_expressed_genes = _compute_expressed_genes(
+                adata_run,
+                mask=receiver_mask,
+                layer=requested_layer,
+                use_raw=expressed_use_raw,
+                min_fraction=min_fraction,
+            )
+            if getattr(cfg, "nichenet_gene_list_file", None):
+                geneset_oi = _load_gene_list_file(Path(getattr(cfg, "nichenet_gene_list_file")))
+                background_genes = sorted(dict.fromkeys(receiver_expressed_genes))
+                receiver_de_df = pd.DataFrame(columns=["gene", "logfoldchanges", "pvals_adj"])
+            else:
+                receiver_adata = adata_run[receiver_mask].copy()
+                geneset_oi, background_genes, receiver_de_df = _extract_receiver_de_geneset(
+                    receiver_adata,
+                    compare_key=str(compare_key),
+                    condition_oi=str(condition_oi),
+                    condition_reference=str(condition_reference),
+                    min_logfc=float(getattr(cfg, "nichenet_min_logfc", 0.25)),
+                    padj_threshold=float(getattr(cfg, "nichenet_padj_threshold", 0.05)),
+                )
+                background_genes = sorted(set(background_genes).intersection(receiver_expressed_genes))
+            geneset_oi = sorted(set(geneset_oi).intersection(background_genes))
+            if not geneset_oi:
+                LOGGER.warning(
+                    "ccc nichenet: skipping run=%r receiver=%r because the receiver gene set is empty after filtering.",
+                    str(run_spec["run_id"]),
+                    str(receiver_cluster),
+                )
+                continue
+
+            nichenet_res = _run_nichenet_sender_focused(
+                sender_expressed_genes=sender_expressed_genes,
+                receiver_expressed_genes=receiver_expressed_genes,
+                geneset_oi=geneset_oi,
+                background_genes=background_genes,
+                top_n_ligands=int(getattr(cfg, "nichenet_top_n_ligands", 30)),
+                top_n_targets=int(getattr(cfg, "nichenet_top_n_targets", 200)),
+                organism=str(getattr(cfg, "nichenet_organism", "human")),
+                signal_scope=signal_scope,
+                r_env=nichenet_r_env,
+            )
+            ligand_activity = nichenet_res.get("ligand_activity", pd.DataFrame())
+            ligand_target_links = nichenet_res.get("ligand_target_links", pd.DataFrame())
+            ligand_receptor_links = nichenet_res.get("ligand_receptor_links", pd.DataFrame())
+            potential_ligands = nichenet_res.get("potential_ligands", pd.DataFrame())
+
+            ligand_activity.to_csv(receiver_tables_dir / "nichenet_ligand_activity.tsv", sep="\t", index=False)
+            ligand_target_links.to_csv(receiver_tables_dir / "nichenet_ligand_target_links.tsv", sep="\t", index=False)
+            ligand_receptor_links.to_csv(receiver_tables_dir / "nichenet_ligand_receptor_links.tsv", sep="\t", index=False)
+            potential_ligands.to_csv(receiver_tables_dir / "nichenet_potential_ligands.tsv", sep="\t", index=False)
+            receiver_de_df.to_csv(receiver_tables_dir / "nichenet_receiver_de.tsv", sep="\t", index=False)
+
+            settings_lines = [
+                f"receiver_cluster\t{receiver_cluster}",
+                f"condition_spec\t{run_spec.get('condition_spec')}",
+                f"compare_key\t{compare_key}",
+                f"condition_oi\t{condition_oi}",
+                f"condition_reference\t{condition_reference}",
+                f"cross_tissue_mode\t{cross_tissue_mode}",
+                f"dataset_key\t{dataset_key}",
+                f"source_levels\t{','.join(source_levels)}",
+                f"target_levels\t{','.join(target_levels)}",
+                f"signal_scope\t{signal_scope}",
+                f"project_r_lib\t{nichenet_r_lib_dir}",
+                f"expression_pct\t{min_fraction}",
+                f"n_sender_expressed_genes\t{len(sender_expressed_genes)}",
+                f"n_receiver_expressed_genes\t{len(receiver_expressed_genes)}",
+                f"n_geneset_oi\t{len(geneset_oi)}",
+            ]
+            (receiver_tables_dir / "nichenet_settings.tsv").write_text("\n".join(settings_lines) + "\n")
+
+            if bool(getattr(cfg, "make_figures", True)):
+                artifacts = []
+                artifacts.extend(
+                    plot_utils.plot_nichenet_top_ligands(
+                        ligand_activity,
+                        figdir=receiver_fig_rel,
+                        stem="nichenet_top_ligands",
+                        title=f"NicheNet top ligands ({run_spec['run_label']}) [{_liana_plot_label(receiver_cluster, display_map)}]",
+                        top_n=int(getattr(cfg, "nichenet_top_n_ligands", 30)),
+                    )
+                )
+                artifacts.extend(
+                    plot_utils.plot_nichenet_ligand_target_heatmap(
+                        ligand_target_links,
+                        figdir=receiver_fig_rel,
+                        stem="nichenet_ligand_target_heatmap",
+                        title=f"NicheNet ligand-target links ({run_spec['run_label']}) [{_liana_plot_label(receiver_cluster, display_map)}]",
+                        top_n_ligands=min(int(getattr(cfg, "nichenet_top_n_ligands", 30)), 15),
+                        top_n_targets=min(int(getattr(cfg, "nichenet_top_n_targets", 200)), 40),
+                    )
+                )
+                plot_utils.persist_plot_artifacts(artifacts)
+
+            run_id = f"{run_spec['run_id']}::receiver={receiver_cluster}"
+            runs_store[str(run_id)] = {
+                "version": __version__,
+                "timestamp_utc": datetime.utcnow().isoformat(),
+                "round_id": getattr(cfg, "round_id", None),
+                "groupby": str(groupby),
+                "receiver_cluster": str(receiver_cluster),
+                "receiver_cluster_label": _liana_plot_label(receiver_cluster, display_map),
+                "receiver_cluster_mode": "all" if receiver_cluster_spec.lower() == "all" else "single",
+                "display_map": dict(display_map),
+                "condition_spec": run_spec.get("condition_spec"),
+                "context_key": run_spec.get("context_key"),
+                "context_value": run_spec.get("context_value"),
+                "compare_key": compare_key,
+                "condition_oi": condition_oi,
+                "condition_reference": condition_reference,
+                "cross_tissue_mode": bool(cross_tissue_mode),
+                "dataset_key": str(dataset_key) if dataset_key else None,
+                "source_levels": list(source_levels),
+                "target_levels": list(target_levels),
+                "signal_scope": str(signal_scope),
+                "project_r_lib": str(nichenet_r_lib_dir),
+                "ligand_activity": ligand_activity,
+                "ligand_target_links": ligand_target_links,
+                "ligand_receptor_links": ligand_receptor_links,
+                "potential_ligands": potential_ligands,
+                "receiver_de": receiver_de_df,
+            }
+
+    out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.ccc_nichenet")) + ".zarr")
+    LOGGER.info("Saving dataset → %s", out_zarr)
+    io_utils.save_dataset(adata, out_zarr, fmt="zarr")
+    if bool(getattr(cfg, "save_h5ad", False)):
+        out_h5ad = output_dir / (str(getattr(cfg, "output_name", "adata.ccc_nichenet")) + ".h5ad")
+        LOGGER.warning("Writing additional H5AD output (loads full matrix into RAM): %s", out_h5ad)
+        io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
+    LOGGER.info("Finished markers-and-de (ccc nichenet).")
+    return adata
+
+
+def run_mebocost_ccc(cfg) -> ad.AnnData:
+    init_logging(getattr(cfg, "logfile", None))
+    LOGGER.info("Starting markers-and-de (ccc mebocost)...")
+    install_missing = bool(getattr(cfg, "mebocost_install_missing_python_deps", False))
+    mebocost_api = _import_mebocost_api(
+        install_missing=install_missing
+    )
+    mebocost_config_path = _ensure_mebocost_resource_config(install_missing=install_missing)
+
+    output_dir = Path(getattr(cfg, "output_dir"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    figdir = output_dir / str(getattr(cfg, "figdir_name", "figures"))
+    plot_utils.setup_scanpy_figs(figdir, getattr(cfg, "figure_formats", ["png", "pdf"]))
+
+    adata = io_utils.load_dataset(getattr(cfg, "input_path"))
+    groupby, display_map = _resolve_stable_groupby_and_display_map(
+        adata,
+        groupby=getattr(cfg, "groupby", None),
+        round_id=getattr(cfg, "round_id", None),
+        label_source=str(getattr(cfg, "label_source", "pretty")),
+    )
+    if str(groupby) not in adata.obs:
+        raise RuntimeError(f"ccc mebocost: groupby={groupby!r} not found in adata.obs")
+
+    dataset_key = getattr(cfg, "ccc_dataset_key", None)
+    source_levels = tuple(str(x) for x in (getattr(cfg, "ccc_source_levels", ()) or ()) if str(x))
+    target_levels = tuple(str(x) for x in (getattr(cfg, "ccc_target_levels", ()) or ()) if str(x))
+    cross_tissue_mode = bool(dataset_key)
+    if cross_tissue_mode:
+        if not source_levels or not target_levels:
+            raise RuntimeError("ccc mebocost: cross-tissue mode requires at least one source level and one target level.")
+        cluster_dataset_map = _resolve_liana_cluster_dataset_levels(
+            adata,
+            cluster_key=str(groupby),
+            dataset_key=str(dataset_key),
+        )
+    else:
+        cluster_dataset_map = {}
+    mebocost_input_mode = str(getattr(cfg, "mebocost_input_mode", "counts")).strip().lower()
+    if mebocost_input_mode not in {"counts", "lognorm"}:
+        raise RuntimeError("ccc mebocost: mebocost_input_mode must be one of {'counts', 'lognorm'}.")
+    mebocost_lognorm_target_sum = float(getattr(cfg, "mebocost_lognorm_target_sum", 1e4))
+    if cross_tissue_mode and mebocost_input_mode == "counts":
+        LOGGER.warning(
+            "ccc mebocost: cross-tissue mode is running on raw count-like input (counts_cb/counts_raw). "
+            "If source datasets differ strongly in sequencing depth or chemistry, MEBOCOST event ranking can be biased by detection depth. "
+            "Consider rerunning with --input-mode lognorm for a depth-normalized expression layer."
+        )
+    mebocost_layer = _effective_mebocost_layer(
+        adata,
+        input_mode=mebocost_input_mode,
+        lognorm_target_sum=mebocost_lognorm_target_sum,
+    )
+
+    run_specs = _build_liana_condition_run_specs(adata, cfg, log_prefix="ccc mebocost")
+    run_namespace = _run_namespace_for_round(
+        adata,
+        prefix="ccc_mebocost",
+        round_id=getattr(cfg, "round_id", None),
+    )
+    run_round = str(plot_utils.get_run_subdir(run_namespace))
+    tables_root = output_dir / "tables" / run_round
+    tables_root.mkdir(parents=True, exist_ok=True)
+
+    adata.uns.setdefault("markers_and_de", {})
+    ccc_block = adata.uns["markers_and_de"].setdefault("ccc", {})
+    mebocost_block = ccc_block.setdefault("mebocost", {})
+    runs_store = mebocost_block.setdefault("runs", {})
+    comparison_buckets: dict[str, dict[str, Any]] = {}
+
+    for run_spec in run_specs:
+        adata_run = run_spec["adata"].copy()
+        run_id = str(run_spec["run_id"])
+        condition_label = str(run_spec["run_label"])
+        run_tables_dir = tables_root / Path(run_spec["tables_rel"])
+        run_tables_dir.mkdir(parents=True, exist_ok=True)
+        run_fig_rel = Path(run_spec["figs_rel"])
+        adata_mebo = adata_run.copy()
+        if mebocost_layer is not None:
+            adata_mebo.X = adata_mebo.layers[mebocost_layer].copy()
+
+        create_obj = getattr(mebocost_api, "create_obj", None)
+        if create_obj is None:
+            raise RuntimeError("ccc mebocost: imported MEBOCOST API does not expose create_obj().")
+        mebo_obj = _call_with_supported_kwargs(
+            create_obj,
+            adata=adata_mebo,
+            group_col=str(groupby),
+            species=str(getattr(cfg, "mebocost_organism", "human")).strip().lower(),
+            config_path=str(mebocost_config_path),
+        )
+        infer_fn = getattr(mebo_obj, "infer_commu", None)
+        if infer_fn is None:
+            raise RuntimeError("ccc mebocost: MEBOCOST object does not expose infer_commu().")
+
+        infer_res = _call_with_supported_kwargs(
+            infer_fn,
+            n_shuffle=int(getattr(cfg, "mebocost_n_shuffle", 1000)),
+            n_permutations=int(getattr(cfg, "mebocost_n_shuffle", 1000)),
+            seed=int(getattr(cfg, "mebocost_seed", 42)),
+            Return=True,
+            save_permuation=False,
+            save_permutation=False,
+            min_cell_number=int(getattr(cfg, "mebocost_min_cell_number", 10)),
+            pval_method="permutation_test_fdr",
+            pval_cutoff=float(getattr(cfg, "mebocost_pval_cutoff", 0.05)),
+        )
+
+        commu_res_raw = getattr(mebo_obj, "commu_res", None)
+        if not isinstance(commu_res_raw, pd.DataFrame) and isinstance(infer_res, pd.DataFrame):
+            commu_res_raw = infer_res
+        if not isinstance(commu_res_raw, pd.DataFrame):
+            commu_res_raw = pd.DataFrame()
+
+        commu_res = _standardize_mebocost_commu_table(commu_res_raw)
+        if cross_tissue_mode:
+            commu_res = _filter_liana_results_cross_tissue(
+                commu_res,
+                cluster_dataset_map=cluster_dataset_map,
+                source_levels=source_levels,
+                target_levels=target_levels,
+                signal_scope="all",
+            )
+        commu_res = _annotate_mebocost_commu_table(
+            commu_res,
+            config_path=mebocost_config_path,
+            species=str(getattr(cfg, "mebocost_organism", "human")).strip().lower(),
+        )
+        if "pval" in commu_res.columns:
+            sig_res = commu_res.loc[commu_res["pval"].fillna(np.inf) <= float(getattr(cfg, "mebocost_pval_cutoff", 0.05))].copy()
+        else:
+            sig_res = commu_res.copy()
+        plot_base = sig_res if not sig_res.empty else commu_res
+        summary = _summarize_mebocost_source_target(plot_base)
+        metabolite_superclass_summary = _summarize_mebocost_annotation(plot_base, "super_class")
+        sensor_annotation_summary = _summarize_mebocost_annotation(plot_base, "sensor_annotation")
+        metabolite_superclass_by_source = _summarize_mebocost_annotation(plot_base, "super_class", focus_col="source")
+        metabolite_superclass_by_target = _summarize_mebocost_annotation(plot_base, "super_class", focus_col="target")
+        sensor_annotation_by_source = _summarize_mebocost_annotation(plot_base, "sensor_annotation", focus_col="source")
+        sensor_annotation_by_target = _summarize_mebocost_annotation(plot_base, "sensor_annotation", focus_col="target")
+        commu_res = _prepare_mebocost_plot_df(commu_res, display_map=display_map)
+        sig_res = _prepare_mebocost_plot_df(sig_res, display_map=display_map)
+        plot_base = _prepare_mebocost_plot_df(plot_base, display_map=display_map)
+        summary = _prepare_mebocost_plot_df(summary, display_map=display_map)
+        metabolite_superclass_summary = _prepare_mebocost_plot_df(metabolite_superclass_summary, display_map=display_map)
+        sensor_annotation_summary = _prepare_mebocost_plot_df(sensor_annotation_summary, display_map=display_map)
+        metabolite_superclass_by_source = _prepare_mebocost_plot_df(metabolite_superclass_by_source, display_map=display_map)
+        metabolite_superclass_by_target = _prepare_mebocost_plot_df(metabolite_superclass_by_target, display_map=display_map)
+        sensor_annotation_by_source = _prepare_mebocost_plot_df(sensor_annotation_by_source, display_map=display_map)
+        sensor_annotation_by_target = _prepare_mebocost_plot_df(sensor_annotation_by_target, display_map=display_map)
+
+        commu_res.to_csv(run_tables_dir / "mebocost_commu_res.tsv", sep="\t", index=False)
+        sig_res.to_csv(run_tables_dir / "mebocost_sig_res.tsv", sep="\t", index=False)
+        summary.to_csv(run_tables_dir / "mebocost_source_target_summary.tsv", sep="\t", index=False)
+        metabolite_superclass_summary.to_csv(run_tables_dir / "mebocost_metabolite_superclass_summary.tsv", sep="\t", index=False)
+        sensor_annotation_summary.to_csv(run_tables_dir / "mebocost_sensor_annotation_summary.tsv", sep="\t", index=False)
+        metabolite_superclass_by_source.to_csv(run_tables_dir / "mebocost_metabolite_superclass_by_source.tsv", sep="\t", index=False)
+        metabolite_superclass_by_target.to_csv(run_tables_dir / "mebocost_metabolite_superclass_by_target.tsv", sep="\t", index=False)
+        sensor_annotation_by_source.to_csv(run_tables_dir / "mebocost_sensor_annotation_by_source.tsv", sep="\t", index=False)
+        sensor_annotation_by_target.to_csv(run_tables_dir / "mebocost_sensor_annotation_by_target.tsv", sep="\t", index=False)
+
+        settings_lines = [
+            f"condition_spec\t{run_spec.get('condition_spec')}",
+            f"cross_tissue_mode\t{cross_tissue_mode}",
+            f"dataset_key\t{dataset_key}",
+            f"source_levels\t{','.join(source_levels)}",
+            f"target_levels\t{','.join(target_levels)}",
+            f"organism\t{getattr(cfg, 'mebocost_organism', 'human')}",
+            f"input_mode\t{mebocost_input_mode}",
+            f"lognorm_target_sum\t{mebocost_lognorm_target_sum if mebocost_input_mode == 'lognorm' else ''}",
+            f"expression_layer\t{mebocost_layer}",
+            f"n_shuffle\t{int(getattr(cfg, 'mebocost_n_shuffle', 1000))}",
+            f"min_cell_number\t{int(getattr(cfg, 'mebocost_min_cell_number', 10))}",
+            f"pval_cutoff\t{float(getattr(cfg, 'mebocost_pval_cutoff', 0.05))}",
+        ]
+        (run_tables_dir / "mebocost_settings.tsv").write_text("\n".join(settings_lines) + "\n")
+
+        if bool(getattr(cfg, "make_figures", True)):
+            artifacts = []
+            artifacts.extend(
+                plot_utils.plot_mebocost_top_events(
+                    plot_base,
+                    figdir=run_fig_rel,
+                    stem="mebocost_top_events",
+                    title=f"{'MEBOCOST cross-tissue top metabolite-sensor events' if cross_tissue_mode else 'MEBOCOST top metabolite-sensor events'} ({condition_label})",
+                    top_n=int(getattr(cfg, "mebocost_plot_top_n", 40)),
+                )
+            )
+            artifacts.extend(
+                plot_utils.plot_mebocost_annotation_summary_bars(
+                    plot_base,
+                    figdir=run_fig_rel,
+                    stem="mebocost_metabolite_superclass_summary",
+                    annotation_col="super_class",
+                    title=f"{'MEBOCOST metabolite super-classes' if not cross_tissue_mode else 'MEBOCOST cross-tissue metabolite super-classes'} ({condition_label})",
+                    top_n=min(int(getattr(cfg, "mebocost_plot_top_n", 40)), 12),
+                )
+            )
+            artifacts.extend(
+                plot_utils.plot_mebocost_annotation_summary_bars(
+                    plot_base,
+                    figdir=run_fig_rel,
+                    stem="mebocost_sensor_annotation_summary",
+                    annotation_col="sensor_annotation",
+                    title=f"{'MEBOCOST sensor annotation classes' if not cross_tissue_mode else 'MEBOCOST cross-tissue sensor annotation classes'} ({condition_label})",
+                    top_n=min(int(getattr(cfg, "mebocost_plot_top_n", 40)), 12),
+                )
+            )
+            artifacts.extend(
+                plot_utils.plot_mebocost_source_target_heatmap(
+                    summary,
+                    figdir=run_fig_rel,
+                    stem="mebocost_source_target_heatmap",
+                    title=f"{'MEBOCOST cross-tissue event count heatmap' if cross_tissue_mode else 'MEBOCOST event count heatmap'} ({condition_label})",
+                    value_col="n_events",
+                )
+            )
+            if "mean_score" in summary.columns and summary["mean_score"].notna().any():
+                artifacts.extend(
+                    plot_utils.plot_mebocost_source_target_heatmap(
+                        summary,
+                        figdir=run_fig_rel,
+                        stem="mebocost_source_target_mean_score_heatmap",
+                        title=f"{'MEBOCOST cross-tissue mean score heatmap' if cross_tissue_mode else 'MEBOCOST mean score heatmap'} ({condition_label})",
+                        value_col="mean_score",
+                        cmap="mako",
+                    )
+                )
+            artifacts.extend(
+                plot_utils.plot_mebocost_cluster_partner_bars(
+                    summary,
+                    figdir=run_fig_rel,
+                    stem_prefix="mebocost_top_target_clusters_by_source",
+                    focus="source",
+                    title_prefix="MEBOCOST top targets by event count",
+                    value_col="n_events",
+                    top_n=min(int(getattr(cfg, "mebocost_plot_top_n", 40)), 12),
+                )
+            )
+            artifacts.extend(
+                plot_utils.plot_mebocost_cluster_partner_bars(
+                    summary,
+                    figdir=run_fig_rel,
+                    stem_prefix="mebocost_top_source_clusters_by_target",
+                    focus="target",
+                    title_prefix="MEBOCOST top senders by event count",
+                    value_col="n_events",
+                    top_n=min(int(getattr(cfg, "mebocost_plot_top_n", 40)), 12),
+                )
+            )
+            if "mean_score" in summary.columns and summary["mean_score"].notna().any():
+                artifacts.extend(
+                    plot_utils.plot_mebocost_cluster_partner_bars(
+                        summary,
+                        figdir=run_fig_rel,
+                        stem_prefix="mebocost_top_target_clusters_by_source_mean_score",
+                        focus="source",
+                        title_prefix="MEBOCOST top targets by mean score",
+                        value_col="mean_score",
+                        top_n=min(int(getattr(cfg, "mebocost_plot_top_n", 40)), 12),
+                    )
+                )
+                artifacts.extend(
+                    plot_utils.plot_mebocost_cluster_partner_bars(
+                        summary,
+                        figdir=run_fig_rel,
+                        stem_prefix="mebocost_top_source_clusters_by_target_mean_score",
+                        focus="target",
+                        title_prefix="MEBOCOST top senders by mean score",
+                        value_col="mean_score",
+                        top_n=min(int(getattr(cfg, "mebocost_plot_top_n", 40)), 12),
+                )
+            )
+            artifacts.extend(
+                plot_utils.plot_mebocost_cluster_annotation_bars(
+                    metabolite_superclass_by_source,
+                    figdir=run_fig_rel,
+                    stem_prefix="mebocost_metabolite_superclass_by_source",
+                    focus="source",
+                    annotation_col="super_class",
+                    title_prefix="MEBOCOST metabolite super-classes",
+                    value_col="n_events",
+                    top_n=min(int(getattr(cfg, "mebocost_plot_top_n", 40)), 12),
+                )
+            )
+            artifacts.extend(
+                plot_utils.plot_mebocost_cluster_annotation_bars(
+                    metabolite_superclass_by_target,
+                    figdir=run_fig_rel,
+                    stem_prefix="mebocost_metabolite_superclass_by_target",
+                    focus="target",
+                    annotation_col="super_class",
+                    title_prefix="MEBOCOST metabolite super-classes",
+                    value_col="n_events",
+                    top_n=min(int(getattr(cfg, "mebocost_plot_top_n", 40)), 12),
+                )
+            )
+            artifacts.extend(
+                plot_utils.plot_mebocost_cluster_annotation_bars(
+                    sensor_annotation_by_source,
+                    figdir=run_fig_rel,
+                    stem_prefix="mebocost_sensor_annotation_by_source",
+                    focus="source",
+                    annotation_col="sensor_annotation",
+                    title_prefix="MEBOCOST sensor annotations",
+                    value_col="n_events",
+                    top_n=min(int(getattr(cfg, "mebocost_plot_top_n", 40)), 12),
+                )
+            )
+            artifacts.extend(
+                plot_utils.plot_mebocost_cluster_annotation_bars(
+                    sensor_annotation_by_target,
+                    figdir=run_fig_rel,
+                    stem_prefix="mebocost_sensor_annotation_by_target",
+                    focus="target",
+                    annotation_col="sensor_annotation",
+                    title_prefix="MEBOCOST sensor annotations",
+                    value_col="n_events",
+                    top_n=min(int(getattr(cfg, "mebocost_plot_top_n", 40)), 12),
+                )
+            )
+            artifacts.extend(
+                plot_utils.plot_mebocost_cluster_event_bars(
+                    plot_base,
+                    figdir=run_fig_rel,
+                    stem_prefix="mebocost_top_events_by_source",
+                    focus="source",
+                    title_prefix="MEBOCOST",
+                    top_n=min(int(getattr(cfg, "mebocost_plot_top_n", 40)), 12),
+                )
+            )
+            artifacts.extend(
+                plot_utils.plot_mebocost_cluster_event_bars(
+                    plot_base,
+                    figdir=run_fig_rel,
+                    stem_prefix="mebocost_top_events_by_target",
+                    focus="target",
+                    title_prefix="MEBOCOST",
+                    top_n=min(int(getattr(cfg, "mebocost_plot_top_n", 40)), 12),
+                )
+            )
+            plot_utils.persist_plot_artifacts(artifacts)
+            compare_bucket = run_spec.get("compare_bucket")
+            if compare_bucket:
+                bucket = comparison_buckets.setdefault(
+                    str(compare_bucket),
+                    {
+                        "compare_rel": Path(run_spec["compare_rel"]),
+                        "title": run_spec.get("compare_title"),
+                        "summaries": [],
+                        "events": [],
+                        "met_source": [],
+                        "met_target": [],
+                        "sensor_source": [],
+                        "sensor_target": [],
+                    },
+                )
+                if not summary.empty:
+                    tmp = summary.copy()
+                    tmp["run_label"] = str(condition_label)
+                    bucket["summaries"].append(tmp)
+                if not plot_base.empty:
+                    tmp = plot_base.copy()
+                    tmp["run_label"] = str(condition_label)
+                    bucket["events"].append(tmp)
+                for key, df_summary in (
+                    ("met_source", metabolite_superclass_by_source),
+                    ("met_target", metabolite_superclass_by_target),
+                    ("sensor_source", sensor_annotation_by_source),
+                    ("sensor_target", sensor_annotation_by_target),
+                ):
+                    if not df_summary.empty:
+                        tmp = df_summary.copy()
+                        tmp["run_label"] = str(condition_label)
+                        bucket[key].append(tmp)
+
+        runs_store[run_id] = {
+            "version": __version__,
+            "timestamp_utc": datetime.utcnow().isoformat(),
+            "round_id": getattr(cfg, "round_id", None),
+            "groupby": str(groupby),
+            "display_map": dict(display_map),
+            "condition_spec": run_spec.get("condition_spec"),
+            "context_key": run_spec.get("context_key"),
+            "context_value": run_spec.get("context_value"),
+            "condition_label": condition_label,
+            "cross_tissue_mode": bool(cross_tissue_mode),
+            "dataset_key": str(dataset_key) if dataset_key else None,
+            "source_levels": list(source_levels),
+            "target_levels": list(target_levels),
+            "organism": str(getattr(cfg, "mebocost_organism", "human")),
+            "input_mode": mebocost_input_mode,
+            "lognorm_target_sum": mebocost_lognorm_target_sum if mebocost_input_mode == "lognorm" else None,
+            "expression_layer": mebocost_layer,
+            "commu_res": commu_res,
+            "sig_res": sig_res,
+            "source_target_summary": summary,
+            "metabolite_superclass_summary": metabolite_superclass_summary,
+            "sensor_annotation_summary": sensor_annotation_summary,
+            "metabolite_superclass_by_source": metabolite_superclass_by_source,
+            "metabolite_superclass_by_target": metabolite_superclass_by_target,
+            "sensor_annotation_by_source": sensor_annotation_by_source,
+            "sensor_annotation_by_target": sensor_annotation_by_target,
+        }
+
+    if bool(getattr(cfg, "make_figures", True)):
+        for bucket in comparison_buckets.values():
+            title_suffix = f" [{bucket['title']}]" if bucket.get("title") else ""
+            comparison_artifacts = []
+            combined_summary = pd.concat(bucket["summaries"], ignore_index=True) if bucket["summaries"] else pd.DataFrame()
+            if not combined_summary.empty and combined_summary["run_label"].astype(str).nunique() >= 2:
+                comparison_artifacts.extend(
+                    plot_utils.plot_liana_condition_heatmap_grid(
+                        combined_summary,
+                        figdir=Path(bucket["compare_rel"]),
+                        stem="mebocost_source_target_compare_heatmap",
+                        title=f"MEBOCOST source-target event count by run{title_suffix}",
+                        value_col="n_events",
+                        cmap="viridis",
+                    )
+                )
+                if "mean_score" in combined_summary.columns and combined_summary["mean_score"].notna().any():
+                    comparison_artifacts.extend(
+                        plot_utils.plot_liana_condition_heatmap_grid(
+                            combined_summary,
+                            figdir=Path(bucket["compare_rel"]),
+                            stem="mebocost_source_target_compare_mean_score_heatmap",
+                            title=f"MEBOCOST source-target mean score by run{title_suffix}",
+                            value_col="mean_score",
+                            cmap="mako",
+                        )
+                    )
+            combined_events = pd.concat(bucket["events"], ignore_index=True) if bucket["events"] else pd.DataFrame()
+            if not combined_events.empty and combined_events["run_label"].astype(str).nunique() >= 2:
+                comparison_artifacts.extend(
+                    plot_utils.plot_mebocost_condition_split_events(
+                        combined_events,
+                        figdir=Path(bucket["compare_rel"]),
+                        focus="source",
+                        stem="mebocost_top_events_by_source_by_condition",
+                        title=f"MEBOCOST condition-split top events by source{title_suffix}",
+                        top_n=min(int(getattr(cfg, "mebocost_plot_top_n", 40)), 6),
+                    )
+                )
+                comparison_artifacts.extend(
+                    plot_utils.plot_mebocost_condition_split_events(
+                        combined_events,
+                        figdir=Path(bucket["compare_rel"]),
+                        focus="target",
+                        stem="mebocost_top_events_by_target_by_condition",
+                        title=f"MEBOCOST condition-split top events by target{title_suffix}",
+                        top_n=min(int(getattr(cfg, "mebocost_plot_top_n", 40)), 6),
+                    )
+                )
+            for payload, focus, annotation_col, stem, title in (
+                ("met_source", "source", "super_class", "mebocost_metabolite_superclass_by_source_by_condition", "MEBOCOST condition-split metabolite super-classes by source"),
+                ("met_target", "target", "super_class", "mebocost_metabolite_superclass_by_target_by_condition", "MEBOCOST condition-split metabolite super-classes by target"),
+                ("sensor_source", "source", "sensor_annotation", "mebocost_sensor_annotation_by_source_by_condition", "MEBOCOST condition-split sensor annotations by source"),
+                ("sensor_target", "target", "sensor_annotation", "mebocost_sensor_annotation_by_target_by_condition", "MEBOCOST condition-split sensor annotations by target"),
+            ):
+                combined_annotation = pd.concat(bucket[payload], ignore_index=True) if bucket[payload] else pd.DataFrame()
+                if combined_annotation.empty or combined_annotation["run_label"].astype(str).nunique() < 2:
+                    continue
+                comparison_artifacts.extend(
+                    plot_utils.plot_mebocost_condition_split_annotations(
+                        combined_annotation,
+                        figdir=Path(bucket["compare_rel"]),
+                        focus=focus,
+                        annotation_col=annotation_col,
+                        stem=stem,
+                        title=f"{title}{title_suffix}",
+                        value_col="n_events",
+                        top_n=min(int(getattr(cfg, "mebocost_plot_top_n", 40)), 8),
+                        x_label="n_events",
+                    )
+                )
+            plot_utils.persist_plot_artifacts(comparison_artifacts)
+
+    out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.ccc_mebocost")) + ".zarr")
+    LOGGER.info("Saving dataset → %s", out_zarr)
+    io_utils.save_dataset(adata, out_zarr, fmt="zarr")
+    if bool(getattr(cfg, "save_h5ad", False)):
+        out_h5ad = output_dir / (str(getattr(cfg, "output_name", "adata.ccc_mebocost")) + ".h5ad")
+        LOGGER.warning("Writing additional H5AD output (loads full matrix into RAM): %s", out_h5ad)
+        io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
+    LOGGER.info("Finished markers-and-de (ccc mebocost).")
+    return adata
+
+
+def run_liana_paired_rescore(cfg) -> ad.AnnData:
+    init_logging(getattr(cfg, "logfile", None))
+    LOGGER.info("Starting markers-and-de (ccc liana paired-rescore)...")
+
+    output_dir = Path(getattr(cfg, "output_dir"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    figdir = output_dir / str(getattr(cfg, "figdir_name", "figures"))
+    plot_utils.setup_scanpy_figs(figdir, getattr(cfg, "figure_formats", ["png", "pdf"]))
+
+    adata = io_utils.load_dataset(getattr(cfg, "input_path"))
+    groupby, display_map = _resolve_stable_groupby_and_display_map(
+        adata,
+        groupby=getattr(cfg, "groupby", None),
+        round_id=getattr(cfg, "round_id", None),
+        label_source=str(getattr(cfg, "label_source", "pretty")),
+    )
+    if str(groupby) not in adata.obs:
+        raise RuntimeError(f"ccc liana paired-rescore: groupby={groupby!r} not found in adata.obs")
+
+    liana_input_mode = str(getattr(cfg, "liana_input_mode", "counts")).strip().lower()
+    if liana_input_mode not in {"counts", "lognorm"}:
+        raise RuntimeError("ccc liana paired-rescore: liana_input_mode must be one of {'counts', 'lognorm'}.")
+    requested_layer = _effective_liana_layer(
+        adata,
+        requested_use_raw=False,
+        layer=None,
+        input_mode=liana_input_mode,
+        lognorm_target_sum=float(getattr(cfg, "liana_lognorm_target_sum", 1e4)),
+    )
+    pairing_key = str(getattr(cfg, "liana_pairing_key", None) or "sample_id").strip()
+    filtered_adata, primary_condition_key, condition_cols, condition_label = _resolve_condition_filter_context(
+        adata,
+        condition_spec=getattr(cfg, "ccc_condition_key", None),
+        condition_values=tuple(str(x) for x in (getattr(cfg, "ccc_condition_values", ()) or ()) if str(x)),
+    )
+    dataset_key = getattr(cfg, "ccc_dataset_key", None)
+    source_levels = tuple(str(x) for x in (getattr(cfg, "ccc_source_levels", ()) or ()) if str(x))
+    target_levels = tuple(str(x) for x in (getattr(cfg, "ccc_target_levels", ()) or ()) if str(x))
+    cross_tissue_mode = bool(dataset_key)
+
+    if cross_tissue_mode and liana_input_mode == "counts":
+        LOGGER.warning(
+            "ccc liana paired-rescore: cross-tissue mode is running on raw count-like input (counts_cb/counts_raw). "
+            "If source datasets differ strongly in sequencing depth or chemistry, donor-level LIANA rescoring can be biased by detection depth. "
+            "Consider rerunning with --input-mode lognorm for a depth-normalized expression layer."
+        )
+    values_logged = requested_layer is not None and str(requested_layer).startswith("lognorm_")
+
+    candidate_df = _read_liana_candidate_events(Path(getattr(cfg, "liana_candidate_events")))
+    candidate_df = _normalize_liana_candidate_events(
+        candidate_df,
+        display_map=display_map,
+        valid_group_tokens=sorted(filtered_adata.obs[str(groupby)].astype(str).unique().tolist()),
+    )
+    if cross_tissue_mode:
+        if not source_levels or not target_levels:
+            raise RuntimeError("ccc liana paired-rescore: cross-tissue mode requires at least one source level and one target level.")
+        source_allowed = {str(x) for x in source_levels}
+        target_allowed = {str(x) for x in target_levels}
+        if "source_dataset_level" in candidate_df.columns:
+            candidate_df = candidate_df[candidate_df["source_dataset_level"].astype(str).isin(source_allowed)].copy()
+        if "target_dataset_level" in candidate_df.columns:
+            candidate_df = candidate_df[candidate_df["target_dataset_level"].astype(str).isin(target_allowed)].copy()
+    candidate_df = _filter_liana_candidate_events(candidate_df, cfg)
+
+    edge_scores = _score_liana_paired_edges(
+        filtered_adata,
+        candidate_df=candidate_df,
+        groupby=str(groupby),
+        pairing_key=pairing_key,
+        condition_cols=condition_cols,
+        dataset_key=str(dataset_key) if dataset_key else None,
+        source_levels=source_levels,
+        target_levels=target_levels,
+        layer=requested_layer,
+        values_logged=values_logged,
+        min_sender_cells=int(getattr(cfg, "liana_min_sender_cells", 5)),
+        min_receiver_cells=int(getattr(cfg, "liana_min_receiver_cells", 5)),
+    )
+    route_scores = _summarize_liana_paired_routes(edge_scores)
+    edge_missingness = _summarize_paired_missingness(
+        edge_scores,
+        group_by=("source_token", "target_token", "source_label", "target_label", "branch_pair", "route_family", "ligand_complex", "receptor_complex"),
+        score_col="edge_score",
+        primary_condition_key=primary_condition_key,
+    )
+    route_missingness = _summarize_paired_missingness(
+        route_scores,
+        group_by=("source_token", "target_token", "source_label", "target_label", "branch_pair", "route_family"),
+        score_col="mean_edge_score",
+        primary_condition_key=primary_condition_key,
+    )
+    compare_levels = tuple(str(x) for x in (getattr(cfg, "ccc_compare_levels", ()) or ()) if str(x))
+    edge_effects = _summarize_liana_paired_effects(
+        edge_scores,
+        primary_condition_key=primary_condition_key,
+        condition_cols=condition_cols,
+        compare_levels=compare_levels,
+        value_col="edge_score",
+        group_by=(
+            "source_token",
+            "target_token",
+            "source_label",
+            "target_label",
+            "branch_pair",
+            "route_family",
+            "ligand_complex",
+            "receptor_complex",
+        ),
+        median_support_cols=("sender_n_cells", "receiver_n_cells"),
+        min_scored_donors_per_group=int(getattr(cfg, "liana_min_scored_donors_per_group", 3)),
+    )
+    route_effects = _summarize_liana_paired_effects(
+        route_scores,
+        primary_condition_key=primary_condition_key,
+        condition_cols=condition_cols,
+        compare_levels=compare_levels,
+        value_col="mean_edge_score",
+        group_by=("source_token", "target_token", "source_label", "target_label", "branch_pair", "route_family"),
+        median_support_cols=("n_edges_scored",),
+        min_scored_donors_per_group=int(getattr(cfg, "liana_min_scored_donors_per_group", 3)),
+    )
+
+    run_namespace = _run_namespace_for_round(
+        adata,
+        prefix="ccc_liana",
+        round_id=getattr(cfg, "round_id", None),
+    )
+    run_round = str(plot_utils.get_run_subdir(run_namespace))
+    tables_root = output_dir / "tables" / run_round / "paired_rescore" / _safe_combo_token(condition_label)
+    tables_root.mkdir(parents=True, exist_ok=True)
+    edge_scores.to_csv(tables_root / "liana_paired_lr_edge_scores.tsv", sep="\t", index=False)
+    route_scores.to_csv(tables_root / "liana_paired_route_scores.tsv", sep="\t", index=False)
+    edge_missingness.to_csv(tables_root / "liana_paired_lr_edge_missingness.tsv", sep="\t", index=False)
+    route_missingness.to_csv(tables_root / "liana_paired_route_missingness.tsv", sep="\t", index=False)
+    edge_effects.to_csv(tables_root / "liana_paired_lr_edge_effects.tsv", sep="\t", index=False)
+    route_effects.to_csv(tables_root / "liana_paired_route_effects.tsv", sep="\t", index=False)
+    if edge_effects.empty and route_effects.empty:
+        n_scored = int(pd.to_numeric(edge_scores.get("edge_score", pd.Series(dtype=float)), errors="coerce").notna().sum())
+        LOGGER.warning(
+            "ccc liana paired-rescore: no group effects were produced for %s. Scored donor-level edges=%d. "
+            "This usually reflects donor-level sparsity or scored-donor thresholds rather than absence of biology. "
+            "Inspect liana_paired_lr_edge_missingness.tsv and consider relaxing --min-sender-cells, --min-receiver-cells, or --min-scored-donors-per-group.",
+            str(condition_label),
+            n_scored,
+        )
+
+    if bool(getattr(cfg, "make_figures", False)):
+        fig_rel = Path("paired_rescore") / _safe_combo_token(condition_label)
+        artifacts = []
+        artifacts.extend(
+            plot_utils.plot_liana_paired_route_dotplot(
+                route_effects,
+                figdir=fig_rel,
+                stem_prefix="liana_paired_route_dotplot",
+                title_prefix="LIANA paired route effects",
+                top_n=min(int(getattr(cfg, "liana_plot_top_n", 60)), 20),
+            )
+        )
+        artifacts.extend(
+            plot_utils.plot_liana_paired_edge_strip(
+                edge_effects,
+                figdir=fig_rel,
+                stem_prefix="liana_paired_lr_edge_strip",
+                title_prefix="LIANA paired LR edge effects",
+                top_n=min(int(getattr(cfg, "liana_plot_top_n", 60)), 16),
+            )
+        )
+        plot_utils.persist_plot_artifacts(artifacts)
+
+    settings_lines = [
+        f"input_path\t{getattr(cfg, 'input_path')}",
+        f"candidate_events\t{getattr(cfg, 'liana_candidate_events')}",
+        f"groupby\t{groupby}",
+        f"pairing_key\t{pairing_key}",
+        f"condition_key\t{getattr(cfg, 'ccc_condition_key', None)}",
+        f"condition_values\t{','.join(str(x) for x in getattr(cfg, 'ccc_condition_values', ()) or ())}",
+        f"compare_levels\t{','.join(compare_levels)}",
+        f"dataset_key\t{dataset_key}",
+        f"source_levels\t{','.join(source_levels)}",
+        f"target_levels\t{','.join(target_levels)}",
+        f"input_mode\t{liana_input_mode}",
+        f"lognorm_target_sum\t{getattr(cfg, 'liana_lognorm_target_sum', 1e4) if liana_input_mode == 'lognorm' else ''}",
+        f"expression_layer\t{requested_layer}",
+        "edge_score_formula\tsqrt(ligand_expr * receptor_expr)",
+        f"min_sender_cells\t{int(getattr(cfg, 'liana_min_sender_cells', 5))}",
+        f"min_receiver_cells\t{int(getattr(cfg, 'liana_min_receiver_cells', 5))}",
+        f"min_scored_donors_per_group\t{int(getattr(cfg, 'liana_min_scored_donors_per_group', 3))}",
+    ]
+    (tables_root / "liana_paired_settings.tsv").write_text("\n".join(settings_lines) + "\n")
+
+    adata.uns.setdefault("markers_and_de", {})
+    ccc_block = adata.uns["markers_and_de"].setdefault("ccc", {})
+    paired_block = ccc_block.setdefault("liana_paired_rescore", {})
+    paired_block[str(condition_label)] = {
+        "edge_scores": edge_scores,
+        "route_scores": route_scores,
+        "edge_missingness": edge_missingness,
+        "route_missingness": route_missingness,
+        "edge_effects": edge_effects,
+        "route_effects": route_effects,
+        "candidate_events": candidate_df,
+        "input_mode": liana_input_mode,
+        "expression_layer": requested_layer,
+        "pairing_key": pairing_key,
+    }
+    out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.ccc_liana_paired")) + ".zarr")
+    LOGGER.info("Saving dataset → %s", out_zarr)
+    io_utils.save_dataset(adata, out_zarr, fmt="zarr")
+    if bool(getattr(cfg, "save_h5ad", False)):
+        out_h5ad = output_dir / (str(getattr(cfg, "output_name", "adata.ccc_liana_paired")) + ".h5ad")
+        LOGGER.warning("Writing additional H5AD output (loads full matrix into RAM): %s", out_h5ad)
+        io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
+    LOGGER.info("Finished markers-and-de (ccc liana paired-rescore).")
+    return adata
+
+
+def run_mebocost_paired_rescore(cfg) -> ad.AnnData:
+    init_logging(getattr(cfg, "logfile", None))
+    LOGGER.info("Starting markers-and-de (ccc mebocost paired-rescore)...")
+    install_missing = bool(getattr(cfg, "mebocost_install_missing_python_deps", False))
+    mebocost_api = _import_mebocost_api(install_missing=install_missing)
+    mebocost_config_path = _ensure_mebocost_resource_config(install_missing=install_missing)
+
+    output_dir = Path(getattr(cfg, "output_dir"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    figdir = output_dir / str(getattr(cfg, "figdir_name", "figures"))
+    plot_utils.setup_scanpy_figs(figdir, getattr(cfg, "figure_formats", ["png", "pdf"]))
+
+    adata = io_utils.load_dataset(getattr(cfg, "input_path"))
+    groupby, display_map = _resolve_stable_groupby_and_display_map(
+        adata,
+        groupby=getattr(cfg, "groupby", None),
+        round_id=getattr(cfg, "round_id", None),
+        label_source=str(getattr(cfg, "label_source", "pretty")),
+    )
+    if str(groupby) not in adata.obs:
+        raise RuntimeError(f"ccc mebocost paired-rescore: groupby={groupby!r} not found in adata.obs")
+
+    pairing_key = str(getattr(cfg, "mebocost_pairing_key", None) or "sample_id").strip()
+    filtered_adata, primary_condition_key, condition_cols, condition_label = _resolve_condition_filter_context(
+        adata,
+        condition_spec=getattr(cfg, "ccc_condition_key", None),
+        condition_values=tuple(str(x) for x in (getattr(cfg, "ccc_condition_values", ()) or ()) if str(x)),
+    )
+    dataset_key = getattr(cfg, "ccc_dataset_key", None)
+    source_levels = tuple(str(x) for x in (getattr(cfg, "ccc_source_levels", ()) or ()) if str(x))
+    target_levels = tuple(str(x) for x in (getattr(cfg, "ccc_target_levels", ()) or ()) if str(x))
+    cross_tissue_mode = bool(dataset_key)
+
+    mebocost_input_mode = str(getattr(cfg, "mebocost_input_mode", "counts")).strip().lower()
+    if mebocost_input_mode not in {"counts", "lognorm"}:
+        raise RuntimeError("ccc mebocost paired-rescore: mebocost_input_mode must be one of {'counts', 'lognorm'}.")
+    if cross_tissue_mode and mebocost_input_mode == "counts":
+        LOGGER.warning(
+            "ccc mebocost paired-rescore: cross-tissue mode is running on raw count-like input (%s). "
+            "If source datasets differ strongly in sequencing depth or chemistry, donor-level MEBOCOST rescoring can be biased by detection depth. "
+            "Consider rerunning with --input-mode lognorm for a depth-normalized expression layer.",
+            "counts_cb/counts_raw",
+        )
+    mebocost_layer = _effective_mebocost_layer(
+        filtered_adata,
+        input_mode=mebocost_input_mode,
+        lognorm_target_sum=float(getattr(cfg, "mebocost_lognorm_target_sum", 1e4)),
+    )
+
+    candidate_df = _read_mebocost_candidate_events(Path(getattr(cfg, "mebocost_candidate_events")))
+    candidate_df = _normalize_mebocost_candidate_events(
+        candidate_df,
+        display_map=display_map,
+        valid_group_tokens=sorted(filtered_adata.obs[str(groupby)].astype(str).unique().tolist()),
+    )
+    if cross_tissue_mode:
+        if not source_levels or not target_levels:
+            raise RuntimeError("ccc mebocost paired-rescore: cross-tissue mode requires at least one source level and one target level.")
+        source_allowed = {str(x) for x in source_levels}
+        target_allowed = {str(x) for x in target_levels}
+        if "source_dataset_level" in candidate_df.columns:
+            candidate_df = candidate_df[candidate_df["source_dataset_level"].astype(str).isin(source_allowed)].copy()
+        if "target_dataset_level" in candidate_df.columns:
+            candidate_df = candidate_df[candidate_df["target_dataset_level"].astype(str).isin(target_allowed)].copy()
+    candidate_df = _annotate_mebocost_commu_table(
+        candidate_df,
+        config_path=mebocost_config_path,
+        species=str(getattr(cfg, "mebocost_organism", "human")).strip().lower(),
+    )
+    candidate_df = _prepare_mebocost_plot_df(
+        candidate_df,
+        display_map=display_map,
+        valid_group_tokens=sorted(filtered_adata.obs[str(groupby)].astype(str).unique().tolist()),
+    )
+    candidate_df = _filter_mebocost_candidate_events(candidate_df, cfg)
+
+    event_scores = _score_mebocost_paired_events(
+        filtered_adata,
+        candidate_df=candidate_df,
+        groupby=str(groupby),
+        pairing_key=pairing_key,
+        condition_cols=condition_cols,
+        dataset_key=str(dataset_key) if dataset_key else None,
+        source_levels=source_levels,
+        target_levels=target_levels,
+        organism=str(getattr(cfg, "mebocost_organism", "human")).strip().lower(),
+        config_path=mebocost_config_path,
+        mebocost_api=mebocost_api,
+        layer=mebocost_layer,
+        score_method=str(getattr(cfg, "mebocost_score_method", "mebocost-metabolite-sensor")).strip().lower(),
+        min_sender_cells=int(getattr(cfg, "mebocost_min_sender_cells", 5)),
+        min_receiver_cells=int(getattr(cfg, "mebocost_min_receiver_cells", 5)),
+    )
+    route_scores = _summarize_mebocost_paired_routes(event_scores)
+    event_missingness = _summarize_paired_missingness(
+        event_scores,
+        group_by=("source_token", "target_token", "source_label", "target_label", "HMDB_ID", "sensor_gene"),
+        score_col="paired_commu_score",
+        primary_condition_key=primary_condition_key,
+    )
+    route_missingness = _summarize_paired_missingness(
+        route_scores,
+        group_by=("source_token", "target_token", "source_label", "target_label", "route"),
+        score_col="mean_paired_commu_score",
+        primary_condition_key=primary_condition_key,
+    )
+    group_effects = _summarize_mebocost_paired_group_effects(
+        event_scores,
+        primary_condition_key=primary_condition_key,
+        min_scored_donors_per_group=int(getattr(cfg, "mebocost_min_scored_donors_per_group", 3)),
+    )
+
+    run_namespace = _run_namespace_for_round(
+        adata,
+        prefix="ccc_mebocost",
+        round_id=getattr(cfg, "round_id", None),
+    )
+    run_round = str(plot_utils.get_run_subdir(run_namespace))
+    tables_root = output_dir / "tables" / run_round / "paired_rescore" / _safe_combo_token(condition_label)
+    tables_root.mkdir(parents=True, exist_ok=True)
+    event_scores.to_csv(tables_root / "mebocost_paired_event_scores.tsv", sep="\t", index=False)
+    route_scores.to_csv(tables_root / "mebocost_paired_route_scores.tsv", sep="\t", index=False)
+    event_missingness.to_csv(tables_root / "mebocost_paired_event_missingness.tsv", sep="\t", index=False)
+    route_missingness.to_csv(tables_root / "mebocost_paired_route_missingness.tsv", sep="\t", index=False)
+    group_effects.to_csv(tables_root / "mebocost_paired_group_effects.tsv", sep="\t", index=False)
+    if group_effects.empty:
+        n_scored = int(pd.to_numeric(event_scores.get("paired_commu_score", pd.Series(dtype=float)), errors="coerce").notna().sum())
+        LOGGER.warning(
+            "ccc mebocost paired-rescore: no group effects were produced for %s. Scored donor-level events=%d. "
+            "This usually reflects donor-level sparsity or scored-donor thresholds rather than absence of biology. "
+            "Inspect mebocost_paired_event_missingness.tsv and consider relaxing --min-sender-cells, --min-receiver-cells, or --min-scored-donors-per-group.",
+            str(condition_label),
+            n_scored,
+        )
+    if bool(getattr(cfg, "make_figures", False)):
+        fig_rel = Path("paired_rescore") / _safe_combo_token(condition_label)
+        artifacts = []
+        artifacts.extend(
+            plot_utils.plot_mebocost_paired_route_summary(
+                route_scores,
+                figdir=fig_rel,
+                stem="mebocost_paired_route_summary",
+                title=f"MEBOCOST paired route summary [{condition_label}]",
+                top_n=min(int(getattr(cfg, "mebocost_plot_top_n", 40)), 15),
+            )
+        )
+        artifacts.extend(
+            plot_utils.plot_mebocost_paired_route_heatmap(
+                route_scores,
+                figdir=fig_rel,
+                stem="mebocost_paired_route_heatmap",
+                title=f"MEBOCOST paired route heatmap [{condition_label}]",
+                top_n_routes=min(int(getattr(cfg, "mebocost_plot_top_n", 40)), 20),
+            )
+        )
+        artifacts.extend(
+            plot_utils.plot_mebocost_paired_group_effects(
+                group_effects,
+                figdir=fig_rel,
+                stem_prefix="mebocost_paired_group_effects",
+                title_prefix="MEBOCOST paired group effects",
+                top_n=min(int(getattr(cfg, "mebocost_plot_top_n", 40)), 15),
+            )
+        )
+        plot_utils.persist_plot_artifacts(artifacts)
+
+    settings_lines = [
+        f"input_path\t{getattr(cfg, 'input_path')}",
+        f"candidate_events\t{getattr(cfg, 'mebocost_candidate_events')}",
+        f"groupby\t{groupby}",
+        f"pairing_key\t{pairing_key}",
+        f"condition_key\t{getattr(cfg, 'ccc_condition_key', None)}",
+        f"condition_values\t{','.join(str(x) for x in getattr(cfg, 'ccc_condition_values', ()) or ())}",
+        f"dataset_key\t{dataset_key}",
+        f"source_levels\t{','.join(source_levels)}",
+        f"target_levels\t{','.join(target_levels)}",
+        f"organism\t{getattr(cfg, 'mebocost_organism', 'human')}",
+        f"input_mode\t{mebocost_input_mode}",
+        f"lognorm_target_sum\t{getattr(cfg, 'mebocost_lognorm_target_sum', 1e4) if mebocost_input_mode == 'lognorm' else ''}",
+        f"expression_layer\t{mebocost_layer}",
+        f"score_method\t{getattr(cfg, 'mebocost_score_method', 'mebocost-metabolite-sensor')}",
+        "communication_score_formula\tsqrt(sender_metabolite_score * receiver_sensor_score)",
+        f"min_sender_cells\t{int(getattr(cfg, 'mebocost_min_sender_cells', 5))}",
+        f"min_receiver_cells\t{int(getattr(cfg, 'mebocost_min_receiver_cells', 5))}",
+        f"min_scored_donors_per_group\t{int(getattr(cfg, 'mebocost_min_scored_donors_per_group', 3))}",
+    ]
+    (tables_root / "mebocost_paired_settings.tsv").write_text("\n".join(settings_lines) + "\n")
+
+    adata.uns.setdefault("markers_and_de", {})
+    ccc_block = adata.uns["markers_and_de"].setdefault("ccc", {})
+    mebo_block = ccc_block.setdefault("mebocost_paired_rescore", {})
+    mebo_block[str(condition_label)] = {
+        "event_scores": event_scores,
+        "route_scores": route_scores,
+        "event_missingness": event_missingness,
+        "route_missingness": route_missingness,
+        "group_effects": group_effects,
+        "candidate_events": candidate_df,
+        "score_method": str(getattr(cfg, "mebocost_score_method", "mebocost-metabolite-sensor")).strip().lower(),
+        "input_mode": mebocost_input_mode,
+        "expression_layer": mebocost_layer,
+        "pairing_key": pairing_key,
+    }
+    out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.ccc_mebocost_paired")) + ".zarr")
+    LOGGER.info("Saving dataset → %s", out_zarr)
+    io_utils.save_dataset(adata, out_zarr, fmt="zarr")
+    if bool(getattr(cfg, "save_h5ad", False)):
+        out_h5ad = output_dir / (str(getattr(cfg, "output_name", "adata.ccc_mebocost_paired")) + ".h5ad")
+        LOGGER.warning("Writing additional H5AD output (loads full matrix into RAM): %s", out_h5ad)
+        io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
+    LOGGER.info("Finished markers-and-de (ccc mebocost paired-rescore).")
     return adata
 
 
@@ -5702,3 +9076,4 @@ def run_within_cluster(cfg) -> ad.AnnData:
 
     LOGGER.info("Finished markers-and-de (within-cluster).")
     return adata
+    install_env = _nichenet_r_env(r_lib_dir, install_only=True)

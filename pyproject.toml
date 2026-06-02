@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scomnom"
-version = "0.8.0"
+version = "0.8.1"
 description = "Modular scRNA-seq preprocessing and analysis pipeline built on the scVerse ecosystem."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -52,4 +52,4 @@ scomnom = "scomnom.cli:app"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"scomnom" = ["resources/*.tsv"]
+"scomnom" = ["resources/*.tsv", "resources/*.R"]

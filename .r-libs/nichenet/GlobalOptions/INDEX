@@ -1,0 +1,6 @@
+.v                      Get other option values
+[.GlobalOptionsFun      Getter and setter functions
+print.GlobalOptionsFun
+                        Print options
+reset_opt               Helper functions
+setGlobalOptions        Option Generator

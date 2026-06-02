@@ -1,0 +1,16 @@
+load_uwot               Save or Load a Model
+lvish                   Dimensionality Reduction with a LargeVis-like
+                        method
+optimize_graph_layout   Optimize Graph Layout
+save_uwot               Save or Load a Model
+similarity_graph        Similarity Graph
+simplicial_set_intersect
+                        Merge Similarity Graph by Simplicial Set
+                        Intersection
+simplicial_set_union    Merge Similarity Graph by Simplicial Set Union
+tumap                   Dimensionality Reduction Using t-Distributed
+                        UMAP (t-UMAP)
+umap                    Dimensionality Reduction with UMAP
+umap2                   Dimensionality Reduction with UMAP
+umap_transform          Add New Points to an Existing Embedding
+unload_uwot             Unload a Model

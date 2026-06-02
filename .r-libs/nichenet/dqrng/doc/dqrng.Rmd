@@ -1,0 +1,387 @@
+---
+title: "Fast Pseudo Random Number Generators for R"
+author: "Ralf Stubner"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Fast Pseudo Random Number Generators for R}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+The dqrng package provides fast random number generators (RNG) with good statistical properties for usage with R.
+It combines these RNGs with fast distribution functions to sample from uniform, normal or exponential distributions.
+Both the RNGs and the distribution functions are distributed as C++ header-only library.
+
+## Supported Random Number Generators
+
+Support for the following 64bit RNGs are currently included:
+
+* **pcg64**
+The default 64 bit variant from the PCG family developed by Melissa O'Neill.
+See https://www.pcg-random.org/ for more details.
+* **Xoroshiro128++** and **Xoshiro256++**  
+RNGs developed by David Blackman and Sebastiano Vigna.
+See https://xoroshiro.di.unimi.it/ for more details.
+The older generators Xoroshiro128+ and Xoshiro256+ should be used only for backwards compatibility.
+* **Threefry**  
+The 64 bit version of the 20 rounds Threefry engine (Salmon et al., 2011) as provided by the package 'sitmo'.
+
+Of these RNGs Xoroshiro128++ is used as default since it is fast, small and has good statistical properties.
+
+## Usage from R
+
+Using these RNGs from R is deliberately similar to using R's build-in RNGs:
+
+* `dqRNGkind()` is analogue to `RNGkind()` and sets the RNG
+* `dqset.seed()` is analogue to `set.seed()` and sets the seed
+* `dqrunif()`, `dqrnorm()`, and `dqrexp()` are analogue to `runif()`, `rnorm()`, and `rexp()` and sample from uniform, normal or exponential distributions
+* `dqsample()` and `dqsample.int` are analogue to `sample`  and ` sample.int` for creating random samples of vectors and vector indices
+
+Let's look at the classical example of calculating $\pi$ via simulation. The 
+basic idea is to generate a large number of random points within the unit 
+square. An approximation for $\pi$ can then be calculated from the ratio of 
+points within the unit circle to the total number of points. A vectorized 
+implementation in R where we can switch the RNG might look like this:
+
+```{r}
+N <- 1e7
+piR <- function(n, rng = stats::runif) {
+    x <- rng(n)
+    y <- rng(n)
+    4 * sum(sqrt(x^2 + y^2) < 1.0) / n
+}
+set.seed(42)
+system.time(cat("pi ~= ", piR(N), "\n"))
+```
+
+Using dqrng is about three times faster:
+
+```{r}
+library(dqrng)
+dqset.seed(42)
+system.time(cat("pi ~= ", piR(N, rng = dqrng::dqrunif), "\n"))
+```
+
+Since the calculations add a constant off-set, the speed-up for the RNGs alone has to be even greater: 
+
+```{r}
+system.time(stats::runif(N))
+system.time(dqrng::dqrunif(N))
+```
+
+Similar for the exponential distribution:
+
+```{r}
+system.time(stats::rexp(N))
+system.time(dqrng::dqrexp(N))
+```
+
+And for the normal distribution:
+
+```{r}
+system.time(stats::rnorm(N))
+system.time(dqrng::dqrnorm(N))
+```
+
+As well as for sampling with and without replacement:
+
+```{r}
+system.time(for (i in 1:100)   sample.int(N, N/100, replace = TRUE))
+system.time(for (i in 1:100) dqsample.int(N, N/100, replace = TRUE))
+system.time(for (i in 1:100)   sample.int(N, N/100))
+system.time(for (i in 1:100) dqsample.int(N, N/100))
+```
+
+It is also possible to register the supplied generators as user-supplied RNGs. This way `set.seed()` and `dqset.seed()` influence both `(dq)runif` and `(dq)rnorm` in the same way. This is also true for other `r<dist>` functions, but note that `rexp` and `dqrexp` still give different results: 
+
+```{r register}
+register_methods()
+set.seed(4711);   stats::runif(5)
+set.seed(4711);   dqrng::dqrunif(5)
+dqset.seed(4711); stats::rnorm(5)
+dqset.seed(4711); dqrng::dqrnorm(5)
+set.seed(4711);   stats::rt(5, 10)
+dqset.seed(4711); stats::rt(5, 10)
+set.seed(4711);   stats::rexp(5, 10)
+set.seed(4711);   dqrng::dqrexp(5, 10)
+restore_methods()
+```
+
+You can automatically register these methods when loading this package by setting the option `dqrng.register_methods` to `TRUE`, e.g. with `options(dqrng.register_methods=TRUE)`.
+
+For some workflows it is helpful to save and restore the RNG's type and state, similar to how `.Randome.seed` can be saved and restored. The function pair `dqrng_get_state()` and `dqrng_set_state()` can be used for this task:
+
+```{r state}
+(state <- dqrng_get_state())
+dqrunif(5)
+# many other operations, that could even change the used RNG type
+dqrng_set_state(state)
+dqrunif(5)
+```
+
+Note that the state is represented by a character vector, since the unsigned 64 and 128 bit integers used by the supported RNGs cannot be represented in R otherwise. Generally this state should be treated as an implementation detail and not manipulated directly.
+
+## Usage from C++
+
+The RNGs and distributions functions can also be used from C++ at various levels of abstraction.
+Technically there are three ways to make use of dqrng at the C++ level:
+
+* use `// [[Rcpp::depends(dqrng)]]` together with `Rcpp::sourceCpp()`
+* use `Rcpp::cppFunction(depends = "dqrng", ...)`
+* use an R package with `LinkingTo: dqrng`
+
+Here only the first approach is shown.
+
+### Using the compiled library functions
+
+The functions available in R directly call corresponding C++ functions.
+These functions are also available at the C++ level if you include `dqrng.h`.
+The full list of functions is available with `vignette("cpp-api", package = "dqrng")`.
+Revisiting the example of approximating $\pi$ we can use:
+
+```{r, eval=FALSE, engine='Rcpp'}
+// [[Rcpp::depends(dqrng)]]
+#include <Rcpp.h>
+#include <dqrng.h>
+
+using Rcpp::IntegerVector;
+using Rcpp::NumericVector;
+using Rcpp::sqrt;
+using Rcpp::sum;
+using dqrng::dqrunif;
+
+// [[Rcpp::export]]
+double piCpp(const int n) {
+  dqrng::dqset_seed(IntegerVector::create(42));
+  NumericVector x = dqrunif(n);
+  NumericVector y = dqrunif(n);
+  NumericVector d = sqrt(x*x + y*y);
+  return 4.0 * sum(d < 1.0) / n;
+}
+/*** R
+system.time(cat("pi ~= ", piCpp(1e7), "\n"))
+*/
+```
+
+Note that in C++ you have to use `dqrng::dqset_seed()`, whereas the analogue function in the R interface is called `dqrng::dqset.seed()`.
+For sampling with and without replacement `dqrng::dqsample_int()` and `dqrng::dqsample_num()` are the analogue of `dqrng::dqsample.int()` in the R interface:
+
+```{r, eval=FALSE, engine='Rcpp'}
+// [[Rcpp::depends(dqrng)]]
+#include <Rcpp.h>
+#include <dqrng.h>
+
+// [[Rcpp::export]]
+void sampleCpp(const int n) {
+  dqrng::dqset_seed(Rcpp::IntegerVector::create(42));
+  Rcpp::IntegerVector sample = dqrng::dqsample_int(n, n/100, true);
+  Rcpp::Rcout << sample << std::endl;
+}
+/*** R
+sampleCpp(1000)
+*/
+```
+
+
+### Using the header only library
+
+The RNG wrapper and distributions functions can be used from C++ by including `dqrng_generator.h` and `dqrng_distribution.h`.
+In order to use these header files, you have to use at least C++11.
+You have to link to the `BH` package as well to use dqrng's distribution functions.
+For example, you can use the distribution functions from dqrng together with some foreign 64bit RNG.
+Here a minimal [SplitMix](https://xoroshiro.di.unimi.it/splitmix64.c) generator is used together with `dqrng::normal_distribution`:
+
+```{r, eval=FALSE, engine='Rcpp'}
+#include <Rcpp.h>
+// [[Rcpp::depends(dqrng, BH)]]
+#include <dqrng_distribution.h>
+
+class SplitMix {
+public:
+  typedef uint64_t result_type;
+  SplitMix (result_type seed) : state(seed) {};
+  result_type operator() () {
+    result_type z = (state += 0x9e3779b97f4a7c15ULL);
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    return z ^ (z >> 31);
+  }
+  void seed(result_type seed) {state = seed;}
+  static constexpr result_type min() {return 0;};
+  static constexpr result_type max() {return UINT64_MAX;};
+
+private:
+  result_type state;
+
+public:  
+  friend std::ostream& operator<<(std::ostream& ost, const SplitMix& e) {
+    return ost << e.state;
+  }
+  friend std::istream& operator>>(std::istream& ist, SplitMix& e) {
+    return ist >> e.state;
+  }
+};
+
+// [[Rcpp::export]]
+Rcpp::NumericVector splitmix_rnorm(const int n, const double mean = 0.0, const double sd = 1.0) {
+  auto rng = dqrng::generator<SplitMix>(42);
+  Rcpp::NumericVector result(n);
+  rng->generate<dqrng::normal_distribution>(result, mean, sd);
+  return result;
+}
+/*** R
+splitmix_rnorm(10)
+system.time(splitmix_rnorm(1e7))
+*/
+```
+
+Since SplitMix is a very fast RNG, the speed of this function is comparable to `dqrnorm`.
+Generally speaking you can use any C++11 compliant RNG with 64 bit output size.
+For example, here the 64 bit Threefry engine with 13 rounds from package sitmo is used:
+
+```{r, eval=FALSE, engine='Rcpp'}
+#include <Rcpp.h>
+// [[Rcpp::depends(dqrng, BH, sitmo)]]
+#include <dqrng_distribution.h>
+#include <threefry.h>
+
+// [[Rcpp::export]]
+Rcpp::NumericVector threefry_rnorm(const int n, const double mean = 0.0, const double sd = 1.0) {
+  auto rng = dqrng::generator<sitmo::threefry_13_64>(42);
+  Rcpp::NumericVector result(n);
+  rng->generate<dqrng::normal_distribution>(result, mean, sd);
+  return result;
+}
+
+/*** R
+threefry_rnorm(10)
+system.time(threefry_rnorm(1e7))
+*/
+```
+
+Note that for the (recommended) Threefry engine with 20 rounds some additional integration is provided in the `dqrng_threefry.h` header file.
+
+Alternatively, you could combine the included RNGs together with dqrng's tooling and some other distribution function.
+For example, this function generates random numbers according to the normal distribution using the standard library from C++11:
+
+```{r, eval=FALSE, engine='Rcpp'}
+#include <random>
+#include <Rcpp.h>
+// [[Rcpp::depends(dqrng)]]
+#include <dqrng_generator.h>
+#include <xoshiro.h>
+
+// [[Rcpp::export]]
+Rcpp::NumericVector std_rnorm(const int n, const double mean = 0.0, const double sd = 1.0) {
+  auto rng = dqrng::generator<dqrng::xoroshiro128plusplus>(42);
+  Rcpp::NumericVector result(n);
+  rng->generate<std::normal_distribution>(result, mean, sd);
+  return result;
+}
+
+/*** R
+std_rnorm(10)
+system.time(std_rnorm(1e7))
+*/
+```
+
+Typically this is not as fast as `dqrnorm`, but the technique is useful to support distributions not (yet) included in dqrng.
+Note however, that the algorithms used for the distributions from C++11 are *implementation defined*.
+
+Finally you could directly use the base generators, which are provided as header-only libraries, without dqrng's tooling.
+For example, the following function uses the 32 bit PCG variant together with Boost's normal distribution function:
+
+```{r, eval=FALSE, engine='Rcpp'}
+#include <Rcpp.h>
+// [[Rcpp::depends(dqrng, BH)]]
+#include <pcg_random.hpp>
+#include <boost/random/normal_distribution.hpp>
+
+// [[Rcpp::plugins(cpp11)]]   
+// [[Rcpp::export]]
+Rcpp::NumericVector boost_pcg_rnorm(const int n, const double mean = 0.0, const double sd = 1.0) {
+  pcg32 rng(42);
+  boost::random::normal_distribution<double> dist(mean, sd);
+  Rcpp::NumericVector result(n);
+  std::generate(result.begin(), result.end(), [&dist, &rng](){return dist(rng);});
+  return result;
+}
+/*** R
+boost_pcg_rnorm(10)
+system.time(boost_pcg_rnorm(1e7))
+*/
+```
+
+This is quite fast since `boost::random::normal_distribution` uses the fast Ziggurat algorithm. 
+For some applications it is necessary to draw random numbers from multiple distributions with varying parameters.
+The following function uses a binomial distribution (from `boost.random`) as well as the normal distribution from `dqrng`.
+The parameters of the distributions are adjusted for every draw using `<distribution>::param_type`: 
+
+```{r, eval=FALSE, engine='Rcpp'}
+#include <Rcpp.h>
+// [[Rcpp::depends(dqrng, BH)]]
+#include <boost/random/binomial_distribution.hpp>
+#include <dqrng_distribution.h>
+
+// [[Rcpp::export]]
+Rcpp::NumericMatrix multiple_distributions(int n) {
+  auto rng = dqrng::generator<dqrng::xoshiro256plusplus>(42);
+  Rcpp::NumericMatrix out(n, 3);
+  double p = 0.0;
+  for (int i = 0; i < n; ++i) {
+    p = double(i) / double(n);
+    out(i,0) = rng->variate<boost::random::binomial_distribution<int>>(1, p);
+    out(i,1) = rng->variate<dqrng::normal_distribution>(p, 1.0);
+    out(i,2) = rng->variate<dqrng::normal_distribution>(4.0, 3.0 - p);
+  }
+  Rcpp::colnames(out) = Rcpp::CharacterVector::create("Bernoulli", "Normal1", "Normal2");
+  return out;
+}
+
+/*** R
+multiple_distributions(5)
+*/
+```
+
+## Accessing the global RNG
+
+You may use the class `dqrng::random_64bit_accessor` to use the **seeded** 
+RNG engine of `dqrng`. Please note that the included RNG will be invalidated if
+`dqRNGkind` is called. You therefore should use this calls only within functions:
+
+```{Rcpp, eval=FALSE, engine='Rcpp'}
+#include <Rcpp.h>
+// [[Rcpp::depends(dqrng, BH)]]
+#include <boost/random/binomial_distribution.hpp>
+#include <dqrng.h>
+#include <dqrng_distribution.h>
+
+// [[Rcpp::export]]
+Rcpp::NumericMatrix multiple_distributions(int n) {
+  auto rng = dqrng::random_64bit_accessor{};
+  Rcpp::NumericMatrix out(n, 3);
+  double p = 0.0;
+  for (int i = 0; i < n; ++i) {
+    p = double(i) / double(n);
+    out(i,0) = rng.variate<boost::random::binomial_distribution<int>>(1, p);
+    out(i,1) = rng.variate<dqrng::normal_distribution>(p, 1.0);
+    out(i,2) = rng.variate<dqrng::normal_distribution>(4.0, 3.0 - p);
+  }
+  Rcpp::colnames(out) = Rcpp::CharacterVector::create("Bernoulli", "Normal1", "Normal2");
+  return out;
+}
+
+/*** R
+dqRNGkind("Xoshiro256++")
+dqset.seed(42)
+multiple_distributions(5)
+*/
+```

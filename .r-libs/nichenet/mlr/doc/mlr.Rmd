@@ -1,0 +1,24 @@
+---
+title: "mlr: Machine Learning in R"
+# author: "Bernd Bischl
+# date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{mlr}
+  %\VignetteEngine{knitr::rmarkdown}
+  \usepackage[utf8]{inputenc}
+---
+
+```{r, echo = FALSE, message=FALSE}
+library("mlr")
+library("BBmisc")
+library("ParamHelpers")
+
+# show grouped code output instead of single lines
+knitr::opts_chunk$set(collapse = TRUE)
+```
+Information on mlr is available here:
+
+* [Project Page](https://github.com/mlr-org/mlr/)
+* [Tutorial](https://mlr.mlr-org.com/index.html)
+* [Wiki](https://github.com/mlr-org/mlr/wiki) with additional information for developers

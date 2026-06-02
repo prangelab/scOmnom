@@ -6,6 +6,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Dict, Sequence, Mapping, Iterable, List, Any
 import ast
+from matplotlib.patches import Patch
 
 import logging
 from sklearn.metrics import silhouette_samples
@@ -1236,6 +1237,22 @@ def save_umap_multi(
     )
 
 
+def _scanpy_umap_style_kwargs(adata: ad.AnnData) -> dict[str, float]:
+    """
+    Return explicit Scanpy UMAP marker styling that keeps dense embeddings
+    legible in saved figures.
+    """
+    n_obs = max(int(getattr(adata, "n_obs", 0)), 1)
+    size = float(np.clip(500000.0 / n_obs, 5.0, 16.0))
+    return {
+        "alpha": 0.94,
+        "size": size,
+        "edgecolors": "none",
+        "linewidths": 0.0,
+        "rasterized": True,
+    }
+
+
 # -------------------------------------------------------------------------
 # Internal helpers
 # -------------------------------------------------------------------------
@@ -1741,6 +1758,8 @@ def umap_by(adata, keys, figdir: Path | None = None, stem: str | None = None):
     if figdir is None:
         figdir = ROOT_FIGDIR
 
+    umap_style = _scanpy_umap_style_kwargs(adata)
+
     # Plot each key separately so we can size per-legend and save cleanly.
     for key in keys:
         if key not in adata.obs:
@@ -1775,6 +1794,7 @@ def umap_by(adata, keys, figdir: Path | None = None, stem: str | None = None):
             ax=ax,  # <- key change
             legend_loc=("right margin" if is_cat else None),
             legend_fontsize=(10 if is_cat else None),
+            **umap_style,
         )
 
         if is_cat and n_cats > 0:
@@ -2682,6 +2702,7 @@ def umap_plots(
     from pathlib import Path
 
     figdir = Path(figdir)
+    umap_style = _scanpy_umap_style_kwargs(adata)
 
     if "X_umap" not in adata.obsm:
         LOGGER.warning("Skipping UMAP plots: X_umap not found.")
@@ -2695,6 +2716,7 @@ def umap_plots(
             show=False,
             return_fig=True,
             legend_loc="right margin",   # <- consistent, outside axes
+            **umap_style,
         )
         save_umap_multi("umap_batch", figdir, fig, right=0.78)
     else:
@@ -2708,6 +2730,7 @@ def umap_plots(
             show=False,
             return_fig=True,
             legend_loc="right margin",   # <- NOT "on data" (avoids messy labels)
+            **umap_style,
         )
         save_umap_multi(f"umap_{cluster_key}", figdir, fig, right=0.78)
     else:
@@ -2760,6 +2783,7 @@ def umap_by_two_legend_styles(
         extra_w += min((n_cats - 9) * 0.18, 3.0)
     full_w = base_w + extra_w
     full_right = 0.64 if extra_w > 0.0 else 0.78
+    umap_style = _scanpy_umap_style_kwargs(adata)
 
     def _extract_cnn(x: str) -> str:
         s = str(x or "")
@@ -2811,6 +2835,7 @@ def umap_by_two_legend_styles(
         show=False,
         legend_loc="right margin",
         ax=ax_full,
+        **umap_style,
     )
     save_umap_multi(f"{stem}__fulllegend", figdir=base, fig=fig_full, right=full_right)
 
@@ -2823,6 +2848,7 @@ def umap_by_two_legend_styles(
         show=False,
         legend_loc=None,
         ax=ax_nolegend,
+        **umap_style,
     )
     save_umap_multi(f"{stem}__nolegend", figdir=base, fig=fig_nolegend)
 
@@ -2835,6 +2861,7 @@ def umap_by_two_legend_styles(
         show=False,
         legend_loc=None,
         ax=ax_short,
+        **umap_style,
     )
     _annotate_cnn(ax_short)
     save_umap_multi(f"{stem}__shortlegend", figdir=base, fig=fig_short)
@@ -3113,12 +3140,27 @@ def plot_cluster_umaps(
     _sanitize_uns_colors(adata, label_key)
     if batch_key is not None and batch_key in adata.obs:
         _sanitize_uns_colors(adata, batch_key)
+    umap_style = _scanpy_umap_style_kwargs(adata)
 
-    fig = sc.pl.umap(adata, color=[label_key], show=False, return_fig=True, legend_loc="right margin")
+    fig = sc.pl.umap(
+        adata,
+        color=[label_key],
+        show=False,
+        return_fig=True,
+        legend_loc="right margin",
+        **umap_style,
+    )
     save_umap_multi(f"cluster_umap_{label_key}", figdir, fig, right=0.78)
 
     if batch_key in adata.obs:
-        fig = sc.pl.umap(adata, color=[batch_key], show=False, return_fig=True, legend_loc="right margin")
+        fig = sc.pl.umap(
+            adata,
+            color=[batch_key],
+            show=False,
+            return_fig=True,
+            legend_loc="right margin",
+            **umap_style,
+        )
         save_umap_multi(f"cluster_umap_{batch_key}", figdir, fig, right=0.78)
 
         fig = sc.pl.umap(
@@ -3127,6 +3169,7 @@ def plot_cluster_umaps(
             show=False,
             return_fig=True,
             legend_loc="right margin",
+            **umap_style,
         )
         save_umap_multi(f"cluster_umap_{batch_key}_and_{label_key}", figdir, fig, right=0.78)
 
@@ -6044,11 +6087,16 @@ def plot_liana_condition_split_target_clusters(
     stem: str = "liana_condition_split_target_clusters",
     title: str | None = None,
     top_n: int = 8,
+    value_col: str | None = None,
+    normalize: bool = False,
+    x_label: str | None = None,
 ) -> None:
     if interactions is None or getattr(interactions, "empty", True):
         LOGGER.warning("plot_liana_condition_split_target_clusters: interactions are empty; skipping.")
         return
     cols_needed = {"run_label", "source", "target"}
+    if value_col is not None:
+        cols_needed.add(value_col)
     if not cols_needed.issubset(interactions.columns):
         LOGGER.warning("plot_liana_condition_split_target_clusters: required columns missing; skipping.")
         return
@@ -6057,20 +6105,30 @@ def plot_liana_condition_split_target_clusters(
     df["run_label"] = df["run_label"].astype(str)
     df["source"] = df["source"].astype(str)
     df["target"] = df["target"].astype(str)
+    if value_col is not None:
+        df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
     run_order = df["run_label"].drop_duplicates().tolist()
     palette = _liana_condition_palette(run_order)
     cluster_order = df["source"].drop_duplicates().tolist()
 
     for cluster in cluster_order:
         cluster_df = df[df["source"] == str(cluster)].copy()
-        target_counts = (
-            cluster_df.groupby(["target", "run_label"], observed=False)
-            .size()
-            .rename("n_interactions")
-            .reset_index()
-        )
+        if value_col is not None:
+            target_counts = (
+                cluster_df.groupby(["target", "run_label"], observed=False)[value_col]
+                .mean()
+                .rename("plot_value")
+                .reset_index()
+            )
+        else:
+            target_counts = (
+                cluster_df.groupby(["target", "run_label"], observed=False)
+                .size()
+                .rename("plot_value")
+                .reset_index()
+            )
         totals = (
-            target_counts.groupby("target", observed=False)["n_interactions"]
+            target_counts.groupby("target", observed=False)["plot_value"]
             .sum()
             .sort_values(ascending=False, kind="mergesort")
             .head(int(max(1, top_n)))
@@ -6080,10 +6138,14 @@ def plot_liana_condition_split_target_clusters(
         selected_labels = totals.index.astype(str).tolist()
         pivot = (
             target_counts[target_counts["target"].isin(selected_labels)]
-            .pivot(index="target", columns="run_label", values="n_interactions")
+            .pivot(index="target", columns="run_label", values="plot_value")
             .reindex(index=selected_labels, columns=run_order)
             .fillna(0.0)
         )
+        if normalize:
+            denom = pivot.sum(axis=0).replace(0.0, np.nan)
+            pivot = pivot.divide(denom, axis=1).fillna(0.0)
+        pivot = pivot.iloc[::-1].copy()
         n_rows = len(pivot.index)
         base_y = np.arange(n_rows, dtype=float)
         height = 0.8 / max(len(run_order), 1)
@@ -6095,9 +6157,16 @@ def plot_liana_condition_split_target_clusters(
             vals = pd.to_numeric(pivot[run_label], errors="coerce").fillna(0.0).to_numpy(dtype=float)
             ax.barh(base_y + offsets[idx], vals, height=height, color=palette[run_label], label=run_label)
         ax.set_yticks(base_y)
-        ax.set_yticklabels(selected_labels, fontsize=9.5)
+        ax.set_yticklabels(pivot.index.astype(str).tolist(), fontsize=9.5)
         ax.invert_yaxis()
-        ax.set_xlabel("n_interactions")
+        if x_label:
+            ax.set_xlabel(str(x_label))
+        elif value_col is not None:
+            ax.set_xlabel(f"mean {value_col}")
+        elif normalize:
+            ax.set_xlabel("share of outgoing interactions")
+        else:
+            ax.set_xlabel("n_interactions")
         ax.set_ylabel("Target cluster")
         ax.set_title(f"{title or 'LIANA condition-split target clusters'} [{cluster}]")
         ax.grid(axis="x", color="#D9D9D9", linewidth=0.8)
@@ -6109,6 +6178,51 @@ def plot_liana_condition_split_target_clusters(
         stem_cluster = f"{stem}__{re.sub(r'[^A-Za-z0-9]+', '_', str(cluster)).strip('_') or 'cluster'}"
         record_plot_artifact(stem_cluster, figdir, fig)
         close_plot(fig)
+
+        if len(run_order) == 2:
+            left_label, right_label = run_order
+            delta_df = pivot.copy()
+            delta_df["delta"] = (
+                pd.to_numeric(delta_df[right_label], errors="coerce").fillna(0.0)
+                - pd.to_numeric(delta_df[left_label], errors="coerce").fillna(0.0)
+            )
+            for favored_label, mask_positive in ((left_label, False), (right_label, True)):
+                favored = delta_df[delta_df["delta"] > 0].copy() if mask_positive else delta_df[delta_df["delta"] < 0].copy()
+                if favored.empty:
+                    continue
+                favored["delta_abs"] = favored["delta"].abs()
+                favored = favored.sort_values("delta_abs", ascending=False, kind="mergesort").head(int(max(1, top_n)))
+                favored = favored.iloc[::-1].copy()
+
+                fig_h = min(10.0, max(4.0, 1.0 + 0.42 * float(len(favored))))
+                fig, ax = plt.subplots(figsize=(9.5, fig_h))
+                vals = pd.to_numeric(favored["delta_abs"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+                ax.barh(
+                    np.arange(len(favored), dtype=float),
+                    vals,
+                    color=palette[favored_label],
+                )
+                ax.set_yticks(np.arange(len(favored), dtype=float))
+                ax.set_yticklabels(favored.index.astype(str).tolist(), fontsize=9.5)
+                ax.invert_yaxis()
+                if x_label:
+                    ax.set_xlabel(f"absolute delta in {x_label}")
+                elif value_col is not None:
+                    ax.set_xlabel(f"absolute delta in mean {value_col}")
+                elif normalize:
+                    ax.set_xlabel("absolute delta in target share")
+                else:
+                    ax.set_xlabel("absolute delta in n_interactions")
+                ax.set_ylabel("Target cluster")
+                ax.set_title(f"{title or 'LIANA condition-split target clusters'} [{cluster}] higher in {favored_label}")
+                ax.grid(axis="x", color="#D9D9D9", linewidth=0.8)
+                ax.spines["top"].set_visible(False)
+                ax.spines["right"].set_visible(False)
+                ax.spines["left"].set_visible(False)
+                fig.tight_layout()
+                favored_token = re.sub(r'[^A-Za-z0-9]+', '_', str(favored_label)).strip('_') or "level"
+                record_plot_artifact(f"{stem_cluster}__higher_in_{favored_token}", figdir, fig)
+                close_plot(fig)
 
 
 @collect_plot_artifacts
@@ -6323,6 +6437,11 @@ def _make_liana_circos_figure(
                 "ignore",
                 message=r"invalid value encountered in divide",
                 category=RuntimeWarning,
+            )
+            warnings.filterwarnings(
+                "ignore",
+                message=r"The default value of observed=False is deprecated and will change to observed=True.*",
+                category=FutureWarning,
             )
             ax = liana.pl.circle_plot(
                 adata=adata_plot,
@@ -6642,3 +6761,986 @@ def _make_unique_labels(labels: dict[str, str]) -> dict[str, str]:
         for raw in raws:
             out[raw] = f"{disp} [{raw}]"
     return out
+
+
+@collect_plot_artifacts
+def plot_nichenet_top_ligands(
+    ligand_activity: pd.DataFrame,
+    *,
+    figdir: Path,
+    stem: str,
+    title: str | None = None,
+    top_n: int = 30,
+    value_col: str = "pearson",
+):
+    if ligand_activity is None or getattr(ligand_activity, "empty", True):
+        return []
+    df = ligand_activity.copy()
+    ligand_col = "test_ligand" if "test_ligand" in df.columns else ("ligand" if "ligand" in df.columns else None)
+    if ligand_col is None or value_col not in df.columns:
+        return []
+    df = df[[ligand_col, value_col]].dropna().copy()
+    if df.empty:
+        return []
+    df[ligand_col] = df[ligand_col].astype(str)
+    df = df.sort_values(value_col, ascending=False, kind="mergesort").head(int(top_n)).reset_index(drop=True)
+
+    fig, ax = plt.subplots(figsize=(10, max(4.5, 0.35 * len(df) + 1.5)))
+    ax.barh(df[ligand_col], df[value_col], color="#2a7fb8")
+    ax.set_xlabel(value_col)
+    ax.set_ylabel("Ligand")
+    ax.set_title(title or "NicheNet top ligands")
+    ax.grid(axis="x", alpha=0.25)
+    ax.invert_yaxis()
+    fig.tight_layout()
+    record_plot_artifact(stem, figdir, fig)
+    close_plot(fig)
+
+
+@collect_plot_artifacts
+def plot_nichenet_ligand_target_heatmap(
+    ligand_target_links: pd.DataFrame,
+    *,
+    figdir: Path,
+    stem: str,
+    title: str | None = None,
+    top_n_ligands: int = 15,
+    top_n_targets: int = 40,
+):
+    if ligand_target_links is None or getattr(ligand_target_links, "empty", True):
+        return []
+    df = ligand_target_links.copy()
+    ligand_col = "ligand" if "ligand" in df.columns else ("test_ligand" if "test_ligand" in df.columns else None)
+    target_col = "target" if "target" in df.columns else ("gene" if "gene" in df.columns else None)
+    weight_col = None
+    for cand in ("weight", "regulatory_potential", "value"):
+        if cand in df.columns:
+            weight_col = cand
+            break
+    if ligand_col is None or target_col is None or weight_col is None:
+        return []
+    df = df[[ligand_col, target_col, weight_col]].dropna().copy()
+    if df.empty:
+        return []
+    df[ligand_col] = df[ligand_col].astype(str)
+    df[target_col] = df[target_col].astype(str)
+    ligand_order = (
+        df.groupby(ligand_col, observed=False)[weight_col]
+        .max()
+        .sort_values(ascending=False)
+        .head(int(top_n_ligands))
+        .index.astype(str)
+        .tolist()
+    )
+    df = df[df[ligand_col].isin(ligand_order)].copy()
+    target_order = (
+        df.groupby(target_col, observed=False)[weight_col]
+        .max()
+        .sort_values(ascending=False)
+        .head(int(top_n_targets))
+        .index.astype(str)
+        .tolist()
+    )
+    df = df[df[target_col].isin(target_order)].copy()
+    if df.empty:
+        return []
+    pivot = (
+        df.pivot_table(index=target_col, columns=ligand_col, values=weight_col, aggfunc="max", fill_value=0.0)
+        .reindex(index=target_order, columns=ligand_order, fill_value=0.0)
+    )
+
+    fig_w = max(6.5, 0.5 * len(pivot.columns) + 3)
+    fig_h = max(4.5, 0.25 * len(pivot.index) + 2)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    sns.heatmap(pivot, cmap="mako", ax=ax, cbar_kws={"label": weight_col})
+    ax.set_xlabel("Ligand")
+    ax.set_ylabel("Target gene")
+    ax.set_title(title or "NicheNet ligand-target heatmap")
+    fig.tight_layout()
+    record_plot_artifact(stem, figdir, fig)
+    close_plot(fig)
+
+
+@collect_plot_artifacts
+def plot_mebocost_top_events(
+    commu_res: pd.DataFrame,
+    *,
+    figdir: Path,
+    stem: str,
+    title: str | None = None,
+    top_n: int = 40,
+    value_col: str = "commu_score",
+):
+    if commu_res is None or getattr(commu_res, "empty", True):
+        return []
+    df = commu_res.copy()
+    source_col = "source_label" if "source_label" in df.columns else "source"
+    target_col = "target_label" if "target_label" in df.columns else "target"
+    metabolite_col = "metabolite_label" if "metabolite_label" in df.columns else ("Metabolite_Name" if "Metabolite_Name" in df.columns else "metabolite")
+    sensor_col = "sensor_label" if "sensor_label" in df.columns else "sensor"
+    required = {source_col, target_col, metabolite_col, sensor_col, value_col}
+    if not required.issubset(df.columns):
+        return []
+    keep_cols = list(required) + [c for c in ("super_class", "sensor_annotation") if c in df.columns]
+    df = df[keep_cols].dropna(subset=list(required)).copy()
+    if df.empty:
+        return []
+    df["event_label"] = (
+        df[source_col].astype(str)
+        + " -> "
+        + df[target_col].astype(str)
+        + " | "
+        + df[metabolite_col].astype(str)
+        + " -> "
+        + df[sensor_col].astype(str)
+    )
+    df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
+    df = df.dropna(subset=[value_col])
+    if df.empty:
+        return []
+    df = df.sort_values(value_col, ascending=False, kind="mergesort").head(int(top_n)).reset_index(drop=True)
+
+    fig, ax = plt.subplots(figsize=(12.5, max(4.8, 0.34 * len(df) + 1.8)))
+    labels = _wrap_labels(df["event_label"].astype(str).tolist(), wrap_at=58)
+    if "super_class" in df.columns and df["super_class"].notna().any():
+        classes = df["super_class"].fillna("Unannotated").astype(str)
+        uniq = list(dict.fromkeys(classes.tolist()))
+        palette_map = dict(zip(uniq, sns.color_palette("tab20", n_colors=max(3, len(uniq)))))
+        colors = [palette_map[str(x)] for x in classes]
+        ax.barh(labels, df[value_col], color=colors)
+        handles = [Patch(facecolor=palette_map[name], edgecolor="none", label=name) for name in uniq[:12]]
+        if handles:
+            ax.legend(
+                handles=handles,
+                title="Metabolite super-class",
+                loc="lower right",
+                frameon=False,
+                fontsize=8.5,
+                title_fontsize=9.0,
+            )
+    else:
+        palette = sns.color_palette("crest", n_colors=max(3, len(df)))
+        ax.barh(labels, df[value_col], color=palette)
+    ax.set_xlabel(value_col)
+    ax.set_ylabel("Metabolite-sensor event")
+    ax.set_title(title or "MEBOCOST top events")
+    ax.grid(axis="x", alpha=0.22, linestyle=":")
+    ax.set_axisbelow(True)
+    ax.invert_yaxis()
+    fig.tight_layout()
+    record_plot_artifact(stem, figdir, fig)
+    close_plot(fig)
+
+
+@collect_plot_artifacts
+def plot_mebocost_source_target_heatmap(
+    summary: pd.DataFrame,
+    *,
+    figdir: Path,
+    stem: str,
+    title: str | None = None,
+    value_col: str = "n_events",
+    cmap: str = "viridis",
+):
+    if summary is None or getattr(summary, "empty", True):
+        return []
+    source_col = "source_label" if "source_label" in summary.columns else "source"
+    target_col = "target_label" if "target_label" in summary.columns else "target"
+    if not {source_col, target_col, value_col}.issubset(summary.columns):
+        return []
+    df = summary[[source_col, target_col, value_col]].copy()
+    df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
+    df = df.dropna(subset=[value_col])
+    if df.empty:
+        return []
+    pivot = df.pivot_table(index=source_col, columns=target_col, values=value_col, aggfunc="sum", fill_value=0.0)
+    if pivot.empty:
+        return []
+    source_order = (
+        df.groupby(source_col, observed=False)[value_col].sum().sort_values(ascending=False).index.astype(str).tolist()
+    )
+    target_order = (
+        df.groupby(target_col, observed=False)[value_col].sum().sort_values(ascending=False).index.astype(str).tolist()
+    )
+    pivot = pivot.reindex(index=source_order, columns=target_order, fill_value=0.0)
+
+    fig_w = max(6.5, 0.45 * len(pivot.columns) + 2.5)
+    fig_h = max(5.0, 0.35 * len(pivot.index) + 2.0)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    sns.heatmap(pivot, cmap=cmap, ax=ax, cbar_kws={"label": value_col})
+    ax.set_xlabel("Target cluster")
+    ax.set_ylabel("Source cluster")
+    ax.set_title(title or "MEBOCOST source-target summary")
+    fig.tight_layout()
+    record_plot_artifact(stem, figdir, fig)
+    close_plot(fig)
+
+
+@collect_plot_artifacts
+def plot_mebocost_cluster_partner_bars(
+    summary: pd.DataFrame,
+    *,
+    figdir: Path,
+    stem_prefix: str,
+    focus: str,
+    title_prefix: str | None = None,
+    value_col: str = "n_events",
+    top_n: int = 12,
+):
+    if summary is None or getattr(summary, "empty", True):
+        return []
+    focus = str(focus).strip().lower()
+    if focus not in {"source", "target"}:
+        return []
+    focus_col = f"{focus}_label" if f"{focus}_label" in summary.columns else focus
+    partner_key = "target" if focus == "source" else "source"
+    partner_col = f"{partner_key}_label" if f"{partner_key}_label" in summary.columns else partner_key
+    if not {focus_col, partner_col, value_col}.issubset(summary.columns):
+        return []
+    df = summary[[focus_col, partner_col, value_col]].copy()
+    df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
+    df = df.dropna(subset=[value_col])
+    if df.empty:
+        return []
+
+    for focus_value, sub in df.groupby(focus_col, observed=False, sort=False):
+        sub = sub.sort_values(value_col, ascending=False, kind="mergesort").head(int(top_n)).reset_index(drop=True)
+        if sub.empty:
+            continue
+        fig, ax = plt.subplots(figsize=(8.8, max(4.2, 0.42 * len(sub) + 1.4)))
+        labels = _wrap_labels(sub[partner_col].astype(str).tolist(), wrap_at=32)
+        ax.barh(labels, sub[value_col], color=sns.color_palette("mako", n_colors=max(3, len(sub))))
+        ax.set_xlabel(value_col)
+        ax.set_ylabel("Partner cluster")
+        if focus == "source":
+            title = f"{title_prefix or 'MEBOCOST'} targets from {focus_value}"
+        else:
+            title = f"{title_prefix or 'MEBOCOST'} senders into {focus_value}"
+        ax.set_title(title)
+        ax.grid(axis="x", alpha=0.22, linestyle=":")
+        ax.set_axisbelow(True)
+        ax.invert_yaxis()
+        fig.tight_layout()
+        token = re.sub(r"[^A-Za-z0-9_.-]+", "_", _extract_cnn_token(str(focus_value)))
+        record_plot_artifact(f"{stem_prefix}__{token}", figdir, fig)
+        close_plot(fig)
+
+
+@collect_plot_artifacts
+def plot_mebocost_cluster_event_bars(
+    commu_res: pd.DataFrame,
+    *,
+    figdir: Path,
+    stem_prefix: str,
+    focus: str,
+    title_prefix: str | None = None,
+    top_n: int = 12,
+    value_col: str = "commu_score",
+):
+    if commu_res is None or getattr(commu_res, "empty", True):
+        return []
+    focus = str(focus).strip().lower()
+    if focus not in {"source", "target"}:
+        return []
+    focus_col = f"{focus}_label" if f"{focus}_label" in commu_res.columns else focus
+    other_key = "target" if focus == "source" else "source"
+    other_col = f"{other_key}_label" if f"{other_key}_label" in commu_res.columns else other_key
+    metabolite_col = "metabolite_label" if "metabolite_label" in commu_res.columns else ("Metabolite_Name" if "Metabolite_Name" in commu_res.columns else "metabolite")
+    sensor_col = "sensor_label" if "sensor_label" in commu_res.columns else "sensor"
+    required = {focus_col, other_col, metabolite_col, sensor_col, value_col}
+    if not required.issubset(commu_res.columns):
+        return []
+    df = commu_res[list(required)].dropna().copy()
+    df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
+    df = df.dropna(subset=[value_col])
+    if df.empty:
+        return []
+
+    for focus_value, sub in df.groupby(focus_col, observed=False, sort=False):
+        sub = sub.sort_values(value_col, ascending=False, kind="mergesort").head(int(top_n)).reset_index(drop=True)
+        if sub.empty:
+            continue
+        sub["event_label"] = (
+            sub[other_col].astype(str)
+            + " | "
+            + sub[metabolite_col].astype(str)
+            + " -> "
+            + sub[sensor_col].astype(str)
+        )
+        fig, ax = plt.subplots(figsize=(11.2, max(4.5, 0.34 * len(sub) + 1.5)))
+        labels = _wrap_labels(sub["event_label"].astype(str).tolist(), wrap_at=54)
+        ax.barh(labels, sub[value_col], color=sns.color_palette("rocket", n_colors=max(3, len(sub))))
+        ax.set_xlabel(value_col)
+        ax.set_ylabel("Event")
+        if focus == "source":
+            title = f"{title_prefix or 'MEBOCOST'} top events sent by {focus_value}"
+        else:
+            title = f"{title_prefix or 'MEBOCOST'} top events received by {focus_value}"
+        ax.set_title(title)
+        ax.grid(axis="x", alpha=0.22, linestyle=":")
+        ax.set_axisbelow(True)
+        ax.invert_yaxis()
+        fig.tight_layout()
+        token = re.sub(r"[^A-Za-z0-9_.-]+", "_", _extract_cnn_token(str(focus_value)))
+        record_plot_artifact(f"{stem_prefix}__{token}", figdir, fig)
+        close_plot(fig)
+
+
+@collect_plot_artifacts
+def plot_mebocost_annotation_summary_bars(
+    commu_res: pd.DataFrame,
+    *,
+    figdir: Path,
+    stem: str,
+    annotation_col: str,
+    title: str | None = None,
+    top_n: int = 12,
+    score_col: str = "commu_score",
+):
+    if commu_res is None or getattr(commu_res, "empty", True):
+        return []
+    if annotation_col not in commu_res.columns:
+        return []
+    df = commu_res[[annotation_col] + ([score_col] if score_col in commu_res.columns else [])].copy()
+    df[annotation_col] = df[annotation_col].fillna("Unannotated").astype(str)
+    if score_col in df.columns:
+        df[score_col] = pd.to_numeric(df[score_col], errors="coerce")
+    grouped = df.groupby(annotation_col, observed=False)
+    summary = grouped.size().rename("n_events").reset_index()
+    if score_col in df.columns:
+        summary = summary.merge(
+            grouped[score_col].mean().rename("mean_score").reset_index(),
+            on=annotation_col,
+            how="left",
+        )
+    else:
+        summary["mean_score"] = np.nan
+    summary = summary.sort_values(["n_events", "mean_score", annotation_col], ascending=[False, False, True], kind="mergesort").head(int(top_n)).reset_index(drop=True)
+    if summary.empty:
+        return []
+    fig, ax = plt.subplots(figsize=(8.6, max(4.0, 0.42 * len(summary) + 1.4)))
+    labels = _wrap_labels(summary[annotation_col].astype(str).tolist(), wrap_at=32)
+    ax.barh(labels, summary["n_events"], color=sns.color_palette("viridis", n_colors=max(3, len(summary))))
+    ax.set_xlabel("n_events")
+    ax.set_ylabel(annotation_col.replace("_", " "))
+    ax.set_title(title or f"MEBOCOST {annotation_col} summary")
+    ax.grid(axis="x", alpha=0.22, linestyle=":")
+    ax.set_axisbelow(True)
+    ax.invert_yaxis()
+    fig.tight_layout()
+    record_plot_artifact(stem, figdir, fig)
+    close_plot(fig)
+
+
+@collect_plot_artifacts
+def plot_mebocost_cluster_annotation_bars(
+    summary: pd.DataFrame,
+    *,
+    figdir: Path,
+    stem_prefix: str,
+    focus: str,
+    annotation_col: str,
+    title_prefix: str | None = None,
+    value_col: str = "n_events",
+    top_n: int = 12,
+):
+    if summary is None or getattr(summary, "empty", True):
+        return []
+    focus = str(focus).strip().lower()
+    if focus not in {"source", "target"}:
+        return []
+    focus_col = f"{focus}_label" if f"{focus}_label" in summary.columns else focus
+    if not {focus_col, annotation_col, value_col}.issubset(summary.columns):
+        return []
+    df = summary[[focus_col, annotation_col, value_col]].copy()
+    df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
+    df = df.dropna(subset=[value_col]).copy()
+    if df.empty:
+        return []
+
+    for focus_value, sub in df.groupby(focus_col, observed=False, sort=False):
+        sub = sub.sort_values(value_col, ascending=False, kind="mergesort").head(int(top_n)).reset_index(drop=True)
+        if sub.empty:
+            continue
+        fig, ax = plt.subplots(figsize=(9.0, max(4.2, 0.42 * len(sub) + 1.4)))
+        labels = _wrap_labels(sub[annotation_col].fillna("Unannotated").astype(str).tolist(), wrap_at=34)
+        ax.barh(labels, sub[value_col], color=sns.color_palette("viridis", n_colors=max(3, len(sub))))
+        ax.set_xlabel(value_col)
+        ax.set_ylabel(annotation_col.replace("_", " "))
+        ax.set_title(f"{title_prefix or 'MEBOCOST annotation summary'} [{focus_value}]")
+        ax.grid(axis="x", alpha=0.22, linestyle=":")
+        ax.set_axisbelow(True)
+        ax.invert_yaxis()
+        fig.tight_layout()
+        token = re.sub(r"[^A-Za-z0-9_.-]+", "_", _extract_cnn_token(str(focus_value)))
+        record_plot_artifact(f"{stem_prefix}__{token}", figdir, fig)
+        close_plot(fig)
+
+
+@collect_plot_artifacts
+def plot_mebocost_condition_split_annotations(
+    summary: pd.DataFrame,
+    figdir: Path,
+    *,
+    focus: str,
+    annotation_col: str,
+    stem: str,
+    title: str | None = None,
+    value_col: str = "n_events",
+    top_n: int = 8,
+    x_label: str | None = None,
+) -> None:
+    if summary is None or getattr(summary, "empty", True):
+        return
+    focus = str(focus).strip().lower()
+    if focus not in {"source", "target"}:
+        return
+    focus_col = f"{focus}_label" if f"{focus}_label" in summary.columns else focus
+    cols_needed = {"run_label", focus_col, annotation_col, value_col}
+    if not cols_needed.issubset(summary.columns):
+        return
+
+    df = summary.copy()
+    df["run_label"] = df["run_label"].astype(str)
+    df[focus_col] = df[focus_col].astype(str)
+    df[annotation_col] = df[annotation_col].fillna("Unannotated").astype(str)
+    df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
+    df = df.dropna(subset=[value_col]).copy()
+    if df.empty:
+        return
+
+    run_order = df["run_label"].drop_duplicates().tolist()
+    palette = _liana_condition_palette(run_order)
+    focus_order = df[focus_col].drop_duplicates().tolist()
+
+    for focus_value in focus_order:
+        cluster_df = df[df[focus_col] == str(focus_value)].copy()
+        annotation_vals = (
+            cluster_df.groupby([annotation_col, "run_label"], observed=False)[value_col]
+            .mean()
+            .rename("plot_value")
+            .reset_index()
+        )
+        totals = (
+            annotation_vals.groupby(annotation_col, observed=False)["plot_value"]
+            .sum()
+            .sort_values(ascending=False, kind="mergesort")
+            .head(int(max(1, top_n)))
+        )
+        if totals.empty:
+            continue
+        selected_labels = totals.index.astype(str).tolist()
+        pivot = (
+            annotation_vals[annotation_vals[annotation_col].isin(selected_labels)]
+            .pivot(index=annotation_col, columns="run_label", values="plot_value")
+            .reindex(index=selected_labels, columns=run_order)
+            .fillna(0.0)
+        )
+        pivot = pivot.iloc[::-1].copy()
+        n_rows = len(pivot.index)
+        base_y = np.arange(n_rows, dtype=float)
+        height = 0.8 / max(len(run_order), 1)
+        offsets = np.linspace(-0.4 + height / 2.0, 0.4 - height / 2.0, num=max(len(run_order), 1))
+
+        fig_h = min(10.0, max(4.0, 1.0 + 0.42 * float(n_rows)))
+        fig, ax = plt.subplots(figsize=(9.8, fig_h))
+        for idx, run_label in enumerate(run_order):
+            vals = pd.to_numeric(pivot[run_label], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+            ax.barh(base_y + offsets[idx], vals, height=height, color=palette[run_label], label=run_label)
+        ax.set_yticks(base_y)
+        ax.set_yticklabels(_wrap_labels(pivot.index.astype(str).tolist(), wrap_at=28), fontsize=9.5)
+        ax.invert_yaxis()
+        ax.set_xlabel(str(x_label or value_col))
+        ax.set_ylabel(annotation_col.replace("_", " "))
+        ax.set_title(f"{title or 'MEBOCOST condition-split annotations'} [{focus_value}]")
+        ax.grid(axis="x", color="#D9D9D9", linewidth=0.8)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_visible(False)
+        ax.legend(loc="lower right", frameon=False, fontsize=9.0, ncol=min(3, len(run_order)))
+        fig.tight_layout()
+        stem_cluster = f"{stem}__{re.sub(r'[^A-Za-z0-9]+', '_', _extract_cnn_token(str(focus_value))).strip('_') or 'cluster'}"
+        record_plot_artifact(stem_cluster, figdir, fig)
+        close_plot(fig)
+
+        if len(run_order) == 2:
+            left_label, right_label = run_order
+            delta_df = pivot.copy()
+            delta_df["delta"] = (
+                pd.to_numeric(delta_df[right_label], errors="coerce").fillna(0.0)
+                - pd.to_numeric(delta_df[left_label], errors="coerce").fillna(0.0)
+            )
+            for favored_label, mask_positive in ((left_label, False), (right_label, True)):
+                favored = delta_df[delta_df["delta"] > 0].copy() if mask_positive else delta_df[delta_df["delta"] < 0].copy()
+                if favored.empty:
+                    continue
+                favored["delta_abs"] = favored["delta"].abs()
+                favored = favored.sort_values("delta_abs", ascending=False, kind="mergesort").head(int(max(1, top_n)))
+                favored = favored.iloc[::-1].copy()
+                fig_h = min(10.0, max(4.0, 1.0 + 0.42 * float(len(favored))))
+                fig, ax = plt.subplots(figsize=(9.8, fig_h))
+                vals = pd.to_numeric(favored["delta_abs"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+                ax.barh(np.arange(len(favored), dtype=float), vals, color=palette[favored_label])
+                ax.set_yticks(np.arange(len(favored), dtype=float))
+                ax.set_yticklabels(_wrap_labels(favored.index.astype(str).tolist(), wrap_at=28), fontsize=9.5)
+                ax.invert_yaxis()
+                ax.set_xlabel(f"absolute delta in {str(x_label or value_col)}")
+                ax.set_ylabel(annotation_col.replace("_", " "))
+                ax.set_title(f"{title or 'MEBOCOST condition-split annotations'} [{focus_value}] higher in {favored_label}")
+                ax.grid(axis="x", color="#D9D9D9", linewidth=0.8)
+                ax.spines["top"].set_visible(False)
+                ax.spines["right"].set_visible(False)
+                ax.spines["left"].set_visible(False)
+                fig.tight_layout()
+                favored_token = re.sub(r"[^A-Za-z0-9]+", "_", str(favored_label)).strip("_") or "level"
+                record_plot_artifact(f"{stem_cluster}__higher_in_{favored_token}", figdir, fig)
+                close_plot(fig)
+
+
+@collect_plot_artifacts
+def plot_mebocost_condition_split_events(
+    commu_res: pd.DataFrame,
+    figdir: Path,
+    *,
+    focus: str,
+    stem: str,
+    title: str | None = None,
+    top_n: int = 6,
+    value_col: str = "commu_score",
+) -> None:
+    if commu_res is None or getattr(commu_res, "empty", True):
+        return
+    focus = str(focus).strip().lower()
+    if focus not in {"source", "target"}:
+        return
+    focus_col = f"{focus}_label" if f"{focus}_label" in commu_res.columns else focus
+    other_key = "target" if focus == "source" else "source"
+    other_col = f"{other_key}_label" if f"{other_key}_label" in commu_res.columns else other_key
+    metabolite_col = "metabolite_label" if "metabolite_label" in commu_res.columns else ("Metabolite_Name" if "Metabolite_Name" in commu_res.columns else "metabolite")
+    sensor_col = "sensor_label" if "sensor_label" in commu_res.columns else "sensor"
+    cols_needed = {"run_label", focus_col, other_col, metabolite_col, sensor_col, value_col}
+    if not cols_needed.issubset(commu_res.columns):
+        return
+
+    df = commu_res.copy()
+    df["run_label"] = df["run_label"].astype(str)
+    df[focus_col] = df[focus_col].astype(str)
+    df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
+    df = df.dropna(subset=[value_col]).copy()
+    if df.empty:
+        return
+    df["event_label"] = (
+        df[other_col].astype(str)
+        + " | "
+        + df[metabolite_col].astype(str)
+        + " -> "
+        + df[sensor_col].astype(str)
+    )
+    run_order = df["run_label"].drop_duplicates().tolist()
+    palette = _liana_condition_palette(run_order)
+    focus_order = df[focus_col].drop_duplicates().tolist()
+
+    for focus_value in focus_order:
+        cluster_df = df[df[focus_col] == str(focus_value)].copy()
+        selector = cluster_df.groupby("event_label", observed=False)[value_col].mean()
+        selected = selector.sort_values(ascending=False, kind="mergesort").head(int(max(1, top_n)))
+        if selected.empty:
+            continue
+        selected_labels = selected.index.astype(str).tolist()
+        plot_df = (
+            cluster_df[cluster_df["event_label"].isin(selected_labels)]
+            .groupby(["event_label", "run_label"], observed=False)[value_col]
+            .mean()
+            .reset_index()
+        )
+        pivot = (
+            plot_df.pivot(index="event_label", columns="run_label", values=value_col)
+            .reindex(index=selected_labels, columns=run_order)
+            .fillna(0.0)
+        )
+        n_rows = len(pivot.index)
+        base_y = np.arange(n_rows, dtype=float)
+        height = 0.8 / max(len(run_order), 1)
+        offsets = np.linspace(-0.4 + height / 2.0, 0.4 - height / 2.0, num=max(len(run_order), 1))
+
+        fig_h = min(12.0, max(4.0, 1.0 + 0.42 * float(n_rows)))
+        fig, ax = plt.subplots(figsize=(11.0, fig_h))
+        for idx, run_label in enumerate(run_order):
+            vals = pd.to_numeric(pivot[run_label], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+            ax.barh(base_y + offsets[idx], vals, height=height, color=palette[run_label], label=run_label)
+        ax.set_yticks(base_y)
+        ax.set_yticklabels(_wrap_labels(pivot.index.astype(str).tolist(), wrap_at=54), fontsize=9.0)
+        ax.invert_yaxis()
+        ax.set_xlabel(value_col)
+        ax.set_ylabel("Event")
+        ax.set_title(f"{title or 'MEBOCOST condition-split top events'} [{focus_value}]")
+        ax.grid(axis="x", color="#D9D9D9", linewidth=0.8)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_visible(False)
+        ax.legend(loc="lower right", frameon=False, fontsize=9.0, ncol=min(3, len(run_order)))
+        fig.tight_layout()
+        stem_cluster = f"{stem}__{re.sub(r'[^A-Za-z0-9]+', '_', _extract_cnn_token(str(focus_value))).strip('_') or 'cluster'}"
+        record_plot_artifact(stem_cluster, figdir, fig)
+        close_plot(fig)
+
+
+@collect_plot_artifacts
+def plot_mebocost_paired_route_summary(
+    route_scores: pd.DataFrame,
+    *,
+    figdir: Path,
+    stem: str,
+    title: str | None = None,
+    value_col: str = "mean_paired_commu_score",
+    top_n: int = 15,
+):
+    if route_scores is None or getattr(route_scores, "empty", True):
+        return []
+    if "route" not in route_scores.columns or value_col not in route_scores.columns:
+        return []
+    df = route_scores.copy()
+    df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
+    df = df.dropna(subset=[value_col]).copy()
+    if df.empty:
+        return []
+    summary = (
+        df.groupby("route", observed=False)
+        .agg(
+            n_samples=("sample_id", "nunique"),
+            mean_score=(value_col, "mean"),
+            median_score=(value_col, "median"),
+        )
+        .reset_index()
+        .sort_values(["mean_score", "median_score", "route"], ascending=[False, False, True], kind="mergesort")
+        .head(int(max(1, top_n)))
+        .reset_index(drop=True)
+    )
+    if summary.empty:
+        return []
+    fig, ax = plt.subplots(figsize=(9.8, max(4.2, 0.42 * len(summary) + 1.4)))
+    labels = _wrap_labels(summary["route"].astype(str).tolist(), wrap_at=34)
+    ax.barh(labels, summary["mean_score"], color=sns.color_palette("viridis", n_colors=max(3, len(summary))))
+    ax.set_xlabel(value_col)
+    ax.set_ylabel("Route")
+    ax.set_title(title or "MEBOCOST paired route summary")
+    ax.grid(axis="x", alpha=0.22, linestyle=":")
+    ax.set_axisbelow(True)
+    ax.invert_yaxis()
+    fig.tight_layout()
+    record_plot_artifact(stem, figdir, fig)
+    close_plot(fig)
+
+
+@collect_plot_artifacts
+def plot_mebocost_paired_route_heatmap(
+    route_scores: pd.DataFrame,
+    *,
+    figdir: Path,
+    stem: str,
+    title: str | None = None,
+    value_col: str = "mean_paired_commu_score",
+    top_n_routes: int = 20,
+):
+    if route_scores is None or getattr(route_scores, "empty", True):
+        return []
+    required = {"sample_id", "route", value_col}
+    if not required.issubset(route_scores.columns):
+        return []
+    df = route_scores.copy()
+    df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
+    df = df.dropna(subset=[value_col]).copy()
+    if df.empty:
+        return []
+    route_order = (
+        df.groupby("route", observed=False)[value_col]
+        .mean()
+        .sort_values(ascending=False, kind="mergesort")
+        .head(int(max(1, top_n_routes)))
+        .index.astype(str)
+        .tolist()
+    )
+    if not route_order:
+        return []
+    df = df[df["route"].astype(str).isin(route_order)].copy()
+    sample_meta_cols = [c for c in ("sex", "MASLD", "timepoint") if c in df.columns]
+    if sample_meta_cols:
+        sample_order = (
+            df[["sample_id"] + sample_meta_cols]
+            .drop_duplicates()
+            .sort_values(sample_meta_cols + ["sample_id"], kind="mergesort")["sample_id"]
+            .astype(str)
+            .tolist()
+        )
+    else:
+        sample_order = sorted(df["sample_id"].astype(str).unique().tolist())
+    pivot = (
+        df.pivot_table(index="sample_id", columns="route", values=value_col, aggfunc="mean", fill_value=0.0)
+        .reindex(index=sample_order, columns=route_order, fill_value=0.0)
+    )
+    if pivot.empty:
+        return []
+    fig_w = max(7.0, 0.42 * len(pivot.columns) + 3.0)
+    fig_h = max(4.5, 0.32 * len(pivot.index) + 2.4)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    sns.heatmap(pivot, cmap="mako", ax=ax, cbar_kws={"label": value_col})
+    ax.set_xlabel("Route")
+    ax.set_ylabel("Sample")
+    ax.set_title(title or "MEBOCOST paired route heatmap")
+    fig.tight_layout()
+    record_plot_artifact(stem, figdir, fig)
+    close_plot(fig)
+
+
+@collect_plot_artifacts
+def plot_mebocost_paired_group_effects(
+    group_effects: pd.DataFrame,
+    *,
+    figdir: Path,
+    stem_prefix: str,
+    title_prefix: str | None = None,
+    top_n: int = 15,
+):
+    if group_effects is None or getattr(group_effects, "empty", True):
+        return []
+    if "contrast" not in group_effects.columns or "cliffs_delta" not in group_effects.columns:
+        return []
+    df = group_effects.copy()
+    df["cliffs_delta"] = pd.to_numeric(df["cliffs_delta"], errors="coerce")
+    df["mannwhitney_fdr"] = pd.to_numeric(df.get("mannwhitney_fdr", np.nan), errors="coerce")
+    df = df.dropna(subset=["cliffs_delta"]).copy()
+    if df.empty:
+        return []
+    context_cols = [c for c in ("MASLD", "timepoint") if c in df.columns]
+    context_groups = [([], df)] if not context_cols else list(df.groupby(context_cols, observed=False))
+    for context_key, context_df in context_groups:
+        context_token = ""
+        context_title = ""
+        if context_cols:
+            if not isinstance(context_key, tuple):
+                context_key = (context_key,)
+            parts = [f"{col}={val}" for col, val in zip(context_cols, context_key)]
+            context_token = "__" + "__".join((re.sub(r"[^A-Za-z0-9_.-]+", "_", str(x)).strip("_") or "context") for x in parts)
+            context_title = " [" + ", ".join(parts) + "]"
+        for contrast, sub in context_df.groupby("contrast", observed=False, sort=False):
+            plot_df = sub.copy()
+            plot_df["_abs_effect"] = plot_df["cliffs_delta"].abs()
+            plot_df = plot_df.sort_values("_abs_effect", ascending=False, kind="mergesort").head(int(max(1, top_n))).copy()
+            if plot_df.empty:
+                continue
+            plot_df["event_label"] = (
+                plot_df.get("source_label", plot_df.get("source_token", "")).astype(str)
+                + " -> "
+                + plot_df.get("target_label", plot_df.get("target_token", "")).astype(str)
+                + " | "
+                + plot_df.get("Metabolite_Name", plot_df.get("HMDB_ID", "")).astype(str)
+                + " -> "
+                + plot_df.get("sensor_gene", "").astype(str)
+            )
+            plot_df = plot_df.iloc[::-1].copy()
+            fig, ax = plt.subplots(figsize=(12.0, max(4.5, 0.38 * len(plot_df) + 1.6)))
+            colors = ["#d62728" if float(x) > 0 else "#1f77b4" for x in plot_df["cliffs_delta"].to_numpy(dtype=float)]
+            vals = plot_df["cliffs_delta"].to_numpy(dtype=float)
+            y = np.arange(len(plot_df), dtype=float)
+            ax.barh(y, vals, color=colors)
+            sig = plot_df["mannwhitney_fdr"].to_numpy(dtype=float)
+            for yi, xi, fdr in zip(y, vals, sig):
+                if np.isfinite(fdr) and float(fdr) <= 0.05:
+                    ha = "left" if xi >= 0 else "right"
+                    xoff = 0.02 * max(1.0, float(np.nanmax(np.abs(vals))))
+                    ax.text(xi + (xoff if xi >= 0 else -xoff), yi, "*", va="center", ha=ha, fontsize=10, color="black")
+            ax.axvline(0.0, color="black", linestyle="--", linewidth=1.0)
+            ax.set_yticks(y)
+            ax.set_yticklabels(_wrap_labels(plot_df["event_label"].astype(str).tolist(), wrap_at=56), fontsize=9.0)
+            ax.set_xlabel("Cliff's delta")
+            ax.set_ylabel("Event")
+            ax.set_title(f"{title_prefix or 'MEBOCOST paired group effects'} [{contrast}]{context_title}")
+            ax.grid(axis="x", alpha=0.22, linestyle=":")
+            ax.set_axisbelow(True)
+            fig.tight_layout()
+            contrast_token = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(contrast)).strip("_") or "contrast"
+            record_plot_artifact(f"{stem_prefix}__{contrast_token}{context_token}", figdir, fig)
+            close_plot(fig)
+
+
+@collect_plot_artifacts
+def plot_liana_paired_route_dotplot(
+    route_effects: pd.DataFrame,
+    *,
+    figdir: Path,
+    stem_prefix: str,
+    title_prefix: str | None = None,
+    top_n: int = 20,
+):
+    if route_effects is None or getattr(route_effects, "empty", True):
+        return []
+    required = {"contrast", "branch_pair", "route_family", "cliffs_delta"}
+    if not required.issubset(route_effects.columns):
+        return []
+    df = route_effects.copy()
+    df["cliffs_delta"] = pd.to_numeric(df["cliffs_delta"], errors="coerce")
+    df["fdr"] = pd.to_numeric(df.get("fdr", np.nan), errors="coerce")
+    df["mannwhitney_pval"] = pd.to_numeric(df.get("mannwhitney_pval", np.nan), errors="coerce")
+    df["n_edges_scored_median"] = pd.to_numeric(df.get("n_edges_scored_median", np.nan), errors="coerce")
+    df = df.dropna(subset=["cliffs_delta"]).copy()
+    if df.empty:
+        return []
+    context_cols = [c for c in ("MASLD", "timepoint") if c in df.columns]
+    context_groups = [([], df)] if not context_cols else list(df.groupby(context_cols, observed=False))
+    for context_key, context_df in context_groups:
+        context_token = ""
+        context_title = ""
+        if context_cols:
+            if not isinstance(context_key, tuple):
+                context_key = (context_key,)
+            parts = [f"{col}={val}" for col, val in zip(context_cols, context_key, strict=False)]
+            context_token = "__" + "__".join((re.sub(r"[^A-Za-z0-9_.-]+", "_", str(x)).strip("_") or "context") for x in parts)
+            context_title = " [" + ", ".join(parts) + "]"
+        for contrast, sub in context_df.groupby("contrast", observed=False, sort=False):
+            plot_df = sub.copy()
+            plot_df["_abs_effect"] = plot_df["cliffs_delta"].abs()
+            plot_df = plot_df.sort_values(["_abs_effect", "n_edges_scored_median"], ascending=[False, False], kind="mergesort").head(int(max(1, top_n))).copy()
+            if plot_df.empty:
+                continue
+            branch_order = (
+                plot_df.groupby("branch_pair", observed=False)["_abs_effect"]
+                .max()
+                .sort_values(ascending=True, kind="mergesort")
+                .index.astype(str)
+                .tolist()
+            )
+            route_order = (
+                plot_df.groupby("route_family", observed=False)["_abs_effect"]
+                .max()
+                .sort_values(ascending=False, kind="mergesort")
+                .index.astype(str)
+                .tolist()
+            )
+            plot_df["branch_pair"] = pd.Categorical(plot_df["branch_pair"].astype(str), categories=branch_order, ordered=True)
+            plot_df["route_family"] = pd.Categorical(plot_df["route_family"].astype(str), categories=route_order, ordered=True)
+            plot_df = plot_df.sort_values(["branch_pair", "route_family"], kind="mergesort")
+            size_vals = plot_df["n_edges_scored_median"].fillna(1.0).clip(lower=1.0).to_numpy(dtype=float)
+            dot_size = 45.0 + 22.0 * np.minimum(size_vals, 8.0)
+            edge_colors = np.where(
+                (plot_df["fdr"].to_numpy(dtype=float) <= 0.05) | (plot_df["mannwhitney_pval"].to_numpy(dtype=float) <= 0.05),
+                "#202522",
+                "white",
+            )
+            linewidths = np.where(edge_colors == "#202522", 1.2, 0.7)
+
+            fig_w = max(8.0, 0.55 * len(route_order) + 4.0)
+            fig_h = max(4.8, 0.4 * len(branch_order) + 2.3)
+            fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+            scatter = ax.scatter(
+                plot_df["route_family"].cat.codes,
+                plot_df["branch_pair"].cat.codes,
+                c=plot_df["cliffs_delta"],
+                s=dot_size,
+                cmap="vlag",
+                vmin=-1.0,
+                vmax=1.0,
+                edgecolor=edge_colors,
+                linewidth=linewidths,
+            )
+            ax.set_xticks(range(len(route_order)))
+            ax.set_xticklabels(_wrap_labels(route_order, wrap_at=24), rotation=30, ha="right")
+            ax.set_yticks(range(len(branch_order)))
+            ax.set_yticklabels(_wrap_labels(branch_order, wrap_at=42))
+            ax.set_xlabel("Route family")
+            ax.set_ylabel("Source -> target")
+            ax.set_title(f"{title_prefix or 'LIANA paired route effects'} [{contrast}]{context_title}")
+            cbar = fig.colorbar(scatter, ax=ax, pad=0.02)
+            cbar.set_label("Cliff's delta")
+            handles = [
+                plt.Line2D([0], [0], marker="o", color="none", markerfacecolor="#bfc6c1", markeredgecolor="white", markersize=6, label="1 edge"),
+                plt.Line2D([0], [0], marker="o", color="none", markerfacecolor="#bfc6c1", markeredgecolor="white", markersize=10, label="4+ edges"),
+                plt.Line2D([0], [0], marker="o", color="none", markerfacecolor="#bfc6c1", markeredgecolor="#202522", markersize=8, label="FDR ≤ 0.05"),
+            ]
+            ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(1.01, 1.0), frameon=True, title="Support")
+            fig.tight_layout()
+            contrast_token = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(contrast)).strip("_") or "contrast"
+            record_plot_artifact(f"{stem_prefix}__{contrast_token}{context_token}", figdir, fig)
+            close_plot(fig)
+
+
+@collect_plot_artifacts
+def plot_liana_paired_edge_strip(
+    edge_effects: pd.DataFrame,
+    *,
+    figdir: Path,
+    stem_prefix: str,
+    title_prefix: str | None = None,
+    top_n: int = 16,
+):
+    if edge_effects is None or getattr(edge_effects, "empty", True):
+        return []
+    required = {"contrast", "cliffs_delta", "ligand_complex", "receptor_complex", "branch_pair"}
+    if not required.issubset(edge_effects.columns):
+        return []
+    df = edge_effects.copy()
+    df["cliffs_delta"] = pd.to_numeric(df["cliffs_delta"], errors="coerce")
+    df["fdr"] = pd.to_numeric(df.get("fdr", np.nan), errors="coerce")
+    df["mannwhitney_pval"] = pd.to_numeric(df.get("mannwhitney_pval", np.nan), errors="coerce")
+    df = df.dropna(subset=["cliffs_delta"]).copy()
+    if df.empty:
+        return []
+    source_levels = sorted(df.get("source_label", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
+    palette = {label: color for label, color in zip(source_levels, sns.color_palette("tab10", n_colors=max(3, len(source_levels))))}
+    context_cols = [c for c in ("MASLD", "timepoint") if c in df.columns]
+    context_groups = [([], df)] if not context_cols else list(df.groupby(context_cols, observed=False))
+    for context_key, context_df in context_groups:
+        context_token = ""
+        context_title = ""
+        if context_cols:
+            if not isinstance(context_key, tuple):
+                context_key = (context_key,)
+            parts = [f"{col}={val}" for col, val in zip(context_cols, context_key, strict=False)]
+            context_token = "__" + "__".join((re.sub(r"[^A-Za-z0-9_.-]+", "_", str(x)).strip("_") or "context") for x in parts)
+            context_title = " [" + ", ".join(parts) + "]"
+        for contrast, sub in context_df.groupby("contrast", observed=False, sort=False):
+            plot_df = sub.copy()
+            plot_df["_abs_effect"] = plot_df["cliffs_delta"].abs()
+            plot_df = plot_df.sort_values("_abs_effect", ascending=False, kind="mergesort").head(int(max(1, top_n))).copy()
+            if plot_df.empty:
+                continue
+            plot_df["edge_label"] = (
+                plot_df["ligand_complex"].astype(str)
+                + " -> "
+                + plot_df["receptor_complex"].astype(str)
+                + " | "
+                + plot_df["branch_pair"].astype(str)
+            )
+            plot_df = plot_df.sort_values("cliffs_delta", kind="mergesort")
+            fig, ax = plt.subplots(figsize=(11.5, max(4.8, 0.42 * len(plot_df) + 1.8)))
+            y = np.arange(len(plot_df), dtype=float)
+            vals = plot_df["cliffs_delta"].to_numpy(dtype=float)
+            colors = [palette.get(str(source), "#8d99ae") for source in plot_df.get("source_label", "").astype(str)]
+            ax.axvline(0.0, color="#202522", linewidth=1.0)
+            ax.scatter(
+                vals,
+                y,
+                s=88,
+                c=colors,
+                edgecolor=np.where((plot_df["fdr"].to_numpy(dtype=float) <= 0.05) | (plot_df["mannwhitney_pval"].to_numpy(dtype=float) <= 0.05), "#202522", "white"),
+                linewidth=np.where((plot_df["fdr"].to_numpy(dtype=float) <= 0.05) | (plot_df["mannwhitney_pval"].to_numpy(dtype=float) <= 0.05), 1.2, 0.7),
+                zorder=2,
+            )
+            ax.set_yticks(y)
+            ax.set_yticklabels(_wrap_labels(plot_df["edge_label"].astype(str).tolist(), wrap_at=62), fontsize=9.0)
+            ax.set_xlabel("Cliff's delta")
+            ax.set_ylabel("Ligand -> receptor route")
+            ax.set_title(f"{title_prefix or 'LIANA paired LR edge effects'} [{contrast}]{context_title}")
+            ax.grid(axis="x", alpha=0.22, linestyle=":")
+            ax.set_axisbelow(True)
+            if source_levels:
+                handles = [
+                    plt.Line2D([0], [0], marker="o", color="none", markerfacecolor=palette[label], markeredgecolor="white", markersize=8, label=label)
+                    for label in source_levels
+                    if label in set(plot_df.get("source_label", "").astype(str))
+                ]
+                if handles:
+                    ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.14), ncol=min(3, len(handles)), frameon=True, title="Source cluster")
+            fig.tight_layout()
+            contrast_token = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(contrast)).strip("_") or "contrast"
+            record_plot_artifact(f"{stem_prefix}__{contrast_token}{context_token}", figdir, fig)
+            close_plot(fig)

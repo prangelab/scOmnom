@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html>
+<head><title>R: Bayesian Optimization and Model-Based Optimization of Expensive
+Black-Box Functions</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+<link rel="stylesheet" type="text/css" href="R.css">
+</head><body><div class="container">
+<h1> Bayesian Optimization and Model-Based Optimization of Expensive
+Black-Box Functions
+<img class="toplogo" src="../../../doc/html/Rlogo.svg" alt="[R logo]">
+</h1>
+<hr>
+<div style="text-align: center;">
+<a href="../../../doc/html/packages.html"><img class="arrow" src="../../../doc/html/left.jpg" alt="[Up]"></a>
+<a href="../../../doc/html/index.html"><img class="arrow" src="../../../doc/html/up.jpg" alt="[Top]"></a>
+</div><h2>Documentation for package &lsquo;mlrMBO&rsquo; version 1.1.6</h2>
+
+<ul><li><a href="../DESCRIPTION" type="text/plain; charset=utf-8">DESCRIPTION file</a>.</li>
+<li><a href="../doc/index.html">User guides, package vignettes and other documentation.</a></li>
+<li><a href="../NEWS.md">Package NEWS</a>.</li>
+</ul>
+
+<h2>Help Pages</h2>
+
+
+<table style="width: 100%;">
+<tr><td style="width: 25%;"><a href="MBOInfillCrit.html">crit.aei</a></td>
+<td>Create an infill criterion.</td></tr>
+<tr><td style="width: 25%;"><a href="MBOInfillCrit.html">crit.cb</a></td>
+<td>Create an infill criterion.</td></tr>
+<tr><td style="width: 25%;"><a href="MBOInfillCrit.html">crit.cb1</a></td>
+<td>Create an infill criterion.</td></tr>
+<tr><td style="width: 25%;"><a href="MBOInfillCrit.html">crit.cb2</a></td>
+<td>Create an infill criterion.</td></tr>
+<tr><td style="width: 25%;"><a href="MBOInfillCrit.html">crit.dib1</a></td>
+<td>Create an infill criterion.</td></tr>
+<tr><td style="width: 25%;"><a href="MBOInfillCrit.html">crit.ei</a></td>
+<td>Create an infill criterion.</td></tr>
+<tr><td style="width: 25%;"><a href="MBOInfillCrit.html">crit.eqi</a></td>
+<td>Create an infill criterion.</td></tr>
+<tr><td style="width: 25%;"><a href="MBOInfillCrit.html">crit.mr</a></td>
+<td>Create an infill criterion.</td></tr>
+<tr><td style="width: 25%;"><a href="MBOInfillCrit.html">crit.se</a></td>
+<td>Create an infill criterion.</td></tr>
+<tr><td style="width: 25%;"><a href="error_handling.html">error_handling</a></td>
+<td>Error handling for mlrMBO</td></tr>
+<tr><td style="width: 25%;"><a href="exampleRun.html">exampleRun</a></td>
+<td>Perform an mbo run on a test function and and visualize what happens.</td></tr>
+<tr><td style="width: 25%;"><a href="exampleRunMultiObj.html">exampleRunMultiObj</a></td>
+<td>Perform an MBO run on a multi-objective test function and and visualize what happens.</td></tr>
+<tr><td style="width: 25%;"><a href="finalizeSMBO.html">finalizeSMBO</a></td>
+<td>Finalizes the SMBO Optimization</td></tr>
+<tr><td style="width: 25%;"><a href="getGlobalOpt.html">getGlobalOpt</a></td>
+<td>Helper function which returns the (estimated) global optimum.</td></tr>
+<tr><td style="width: 25%;"><a href="getMBOInfillCrit.html">getMBOInfillCrit</a></td>
+<td>Get properties of MBO infill criterion.</td></tr>
+<tr><td style="width: 25%;"><a href="getMBOInfillCrit.html">getMBOInfillCritComponents</a></td>
+<td>Get properties of MBO infill criterion.</td></tr>
+<tr><td style="width: 25%;"><a href="getMBOInfillCrit.html">getMBOInfillCritId</a></td>
+<td>Get properties of MBO infill criterion.</td></tr>
+<tr><td style="width: 25%;"><a href="getMBOInfillCrit.html">getMBOInfillCritName</a></td>
+<td>Get properties of MBO infill criterion.</td></tr>
+<tr><td style="width: 25%;"><a href="getMBOInfillCrit.html">getMBOInfillCritParam</a></td>
+<td>Get properties of MBO infill criterion.</td></tr>
+<tr><td style="width: 25%;"><a href="getMBOInfillCrit.html">getMBOInfillCritParams</a></td>
+<td>Get properties of MBO infill criterion.</td></tr>
+<tr><td style="width: 25%;"><a href="getSupportedInfillOptFunctions.html">getSupportedInfillOptFunctions</a></td>
+<td>Get names of supported infill-criteria optimizers.</td></tr>
+<tr><td style="width: 25%;"><a href="getSupportedMultipointInfillOptFunctions.html">getSupportedMultipointInfillOptFunctions</a></td>
+<td>Get names of supported multi-point infill-criteria optimizers.</td></tr>
+<tr><td style="width: 25%;"><a href="getMBOInfillCrit.html">hasRequiresInfillCritStandardError</a></td>
+<td>Get properties of MBO infill criterion.</td></tr>
+<tr><td style="width: 25%;"><a href="infillcrits.html">infillcrits</a></td>
+<td>Infill criteria.</td></tr>
+<tr><td style="width: 25%;"><a href="initCrit.html">initCrit</a></td>
+<td>Initialize an MBO infill criterion.</td></tr>
+<tr><td style="width: 25%;"><a href="initSMBO.html">initSMBO</a></td>
+<td>Initialize a manual sequential MBO run.</td></tr>
+<tr><td style="width: 25%;"><a href="makeMBOControl.html">makeMBOControl</a></td>
+<td>Set MBO options.</td></tr>
+<tr><td style="width: 25%;"><a href="MBOInfillCrit.html">makeMBOInfillCrit</a></td>
+<td>Create an infill criterion.</td></tr>
+<tr><td style="width: 25%;"><a href="infillcrits.html">makeMBOInfillCritAdaCB</a></td>
+<td>Infill criteria.</td></tr>
+<tr><td style="width: 25%;"><a href="infillcrits.html">makeMBOInfillCritAEI</a></td>
+<td>Infill criteria.</td></tr>
+<tr><td style="width: 25%;"><a href="infillcrits.html">makeMBOInfillCritCB</a></td>
+<td>Infill criteria.</td></tr>
+<tr><td style="width: 25%;"><a href="infillcrits.html">makeMBOInfillCritDIB</a></td>
+<td>Infill criteria.</td></tr>
+<tr><td style="width: 25%;"><a href="infillcrits.html">makeMBOInfillCritEI</a></td>
+<td>Infill criteria.</td></tr>
+<tr><td style="width: 25%;"><a href="infillcrits.html">makeMBOInfillCritEQI</a></td>
+<td>Infill criteria.</td></tr>
+<tr><td style="width: 25%;"><a href="infillcrits.html">makeMBOInfillCritMeanResponse</a></td>
+<td>Infill criteria.</td></tr>
+<tr><td style="width: 25%;"><a href="infillcrits.html">makeMBOInfillCritStandardError</a></td>
+<td>Infill criteria.</td></tr>
+<tr><td style="width: 25%;"><a href="makeMBOLearner.html">makeMBOLearner</a></td>
+<td>Generate default learner.</td></tr>
+<tr><td style="width: 25%;"><a href="makeMBOTrafoFunction.html">makeMBOTrafoFunction</a></td>
+<td>Create a transformation function for MBOExampleRun.</td></tr>
+<tr><td style="width: 25%;"><a href="mbo.html">mbo</a></td>
+<td>Optimizes a function with sequential model based optimization.</td></tr>
+<tr><td style="width: 25%;"><a href="mboContinue.html">mboContinue</a></td>
+<td>Continues an mbo run from a save-file.</td></tr>
+<tr><td style="width: 25%;"><a href="makeMBOControl.html">MBOControl</a></td>
+<td>Set MBO options.</td></tr>
+<tr><td style="width: 25%;"><a href="mboFinalize.html">mboFinalize</a></td>
+<td>Finalizes an mbo run from a save-file.</td></tr>
+<tr><td style="width: 25%;"><a href="MBOInfillCrit.html">MBOInfillCrit</a></td>
+<td>Create an infill criterion.</td></tr>
+<tr><td style="width: 25%;"><a href="MBOMultiObjResult.html">MBOMultiObjResult</a></td>
+<td>Multi-Objective result object.</td></tr>
+<tr><td style="width: 25%;"><a href="MBOSingleObjResult.html">MBOSingleObjResult</a></td>
+<td>Single-Objective result object.</td></tr>
+<tr><td style="width: 25%;"><a href="makeMBOLearner.html">mbo_default_learner</a></td>
+<td>Generate default learner.</td></tr>
+<tr><td style="width: 25%;"><a href="mbo_OptPath.html">mbo_OptPath</a></td>
+<td>OptPath in mlrMBO</td></tr>
+<tr><td style="width: 25%;"><a href="mbo_parallel.html">mbo_parallel</a></td>
+<td>Parallelization in mlrMBO</td></tr>
+<tr><td style="width: 25%;"><a href="mlrMBO_examples.html">mlrMBO_examples</a></td>
+<td>mlrMBO examples</td></tr>
+<tr><td style="width: 25%;"><a href="OptProblem.html">OptProblem</a></td>
+<td>OptProblem object.</td></tr>
+<tr><td style="width: 25%;"><a href="OptResult.html">OptResult</a></td>
+<td>OptResult object.</td></tr>
+<tr><td style="width: 25%;"><a href="OptState.html">OptState</a></td>
+<td>OptState object.</td></tr>
+<tr><td style="width: 25%;"><a href="plotMBOResult.html">plot.MBOMultiObjResult</a></td>
+<td>MBO Result Plotting</td></tr>
+<tr><td style="width: 25%;"><a href="plotMBOResult.html">plot.MBOSingleObjResult</a></td>
+<td>MBO Result Plotting</td></tr>
+<tr><td style="width: 25%;"><a href="plot.OptState.html">plot.OptState</a></td>
+<td>Generate ggplot2 Object</td></tr>
+<tr><td style="width: 25%;"><a href="plotExampleRun.html">plotExampleRun</a></td>
+<td>Renders plots for exampleRun objects and displays them.</td></tr>
+<tr><td style="width: 25%;"><a href="plotMBOResult.html">plotMBOResult</a></td>
+<td>MBO Result Plotting</td></tr>
+<tr><td style="width: 25%;"><a href="print.MBOControl.html">print.MBOControl</a></td>
+<td>Print mbo control object.</td></tr>
+<tr><td style="width: 25%;"><a href="proposePoints.html">proposePoints</a></td>
+<td>Propose candidates for the objective function</td></tr>
+<tr><td style="width: 25%;"><a href="renderExampleRunPlot.html">renderExampleRunPlot</a></td>
+<td>Renders plots for exampleRun objects, either in 1D or 2D, or exampleRunMultiObj objects.</td></tr>
+<tr><td style="width: 25%;"><a href="setMBOControlInfill.html">setMBOControlInfill</a></td>
+<td>Extends mbo control object with infill criteria and infill optimizer options.</td></tr>
+<tr><td style="width: 25%;"><a href="setMBOControlMultiObj.html">setMBOControlMultiObj</a></td>
+<td>Set multi-objective options.</td></tr>
+<tr><td style="width: 25%;"><a href="setMBOControlMultiPoint.html">setMBOControlMultiPoint</a></td>
+<td>Set multipoint proposal options.</td></tr>
+<tr><td style="width: 25%;"><a href="setMBOControlTermination.html">setMBOControlTermination</a></td>
+<td>Set termination options.</td></tr>
+<tr><td style="width: 25%;"><a href="trafos.html">trafoLog</a></td>
+<td>Transformation methods.</td></tr>
+<tr><td style="width: 25%;"><a href="trafos.html">trafos</a></td>
+<td>Transformation methods.</td></tr>
+<tr><td style="width: 25%;"><a href="trafos.html">trafoSqrt</a></td>
+<td>Transformation methods.</td></tr>
+<tr><td style="width: 25%;"><a href="updateSMBO.html">updateSMBO</a></td>
+<td>Updates SMBO with the new observations</td></tr>
+</table>
+</div></body></html>

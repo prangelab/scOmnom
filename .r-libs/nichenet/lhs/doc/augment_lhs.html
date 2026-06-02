@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="utf-8" />
+<meta name="generator" content="pandoc" />
+<meta http-equiv="X-UA-Compatible" content="IE=EDGE" />
+
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+<meta name="author" content="Rob Carnell" />
+
+<meta name="date" content="2026-04-26" />
+
+<title>An Example of Augmenting a Latin Hypercube</title>
+
+<script>// Pandoc 2.9 adds attributes on both header and div. We remove the former (to
+// be compatible with the behavior of Pandoc < 2.8).
+document.addEventListener('DOMContentLoaded', function(e) {
+  var hs = document.querySelectorAll("div.section[class*='level'] > :first-child");
+  var i, h, a;
+  for (i = 0; i < hs.length; i++) {
+    h = hs[i];
+    if (!/^h[1-6]$/i.test(h.tagName)) continue;  // it should be a header h1-h6
+    a = h.attributes;
+    while (a.length > 0) h.removeAttribute(a[0].name);
+  }
+});
+</script>
+
+<style type="text/css">
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+span.underline{text-decoration: underline;}
+div.column{display: inline-block; vertical-align: top; width: 50%;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+</style>
+
+
+
+<style type="text/css">
+code {
+white-space: pre;
+}
+.sourceCode {
+overflow: visible;
+}
+</style>
+<style type="text/css" data-origin="pandoc">
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+{ counter-reset: source-line 0; }
+pre.numberSource code > span
+{ position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+{ content: counter(source-line);
+position: relative; left: -1em; text-align: right; vertical-align: baseline;
+border: none; display: inline-block;
+-webkit-touch-callout: none; -webkit-user-select: none;
+-khtml-user-select: none; -moz-user-select: none;
+-ms-user-select: none; user-select: none;
+padding: 0 4px; width: 4em;
+color: #aaaaaa;
+}
+pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa; padding-left: 4px; }
+div.sourceCode
+{ }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+code span.al { color: #ff0000; font-weight: bold; } 
+code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.at { color: #7d9029; } 
+code span.bn { color: #40a070; } 
+code span.bu { color: #008000; } 
+code span.cf { color: #007020; font-weight: bold; } 
+code span.ch { color: #4070a0; } 
+code span.cn { color: #880000; } 
+code span.co { color: #60a0b0; font-style: italic; } 
+code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.do { color: #ba2121; font-style: italic; } 
+code span.dt { color: #902000; } 
+code span.dv { color: #40a070; } 
+code span.er { color: #ff0000; font-weight: bold; } 
+code span.ex { } 
+code span.fl { color: #40a070; } 
+code span.fu { color: #06287e; } 
+code span.im { color: #008000; font-weight: bold; } 
+code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.kw { color: #007020; font-weight: bold; } 
+code span.op { color: #666666; } 
+code span.ot { color: #007020; } 
+code span.pp { color: #bc7a00; } 
+code span.sc { color: #4070a0; } 
+code span.ss { color: #bb6688; } 
+code span.st { color: #4070a0; } 
+code span.va { color: #19177c; } 
+code span.vs { color: #4070a0; } 
+code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } 
+</style>
+<script>
+// apply pandoc div.sourceCode style to pre.sourceCode instead
+(function() {
+  var sheets = document.styleSheets;
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].ownerNode.dataset["origin"] !== "pandoc") continue;
+    try { var rules = sheets[i].cssRules; } catch (e) { continue; }
+    var j = 0;
+    while (j < rules.length) {
+      var rule = rules[j];
+      // check if there is a div.sourceCode rule
+      if (rule.type !== rule.STYLE_RULE || rule.selectorText !== "div.sourceCode") {
+        j++;
+        continue;
+      }
+      var style = rule.style.cssText;
+      // check if color or background-color is set
+      if (rule.style.color === '' && rule.style.backgroundColor === '') {
+        j++;
+        continue;
+      }
+      // replace div.sourceCode by a pre.sourceCode rule
+      sheets[i].deleteRule(j);
+      sheets[i].insertRule('pre.sourceCode{' + style + '}', j);
+    }
+  }
+})();
+</script>
+
+
+
+
+<style type="text/css">body {
+background-color: #fff;
+margin: 1em auto;
+max-width: 700px;
+overflow: visible;
+padding-left: 2em;
+padding-right: 2em;
+font-family: "Open Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+font-size: 14px;
+line-height: 1.35;
+}
+#TOC {
+clear: both;
+margin: 0 0 10px 10px;
+padding: 4px;
+width: 400px;
+border: 1px solid #CCCCCC;
+border-radius: 5px;
+background-color: #f6f6f6;
+font-size: 13px;
+line-height: 1.3;
+}
+#TOC .toctitle {
+font-weight: bold;
+font-size: 15px;
+margin-left: 5px;
+}
+#TOC ul {
+padding-left: 40px;
+margin-left: -1.5em;
+margin-top: 5px;
+margin-bottom: 5px;
+}
+#TOC ul ul {
+margin-left: -2em;
+}
+#TOC li {
+line-height: 16px;
+}
+table {
+margin: 1em auto;
+border-width: 1px;
+border-color: #DDDDDD;
+border-style: outset;
+border-collapse: collapse;
+}
+table th {
+border-width: 2px;
+padding: 5px;
+border-style: inset;
+}
+table td {
+border-width: 1px;
+border-style: inset;
+line-height: 18px;
+padding: 5px 5px;
+}
+table, table th, table td {
+border-left-style: none;
+border-right-style: none;
+}
+table thead, table tr.even {
+background-color: #f7f7f7;
+}
+p {
+margin: 0.5em 0;
+}
+blockquote {
+background-color: #f6f6f6;
+padding: 0.25em 0.75em;
+}
+hr {
+border-style: solid;
+border: none;
+border-top: 1px solid #777;
+margin: 28px 0;
+}
+dl {
+margin-left: 0;
+}
+dl dd {
+margin-bottom: 13px;
+margin-left: 13px;
+}
+dl dt {
+font-weight: bold;
+}
+ul {
+margin-top: 0;
+}
+ul li {
+list-style: circle outside;
+}
+ul ul {
+margin-bottom: 0;
+}
+pre, code {
+background-color: #f7f7f7;
+border-radius: 3px;
+color: #333;
+white-space: pre-wrap; 
+}
+pre {
+border-radius: 3px;
+margin: 5px 0px 10px 0px;
+padding: 10px;
+}
+pre:not([class]) {
+background-color: #f7f7f7;
+}
+code {
+font-family: Consolas, Monaco, 'Courier New', monospace;
+font-size: 85%;
+}
+p > code, li > code {
+padding: 2px 0px;
+}
+div.figure {
+text-align: center;
+}
+img {
+background-color: #FFFFFF;
+padding: 2px;
+border: 1px solid #DDDDDD;
+border-radius: 3px;
+border: 1px solid #CCCCCC;
+margin: 0 5px;
+}
+h1 {
+margin-top: 0;
+font-size: 35px;
+line-height: 40px;
+}
+h2 {
+border-bottom: 4px solid #f7f7f7;
+padding-top: 10px;
+padding-bottom: 2px;
+font-size: 145%;
+}
+h3 {
+border-bottom: 2px solid #f7f7f7;
+padding-top: 10px;
+font-size: 120%;
+}
+h4 {
+border-bottom: 1px solid #f7f7f7;
+margin-left: 8px;
+font-size: 105%;
+}
+h5, h6 {
+border-bottom: 1px solid #ccc;
+font-size: 105%;
+}
+a {
+color: #0033dd;
+text-decoration: none;
+}
+a:hover {
+color: #6666ff; }
+a:visited {
+color: #800080; }
+a:visited:hover {
+color: #BB00BB; }
+a[href^="http:"] {
+text-decoration: underline; }
+a[href^="https:"] {
+text-decoration: underline; }
+
+code > span.kw { color: #555; font-weight: bold; } 
+code > span.dt { color: #902000; } 
+code > span.dv { color: #40a070; } 
+code > span.bn { color: #d14; } 
+code > span.fl { color: #d14; } 
+code > span.ch { color: #d14; } 
+code > span.st { color: #d14; } 
+code > span.co { color: #888888; font-style: italic; } 
+code > span.ot { color: #007020; } 
+code > span.al { color: #ff0000; font-weight: bold; } 
+code > span.fu { color: #900; font-weight: bold; } 
+code > span.er { color: #a61717; background-color: #e3d2d2; } 
+</style>
+
+
+
+
+</head>
+
+<body>
+
+
+
+
+<h1 class="title toc-ignore">An Example of Augmenting a Latin
+Hypercube</h1>
+<h4 class="author">Rob Carnell</h4>
+<h4 class="date">2026-04-26</h4>
+
+
+
+<p>Suppose that a computer simulation study is being designed that
+requires expensive runs. A Latin hypercube design is desired for this
+simulation so that the expectation of the simulation output can be
+estimated efficiently given the distributions of the input variables.
+Latin hypercubes are most often used in highly dimensional problems, but
+the example shown is of small dimension. Suppose further that the total
+extent of funding is uncertain. Enough money is available for 5 runs,
+and there is a chance that there will be enough for 5 more. However, if
+the money for the additional 5 runs does not materialize, then the first
+5 runs must be a Latin hypercube alone. A design for this situation can
+be created using the <code>lhs</code> package.</p>
+<p>First create a random Latin hypercube using the
+<code>randomLHS(n, k)</code> command:</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a>A <span class="ot">&lt;-</span> <span class="fu">randomLHS</span>(<span class="dv">5</span>,<span class="dv">2</span>)</span></code></pre></div>
+<p>An example of this hypercube is shown in <a href="#X">Figure 1</a>.
+Note that the <em>Latin</em> property of the hypercube requires that
+each of the 5 equal probability intervals be filled (i.e. each row and
+each column is filled with one point). Also notice that the exact
+location of the design point is randomly sampled from within that cell
+using a uniform distribution for each marginal variable.</p>
+<table style="width:8%;">
+<colgroup>
+<col width="8%" />
+</colgroup>
+<tbody>
+<tr class="odd">
+<td></td>
+</tr>
+<tr class="even">
+<td><img role="img" aria-label src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAeAAAAHgCAMAAABKCk6nAAAAY1BMVEUAAAAAADoAAGYAOpAAZrY6AAA6ADo6AGY6kNtmAABmADpmOpBmZmZmtttmtv+QOgCQOmaQZgCQ2/+2ZgC2tv+2/7a2//++vr7bkDrb/9vb////AAD/tmb/25D//7b//9v///+3t8KlAAAACXBIWXMAAA7DAAAOwwHHb6hkAAAPfUlEQVR4nO2d63ra2hVFl2PnNPQSt6YnoTHGvP9T1iA2Rj4Is7fG0loic/xKWp0xZ5gfFwOWbCtuGosuIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyxqqNfH23Plx8+bQSO1Ry8sm/dH9blDyI7VnHs6+Nx1tX9L76LcMAqjt0svpc/rvUgPROs4ljdg2eI1Ry8ssNdWM/Bs8Gqjt4sulfRuv/OBosuIHyx6ALCF2v7z1Z6FT0TjLGIqZl24HfdTwasFiWarYcKLDoNnMxDBRadBk7moQKLTgMn89QElrc5dgy8itbA2TxVga+Pn/10pIGzeeoCXx8fPtFp4GSeysC1fb/4/2vgbB4qsOg0cDIPFVh0GjiZhwosOg2czEMFFp0GTuahAotOAyfzUIFFp4GTeajAotPAyTxUYNFp4GQeKrDoNHAyDxVYdBo4mYcKLDoNnMxDBRadBk7moQKLTgMn81CBRaeBk3mowKLTwMk8VGDRaeBkHiqw6DRwMg8VWHQaOJmHCiw6DZzMQwUWnQZO5qECi04DJ/NQgUWngZN5qMCi08DJPFRg0WngZB4qsOg0cDIPFVh0GjiZhwosOg2czEMFFp0GTuahAotOAyfzUIFFp4GTeajAotPAyTxUYNFp4GQeKrDoNHAyDxVYdD9/Pj8/a+A8Hiqw6Hb7AgtjtSjRbD1UYNE9PyMLY7Uo0Ww9VGDRaeBkHiqw6DRwMg8VWHR6Dk7moQKLTq+ik3mowKIbv60GRj1UYNFp4GSeusCl2cP+ApVDJzTUwNk8VYG7650t7WF3YuGBC2Np4GyemsD9pe3Wd0/b4UvbaeBsnprA/cUpu8tSDl2cUgNn89QE6h48Q09V4PE5+OQ6pB90GjiZpy5Qr6Jn56ECi04DJ/NQgUWngZN5GgOHLk6pgbN5mMCgCzT+zkw7MK6jPFyhZA9NV3uoQFhHeTRwXeD+RyQbvLCdBp75wCs7vL+xtqE3Omp0F6A8Grgm8OT9q8G3Kit0l6A8GrgmcP9hQ8fghw0VuktQHg1cE6h78HlqvoWG9cEP3LEq70HrObi/7/ULY33wA/eUS0QP3H9/y4HrvgmO9cEPnFZHeTQwFQjrKI8GpgJhHeXRczAVCOsoj15FU4GwjvLo52AqENZRHg1MBcI6yqOBqUBYR3k0MBUI6yiPBqYCYR3l0cBUIKyjPBqYCoR1lEcDU4GwjvJoYCoQ1lEeDUwFwjrKo4GpQFhHeTQwFQjrKI8GpgJhHeXRwFQgrKM8GpgKhHWURwNTgbCO8mhgKhDWUR4NTAXCOsqjgalAWEd5NDAVCOsojwamAmEd5dHAVCCsozwamAqEdZRHA1OBsI7yaGAqENZRHg1MBcI6yqOBqUBYR3k0MBUI6yiPBqYCYR3l0cBUIKyjPBqYCoR1lEcDU4GwjvJoYCoQ1lEeDUwFwjrKo4GpQFhHeTQwFQjrKI8Grgtcfvmxfflqtr841njdMJRHA1cF7vf946l33tkRugtQHg1cE7i/5ujyYfdHnW32Ngf+Xk4prPNF3+LA+3vvSvfg2x14s/jy4+QSpGN1F6A8GrgycN2dL/oB0g1CeTQwFQjrKI8GpgJhHeXRwI2BgxenbNO5eTQwExhyecbfm2kHxnXUHWb6e0w2DxUI6zQw5akLnO7ilBoY8lQFTnhxSg0MeWoCp7y0nQaGPDWBU16cUgNDnppA3YNn6KkKnPDilBoY8tQFTndxSg0MeahAWKeBKQ8VCOs0MOWhAmGdBqY8VCCs08CUhwqEdRqY8lCBsE4DUx4qENZpYMpDBcI6DUx5qEBYp4EpDxUI6zQw5aECYZ0GpjxUIKwrAz8/P2vgUR4qENbZcd+RC2OF5uopB67Mus8Ch77xDOd+5nnfd9zCWKG5eg4Hru6etpvF7leONPD5QnP1dAd239V4fbz/pYEHCs3V0x1Yvm21vP+VaWA9B4/3dAcev221fEg1sF5Fj/YcDiyzbhbDX2pHcz/zjJtVA//lwPJ9utdHDXy20Fw9VCCs08CU53jg5r+T5n7m0cCQ53jgZtF9F/b133qIPldorp73A9f7t7JWepF1vtBcPScHdr8bOvArC3TuZx4NDHlOD9wtPHAOSjz3M48GhjwnB67M/vU4/FspbO5nHg0MeY4Hbhb7R+e1noPPF5qr53jg5h/dXVevos8XmquHCoR1GpjyUIGwTgNTHioQ1mlgykMFwjoNTHmoQFingSkPFQjrNDDloQJhnQamPFQgrNPAlIcKhHUamPJQgbBOA1MeKhDWaWDK0xL48nXwQ8UW3VmPBoY8NYHlPHcXzhhdo7uEBqY8VYGHU1TqHjwjT11g9808DTwjT23g8u5JA8/JUx24sm8aeEae+sDdFcA18Gw8DYGvjxp4Ph4qENZpYMrTGOh+7UINDHmYwGkv2yfemHZgXEd55nvVUMpDBcI6yqOB6wKnu3Yh5NHAVYETXrsQ8mjgmsApr3wGeTRwTeCU1y6EPBq4JlD3YKDP1J6qwAmvXQh5NHBd4HTXLoQ8GpgKhHWURwNTgbCO8mhgKhDWUR4NTAXCOsqjgalAWEd5NDAVCOsojwamAmEd5dHAVCCsozwamAqEdZRHA1OBsI7yaGAqENZRHg1MBcI6yqOBqUBYR3k0MBUI6yiPBqYCYR3l0cBUIKyjPBqYCoR1lEcDU4GwjvJoYCoQ1lEeDUwFwjrKo4GpQFhHeTQwFQjrKI8GpgJhHeUZHLj2ytNUock9VCCsozxDA1dfO54qNLmHCoR1lGdg4Ofn2oWpQpN7qEBYR3k0MBUI6yiPBqYCYR3l0XMwFQjrKI9eRVOBsI7y6OdgKhDWUR4NTAXCOsqjgalAWEd5NDAVCOsojwamAmEd5dHAVCCsozwamAqEdZRHA1OBsI7yaGAqENZRHg1MBcI6yqOBqUBYR3k0cF3gyg6X1HG/ZgPk0cBVgau7p+1m8bDVwO19pvbUBHZnm319vP+lgZv7TO2pCSzni17e/9LArX2m9tQEHs8XvXzQwK19pvZUBZZZNwv3C0RDHg1cF1jOCP76qIEb+0ztoQJhHeXRwFQgrKM8GrgxUC+yWvtM7WECo67Q+Bsz7cC4jvKkKzT5IwpVHNZRnnSFkg88w4tTZvOkHniOF6fM5sk88CwvbZfNk3ngWV6cMpsn88C6BwOezAPP8uKU2TypB57jxSmzeXIPPJmO8qQrpIFZT7pCGpj1pCukgVlPukIamPWkK6SBWU+6QhqY9aQrpIFZT7pCGpj1pCukgVlPukIamPWkK6SBWU+6QhqY9aQrpIFZT7pCdQMPnxP36j5UcVhHedIVqhr4wlmtr+5DFYd1lCddoZqBL52X/uo+VHFYR3nSFdLArCddIQ3MetIV0nMw60lXSK+iWU+6Qvo5mPWkK6SBWU+6QhqY9aQrpIFZT7pCGpj1pCukgVlPukIamPWkK6SBWU+6QhqY9aQrpIFZT7pCGpj1pCukgVlPukIamPWkK6SBWU+6QhqY9aQrpIFZT7pCGpj1pCukgVlPukIamPWkK6SBWU+6QskH1vmiR3tSD6zzRY/3ZB5YZ5sFPJkH1vmiAU/mgXUPBjyZB9b5ogFP6oF1vujxntwDT6ajPOkKaWDWk67QXAaez8Ups3lmMvBHi5iaaQfGdZQnXaHJPVQgrKM86QpN7qkL1IcNs/NUBerDhvl5agL1VuUMPTWB+rBhhp6aQN2DZ+ipCtSHDfPz1AXqw4bZeahAkRSLLiB8segCwheLLiB8segCwheLLiB8segCwheLLiB8segCwheLLiB8segCwheLLiB8segCwhdDLGuzu6ezf2n37L//NfCpZF2hN5aDn39VeF6+mj0AfVZv/7Dvl46+xMvfjl+1uOqGttagU9ZvOeuS1ftLu+f18e0Pq8Yb9GOH9fAHnNd71m+OzaKpUM+z2v2ldeHN4vhdmutuaGvL6dF902P58Ne/jPC8fN3dBEO/QVEh2u4/xm4a+Mw/rKnQB8/DtvEG2t9pS4Erb2hryunT22LEMGf+07aHgo+i1f1/mgbu/8P+aHze+eAZM/Davh2/DXflDW0tOR/o/unr09th6Et513s6lk334A+it7+2PQf3POsvfy4aXxT0+4x6iO79q7ZX3NDWmNPL3N/NDne23l9GeLr/pe0G7Yt2j2VtA/c8q92DY3f3G9dnzKvQk0WvvKGtNeg002vg9YjXWO+i3TdAiYHvmh+a+n12j0ovX5t/PggY2OshuvH+e64Q8BDdPdt1z3yj+ox49bjdhjxEO73IWjX/FNwTrQ6/b9kyzKmnuymbXmr1Pe0Pce81PkqHsbaYHi4/Jr1/CXusaEfbPbjn6X6vo+mh6czPf02e7el/OOGPSS5vdLQ/S53r0PhOVv8NijfHyS93NHug5+AJ3+jYPwzukrrXmKv2F4knnsMja6OpV2jb/lZlz7Nuf++051mOeA+2G7jihrbWIDEPLLqA8MWiCwhfLLqA8MWiCwhfLLqA8MWiCwhfLLqA8MWiCwhfLLqA8MWiCwhfLLqA8MWiCwhfLLqA8MWiCwhfLLqA8MWiCwhfLLqA8MWiCwhfLLqA8MWiCwhfLLqA8MWiCwhfLLqA8MWiCwhfLLqA8MWiCwhfLLpADk5OTnRjWHSBFJycnOjWsOgCGVhfuNzm3LHoAoHsfjt+s/jWOznRzWHRBQLZ/Tb34Rp9GvgmWX/58+9Phz9p4FtkWc7TpIFvk+MJ5zTwTfL6+M/DsBr4Jlnd/+9w1hwNfIvszny1Pj3L2S1i0QUCWe5PfLV/maWBxUyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCF4suIHyx6ALCl/8DpjAt0UkOBtoAAAAASUVORK5CYII=" alt style="display: block; margin: auto;" /></td>
+</tr>
+</tbody>
+</table>
+<p>Next, in order to augment the design with more points use
+<code>augmentLHS(lhs, m)</code>. The following will add 5 more points to
+the design:</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a>B <span class="ot">&lt;-</span> <span class="fu">augmentLHS</span>(A, <span class="dv">5</span>)</span></code></pre></div>
+<p>The <code>augmentLHS</code> function works by re-dividing the
+original design into <code>n+m</code> intervals (e.g. 5+5=10) keeping
+the original design points exactly in the same position. It then
+randomly fills the empty row-column sets. The results are shown in
+<a href="#Y">Figure 2</a>.</p>
+<table style="width:8%;">
+<colgroup>
+<col width="8%" />
+</colgroup>
+<tbody>
+<tr class="odd">
+<td></td>
+</tr>
+<tr class="even">
+<td><img role="img" aria-label src="data:image/png;base64,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" alt style="display: block; margin: auto;" /></td>
+</tr>
+</tbody>
+</table>
+<p>The <code>augmentLHS</code> function uses the following algorithm
+(see the documentation for <code>augmentLHS</code>):</p>
+<ul>
+<li>Create a new <code>(n+m)</code> by <code>k</code> matrix to hold the
+candidate points after the design has been re-partitioned into
+<code>(n+m)^2</code> cells, where <code>n</code> is number of points in
+the original <code>lhs</code> matrix.</li>
+<li>Then randomly sweep through each column (1…<code>k</code>) in the
+repartitioned design to find the missing cells.</li>
+<li>For each column (variable), randomly search for an empty row,
+generate a random value that fits in that row, record the value in the
+new matrix. The new matrix can contain more than <code>m</code> points
+unless <code>m = 2n</code>, in which case the new matrix will contain
+exactly <code>m</code> filled rows.</li>
+<li>Finally, keep only the first <code>m</code> rows of the new matrix.
+It is guaranteed that there will be <code>m</code> full rows (points) in
+the new matrix. The deleted rows are partially full. The additional
+candidate points are selected randomly because of the random search used
+to find empty cells.</li>
+</ul>
+<p>Also notice that because the original points are randomly placed
+within the cells, depending on how you bin the marginal distributions, a
+histogram (of x1 for example) will not necessarily be exactly
+uniform.</p>
+<p>Now, the augmenting points do not necessarily form a Latin Hypercube
+themselves. The original design and augmenting points may form a Latin
+Hypercube, or there may be more than one point per row in the augmented
+design. If the augmented points are equal to the number of original
+points, then a strictly uniform Latin hypercube is guaranteed. An
+example of an augmented design which is not uniform in the marginal
+distributions is given in <a href="#Z">Figure 3</a> and
+<a href="#W">Figure 4</a>. The commands were:</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>A <span class="ot">&lt;-</span> <span class="fu">randomLHS</span>(<span class="dv">7</span>, <span class="dv">2</span>)</span>
+<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>B <span class="ot">&lt;-</span> <span class="fu">augmentLHS</span>(A, <span class="dv">3</span>)</span></code></pre></div>
+<table style="width:8%;">
+<colgroup>
+<col width="8%" />
+</colgroup>
+<tbody>
+<tr class="odd">
+<td></td>
+</tr>
+<tr class="even">
+<td><img role="img" aria-label src="data:image/png;base64,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" alt style="display: block; margin: auto;" /></td>
+</tr>
+</tbody>
+</table>
+<div id="W" style="text-align:center;text-size:11pt;font-weight:bold">
+Figure 4. Augmented design with 3 additional points. Note that row 9 has
+2 points and row 3 has none.
+</div>
+<p><img role="img" aria-label src="data:image/png;base64,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" alt style="display: block; margin: auto;" /></p>
+
+
+
+<!-- code folding -->
+
+
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+  (function () {
+    var script = document.createElement("script");
+    script.type = "text/javascript";
+    script.src  = "https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML";
+    document.getElementsByTagName("head")[0].appendChild(script);
+  })();
+</script>
+
+</body>
+</html>

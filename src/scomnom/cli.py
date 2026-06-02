@@ -19,6 +19,10 @@ from .markers_and_de import (
     run_enrichment_de as run_enrichment_de_from_tables,
     run_module_score,
     run_liana_ccc,
+    run_liana_paired_rescore,
+    run_mebocost_ccc,
+    run_mebocost_paired_rescore,
+    run_nichenet_ccc,
 )
 
 from .config import (
@@ -2026,9 +2030,15 @@ def _build_cfg_ccc_liana(
     condition_keys: Optional[List[str]],
     condition_values: Optional[List[str]],
     compare_levels: Optional[List[str]],
+    dataset_key: Optional[str],
+    source_levels: Optional[List[str]],
+    target_levels: Optional[List[str]],
+    signal_scope: str,
     liana_methods: Sequence[str],
     liana_resource: str,
     liana_expr_prop: float,
+    liana_input_mode: str,
+    liana_lognorm_target_sum: float,
     liana_use_raw: bool,
     liana_layer: Optional[str],
     liana_n_perms: Optional[int],
@@ -2065,9 +2075,15 @@ def _build_cfg_ccc_liana(
         ccc_condition_keys=cond_keys,
         ccc_condition_values=tuple(_parse_csv_repeat(condition_values) or ()),
         ccc_compare_levels=tuple(_parse_csv_repeat(compare_levels) or ()),
+        ccc_dataset_key=(str(dataset_key).strip() if dataset_key else None),
+        ccc_source_levels=tuple(_parse_csv_repeat(source_levels) or ()),
+        ccc_target_levels=tuple(_parse_csv_repeat(target_levels) or ()),
+        ccc_signal_scope=str(signal_scope).strip().lower(),
         liana_resource=str(liana_resource).strip().lower(),
         liana_methods=tuple(str(x).strip().lower() for x in liana_methods if str(x).strip()),
         liana_expr_prop=float(liana_expr_prop),
+        liana_input_mode=str(liana_input_mode).strip().lower(),
+        liana_lognorm_target_sum=float(liana_lognorm_target_sum),
         liana_use_raw=bool(liana_use_raw),
         liana_layer=(str(liana_layer) if liana_layer else None),
         liana_n_perms=(None if liana_n_perms is None else int(liana_n_perms)),
@@ -2075,6 +2091,328 @@ def _build_cfg_ccc_liana(
         liana_return_all_lrs=bool(liana_return_all_lrs),
         liana_top_n=int(liana_top_n),
         liana_plot_top_n=int(liana_plot_top_n),
+    )
+
+
+def _build_cfg_ccc_nichenet(
+    *,
+    input_path: Path,
+    output_dir: Optional[Path],
+    output_name: str,
+    save_h5ad: bool,
+    n_jobs: int,
+    make_figures: bool,
+    figdir_name: str,
+    figure_formats: Sequence[str],
+    round_id: Optional[str],
+    group_key: Optional[str],
+    label_source: str,
+    condition_keys: Optional[List[str]],
+    condition_values: Optional[List[str]],
+    compare_levels: Optional[List[str]],
+    dataset_key: Optional[str],
+    source_levels: Optional[List[str]],
+    target_levels: Optional[List[str]],
+    signal_scope: str,
+    receiver_cluster: str,
+    sender_clusters: Optional[List[str]],
+    gene_list_file: Optional[Path],
+    expression_pct: float,
+    input_mode: str,
+    lognorm_target_sum: float,
+    top_n_ligands: int,
+    top_n_targets: int,
+    min_logfc: float,
+    padj_threshold: float,
+    organism: str,
+    install_missing_r_deps: bool,
+) -> MarkersAndDEConfig:
+    out_dir = output_dir or input_path.parent
+    log_dir = out_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "markers-and-de.ccc.nichenet.log"
+    init_logging(log_path)
+
+    cond_keys = tuple(_parse_csv_repeat(condition_keys) or ())
+    return MarkersAndDEConfig(
+        input_path=input_path,
+        input_dir=None,
+        output_dir=out_dir,
+        output_name=output_name,
+        save_h5ad=save_h5ad,
+        run="pseudobulk",
+        n_jobs=n_jobs,
+        logfile=log_path,
+        make_figures=make_figures,
+        regenerate_figures=False,
+        figdir_name=figdir_name,
+        figure_formats=figure_formats,
+        groupby=group_key,
+        label_source=label_source,
+        round_id=round_id,
+        ccc_backend="nichenet",
+        ccc_condition_key=(str(cond_keys[0]).strip() if cond_keys else None),
+        ccc_condition_keys=cond_keys,
+        ccc_condition_values=tuple(_parse_csv_repeat(condition_values) or ()),
+        ccc_compare_levels=tuple(_parse_csv_repeat(compare_levels) or ()),
+        ccc_dataset_key=(str(dataset_key).strip() if dataset_key else None),
+        ccc_source_levels=tuple(_parse_csv_repeat(source_levels) or ()),
+        ccc_target_levels=tuple(_parse_csv_repeat(target_levels) or ()),
+        ccc_signal_scope=str(signal_scope).strip().lower(),
+        nichenet_receiver_cluster=str(receiver_cluster).strip(),
+        nichenet_sender_clusters=tuple(_parse_csv_repeat(sender_clusters) or ()),
+        nichenet_gene_list_file=(str(gene_list_file) if gene_list_file else None),
+        nichenet_expression_pct=float(expression_pct),
+        nichenet_input_mode=str(input_mode).strip().lower(),
+        nichenet_lognorm_target_sum=float(lognorm_target_sum),
+        nichenet_top_n_ligands=int(top_n_ligands),
+        nichenet_top_n_targets=int(top_n_targets),
+        nichenet_min_logfc=float(min_logfc),
+        nichenet_padj_threshold=float(padj_threshold),
+        nichenet_organism=str(organism).strip().lower(),
+        nichenet_install_missing_r_deps=bool(install_missing_r_deps),
+    )
+
+
+def _build_cfg_ccc_mebocost(
+    *,
+    input_path: Path,
+    output_dir: Optional[Path],
+    output_name: str,
+    save_h5ad: bool,
+    n_jobs: int,
+    make_figures: bool,
+    figdir_name: str,
+    figure_formats: Sequence[str],
+    round_id: Optional[str],
+    group_key: Optional[str],
+    label_source: str,
+    condition_keys: Optional[List[str]],
+    condition_values: Optional[List[str]],
+    compare_levels: Optional[List[str]],
+    dataset_key: Optional[str],
+    source_levels: Optional[List[str]],
+    target_levels: Optional[List[str]],
+    organism: str,
+    input_mode: str,
+    lognorm_target_sum: float,
+    n_shuffle: int,
+    seed: int,
+    min_cell_number: int,
+    pval_cutoff: float,
+    plot_top_n: int,
+    install_missing_python_deps: bool,
+) -> MarkersAndDEConfig:
+    out_dir = output_dir or input_path.parent
+    log_dir = out_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "markers-and-de.ccc.mebocost.log"
+    init_logging(log_path)
+
+    cond_keys = tuple(_parse_csv_repeat(condition_keys) or ())
+    return MarkersAndDEConfig(
+        input_path=input_path,
+        input_dir=None,
+        output_dir=out_dir,
+        output_name=output_name,
+        save_h5ad=save_h5ad,
+        run="pseudobulk",
+        n_jobs=n_jobs,
+        logfile=log_path,
+        make_figures=make_figures,
+        regenerate_figures=False,
+        figdir_name=figdir_name,
+        figure_formats=figure_formats,
+        groupby=group_key,
+        label_source=label_source,
+        round_id=round_id,
+        ccc_backend="mebocost",
+        ccc_condition_key=(str(cond_keys[0]).strip() if cond_keys else None),
+        ccc_condition_keys=cond_keys,
+        ccc_condition_values=tuple(_parse_csv_repeat(condition_values) or ()),
+        ccc_compare_levels=tuple(_parse_csv_repeat(compare_levels) or ()),
+        ccc_dataset_key=(str(dataset_key).strip() if dataset_key else None),
+        ccc_source_levels=tuple(_parse_csv_repeat(source_levels) or ()),
+        ccc_target_levels=tuple(_parse_csv_repeat(target_levels) or ()),
+        mebocost_organism=str(organism).strip().lower(),
+        mebocost_input_mode=str(input_mode).strip().lower(),
+        mebocost_lognorm_target_sum=float(lognorm_target_sum),
+        mebocost_n_shuffle=int(n_shuffle),
+        mebocost_seed=int(seed),
+        mebocost_min_cell_number=int(min_cell_number),
+        mebocost_pval_cutoff=float(pval_cutoff),
+        mebocost_plot_top_n=int(plot_top_n),
+        mebocost_install_missing_python_deps=bool(install_missing_python_deps),
+    )
+
+
+def _build_cfg_ccc_mebocost_paired(
+    *,
+    input_path: Path,
+    candidate_events: Path,
+    output_dir: Optional[Path],
+    output_name: str,
+    save_h5ad: bool,
+    n_jobs: int,
+    make_figures: bool,
+    figdir_name: str,
+    figure_formats: Sequence[str],
+    round_id: Optional[str],
+    group_key: Optional[str],
+    label_source: str,
+    condition_keys: Optional[List[str]],
+    condition_values: Optional[List[str]],
+    compare_levels: Optional[List[str]],
+    dataset_key: Optional[str],
+    source_levels: Optional[List[str]],
+    target_levels: Optional[List[str]],
+    pairing_key: str,
+    organism: str,
+    input_mode: str,
+    lognorm_target_sum: float,
+    source_filter: Optional[List[str]],
+    target_filter: Optional[List[str]],
+    metabolite_filter: Optional[List[str]],
+    sensor_filter: Optional[List[str]],
+    superclass_filter: Optional[List[str]],
+    class_filter: Optional[List[str]],
+    subclass_filter: Optional[List[str]],
+    max_events: int,
+    score_method: str,
+    min_sender_cells: int,
+    min_receiver_cells: int,
+    min_scored_donors_per_group: int,
+    install_missing_python_deps: bool,
+) -> MarkersAndDEConfig:
+    out_dir = output_dir or input_path.parent
+    log_dir = out_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "markers-and-de.ccc.mebocost.paired.log"
+    init_logging(log_path)
+
+    cond_keys = tuple(_parse_csv_repeat(condition_keys) or ())
+    return MarkersAndDEConfig(
+        input_path=input_path,
+        input_dir=None,
+        output_dir=out_dir,
+        output_name=output_name,
+        save_h5ad=save_h5ad,
+        run="pseudobulk",
+        n_jobs=n_jobs,
+        logfile=log_path,
+        make_figures=make_figures,
+        regenerate_figures=False,
+        figdir_name=figdir_name,
+        figure_formats=figure_formats,
+        groupby=group_key,
+        label_source=label_source,
+        round_id=round_id,
+        ccc_backend="mebocost_paired_rescore",
+        ccc_condition_key=(str(cond_keys[0]).strip() if cond_keys else None),
+        ccc_condition_keys=cond_keys,
+        ccc_condition_values=tuple(_parse_csv_repeat(condition_values) or ()),
+        ccc_compare_levels=tuple(_parse_csv_repeat(compare_levels) or ()),
+        ccc_dataset_key=(str(dataset_key).strip() if dataset_key else None),
+        ccc_source_levels=tuple(_parse_csv_repeat(source_levels) or ()),
+        ccc_target_levels=tuple(_parse_csv_repeat(target_levels) or ()),
+        mebocost_candidate_events=str(candidate_events),
+        mebocost_pairing_key=str(pairing_key).strip(),
+        mebocost_organism=str(organism).strip().lower(),
+        mebocost_input_mode=str(input_mode).strip().lower(),
+        mebocost_lognorm_target_sum=float(lognorm_target_sum),
+        mebocost_source_filter=tuple(_parse_csv_repeat(source_filter) or ()),
+        mebocost_target_filter=tuple(_parse_csv_repeat(target_filter) or ()),
+        mebocost_metabolite_filter=tuple(_parse_csv_repeat(metabolite_filter) or ()),
+        mebocost_sensor_filter=tuple(_parse_csv_repeat(sensor_filter) or ()),
+        mebocost_superclass_filter=tuple(_parse_csv_repeat(superclass_filter) or ()),
+        mebocost_class_filter=tuple(_parse_csv_repeat(class_filter) or ()),
+        mebocost_subclass_filter=tuple(_parse_csv_repeat(subclass_filter) or ()),
+        mebocost_max_events=int(max_events),
+        mebocost_score_method=str(score_method).strip().lower(),
+        mebocost_min_sender_cells=int(min_sender_cells),
+        mebocost_min_receiver_cells=int(min_receiver_cells),
+        mebocost_min_scored_donors_per_group=int(min_scored_donors_per_group),
+        mebocost_install_missing_python_deps=bool(install_missing_python_deps),
+    )
+
+
+def _build_cfg_ccc_liana_paired(
+    *,
+    input_path: Path,
+    candidate_events: Path,
+    output_dir: Optional[Path],
+    output_name: str,
+    save_h5ad: bool,
+    n_jobs: int,
+    make_figures: bool,
+    figdir_name: str,
+    figure_formats: Sequence[str],
+    round_id: Optional[str],
+    group_key: Optional[str],
+    label_source: str,
+    condition_keys: Optional[List[str]],
+    condition_values: Optional[List[str]],
+    compare_levels: Optional[List[str]],
+    dataset_key: Optional[str],
+    source_levels: Optional[List[str]],
+    target_levels: Optional[List[str]],
+    pairing_key: str,
+    input_mode: str,
+    lognorm_target_sum: float,
+    source_filter: Optional[List[str]],
+    target_filter: Optional[List[str]],
+    ligand_filter: Optional[List[str]],
+    receptor_filter: Optional[List[str]],
+    route_family_filter: Optional[List[str]],
+    max_edges: int,
+    min_sender_cells: int,
+    min_receiver_cells: int,
+    min_scored_donors_per_group: int,
+) -> MarkersAndDEConfig:
+    out_dir = output_dir or input_path.parent
+    log_dir = out_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "markers-and-de.ccc.liana.paired.log"
+    init_logging(log_path)
+
+    cond_keys = tuple(_parse_csv_repeat(condition_keys) or ())
+    return MarkersAndDEConfig(
+        input_path=input_path,
+        input_dir=None,
+        output_dir=out_dir,
+        output_name=output_name,
+        save_h5ad=save_h5ad,
+        run="pseudobulk",
+        n_jobs=n_jobs,
+        logfile=log_path,
+        make_figures=make_figures,
+        regenerate_figures=False,
+        figdir_name=figdir_name,
+        figure_formats=figure_formats,
+        groupby=group_key,
+        label_source=label_source,
+        round_id=round_id,
+        ccc_backend="liana_paired_rescore",
+        ccc_condition_key=(str(cond_keys[0]).strip() if cond_keys else None),
+        ccc_condition_keys=cond_keys,
+        ccc_condition_values=tuple(_parse_csv_repeat(condition_values) or ()),
+        ccc_compare_levels=tuple(_parse_csv_repeat(compare_levels) or ()),
+        ccc_dataset_key=(str(dataset_key).strip() if dataset_key else None),
+        ccc_source_levels=tuple(_parse_csv_repeat(source_levels) or ()),
+        ccc_target_levels=tuple(_parse_csv_repeat(target_levels) or ()),
+        liana_candidate_events=str(candidate_events),
+        liana_pairing_key=str(pairing_key).strip(),
+        liana_input_mode=str(input_mode).strip().lower(),
+        liana_lognorm_target_sum=float(lognorm_target_sum),
+        liana_source_filter=tuple(_parse_csv_repeat(source_filter) or ()),
+        liana_target_filter=tuple(_parse_csv_repeat(target_filter) or ()),
+        liana_ligand_filter=tuple(_parse_csv_repeat(ligand_filter) or ()),
+        liana_receptor_filter=tuple(_parse_csv_repeat(receptor_filter) or ()),
+        liana_route_family_filter=tuple(_parse_csv_repeat(route_family_filter) or ()),
+        liana_max_edges=int(max_edges),
+        liana_min_sender_cells=int(min_sender_cells),
+        liana_min_receiver_cells=int(min_receiver_cells),
+        liana_min_scored_donors_per_group=int(min_scored_donors_per_group),
     )
 
 
@@ -2121,6 +2459,26 @@ def ccc_liana(
         "--compare-level",
         help="Restrict levels of the comparison variable within each condition spec (repeatable/comma-separated). For A@B this filters the A-side levels.",
     ),
+    dataset_key: Optional[str] = typer.Option(
+        None,
+        "--dataset-key",
+        help="Optional obs key defining tissue/dataset origin for cross-tissue LIANA mode.",
+    ),
+    source_levels: List[str] = typer.Option(
+        [],
+        "--source-level",
+        help="Allowed sender dataset/tissue levels in cross-tissue mode (repeatable/comma-separated).",
+    ),
+    target_levels: List[str] = typer.Option(
+        [],
+        "--target-level",
+        help="Allowed receiver dataset/tissue levels in cross-tissue mode (repeatable/comma-separated).",
+    ),
+    signal_scope: str = typer.Option(
+        "all",
+        "--signal-scope",
+        help="Resource/output filter for LIANA interactions: all or secreted.",
+    ),
     liana_method: List[str] = typer.Option(
         ["rank_aggregate"],
         "--liana-method",
@@ -2129,6 +2487,16 @@ def ccc_liana(
     ),
     liana_resource: str = typer.Option("consensus", "--resource"),
     liana_expr_prop: float = typer.Option(0.1, "--expr-prop"),
+    liana_input_mode: str = typer.Option(
+        "counts",
+        "--input-mode",
+        help="LIANA expression input mode. 'counts' uses counts_cb/counts_raw directly; 'lognorm' builds and reuses a log-normalized layer from counts_cb or counts_raw.",
+    ),
+    liana_lognorm_target_sum: float = typer.Option(
+        1e4,
+        "--lognorm-target-sum",
+        help="Target library size used when --input-mode lognorm builds a log-normalized LIANA layer.",
+    ),
     liana_use_raw: bool = typer.Option(
         False,
         "--use-raw/--no-use-raw",
@@ -2152,8 +2520,12 @@ def ccc_liana(
     liana_top_n: int = typer.Option(250, "--top-n"),
     liana_plot_top_n: int = typer.Option(60, "--plot-top-n"),
 ):
+    if str(liana_input_mode).strip().lower() not in {"counts", "lognorm"}:
+        raise typer.BadParameter("--input-mode must be one of: counts, lognorm.")
     if liana_use_raw and liana_layer:
         raise typer.BadParameter("Cannot use both --use-raw and --layer.")
+    if dataset_key and (not source_levels or not target_levels):
+        raise typer.BadParameter("--dataset-key requires at least one --source-level and one --target-level.")
     if output_name is None:
         output_name = _default_output_name(input_path, "ccc_liana", round_id=round_id)
 
@@ -2172,9 +2544,15 @@ def ccc_liana(
         condition_keys=condition_keys,
         condition_values=condition_values,
         compare_levels=compare_levels,
+        dataset_key=dataset_key,
+        source_levels=source_levels,
+        target_levels=target_levels,
+        signal_scope=signal_scope,
         liana_methods=liana_method,
         liana_resource=liana_resource,
         liana_expr_prop=liana_expr_prop,
+        liana_input_mode=liana_input_mode,
+        liana_lognorm_target_sum=liana_lognorm_target_sum,
         liana_use_raw=liana_use_raw,
         liana_layer=liana_layer,
         liana_n_perms=None if liana_n_perms in (None, 0) else liana_n_perms,
@@ -2185,6 +2563,494 @@ def ccc_liana(
     )
 
     run_liana_ccc(cfg)
+
+
+@ccc_app.command(
+    "liana-paired",
+    help="Run donor/sample-level focused LIANA rescoring on a candidate LR table.",
+)
+def ccc_liana_paired(
+    input_path: Path = typer.Option(..., "--input-path", "-i"),
+    candidate_events: Path = typer.Option(..., "--candidate-events"),
+    output_dir: Optional[Path] = typer.Option(None, "--output-dir", "-o"),
+    output_name: Optional[str] = typer.Option(None, "--output-name"),
+    save_h5ad: bool = typer.Option(False, "--save-h5ad/--no-save-h5ad"),
+    n_jobs: int = typer.Option(1, "--n-jobs"),
+    make_figures: bool = typer.Option(True, "--make-figures/--no-make-figures"),
+    figdir_name: str = typer.Option("figures", "--figdir-name"),
+    figure_formats: List[str] = typer.Option(["png", "pdf"], "--figure-formats", "-F"),
+    group_key: Optional[str] = typer.Option(None, "--group-key"),
+    label_source: str = typer.Option("pretty", "--label-source"),
+    round_id: Optional[str] = typer.Option(None, "--round-id"),
+    condition_keys: List[str] = typer.Option(
+        [],
+        "--condition-key",
+        help="Optional subset spec(s); repeatable/comma-separated. Supports A and A@B.",
+    ),
+    condition_values: List[str] = typer.Option(
+        [],
+        "--condition-value",
+        help="Restrict subset levels for A@B by filtering the B-side context levels.",
+    ),
+    compare_levels: List[str] = typer.Option(
+        [],
+        "--compare-level",
+        help="Optional levels of the A-side condition variable to keep when using A@B specs.",
+    ),
+    dataset_key: Optional[str] = typer.Option(
+        None,
+        "--dataset-key",
+        help="Optional obs key defining tissue/dataset origin for cross-tissue sender/receiver restriction.",
+    ),
+    source_levels: List[str] = typer.Option(
+        [],
+        "--source-level",
+        help="Allowed sender dataset/tissue levels in cross-tissue mode (repeatable/comma-separated).",
+    ),
+    target_levels: List[str] = typer.Option(
+        [],
+        "--target-level",
+        help="Allowed receiver dataset/tissue levels in cross-tissue mode (repeatable/comma-separated).",
+    ),
+    pairing_key: str = typer.Option("sample_id", "--pairing-key"),
+    input_mode: str = typer.Option(
+        "counts",
+        "--input-mode",
+        help="LIANA paired expression input mode. 'counts' uses counts_cb/counts_raw directly; 'lognorm' builds and reuses a log-normalized layer from counts_cb or counts_raw.",
+    ),
+    lognorm_target_sum: float = typer.Option(
+        1e4,
+        "--lognorm-target-sum",
+        help="Target library size used when --input-mode lognorm builds a log-normalized LIANA layer.",
+    ),
+    source_filter: List[str] = typer.Option([], "--source-filter"),
+    target_filter: List[str] = typer.Option([], "--target-filter"),
+    ligand_filter: List[str] = typer.Option([], "--ligand-filter"),
+    receptor_filter: List[str] = typer.Option([], "--receptor-filter"),
+    route_family_filter: List[str] = typer.Option([], "--route-family-filter"),
+    max_edges: int = typer.Option(200, "--max-edges"),
+    min_sender_cells: int = typer.Option(5, "--min-sender-cells"),
+    min_receiver_cells: int = typer.Option(5, "--min-receiver-cells"),
+    min_scored_donors_per_group: int = typer.Option(3, "--min-scored-donors-per-group"),
+):
+    if str(input_mode).strip().lower() not in {"counts", "lognorm"}:
+        raise typer.BadParameter("--input-mode must be one of: counts, lognorm.")
+    if dataset_key and (not source_levels or not target_levels):
+        raise typer.BadParameter("--dataset-key requires at least one --source-level and one --target-level.")
+    if output_name is None:
+        output_name = _default_output_name(input_path, "ccc_liana_paired", round_id=round_id)
+
+    cfg = _build_cfg_ccc_liana_paired(
+        input_path=input_path,
+        candidate_events=candidate_events,
+        output_dir=output_dir,
+        output_name=str(output_name),
+        save_h5ad=save_h5ad,
+        n_jobs=n_jobs,
+        make_figures=make_figures,
+        figdir_name=figdir_name,
+        figure_formats=figure_formats,
+        round_id=round_id,
+        group_key=group_key,
+        label_source=label_source,
+        condition_keys=condition_keys,
+        condition_values=condition_values,
+        compare_levels=compare_levels,
+        dataset_key=dataset_key,
+        source_levels=source_levels,
+        target_levels=target_levels,
+        pairing_key=pairing_key,
+        input_mode=input_mode,
+        lognorm_target_sum=lognorm_target_sum,
+        source_filter=source_filter,
+        target_filter=target_filter,
+        ligand_filter=ligand_filter,
+        receptor_filter=receptor_filter,
+        route_family_filter=route_family_filter,
+        max_edges=max_edges,
+        min_sender_cells=min_sender_cells,
+        min_receiver_cells=min_receiver_cells,
+        min_scored_donors_per_group=min_scored_donors_per_group,
+    )
+
+    run_liana_paired_rescore(cfg)
+
+
+@ccc_app.command(
+    "mebocost",
+    help="Run MEBOCOST metabolite-mediated cell-cell communication inference on cluster labels.",
+)
+def ccc_mebocost(
+    input_path: Path = typer.Option(..., "--input-path", "-i"),
+    output_dir: Optional[Path] = typer.Option(None, "--output-dir", "-o"),
+    output_name: Optional[str] = typer.Option(None, "--output-name"),
+    save_h5ad: bool = typer.Option(False, "--save-h5ad/--no-save-h5ad"),
+    n_jobs: int = typer.Option(1, "--n-jobs"),
+    make_figures: bool = typer.Option(True, "--make-figures/--no-make-figures"),
+    figdir_name: str = typer.Option("figures", "--figdir-name"),
+    figure_formats: List[str] = typer.Option(["png", "pdf"], "--figure-formats", "-F"),
+    group_key: Optional[str] = typer.Option(None, "--group-key"),
+    label_source: str = typer.Option("pretty", "--label-source"),
+    round_id: Optional[str] = typer.Option(None, "--round-id"),
+    condition_keys: List[str] = typer.Option(
+        [],
+        "--condition-key",
+        help="Optional subset spec(s); repeatable/comma-separated. Supports A and A@B.",
+    ),
+    condition_values: List[str] = typer.Option(
+        [],
+        "--condition-value",
+        help="Restrict subset levels for A@B by filtering the B-side context levels.",
+    ),
+    compare_levels: List[str] = typer.Option(
+        [],
+        "--compare-level",
+        help="Optional levels of the A-side condition variable to keep when using A@B specs.",
+    ),
+    dataset_key: Optional[str] = typer.Option(
+        None,
+        "--dataset-key",
+        help="Optional obs key defining tissue/dataset origin for cross-tissue sender/receiver restriction.",
+    ),
+    source_levels: List[str] = typer.Option(
+        [],
+        "--source-level",
+        help="Allowed sender dataset/tissue levels in cross-tissue mode (repeatable/comma-separated).",
+    ),
+    target_levels: List[str] = typer.Option(
+        [],
+        "--target-level",
+        help="Allowed receiver dataset/tissue levels in cross-tissue mode (repeatable/comma-separated).",
+    ),
+    organism: str = typer.Option("human", "--organism"),
+    input_mode: str = typer.Option(
+        "counts",
+        "--input-mode",
+        help="MEBOCOST expression input mode. 'counts' uses counts_cb/counts_raw directly; 'lognorm' builds and reuses a log-normalized layer from counts_cb or counts_raw.",
+    ),
+    lognorm_target_sum: float = typer.Option(
+        1e4,
+        "--lognorm-target-sum",
+        help="Target library size used when --input-mode lognorm builds a log-normalized MEBOCOST layer.",
+    ),
+    n_shuffle: int = typer.Option(1000, "--n-shuffle"),
+    seed: int = typer.Option(42, "--seed"),
+    min_cell_number: int = typer.Option(10, "--min-cell-number"),
+    pval_cutoff: float = typer.Option(0.05, "--pval-cutoff"),
+    plot_top_n: int = typer.Option(40, "--plot-top-n"),
+    install_missing_python_deps: bool = typer.Option(
+        False,
+        "--install-missing-python-deps/--no-install-missing-python-deps",
+        help="Install missing MEBOCOST Python dependencies into the active environment before running.",
+    ),
+):
+    if str(input_mode).strip().lower() not in {"counts", "lognorm"}:
+        raise typer.BadParameter("--input-mode must be one of: counts, lognorm.")
+    if dataset_key and (not source_levels or not target_levels):
+        raise typer.BadParameter("--dataset-key requires at least one --source-level and one --target-level.")
+    if output_name is None:
+        output_name = _default_output_name(input_path, "ccc_mebocost", round_id=round_id)
+
+    cfg = _build_cfg_ccc_mebocost(
+        input_path=input_path,
+        output_dir=output_dir,
+        output_name=str(output_name),
+        save_h5ad=save_h5ad,
+        n_jobs=n_jobs,
+        make_figures=make_figures,
+        figdir_name=figdir_name,
+        figure_formats=figure_formats,
+        round_id=round_id,
+        group_key=group_key,
+        label_source=label_source,
+        condition_keys=condition_keys,
+        condition_values=condition_values,
+        compare_levels=compare_levels,
+        dataset_key=dataset_key,
+        source_levels=source_levels,
+        target_levels=target_levels,
+        organism=organism,
+        input_mode=input_mode,
+        lognorm_target_sum=lognorm_target_sum,
+        n_shuffle=n_shuffle,
+        seed=seed,
+        min_cell_number=min_cell_number,
+        pval_cutoff=pval_cutoff,
+        plot_top_n=plot_top_n,
+        install_missing_python_deps=install_missing_python_deps,
+    )
+
+    run_mebocost_ccc(cfg)
+
+
+@ccc_app.command(
+    "mebocost-paired",
+    help="Run donor/sample-level focused MEBOCOST rescoring on a candidate event table.",
+)
+def ccc_mebocost_paired(
+    input_path: Path = typer.Option(..., "--input-path", "-i"),
+    candidate_events: Path = typer.Option(..., "--candidate-events"),
+    output_dir: Optional[Path] = typer.Option(None, "--output-dir", "-o"),
+    output_name: Optional[str] = typer.Option(None, "--output-name"),
+    save_h5ad: bool = typer.Option(False, "--save-h5ad/--no-save-h5ad"),
+    n_jobs: int = typer.Option(1, "--n-jobs"),
+    make_figures: bool = typer.Option(False, "--make-figures/--no-make-figures"),
+    figdir_name: str = typer.Option("figures", "--figdir-name"),
+    figure_formats: List[str] = typer.Option(["png", "pdf"], "--figure-formats", "-F"),
+    group_key: Optional[str] = typer.Option(None, "--group-key"),
+    label_source: str = typer.Option("pretty", "--label-source"),
+    round_id: Optional[str] = typer.Option(None, "--round-id"),
+    condition_keys: List[str] = typer.Option(
+        [],
+        "--condition-key",
+        help="Optional subset spec(s); repeatable/comma-separated. Supports A and A@B.",
+    ),
+    condition_values: List[str] = typer.Option(
+        [],
+        "--condition-value",
+        help="Restrict subset levels for A@B by filtering the B-side context levels.",
+    ),
+    compare_levels: List[str] = typer.Option(
+        [],
+        "--compare-level",
+        help="Optional levels of the A-side condition variable to keep when using A@B specs.",
+    ),
+    dataset_key: Optional[str] = typer.Option(
+        None,
+        "--dataset-key",
+        help="Optional obs key defining tissue/dataset origin for cross-tissue sender/receiver restriction.",
+    ),
+    source_levels: List[str] = typer.Option(
+        [],
+        "--source-level",
+        help="Allowed sender dataset/tissue levels in cross-tissue mode (repeatable/comma-separated).",
+    ),
+    target_levels: List[str] = typer.Option(
+        [],
+        "--target-level",
+        help="Allowed receiver dataset/tissue levels in cross-tissue mode (repeatable/comma-separated).",
+    ),
+    pairing_key: str = typer.Option("sample_id", "--pairing-key"),
+    organism: str = typer.Option("human", "--organism"),
+    input_mode: str = typer.Option(
+        "counts",
+        "--input-mode",
+        help="MEBOCOST expression input mode. 'counts' uses counts_cb/counts_raw directly; 'lognorm' builds and reuses a log-normalized layer from counts_cb or counts_raw.",
+    ),
+    lognorm_target_sum: float = typer.Option(
+        1e4,
+        "--lognorm-target-sum",
+        help="Target library size used when --input-mode lognorm builds a log-normalized MEBOCOST layer.",
+    ),
+    source_filter: List[str] = typer.Option([], "--source-filter"),
+    target_filter: List[str] = typer.Option([], "--target-filter"),
+    metabolite_filter: List[str] = typer.Option([], "--metabolite-filter"),
+    sensor_filter: List[str] = typer.Option([], "--sensor-filter"),
+    superclass_filter: List[str] = typer.Option([], "--superclass-filter"),
+    class_filter: List[str] = typer.Option([], "--class-filter"),
+    subclass_filter: List[str] = typer.Option([], "--subclass-filter"),
+    max_events: int = typer.Option(200, "--max-events"),
+    score_method: str = typer.Option(
+        "mebocost-metabolite-sensor",
+        "--score-method",
+        help="Focused donor-level score mode: mebocost-metabolite-sensor or associated-gene-proxy.",
+    ),
+    min_sender_cells: int = typer.Option(5, "--min-sender-cells"),
+    min_receiver_cells: int = typer.Option(5, "--min-receiver-cells"),
+    min_scored_donors_per_group: int = typer.Option(3, "--min-scored-donors-per-group"),
+    install_missing_python_deps: bool = typer.Option(
+        False,
+        "--install-missing-python-deps/--no-install-missing-python-deps",
+        help="Install missing MEBOCOST Python dependencies into the active environment before running.",
+    ),
+):
+    if str(input_mode).strip().lower() not in {"counts", "lognorm"}:
+        raise typer.BadParameter("--input-mode must be one of: counts, lognorm.")
+    if str(score_method).strip().lower() not in {"mebocost-metabolite-sensor", "associated-gene-proxy"}:
+        raise typer.BadParameter(
+            "--score-method must be one of: mebocost-metabolite-sensor, associated-gene-proxy."
+        )
+    if dataset_key and (not source_levels or not target_levels):
+        raise typer.BadParameter("--dataset-key requires at least one --source-level and one --target-level.")
+    if output_name is None:
+        output_name = _default_output_name(input_path, "ccc_mebocost_paired", round_id=round_id)
+
+    cfg = _build_cfg_ccc_mebocost_paired(
+        input_path=input_path,
+        candidate_events=candidate_events,
+        output_dir=output_dir,
+        output_name=str(output_name),
+        save_h5ad=save_h5ad,
+        n_jobs=n_jobs,
+        make_figures=make_figures,
+        figdir_name=figdir_name,
+        figure_formats=figure_formats,
+        round_id=round_id,
+        group_key=group_key,
+        label_source=label_source,
+        condition_keys=condition_keys,
+        condition_values=condition_values,
+        compare_levels=compare_levels,
+        dataset_key=dataset_key,
+        source_levels=source_levels,
+        target_levels=target_levels,
+        pairing_key=pairing_key,
+        organism=organism,
+        input_mode=input_mode,
+        lognorm_target_sum=lognorm_target_sum,
+        source_filter=source_filter,
+        target_filter=target_filter,
+        metabolite_filter=metabolite_filter,
+        sensor_filter=sensor_filter,
+        superclass_filter=superclass_filter,
+        class_filter=class_filter,
+        subclass_filter=subclass_filter,
+        max_events=max_events,
+        score_method=score_method,
+        min_sender_cells=min_sender_cells,
+        min_receiver_cells=min_receiver_cells,
+        min_scored_donors_per_group=min_scored_donors_per_group,
+        install_missing_python_deps=install_missing_python_deps,
+    )
+
+    run_mebocost_paired_rescore(cfg)
+
+
+@ccc_app.command(
+    "nichenet",
+    help="Run sender-focused NicheNet ligand activity analysis for one receiver cluster or all clusters.",
+)
+def ccc_nichenet(
+    input_path: Path = typer.Option(..., "--input-path", "-i"),
+    output_dir: Optional[Path] = typer.Option(None, "--output-dir", "-o"),
+    output_name: Optional[str] = typer.Option(None, "--output-name"),
+    save_h5ad: bool = typer.Option(False, "--save-h5ad/--no-save-h5ad"),
+    n_jobs: int = typer.Option(1, "--n-jobs"),
+    make_figures: bool = typer.Option(True, "--make-figures/--no-make-figures"),
+    figdir_name: str = typer.Option("figures", "--figdir-name"),
+    figure_formats: List[str] = typer.Option(["png", "pdf"], "--figure-formats", "-F"),
+    group_key: Optional[str] = typer.Option(None, "--group-key"),
+    label_source: str = typer.Option("pretty", "--label-source"),
+    round_id: Optional[str] = typer.Option(None, "--round-id"),
+    condition_keys: List[str] = typer.Option(
+        [],
+        "--condition-key",
+        help="Optional comparison spec(s); repeatable/comma-separated. Supports A and A@B.",
+    ),
+    condition_values: List[str] = typer.Option(
+        [],
+        "--condition-value",
+        help="Restrict subset levels for A@B by filtering the B-side context levels.",
+    ),
+    compare_levels: List[str] = typer.Option(
+        [],
+        "--compare-level",
+        help="Exactly two comparison levels for the A-side condition variable.",
+    ),
+    dataset_key: Optional[str] = typer.Option(
+        None,
+        "--dataset-key",
+        help="Optional obs key defining tissue/dataset origin for cross-tissue sender/receiver restriction.",
+    ),
+    source_levels: List[str] = typer.Option(
+        [],
+        "--source-level",
+        help="Allowed sender dataset/tissue levels in cross-tissue mode (repeatable/comma-separated).",
+    ),
+    target_levels: List[str] = typer.Option(
+        [],
+        "--target-level",
+        help="Allowed receiver dataset/tissue levels in cross-tissue mode (repeatable/comma-separated).",
+    ),
+    signal_scope: str = typer.Option(
+        "all",
+        "--signal-scope",
+        help="Resource/output filter for downstream LR interpretation: all or secreted.",
+    ),
+    receiver_cluster: str = typer.Option(
+        "all",
+        "--receiver-cluster",
+        help="Receiver cluster to explain, using either raw ids or pretty labels. Use 'all' to batch over every cluster.",
+    ),
+    sender_clusters: List[str] = typer.Option(
+        [],
+        "--sender-cluster",
+        help="Optional sender cluster restriction (repeatable/comma-separated). If omitted, all allowed sender clusters are considered.",
+    ),
+    gene_list_file: Optional[Path] = typer.Option(
+        None,
+        "--gene-list-file",
+        help="Optional one-gene-per-line receiver gene set. If omitted, NicheNet derives the gene set from receiver-cluster DE.",
+    ),
+    expression_pct: float = typer.Option(0.10, "--expression-pct"),
+    input_mode: str = typer.Option(
+        "counts",
+        "--input-mode",
+        help="NicheNet expression input mode for sender/receiver expressed-gene filtering. 'counts' uses counts_cb/counts_raw directly; 'lognorm' builds and reuses a log-normalized layer from counts_cb or counts_raw.",
+    ),
+    lognorm_target_sum: float = typer.Option(
+        1e4,
+        "--lognorm-target-sum",
+        help="Target library size used when --input-mode lognorm builds a log-normalized NicheNet expression layer.",
+    ),
+    top_n_ligands: int = typer.Option(30, "--top-n-ligands"),
+    top_n_targets: int = typer.Option(200, "--top-n-targets"),
+    min_logfc: float = typer.Option(0.25, "--min-logfc"),
+    padj_threshold: float = typer.Option(0.05, "--padj-threshold"),
+    organism: str = typer.Option("human", "--organism"),
+    install_missing_r_deps: bool = typer.Option(
+        False,
+        "--install-missing-r-deps/--no-install-missing-r-deps",
+        help="Install missing NicheNet R dependencies into scOmnom's project-local R library before running.",
+    ),
+):
+    if str(input_mode).strip().lower() not in {"counts", "lognorm"}:
+        raise typer.BadParameter("--input-mode must be one of: counts, lognorm.")
+    if dataset_key and (not source_levels or not target_levels):
+        raise typer.BadParameter("--dataset-key requires at least one --source-level and one --target-level.")
+    if organism.strip().lower() != "human":
+        raise typer.BadParameter("NicheNet v1 support in scOmnom currently expects --organism human.")
+    if gene_list_file is None and not condition_keys:
+        raise typer.BadParameter("Provide either --gene-list-file or at least one --condition-key.")
+    if gene_list_file is None and len(_parse_csv_repeat(compare_levels) or ()) != 2:
+        raise typer.BadParameter("Receiver-DE NicheNet requires exactly two --compare-level values.")
+    if output_name is None:
+        output_name = _default_output_name(input_path, "ccc_nichenet", round_id=round_id)
+
+    cfg = _build_cfg_ccc_nichenet(
+        input_path=input_path,
+        output_dir=output_dir,
+        output_name=str(output_name),
+        save_h5ad=save_h5ad,
+        n_jobs=n_jobs,
+        make_figures=make_figures,
+        figdir_name=figdir_name,
+        figure_formats=figure_formats,
+        round_id=round_id,
+        group_key=group_key,
+        label_source=label_source,
+        condition_keys=condition_keys,
+        condition_values=condition_values,
+        compare_levels=compare_levels,
+        dataset_key=dataset_key,
+        source_levels=source_levels,
+        target_levels=target_levels,
+        signal_scope=signal_scope,
+        receiver_cluster=receiver_cluster,
+        sender_clusters=sender_clusters,
+        gene_list_file=gene_list_file,
+        expression_pct=expression_pct,
+        input_mode=input_mode,
+        lognorm_target_sum=lognorm_target_sum,
+        top_n_ligands=top_n_ligands,
+        top_n_targets=top_n_targets,
+        min_logfc=min_logfc,
+        padj_threshold=padj_threshold,
+        organism=organism,
+        install_missing_r_deps=install_missing_r_deps,
+    )
+
+    run_nichenet_ccc(cfg)
 
 
 @markers_and_de_app.command(

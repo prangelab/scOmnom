@@ -1,0 +1,37 @@
+Package: RcppAnnoy
+Type: Package
+Title: 'Rcpp' Bindings for 'Annoy', a Library for Approximate Nearest
+        Neighbors
+Version: 0.0.23
+Date: 2026-01-12
+Authors@R: c(person("Dirk", "Eddelbuettel", role = c("aut", "cre"), email = "edd@debian.org",
+                    comment = c(ORCID = "0000-0001-6419-907X")),
+             person("Erik", "Bernhardsson", role = c("aut"),
+                    comment = "Principal author of Annoy"))
+Description: 'Annoy' is a small C++ library for Approximate Nearest Neighbors 
+ written for efficient memory usage as well an ability to load from / save to
+ disk. This package provides an R interface by relying on the 'Rcpp' package,
+ exposing the same interface as the original Python wrapper to 'Annoy'. See
+ <https://github.com/spotify/annoy> for more on 'Annoy'. 'Annoy' is released
+ under Version 2.0 of the Apache License. Also included is a small Windows
+ port of 'mmap' which is released under the MIT license.
+License: GPL (>= 2)
+Depends: R (>= 3.1)
+Imports: methods, Rcpp
+LinkingTo: Rcpp
+Suggests: tinytest
+URL: https://github.com/eddelbuettel/rcppannoy,
+        https://dirk.eddelbuettel.com/code/rcpp.annoy.html
+BugReports: https://github.com/eddelbuettel/rcppannoy/issues
+NeedsCompilation: yes
+RoxygenNote: 7.3.2
+Encoding: UTF-8
+VignetteBuilder: Rcpp
+Packaged: 2026-01-12 12:24:51 UTC; edd
+Author: Dirk Eddelbuettel [aut, cre] (ORCID:
+    <https://orcid.org/0000-0001-6419-907X>),
+  Erik Bernhardsson [aut] (Principal author of Annoy)
+Maintainer: Dirk Eddelbuettel <edd@debian.org>
+Repository: CRAN
+Date/Publication: 2026-01-12 13:10:02 UTC
+Built: R 4.5.2; aarch64-apple-darwin20.0.0; 2026-05-18 18:57:13 UTC; unix

@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="utf-8" />
+<meta name="generator" content="pandoc" />
+<meta http-equiv="X-UA-Compatible" content="IE=EDGE" />
+
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+<meta name="author" content="Ralf Stubner" />
+
+<meta name="date" content="2024-05-28" />
+
+<title>C++ API</title>
+
+<script>// Pandoc 2.9 adds attributes on both header and div. We remove the former (to
+// be compatible with the behavior of Pandoc < 2.8).
+document.addEventListener('DOMContentLoaded', function(e) {
+  var hs = document.querySelectorAll("div.section[class*='level'] > :first-child");
+  var i, h, a;
+  for (i = 0; i < hs.length; i++) {
+    h = hs[i];
+    if (!/^h[1-6]$/i.test(h.tagName)) continue;  // it should be a header h1-h6
+    a = h.attributes;
+    while (a.length > 0) h.removeAttribute(a[0].name);
+  }
+});
+</script>
+
+<style type="text/css">
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+span.underline{text-decoration: underline;}
+div.column{display: inline-block; vertical-align: top; width: 50%;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+</style>
+
+
+
+<style type="text/css">
+code {
+white-space: pre;
+}
+.sourceCode {
+overflow: visible;
+}
+</style>
+<style type="text/css" data-origin="pandoc">
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { display: inline-block; text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+{ counter-reset: source-line 0; }
+pre.numberSource code > span
+{ position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+{ content: counter(source-line);
+position: relative; left: -1em; text-align: right; vertical-align: baseline;
+border: none; display: inline-block;
+-webkit-touch-callout: none; -webkit-user-select: none;
+-khtml-user-select: none; -moz-user-select: none;
+-ms-user-select: none; user-select: none;
+padding: 0 4px; width: 4em;
+color: #aaaaaa;
+}
+pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa; padding-left: 4px; }
+div.sourceCode
+{ }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+code span.al { color: #ff0000; font-weight: bold; } 
+code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.at { color: #7d9029; } 
+code span.bn { color: #40a070; } 
+code span.bu { color: #008000; } 
+code span.cf { color: #007020; font-weight: bold; } 
+code span.ch { color: #4070a0; } 
+code span.cn { color: #880000; } 
+code span.co { color: #60a0b0; font-style: italic; } 
+code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.do { color: #ba2121; font-style: italic; } 
+code span.dt { color: #902000; } 
+code span.dv { color: #40a070; } 
+code span.er { color: #ff0000; font-weight: bold; } 
+code span.ex { } 
+code span.fl { color: #40a070; } 
+code span.fu { color: #06287e; } 
+code span.im { color: #008000; font-weight: bold; } 
+code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.kw { color: #007020; font-weight: bold; } 
+code span.op { color: #666666; } 
+code span.ot { color: #007020; } 
+code span.pp { color: #bc7a00; } 
+code span.sc { color: #4070a0; } 
+code span.ss { color: #bb6688; } 
+code span.st { color: #4070a0; } 
+code span.va { color: #19177c; } 
+code span.vs { color: #4070a0; } 
+code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } 
+</style>
+<script>
+// apply pandoc div.sourceCode style to pre.sourceCode instead
+(function() {
+  var sheets = document.styleSheets;
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].ownerNode.dataset["origin"] !== "pandoc") continue;
+    try { var rules = sheets[i].cssRules; } catch (e) { continue; }
+    var j = 0;
+    while (j < rules.length) {
+      var rule = rules[j];
+      // check if there is a div.sourceCode rule
+      if (rule.type !== rule.STYLE_RULE || rule.selectorText !== "div.sourceCode") {
+        j++;
+        continue;
+      }
+      var style = rule.style.cssText;
+      // check if color or background-color is set
+      if (rule.style.color === '' && rule.style.backgroundColor === '') {
+        j++;
+        continue;
+      }
+      // replace div.sourceCode by a pre.sourceCode rule
+      sheets[i].deleteRule(j);
+      sheets[i].insertRule('pre.sourceCode{' + style + '}', j);
+    }
+  }
+})();
+</script>
+
+
+
+
+<style type="text/css">body {
+background-color: #fff;
+margin: 1em auto;
+max-width: 700px;
+overflow: visible;
+padding-left: 2em;
+padding-right: 2em;
+font-family: "Open Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+font-size: 14px;
+line-height: 1.35;
+}
+#TOC {
+clear: both;
+margin: 0 0 10px 10px;
+padding: 4px;
+width: 400px;
+border: 1px solid #CCCCCC;
+border-radius: 5px;
+background-color: #f6f6f6;
+font-size: 13px;
+line-height: 1.3;
+}
+#TOC .toctitle {
+font-weight: bold;
+font-size: 15px;
+margin-left: 5px;
+}
+#TOC ul {
+padding-left: 40px;
+margin-left: -1.5em;
+margin-top: 5px;
+margin-bottom: 5px;
+}
+#TOC ul ul {
+margin-left: -2em;
+}
+#TOC li {
+line-height: 16px;
+}
+table {
+margin: 1em auto;
+border-width: 1px;
+border-color: #DDDDDD;
+border-style: outset;
+border-collapse: collapse;
+}
+table th {
+border-width: 2px;
+padding: 5px;
+border-style: inset;
+}
+table td {
+border-width: 1px;
+border-style: inset;
+line-height: 18px;
+padding: 5px 5px;
+}
+table, table th, table td {
+border-left-style: none;
+border-right-style: none;
+}
+table thead, table tr.even {
+background-color: #f7f7f7;
+}
+p {
+margin: 0.5em 0;
+}
+blockquote {
+background-color: #f6f6f6;
+padding: 0.25em 0.75em;
+}
+hr {
+border-style: solid;
+border: none;
+border-top: 1px solid #777;
+margin: 28px 0;
+}
+dl {
+margin-left: 0;
+}
+dl dd {
+margin-bottom: 13px;
+margin-left: 13px;
+}
+dl dt {
+font-weight: bold;
+}
+ul {
+margin-top: 0;
+}
+ul li {
+list-style: circle outside;
+}
+ul ul {
+margin-bottom: 0;
+}
+pre, code {
+background-color: #f7f7f7;
+border-radius: 3px;
+color: #333;
+white-space: pre-wrap; 
+}
+pre {
+border-radius: 3px;
+margin: 5px 0px 10px 0px;
+padding: 10px;
+}
+pre:not([class]) {
+background-color: #f7f7f7;
+}
+code {
+font-family: Consolas, Monaco, 'Courier New', monospace;
+font-size: 85%;
+}
+p > code, li > code {
+padding: 2px 0px;
+}
+div.figure {
+text-align: center;
+}
+img {
+background-color: #FFFFFF;
+padding: 2px;
+border: 1px solid #DDDDDD;
+border-radius: 3px;
+border: 1px solid #CCCCCC;
+margin: 0 5px;
+}
+h1 {
+margin-top: 0;
+font-size: 35px;
+line-height: 40px;
+}
+h2 {
+border-bottom: 4px solid #f7f7f7;
+padding-top: 10px;
+padding-bottom: 2px;
+font-size: 145%;
+}
+h3 {
+border-bottom: 2px solid #f7f7f7;
+padding-top: 10px;
+font-size: 120%;
+}
+h4 {
+border-bottom: 1px solid #f7f7f7;
+margin-left: 8px;
+font-size: 105%;
+}
+h5, h6 {
+border-bottom: 1px solid #ccc;
+font-size: 105%;
+}
+a {
+color: #0033dd;
+text-decoration: none;
+}
+a:hover {
+color: #6666ff; }
+a:visited {
+color: #800080; }
+a:visited:hover {
+color: #BB00BB; }
+a[href^="http:"] {
+text-decoration: underline; }
+a[href^="https:"] {
+text-decoration: underline; }
+
+code > span.kw { color: #555; font-weight: bold; } 
+code > span.dt { color: #902000; } 
+code > span.dv { color: #40a070; } 
+code > span.bn { color: #d14; } 
+code > span.fl { color: #d14; } 
+code > span.ch { color: #d14; } 
+code > span.st { color: #d14; } 
+code > span.co { color: #888888; font-style: italic; } 
+code > span.ot { color: #007020; } 
+code > span.al { color: #ff0000; font-weight: bold; } 
+code > span.fu { color: #900; font-weight: bold; } 
+code > span.er { color: #a61717; background-color: #e3d2d2; } 
+</style>
+
+
+
+
+</head>
+
+<body>
+
+
+
+
+<h1 class="title toc-ignore">C++ API</h1>
+<h4 class="author">Ralf Stubner</h4>
+<h4 class="date">2024-05-28</h4>
+
+
+
+<p>The RNGs and distributions functions can also be used from C++ at
+various levels of abstraction. Technically there are three ways to make
+use of dqrng at the C++ level:</p>
+<ul>
+<li>use <code>// [[Rcpp::depends(dqrng)]]</code> together with
+<code>Rcpp::sourceCpp()</code></li>
+<li>use <code>Rcpp::cppFunction(depends = &quot;dqrng&quot;, ...)</code></li>
+<li>use an R package with <code>LinkingTo: dqrng</code></li>
+</ul>
+<p>The following functions are also available if you include
+<code>dqrng.h</code>. Note that the scalar function
+<code>dqrng::runif</code>, <code>dqrng::rnorm</code>, and
+<code>dqrng::rexp</code> have been deprecated and will be removed in a
+future release. Please use the more flexible and faster
+<code>dqrng::random_64bit_accessor</code> together with
+<code>variate&lt;Dist&gt;()</code> instead.</p>
+<div id="setting-seed-and-rng-type" class="section level2">
+<h2>Setting seed and RNG type</h2>
+<div class="sourceCode" id="cb1"><pre class="sourceCode cpp"><code class="sourceCode cpp"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="dt">void</span> dqrng<span class="op">::</span>dqset_seed<span class="op">(</span>Rcpp<span class="op">::</span>IntegerVector seed<span class="op">,</span> </span>
+<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a>                       Rcpp<span class="op">::</span>Nullable<span class="op">&lt;</span>Rcpp<span class="op">::</span>IntegerVector<span class="op">&gt;</span> stream <span class="op">=</span> R_NilValue<span class="op">)</span></span>
+<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a><span class="dt">void</span> dqrng<span class="op">::</span>dqRNGkind<span class="op">(</span><span class="bu">std::</span>string kind<span class="op">,</span> <span class="at">const</span> <span class="bu">std::</span>string<span class="op">&amp;</span> normal_kind <span class="op">=</span> <span class="st">&quot;ignored&quot;</span><span class="op">)</span></span></code></pre></div>
+<dl>
+<dt><code>seed</code></dt>
+<dd>
+seed for the RNG; length 1 or 2
+</dd>
+<dt><code>stream</code></dt>
+<dd>
+RNG stream to use; length 1 or 2
+</dd>
+<dt><code>kind</code></dt>
+<dd>
+string specifying the RNG, One of “pcg64”, “Xoroshiro128+”,
+“Xoroshiro128++”, “Xoshiro256+”, “Xoshiro256++” or “Threefry”
+</dd>
+<dt><code>normal-kind</code></dt>
+<dd>
+ignored; included for compatibility with <code>RNGkind</code>
+</dd>
+</dl>
+</div>
+<div id="random-variates-with-uniform-distribution" class="section level2">
+<h2>Random variates with uniform distribution</h2>
+<div class="sourceCode" id="cb2"><pre class="sourceCode cpp"><code class="sourceCode cpp"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a>Rcpp<span class="op">::</span>NumericVector dqrng<span class="op">::</span>dqrunif<span class="op">(</span><span class="dt">size_t</span> n<span class="op">,</span> <span class="dt">double</span> min <span class="op">=</span> <span class="fl">0.0</span><span class="op">,</span> <span class="dt">double</span> max <span class="op">=</span> <span class="fl">1.0</span><span class="op">)</span></span>
+<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a>DEPRECATED <span class="dt">double</span> dqrng<span class="op">::</span>runif<span class="op">(</span><span class="dt">double</span> min <span class="op">=</span> <span class="fl">0.0</span><span class="op">,</span> <span class="dt">double</span> max <span class="op">=</span> <span class="fl">1.0</span><span class="op">)</span></span></code></pre></div>
+<dl>
+<dt><code>n</code></dt>
+<dd>
+number of observations
+</dd>
+<dt><code>min</code></dt>
+<dd>
+lower limit of the uniform distribution
+</dd>
+<dt><code>max</code></dt>
+<dd>
+upper limit of the uniform distribution
+</dd>
+</dl>
+</div>
+<div id="random-variates-with-normal-distribution" class="section level2">
+<h2>Random variates with normal distribution</h2>
+<div class="sourceCode" id="cb3"><pre class="sourceCode cpp"><code class="sourceCode cpp"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>Rcpp<span class="op">::</span>NumericVector dqrng<span class="op">::</span>dqrnorm<span class="op">(</span><span class="dt">size_t</span> n<span class="op">,</span> <span class="dt">double</span> mean <span class="op">=</span> <span class="fl">0.0</span><span class="op">,</span> <span class="dt">double</span> sd <span class="op">=</span> <span class="fl">1.0</span><span class="op">)</span></span>
+<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>DEPRECATED <span class="dt">double</span> dqrng<span class="op">::</span>rnorm<span class="op">(</span><span class="dt">double</span> mean <span class="op">=</span> <span class="fl">0.0</span><span class="op">,</span> <span class="dt">double</span> sd <span class="op">=</span> <span class="fl">1.0</span><span class="op">)</span></span></code></pre></div>
+<dl>
+<dt><code>n</code></dt>
+<dd>
+number of observations
+</dd>
+<dt><code>mean</code></dt>
+<dd>
+mean value of the normal distribution
+</dd>
+<dt><code>sd</code></dt>
+<dd>
+standard deviation of the normal distribution
+</dd>
+</dl>
+</div>
+<div id="random-variates-with-exponential-distribution" class="section level2">
+<h2>Random variates with exponential distribution</h2>
+<div class="sourceCode" id="cb4"><pre class="sourceCode cpp"><code class="sourceCode cpp"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a>Rcpp<span class="op">::</span>NumericVector dqrng<span class="op">::</span>dqrexp<span class="op">(</span><span class="dt">size_t</span> n<span class="op">,</span> <span class="dt">double</span> rate <span class="op">=</span> <span class="fl">1.0</span><span class="op">)</span></span>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a>DEPRECATED <span class="dt">double</span> dqrng<span class="op">::</span>rexp<span class="op">(</span><span class="dt">double</span> rate <span class="op">=</span> <span class="fl">1.0</span><span class="op">)</span></span></code></pre></div>
+<dl>
+<dt><code>n</code></dt>
+<dd>
+number of observations
+</dd>
+<dt><code>rate</code></dt>
+<dd>
+rate of the exponential distribution
+</dd>
+</dl>
+</div>
+<div id="random-variates-with-rademacher-distribution" class="section level2">
+<h2>Random variates with Rademacher distribution</h2>
+<div class="sourceCode" id="cb5"><pre class="sourceCode cpp"><code class="sourceCode cpp"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a>Rcpp<span class="op">::</span>IntegerVector dqrng<span class="op">::</span>dqrrademacher<span class="op">(</span><span class="dt">size_t</span> n<span class="op">)</span></span></code></pre></div>
+<dl>
+<dt><code>n</code></dt>
+<dd>
+number of observations
+</dd>
+</dl>
+</div>
+<div id="random-sampling" class="section level2">
+<h2>Random sampling</h2>
+<div class="sourceCode" id="cb6"><pre class="sourceCode cpp"><code class="sourceCode cpp"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a>Rcpp<span class="op">::</span>IntegerVector dqrng<span class="op">::</span>dqsample_int<span class="op">(</span><span class="dt">int</span> n<span class="op">,</span> <span class="dt">int</span> size<span class="op">,</span> <span class="dt">bool</span> replace <span class="op">=</span> <span class="kw">false</span><span class="op">,</span></span>
+<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a>                                        Rcpp<span class="op">::</span>Nullable<span class="op">&lt;</span>Rcpp<span class="op">::</span>NumericVector<span class="op">&gt;</span> probs <span class="op">=</span> R_NilValue<span class="op">,</span></span>
+<span id="cb6-3"><a href="#cb6-3" tabindex="-1"></a>                                        <span class="dt">int</span> offset <span class="op">=</span> <span class="dv">0</span><span class="op">)</span></span>
+<span id="cb6-4"><a href="#cb6-4" tabindex="-1"></a>Rcpp<span class="op">::</span>NumericVector dqrng<span class="op">::</span>dqsample_num<span class="op">(</span><span class="dt">double</span> n<span class="op">,</span> <span class="dt">double</span> size<span class="op">,</span> <span class="dt">bool</span> replace <span class="op">=</span> <span class="kw">false</span><span class="op">,</span></span>
+<span id="cb6-5"><a href="#cb6-5" tabindex="-1"></a>                                        Rcpp<span class="op">::</span>Nullable<span class="op">&lt;</span>Rcpp<span class="op">::</span>NumericVector<span class="op">&gt;</span> probs <span class="op">=</span> R_NilValue<span class="op">,</span></span>
+<span id="cb6-6"><a href="#cb6-6" tabindex="-1"></a>                                        <span class="dt">int</span> offset <span class="op">=</span> <span class="dv">0</span><span class="op">)</span></span></code></pre></div>
+<dl>
+<dt><code>n</code></dt>
+<dd>
+a positive number, the number of items to choose from
+</dd>
+<dt><code>size</code></dt>
+<dd>
+a non-negative number giving the number of items to choose
+</dd>
+<dt><code>replace</code></dt>
+<dd>
+should sampling be with replacement?
+</dd>
+<dt><code>prob</code></dt>
+<dd>
+a vector of probability weights for obtaining the elements of the vector
+being sampled (currently ignored)
+</dd>
+<dt><code>offset</code></dt>
+<dd>
+sample from range <code>[offset, offset + m)</code>
+</dd>
+</dl>
+<p>The two functions are used for “normal” and “long-vector” support in
+R.</p>
+</div>
+<div id="getting-and-setting-the-rng-state" class="section level2">
+<h2>Getting and setting the RNG state</h2>
+<div class="sourceCode" id="cb7"><pre class="sourceCode cpp"><code class="sourceCode cpp"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a><span class="bu">std::</span>vector<span class="op">&lt;</span><span class="bu">std::</span>string<span class="op">&gt;</span> dqrng<span class="op">::</span>dqrng_get_state<span class="op">()</span></span>
+<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a><span class="dt">void</span> dqrng<span class="op">::</span>dqrng_set_state<span class="op">(</span><span class="bu">std::</span>vector<span class="op">&lt;</span><span class="bu">std::</span>string<span class="op">&gt;</span> state<span class="op">)</span></span></code></pre></div>
+<dl>
+<dt><code>state</code></dt>
+<dd>
+a <code>std::vector&lt;std::string&gt;</code> as produced by
+<code>dqrng_get_state()</code>
+</dd>
+</dl>
+</div>
+<div id="accessing-the-global-rng" class="section level2">
+<h2>Accessing the global RNG</h2>
+<div class="sourceCode" id="cb8"><pre class="sourceCode cpp"><code class="sourceCode cpp"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a>Rcpp<span class="op">::</span>XPtr<span class="op">&lt;</span>dqrng<span class="op">::</span>random_64bit_generator<span class="op">&gt;</span> dqrng<span class="op">::</span>get_rng<span class="op">()</span></span></code></pre></div>
+<p>Direct usage of this method is <strong>discouraged</strong>. The
+preferred way of accessing the global RNG is to instantiate
+<code>dqrng::random_64bit_accessor</code> within your function. Note
+that you MUST NOT delete the global RNG. Using
+<code>dqrng::random_64bit_accessor</code> makes this impossible. In
+addition, you SHOULD NOT store a reference to the RNG permanently,
+because it can be invalidated by calls to <code>dqRNGkind</code>.
+Therefore, instances of <code>dqrng::random_64bit_accessor</code> SHOULD
+be stored as (non-static) variables in functions.</p>
+<p>Note that <code>dqrng::random_64bit_accessor</code> supports <a href="https://en.cppreference.com/w/cpp/named_req/UniformRandomBitGenerator">UniformRandomBitGenerator</a>
+and can therefore be used together with any C++11 distribution function.
+In addition, the following functions are supported, since they are
+inherited from the abstract parent class
+<code>random_64bit_generator</code>:</p>
+<div class="sourceCode" id="cb9"><pre class="sourceCode cpp"><code class="sourceCode cpp"><span id="cb9-1"><a href="#cb9-1" tabindex="-1"></a><span class="co">// clone RNG and select a different stream</span></span>
+<span id="cb9-2"><a href="#cb9-2" tabindex="-1"></a><span class="bu">std::</span>unique_ptr<span class="op">&lt;</span>random_64bit_generator<span class="op">&gt;</span> clone<span class="op">(</span><span class="dt">uint64_t</span> stream<span class="op">)</span></span>
+<span id="cb9-3"><a href="#cb9-3" tabindex="-1"></a><span class="co">// uniform doubles in [0,1) and double-int-pairs</span></span>
+<span id="cb9-4"><a href="#cb9-4" tabindex="-1"></a><span class="dt">double</span> uniform01<span class="op">()</span></span>
+<span id="cb9-5"><a href="#cb9-5" tabindex="-1"></a><span class="bu">std::</span>pair<span class="op">&lt;</span><span class="dt">double</span><span class="op">,</span> <span class="dt">int</span><span class="op">&gt;</span> generate_double_8bit_pair<span class="op">()</span></span>
+<span id="cb9-6"><a href="#cb9-6" tabindex="-1"></a><span class="co">// uniform integers in a range </span></span>
+<span id="cb9-7"><a href="#cb9-7" tabindex="-1"></a><span class="dt">uint32_t</span> <span class="kw">operator</span><span class="op">()</span> <span class="op">(</span><span class="dt">uint32_t</span> range<span class="op">)</span></span>
+<span id="cb9-8"><a href="#cb9-8" tabindex="-1"></a><span class="dt">uint64_t</span> <span class="kw">operator</span><span class="op">()</span> <span class="op">(</span><span class="dt">uint64_t</span> range<span class="op">)</span></span>
+<span id="cb9-9"><a href="#cb9-9" tabindex="-1"></a>ResultType variate<span class="op">&lt;</span>ResultType<span class="op">,</span> DistTmpl<span class="op">&gt;(</span>param1<span class="op">,</span> <span class="op">...</span> paramN<span class="op">)</span></span>
+<span id="cb9-10"><a href="#cb9-10" tabindex="-1"></a>generate<span class="op">&lt;</span>DistTmpl<span class="op">&gt;(</span>container<span class="op">,</span> param1<span class="op">,</span> <span class="op">...</span> paramN<span class="op">)</span></span>
+<span id="cb9-11"><a href="#cb9-11" tabindex="-1"></a>generate<span class="op">&lt;</span>DistTmpl<span class="op">&gt;(</span>start<span class="op">,</span> end<span class="op">,</span> param1<span class="op">,</span> <span class="op">...</span> paramN<span class="op">)</span></span>
+<span id="cb9-12"><a href="#cb9-12" tabindex="-1"></a>Dist<span class="op">::</span><span class="dt">result_type</span> variate<span class="op">&lt;</span>Dist<span class="op">&gt;(</span>param1<span class="op">,</span> <span class="op">...</span> paramN<span class="op">)</span></span>
+<span id="cb9-13"><a href="#cb9-13" tabindex="-1"></a>generate<span class="op">&lt;</span>Dist<span class="op">&gt;(</span>container<span class="op">,</span> param1<span class="op">,</span> <span class="op">...</span> paramN<span class="op">)</span></span>
+<span id="cb9-14"><a href="#cb9-14" tabindex="-1"></a>generate<span class="op">&lt;</span>Dist<span class="op">&gt;(</span>start<span class="op">,</span> end<span class="op">,</span> param1<span class="op">,</span> <span class="op">...</span> paramN<span class="op">)</span></span></code></pre></div>
+<dl>
+<dt><code>stream</code></dt>
+<dd>
+RNG stream to use for the cloned RNG
+</dd>
+<dt><code>range</code></dt>
+<dd>
+Integers are generated in closed interval <code>[0, range]</code>
+</dd>
+<dt><code>ResultType</code></dt>
+<dd>
+Expected result from the distribution template <code>DistTmpl</code>
+</dd>
+<dt><code>DistTmpl</code></dt>
+<dd>
+Distribution template like <code>std::uniform_distribution</code>.
+<code>DistTmpl&lt;ResultType&gt;</code> defines the full distribution.
+</dd>
+<dt><code>Dist</code></dt>
+<dd>
+Full distribution like
+<code>std::uniform_distribution&lt;double&gt;</code> or
+<code>dqrng::normal_distriubtion</code>.
+</dd>
+<dt><code>param1, ... paramN</code></dt>
+<dd>
+Necessary parameters to initialize the distribution.
+</dd>
+<dt><code>container</code></dt>
+<dd>
+A container that is to be filled with variates from the distribution
+function. Needs to support <code>std::begin</code> and
+<code>std::end</code>.
+</dd>
+<dt><code>start, end</code></dt>
+<dd>
+Forward iterators pointing to start and end of a range to be filled with
+variates from the distribution function.
+</dd>
+</dl>
+</div>
+
+
+
+<!-- code folding -->
+
+
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+  (function () {
+    var script = document.createElement("script");
+    script.type = "text/javascript";
+    script.src  = "https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML";
+    document.getElementsByTagName("head")[0].appendChild(script);
+  })();
+</script>
+
+</body>
+</html>

@@ -1,0 +1,27 @@
+Package: shadowtext
+Title: Shadow Text Grob and Layer
+Version: 0.1.6
+Authors@R: c(
+       person("Guangchuang", "Yu",     email = "guangchuangyu@gmail.com", role = c("aut", "cre", "cph"), comment = c(ORCID = "0000-0002-6485-8781")),
+       person("Shuangbin", "Xu",       email = "xshuangbin@163.com",      role = "ctb", comment = c(ORCID="0000-0003-3513-5362"))
+       )
+Description: Implement shadowtextGrob() for 'grid' and geom_shadowtext() layer for 'ggplot2'.
+             These functions create/draw text grob with background shadow.
+Depends: R (>= 3.4.0)
+Imports: ggiraph, ggplot2, grid, scales, S7, purrr, rlang
+Suggests: knitr, rmarkdown, prettydoc
+VignetteBuilder: knitr
+License: Artistic-2.0
+Encoding: UTF-8
+URL: https://github.com/GuangchuangYu/shadowtext/
+BugReports: https://github.com/GuangchuangYu/shadowtext/issues
+RoxygenNote: 7.3.2
+NeedsCompilation: no
+Packaged: 2025-08-24 08:12:19 UTC; HUAWEI
+Author: Guangchuang Yu [aut, cre, cph] (ORCID:
+    <https://orcid.org/0000-0002-6485-8781>),
+  Shuangbin Xu [ctb] (ORCID: <https://orcid.org/0000-0003-3513-5362>)
+Maintainer: Guangchuang Yu <guangchuangyu@gmail.com>
+Repository: CRAN
+Date/Publication: 2025-08-24 08:40:02 UTC
+Built: R 4.5.2; ; 2026-05-18 15:43:34 UTC; unix

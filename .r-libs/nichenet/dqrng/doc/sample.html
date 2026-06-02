@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="utf-8" />
+<meta name="generator" content="pandoc" />
+<meta http-equiv="X-UA-Compatible" content="IE=EDGE" />
+
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+<meta name="author" content="Ralf Stubner" />
+
+<meta name="date" content="2024-05-28" />
+
+<title>Fast sampling methods</title>
+
+<script>// Pandoc 2.9 adds attributes on both header and div. We remove the former (to
+// be compatible with the behavior of Pandoc < 2.8).
+document.addEventListener('DOMContentLoaded', function(e) {
+  var hs = document.querySelectorAll("div.section[class*='level'] > :first-child");
+  var i, h, a;
+  for (i = 0; i < hs.length; i++) {
+    h = hs[i];
+    if (!/^h[1-6]$/i.test(h.tagName)) continue;  // it should be a header h1-h6
+    a = h.attributes;
+    while (a.length > 0) h.removeAttribute(a[0].name);
+  }
+});
+</script>
+
+<style type="text/css">
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+span.underline{text-decoration: underline;}
+div.column{display: inline-block; vertical-align: top; width: 50%;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+</style>
+
+
+
+<style type="text/css">
+code {
+white-space: pre;
+}
+.sourceCode {
+overflow: visible;
+}
+</style>
+<style type="text/css" data-origin="pandoc">
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { display: inline-block; text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+{ counter-reset: source-line 0; }
+pre.numberSource code > span
+{ position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+{ content: counter(source-line);
+position: relative; left: -1em; text-align: right; vertical-align: baseline;
+border: none; display: inline-block;
+-webkit-touch-callout: none; -webkit-user-select: none;
+-khtml-user-select: none; -moz-user-select: none;
+-ms-user-select: none; user-select: none;
+padding: 0 4px; width: 4em;
+color: #aaaaaa;
+}
+pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa; padding-left: 4px; }
+div.sourceCode
+{ }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+code span.al { color: #ff0000; font-weight: bold; } 
+code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.at { color: #7d9029; } 
+code span.bn { color: #40a070; } 
+code span.bu { color: #008000; } 
+code span.cf { color: #007020; font-weight: bold; } 
+code span.ch { color: #4070a0; } 
+code span.cn { color: #880000; } 
+code span.co { color: #60a0b0; font-style: italic; } 
+code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.do { color: #ba2121; font-style: italic; } 
+code span.dt { color: #902000; } 
+code span.dv { color: #40a070; } 
+code span.er { color: #ff0000; font-weight: bold; } 
+code span.ex { } 
+code span.fl { color: #40a070; } 
+code span.fu { color: #06287e; } 
+code span.im { color: #008000; font-weight: bold; } 
+code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.kw { color: #007020; font-weight: bold; } 
+code span.op { color: #666666; } 
+code span.ot { color: #007020; } 
+code span.pp { color: #bc7a00; } 
+code span.sc { color: #4070a0; } 
+code span.ss { color: #bb6688; } 
+code span.st { color: #4070a0; } 
+code span.va { color: #19177c; } 
+code span.vs { color: #4070a0; } 
+code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } 
+</style>
+<script>
+// apply pandoc div.sourceCode style to pre.sourceCode instead
+(function() {
+  var sheets = document.styleSheets;
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].ownerNode.dataset["origin"] !== "pandoc") continue;
+    try { var rules = sheets[i].cssRules; } catch (e) { continue; }
+    var j = 0;
+    while (j < rules.length) {
+      var rule = rules[j];
+      // check if there is a div.sourceCode rule
+      if (rule.type !== rule.STYLE_RULE || rule.selectorText !== "div.sourceCode") {
+        j++;
+        continue;
+      }
+      var style = rule.style.cssText;
+      // check if color or background-color is set
+      if (rule.style.color === '' && rule.style.backgroundColor === '') {
+        j++;
+        continue;
+      }
+      // replace div.sourceCode by a pre.sourceCode rule
+      sheets[i].deleteRule(j);
+      sheets[i].insertRule('pre.sourceCode{' + style + '}', j);
+    }
+  }
+})();
+</script>
+
+
+
+
+<style type="text/css">body {
+background-color: #fff;
+margin: 1em auto;
+max-width: 700px;
+overflow: visible;
+padding-left: 2em;
+padding-right: 2em;
+font-family: "Open Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+font-size: 14px;
+line-height: 1.35;
+}
+#TOC {
+clear: both;
+margin: 0 0 10px 10px;
+padding: 4px;
+width: 400px;
+border: 1px solid #CCCCCC;
+border-radius: 5px;
+background-color: #f6f6f6;
+font-size: 13px;
+line-height: 1.3;
+}
+#TOC .toctitle {
+font-weight: bold;
+font-size: 15px;
+margin-left: 5px;
+}
+#TOC ul {
+padding-left: 40px;
+margin-left: -1.5em;
+margin-top: 5px;
+margin-bottom: 5px;
+}
+#TOC ul ul {
+margin-left: -2em;
+}
+#TOC li {
+line-height: 16px;
+}
+table {
+margin: 1em auto;
+border-width: 1px;
+border-color: #DDDDDD;
+border-style: outset;
+border-collapse: collapse;
+}
+table th {
+border-width: 2px;
+padding: 5px;
+border-style: inset;
+}
+table td {
+border-width: 1px;
+border-style: inset;
+line-height: 18px;
+padding: 5px 5px;
+}
+table, table th, table td {
+border-left-style: none;
+border-right-style: none;
+}
+table thead, table tr.even {
+background-color: #f7f7f7;
+}
+p {
+margin: 0.5em 0;
+}
+blockquote {
+background-color: #f6f6f6;
+padding: 0.25em 0.75em;
+}
+hr {
+border-style: solid;
+border: none;
+border-top: 1px solid #777;
+margin: 28px 0;
+}
+dl {
+margin-left: 0;
+}
+dl dd {
+margin-bottom: 13px;
+margin-left: 13px;
+}
+dl dt {
+font-weight: bold;
+}
+ul {
+margin-top: 0;
+}
+ul li {
+list-style: circle outside;
+}
+ul ul {
+margin-bottom: 0;
+}
+pre, code {
+background-color: #f7f7f7;
+border-radius: 3px;
+color: #333;
+white-space: pre-wrap; 
+}
+pre {
+border-radius: 3px;
+margin: 5px 0px 10px 0px;
+padding: 10px;
+}
+pre:not([class]) {
+background-color: #f7f7f7;
+}
+code {
+font-family: Consolas, Monaco, 'Courier New', monospace;
+font-size: 85%;
+}
+p > code, li > code {
+padding: 2px 0px;
+}
+div.figure {
+text-align: center;
+}
+img {
+background-color: #FFFFFF;
+padding: 2px;
+border: 1px solid #DDDDDD;
+border-radius: 3px;
+border: 1px solid #CCCCCC;
+margin: 0 5px;
+}
+h1 {
+margin-top: 0;
+font-size: 35px;
+line-height: 40px;
+}
+h2 {
+border-bottom: 4px solid #f7f7f7;
+padding-top: 10px;
+padding-bottom: 2px;
+font-size: 145%;
+}
+h3 {
+border-bottom: 2px solid #f7f7f7;
+padding-top: 10px;
+font-size: 120%;
+}
+h4 {
+border-bottom: 1px solid #f7f7f7;
+margin-left: 8px;
+font-size: 105%;
+}
+h5, h6 {
+border-bottom: 1px solid #ccc;
+font-size: 105%;
+}
+a {
+color: #0033dd;
+text-decoration: none;
+}
+a:hover {
+color: #6666ff; }
+a:visited {
+color: #800080; }
+a:visited:hover {
+color: #BB00BB; }
+a[href^="http:"] {
+text-decoration: underline; }
+a[href^="https:"] {
+text-decoration: underline; }
+
+code > span.kw { color: #555; font-weight: bold; } 
+code > span.dt { color: #902000; } 
+code > span.dv { color: #40a070; } 
+code > span.bn { color: #d14; } 
+code > span.fl { color: #d14; } 
+code > span.ch { color: #d14; } 
+code > span.st { color: #d14; } 
+code > span.co { color: #888888; font-style: italic; } 
+code > span.ot { color: #007020; } 
+code > span.al { color: #ff0000; font-weight: bold; } 
+code > span.fu { color: #900; font-weight: bold; } 
+code > span.er { color: #a61717; background-color: #e3d2d2; } 
+</style>
+
+
+
+
+</head>
+
+<body>
+
+
+
+
+<h1 class="title toc-ignore">Fast sampling methods</h1>
+<h4 class="author">Ralf Stubner</h4>
+<h4 class="date">2024-05-28</h4>
+
+
+
+<p>Random sampling from a fixed set is used in many areas of statistical
+computing. The performance of this operation can be critical, especially
+when the sampled set is large. The fast RNGs provided in this package
+make very fast sampling possible when combined with suitably fast
+algorithms.</p>
+<div id="benchmarks" class="section level2">
+<h2>Benchmarks</h2>
+<p>By combining fast RNGs with a fast methods for creating <a href="https://www.pcg-random.org/posts/bounded-rands.html">integers in a
+range</a> one gets good performance for sampling with replacement:</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="fu">library</span>(dqrng)</span>
+<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a>m <span class="ot">&lt;-</span> <span class="fl">1e6</span></span>
+<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a>n <span class="ot">&lt;-</span> <span class="fl">1e4</span></span>
+<span id="cb1-4"><a href="#cb1-4" tabindex="-1"></a>bm <span class="ot">&lt;-</span> bench<span class="sc">::</span><span class="fu">mark</span>(<span class="fu">sample.int</span>(m, n, <span class="at">replace =</span> <span class="cn">TRUE</span>),</span>
+<span id="cb1-5"><a href="#cb1-5" tabindex="-1"></a>                  <span class="fu">sample.int</span>(<span class="fl">1e4</span><span class="sc">*</span>m, n, <span class="at">replace =</span> <span class="cn">TRUE</span>),</span>
+<span id="cb1-6"><a href="#cb1-6" tabindex="-1"></a>                  <span class="fu">dqsample.int</span>(m, n, <span class="at">replace =</span> <span class="cn">TRUE</span>),</span>
+<span id="cb1-7"><a href="#cb1-7" tabindex="-1"></a>                  <span class="fu">dqsample.int</span>(<span class="fl">1e4</span><span class="sc">*</span>m, n, <span class="at">replace =</span> <span class="cn">TRUE</span>),</span>
+<span id="cb1-8"><a href="#cb1-8" tabindex="-1"></a>                  <span class="at">check =</span> <span class="cn">FALSE</span>)</span></code></pre></div>
+<table>
+<colgroup>
+<col width="54%" />
+<col width="10%" />
+<col width="10%" />
+<col width="12%" />
+<col width="12%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th align="left">expression</th>
+<th align="right">min</th>
+<th align="right">median</th>
+<th align="right">itr/sec</th>
+<th align="right">mem_alloc</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">sample.int(m, n, replace = TRUE)</td>
+<td align="right">433.3µs</td>
+<td align="right">475µs</td>
+<td align="right">1999.342</td>
+<td align="right">49.1KB</td>
+</tr>
+<tr class="even">
+<td align="left">sample.int(10000 * m, n, replace = TRUE)</td>
+<td align="right">846µs</td>
+<td align="right">900.4µs</td>
+<td align="right">1072.688</td>
+<td align="right">80.7KB</td>
+</tr>
+<tr class="odd">
+<td align="left">dqsample.int(m, n, replace = TRUE)</td>
+<td align="right">47.6µs</td>
+<td align="right">50µs</td>
+<td align="right">17170.274</td>
+<td align="right">58.2KB</td>
+</tr>
+<tr class="even">
+<td align="left">dqsample.int(10000 * m, n, replace = TRUE)</td>
+<td align="right">53.3µs</td>
+<td align="right">57.5µs</td>
+<td align="right">14311.590</td>
+<td align="right">82.9KB</td>
+</tr>
+</tbody>
+</table>
+<p>Note that sampling from <code>10^10</code> integers triggers “<a href="https://stat.ethz.ch/R-manual/R-devel/library/base/html/LongVectors.html">long-vector
+support</a>” in R.</p>
+<p>When sampling <em>without</em> replacement one has to consider an
+appropriate algorithm for making sure that no entry is repeated. When
+more than 50% of the population are sampled, dqrng shuffles an
+appropriate part of the full list and returns that. The algorithm used
+in R is similar but dqrng has the edge with respect to performance:</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a><span class="fu">library</span>(dqrng)</span>
+<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a>m <span class="ot">&lt;-</span> <span class="fl">1e6</span></span>
+<span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a>n <span class="ot">&lt;-</span> <span class="fl">6e5</span></span>
+<span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a>bm <span class="ot">&lt;-</span> bench<span class="sc">::</span><span class="fu">mark</span>(<span class="fu">sample.int</span>(m, n),</span>
+<span id="cb2-5"><a href="#cb2-5" tabindex="-1"></a>                  <span class="fu">dqsample.int</span>(m, n),</span>
+<span id="cb2-6"><a href="#cb2-6" tabindex="-1"></a>                  <span class="at">check =</span> <span class="cn">FALSE</span>, <span class="at">min_iterations =</span> <span class="dv">50</span>)</span></code></pre></div>
+<table>
+<thead>
+<tr class="header">
+<th align="left">expression</th>
+<th align="right">min</th>
+<th align="right">median</th>
+<th align="right">itr/sec</th>
+<th align="right">mem_alloc</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">sample.int(m, n)</td>
+<td align="right">55.96ms</td>
+<td align="right">63.7ms</td>
+<td align="right">15.45168</td>
+<td align="right">6.11MB</td>
+</tr>
+<tr class="even">
+<td align="left">dqsample.int(m, n)</td>
+<td align="right">8.16ms</td>
+<td align="right">10.3ms</td>
+<td align="right">90.04322</td>
+<td align="right">6.1MB</td>
+</tr>
+</tbody>
+</table>
+<p>For lower sampling ratios a set based rejection sampling algorithm is
+used by dqrng. In principle, R can make use of a similar algorithm based
+on a hashset. However, it is only used for larger input vectors even
+though it is faster than the default method. The algorithm in dqrng,
+which is based on a <a href="https://lemire.me/blog/2012/11/13/fast-sets-of-integers/">bitset</a>,
+is even faster, though:</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a><span class="fu">library</span>(dqrng)</span>
+<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>m <span class="ot">&lt;-</span> <span class="fl">1e6</span></span>
+<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a>n <span class="ot">&lt;-</span> <span class="fl">1e4</span></span>
+<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a>bm <span class="ot">&lt;-</span> bench<span class="sc">::</span><span class="fu">mark</span>(<span class="fu">sample.int</span>(m, n),</span>
+<span id="cb3-5"><a href="#cb3-5" tabindex="-1"></a>                  <span class="fu">sample.int</span>(m, n, <span class="at">useHash =</span> <span class="cn">TRUE</span>),</span>
+<span id="cb3-6"><a href="#cb3-6" tabindex="-1"></a>                  <span class="fu">dqsample.int</span>(m, n),</span>
+<span id="cb3-7"><a href="#cb3-7" tabindex="-1"></a>                  <span class="at">check =</span> <span class="cn">FALSE</span>)</span></code></pre></div>
+<table>
+<colgroup>
+<col width="47%" />
+<col width="11%" />
+<col width="12%" />
+<col width="14%" />
+<col width="14%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th align="left">expression</th>
+<th align="right">min</th>
+<th align="right">median</th>
+<th align="right">itr/sec</th>
+<th align="right">mem_alloc</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">sample.int(m, n)</td>
+<td align="right">1.19ms</td>
+<td align="right">1.94ms</td>
+<td align="right">433.0223</td>
+<td align="right">3.85MB</td>
+</tr>
+<tr class="even">
+<td align="left">sample.int(m, n, useHash = TRUE)</td>
+<td align="right">590.9µs</td>
+<td align="right">657.81µs</td>
+<td align="right">1427.8970</td>
+<td align="right">169.65KB</td>
+</tr>
+<tr class="odd">
+<td align="left">dqsample.int(m, n)</td>
+<td align="right">99.66µs</td>
+<td align="right">102.62µs</td>
+<td align="right">8678.4395</td>
+<td align="right">39.11KB</td>
+</tr>
+</tbody>
+</table>
+<p>As one decreases the sampling rate even more, dqrng switches to a
+hashset based rejection sampling. Both hashset based methods have
+similar performance and are much faster than R’s default method.</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a><span class="fu">library</span>(dqrng)</span>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a>m <span class="ot">&lt;-</span> <span class="fl">1e6</span></span>
+<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>n <span class="ot">&lt;-</span> <span class="fl">1e2</span></span>
+<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>bm <span class="ot">&lt;-</span> bench<span class="sc">::</span><span class="fu">mark</span>(<span class="fu">sample.int</span>(m, n),</span>
+<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a>                  <span class="fu">sample.int</span>(m, n, <span class="at">useHash =</span> <span class="cn">TRUE</span>),</span>
+<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a>                  <span class="fu">dqsample.int</span>(m, n),</span>
+<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a>                  <span class="at">check =</span> <span class="cn">FALSE</span>)</span></code></pre></div>
+<table style="width:100%;">
+<colgroup>
+<col width="45%" />
+<col width="12%" />
+<col width="12%" />
+<col width="16%" />
+<col width="13%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th align="left">expression</th>
+<th align="right">min</th>
+<th align="right">median</th>
+<th align="right">itr/sec</th>
+<th align="right">mem_alloc</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">sample.int(m, n)</td>
+<td align="right">478.87µs</td>
+<td align="right">692.85µs</td>
+<td align="right">799.9916</td>
+<td align="right">3.82MB</td>
+</tr>
+<tr class="even">
+<td align="left">sample.int(m, n, useHash = TRUE)</td>
+<td align="right">14.64µs</td>
+<td align="right">16.57µs</td>
+<td align="right">56302.7572</td>
+<td align="right">3.98KB</td>
+</tr>
+<tr class="odd">
+<td align="left">dqsample.int(m, n)</td>
+<td align="right">4.76µs</td>
+<td align="right">5.42µs</td>
+<td align="right">158618.5998</td>
+<td align="right">448B</td>
+</tr>
+</tbody>
+</table>
+<p>For larger sampling ranges R uses the hashset by default, though
+<code>dqsample.int</code> is still faster:</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a><span class="fu">library</span>(dqrng)</span>
+<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a>m <span class="ot">&lt;-</span> <span class="fl">1e10</span></span>
+<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a>n <span class="ot">&lt;-</span> <span class="fl">1e5</span></span>
+<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a>bm <span class="ot">&lt;-</span> bench<span class="sc">::</span><span class="fu">mark</span>(<span class="fu">sample.int</span>(m, n),</span>
+<span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a>                  <span class="fu">dqsample.int</span>(m, n),</span>
+<span id="cb5-6"><a href="#cb5-6" tabindex="-1"></a>                  <span class="at">check =</span> <span class="cn">FALSE</span>)</span></code></pre></div>
+<table>
+<thead>
+<tr class="header">
+<th align="left">expression</th>
+<th align="right">min</th>
+<th align="right">median</th>
+<th align="right">itr/sec</th>
+<th align="right">mem_alloc</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">sample.int(m, n)</td>
+<td align="right">12.45ms</td>
+<td align="right">16.43ms</td>
+<td align="right">58.97732</td>
+<td align="right">1.76MB</td>
+</tr>
+<tr class="even">
+<td align="left">dqsample.int(m, n)</td>
+<td align="right">1.98ms</td>
+<td align="right">3.04ms</td>
+<td align="right">302.74952</td>
+<td align="right">781.3KB</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div id="technicalities" class="section level2">
+<h2>Technicalities</h2>
+<p>The following methods are used for sampling without replacement. The
+algorithms are presented in R-like pseudo code, even though the real
+implementation is in C++. For sampling rates above 50%, a partial <a href="https://en.wikipedia.org/wiki/Fisher%E2%80%93Yates_shuffle">Fisher-Yates
+shuffle</a> is used:</p>
+<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a>no_replace_shuffle <span class="ot">&lt;-</span> <span class="cf">function</span>(m, n) {</span>
+<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a>  tmp <span class="ot">&lt;-</span> <span class="fu">seq_len</span>(m)</span>
+<span id="cb6-3"><a href="#cb6-3" tabindex="-1"></a>  <span class="cf">for</span> (i <span class="cf">in</span> <span class="fu">seq_len</span>(n))</span>
+<span id="cb6-4"><a href="#cb6-4" tabindex="-1"></a>    <span class="fu">swap</span>(tmp[i], tmp[i <span class="sc">+</span> <span class="fu">random_int</span>(m<span class="sc">-</span>i)])</span>
+<span id="cb6-5"><a href="#cb6-5" tabindex="-1"></a>  tmp[<span class="dv">1</span><span class="sc">:</span>n]</span>
+<span id="cb6-6"><a href="#cb6-6" tabindex="-1"></a>}</span></code></pre></div>
+<p>where <code>random_int(m-i)</code> returns a random integer in
+<code>[0, m-i]</code>. Since the full population is kept in memory, this
+method is only suitable for high selection rates. One could expect that
+<a href="https://en.wikipedia.org/wiki/Reservoir_sampling">reservoir
+sampling</a> should work well for lower selection rates. However, in my
+tests set based algorithms were faster:</p>
+<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a>no_replace_set <span class="ot">&lt;-</span> <span class="cf">function</span>(m, n) {</span>
+<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a>  result <span class="ot">&lt;-</span> <span class="fu">vector</span>(<span class="at">mode =</span> <span class="st">&quot;...&quot;</span>, <span class="at">length =</span> n) <span class="co"># integer or numeric</span></span>
+<span id="cb7-3"><a href="#cb7-3" tabindex="-1"></a>  elems <span class="ot">&lt;-</span> <span class="fu">new</span>(set, m, n) <span class="co"># set object for storing n objects out of m possible values</span></span>
+<span id="cb7-4"><a href="#cb7-4" tabindex="-1"></a>  <span class="cf">for</span> (i <span class="cf">in</span> <span class="fu">seq_len</span>(n))</span>
+<span id="cb7-5"><a href="#cb7-5" tabindex="-1"></a>    <span class="cf">while</span> (<span class="cn">TRUE</span>) {</span>
+<span id="cb7-6"><a href="#cb7-6" tabindex="-1"></a>      v <span class="ot">=</span> <span class="fu">random_int</span>(m)</span>
+<span id="cb7-7"><a href="#cb7-7" tabindex="-1"></a>      <span class="cf">if</span> (<span class="fu">elems.insert</span>(v)) {</span>
+<span id="cb7-8"><a href="#cb7-8" tabindex="-1"></a>        result[i] <span class="ot">=</span> v</span>
+<span id="cb7-9"><a href="#cb7-9" tabindex="-1"></a>        <span class="cf">break</span></span>
+<span id="cb7-10"><a href="#cb7-10" tabindex="-1"></a>      }</span>
+<span id="cb7-11"><a href="#cb7-11" tabindex="-1"></a>    }</span>
+<span id="cb7-12"><a href="#cb7-12" tabindex="-1"></a>  result</span>
+<span id="cb7-13"><a href="#cb7-13" tabindex="-1"></a>}</span></code></pre></div>
+<p>Here <code>elems.insert(v)</code> returns <code>TRUE</code> if the
+insert was successful, i.e. <code>v</code> was not in <code>elems</code>
+before, and <code>FALSE</code> otherwise. There are different strategies
+for implementing such a set. For intermediate sampling rates (currently
+between 0.1% and 50%) dqrng uses a bitset, i.e. a vector of
+<code>m</code> bits each representing one of the possible values. For
+lower sampling rates the memory usage of this algorithm is to expensive,
+which is why a hashset<a href="#fn1" class="footnote-ref" id="fnref1"><sup>1</sup></a> is used, since there the used memory scales
+with <code>n</code> and not with <code>m</code>. One could expect that
+<a href="https://stackoverflow.com/a/2394292/8416610">Robert Floyd’s
+sampling algorithm</a> would be superior, but this was not the case in
+my tests, probably because it requires a final shuffling of the result
+to get a random <em>permutation</em> instead of a random
+<em>combination</em>.</p>
+</div>
+<div class="footnotes footnotes-end-of-document">
+<hr />
+<ol>
+<li id="fn1"><p>For the specialists: Open addressing with a power-of-two
+size between 1.5 and 3 times <code>n</code>, identity hash function for
+the stored integers and quadratic probing.<a href="#fnref1" class="footnote-back">↩︎</a></p></li>
+</ol>
+</div>
+
+
+
+<!-- code folding -->
+
+
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+  (function () {
+    var script = document.createElement("script");
+    script.type = "text/javascript";
+    script.src  = "https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML";
+    document.getElementsByTagName("head")[0].appendChild(script);
+  })();
+</script>
+
+</body>
+</html>

@@ -596,6 +596,32 @@ def _hide_umap_default_axes(ax: Axes) -> None:
             pass
 
 
+def _style_on_data_umap_labels(fig: Figure) -> None:
+    for ax in _iter_umap_data_axes(fig):
+        for text in list(getattr(ax, "texts", [])):
+            try:
+                label = str(text.get_text() or "").strip()
+            except Exception:
+                continue
+            if not label:
+                continue
+            text.set_fontweight("bold")
+            text.set_color("black")
+            text.set_bbox(
+                dict(
+                    boxstyle="round,pad=0.18",
+                    fc="white",
+                    ec="none",
+                    alpha=0.65,
+                )
+            )
+            text.set_zorder(10)
+        try:
+            ax.figure.canvas.draw_idle()
+        except Exception:
+            pass
+
+
 def _select_top_genes(
     df: pd.DataFrame,
     *,
@@ -1931,6 +1957,8 @@ def umap_features_grid(
     artifact_figdir: Path | None = None,
     savefig_kwargs: dict | None = None,
 ) -> plot_utils.PlotArtifact:
+    umap_style = plot_utils._scanpy_umap_style_kwargs(adata)
+    point_size = float(size) if size is not None else float(umap_style["size"])
 
     genes = [str(g) for g in genes if g is not None and str(g) != ""]
     if not genes:
@@ -1957,7 +1985,9 @@ def umap_features_grid(
         cmap=cmap,
         vmin=vmin,
         vmax=vmax,
-        size=size,
+        size=point_size,
+        alpha=float(umap_style["alpha"]),
+        edges=False,
         show=False,
     )
     fig = _get_fig_from_scanpy_return(ret)
@@ -2082,6 +2112,8 @@ def umap_single(
         raise KeyError(
             "No default ident-like key found in adata.obs; pass `color=...` explicitly."
         )
+    umap_style = plot_utils._scanpy_umap_style_kwargs(adata)
+    point_size = float(size) if size is not None else float(umap_style["size"])
 
     ret = sc.pl.umap(
         adata,
@@ -2092,7 +2124,9 @@ def umap_single(
         cmap=cmap,
         vmin=vmin,
         vmax=vmax,
-        size=size,
+        size=point_size,
+        alpha=float(umap_style["alpha"]),
+        edges=False,
         legend_loc=legend_loc,
         title=title,
         show=False,
@@ -2106,6 +2140,11 @@ def umap_single(
                     coll.set_rasterized(True)
             except Exception:
                 pass
+    if str(legend_loc).strip().lower() == "on data":
+        try:
+            _style_on_data_umap_labels(fig)
+        except Exception:
+            pass
     if bool(show_umap_corner_axes):
         try:
             data_axes = _iter_umap_data_axes(fig)
