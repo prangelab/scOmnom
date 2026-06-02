@@ -1,4 +1,0 @@
-exportPattern("^[Hh]nsw")
-import(Rcpp)
-import(methods)
-useDynLib(RcppHNSW, .registration = TRUE)

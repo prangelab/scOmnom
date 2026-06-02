@@ -19,3 +19,6 @@ dist/
 
 # Local private design notes
 DESIGNGOALS.md
+
+# Local R runtime libraries
+.r-libs/

@@ -1488,6 +1488,7 @@ def test_run_liana_ccc_cross_tissue_secreted_filter(monkeypatch, tmp_path: Path)
 def test_run_nichenet_ccc_cross_tissue_sender_focused(
     monkeypatch, tmp_path: Path, input_mode: str, expect_layer: str
 ) -> None:
+    project_r_lib = tmp_path / "Library" / "Caches" / "scOmnom" / "r-libs" / "nichenet"
     adata = ad.AnnData(X=np.ones((8, 4)))
     adata.var_names = ["BMP2", "TGFB1", "COL1A1", "SOX9"]
     adata.layers["counts_cb"] = adata.X.copy()
@@ -1520,7 +1521,7 @@ def test_run_nichenet_ccc_cross_tissue_sender_focused(
     monkeypatch.setattr(md_mod.io_utils, "load_dataset", lambda path: adata)
     saved: list[tuple[str, str]] = []
     monkeypatch.setattr(md_mod.io_utils, "save_dataset", lambda a, p, fmt: saved.append((str(p), str(fmt))))
-    monkeypatch.setattr(md_mod, "_ensure_nichenet_r_runtime", lambda install_missing: tmp_path / ".r-libs" / "nichenet")
+    monkeypatch.setattr(md_mod, "_ensure_nichenet_r_runtime", lambda install_missing: project_r_lib)
     captured_layers: list[tuple[Optional[str], bool]] = []
 
     def _fake_compute_expressed_genes(adata_in, *, mask, layer, use_raw, min_fraction):
@@ -1609,7 +1610,7 @@ def test_run_nichenet_ccc_cross_tissue_sender_focused(
     assert set(runs[run_key]["ligand_activity"]["test_ligand"].astype(str)) == {"BMP2", "TGFB1"}
     assert runs[run_key]["cross_tissue_mode"] is True
     assert runs[run_key]["receiver_cluster_mode"] == "all"
-    assert str(runs[run_key]["project_r_lib"]) == str(tmp_path / ".r-libs" / "nichenet")
+    assert str(runs[run_key]["project_r_lib"]) == str(project_r_lib)
     assert list((tmp_path / "out" / "tables").glob("**/nichenet_ligand_activity.tsv"))
 
 

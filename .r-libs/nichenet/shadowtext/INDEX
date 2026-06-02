@@ -1,8 +1,0 @@
-GeomInteractiveShadowtext
-                        ggproto classes for ggiraph
-GeomShadowText          GeomShadowText
-element_shadowtext      element_shadowtext
-geom_shadowtext         geom_shadowtext
-geom_shadowtext_interactive
-                        Create interactive shadow text
-shadowtextGrob          shadowtextGrob
