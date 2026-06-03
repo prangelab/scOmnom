@@ -179,3 +179,10 @@ Packaging, environments, tests, and docs:
 - expanded CLI/config and analysis tests for the new CCC modes, log-normalized input paths, cross-tissue filtering, paired rescoring, candidate normalization, and plotting behavior
 - split the repository documentation into a concise root `README.md` and a full workflow manual at `docs/manual.md`
 - fixed the README filename casing so the package `readme = "README.md"` path resolves on case-sensitive systems
+
+## 0.8.2 [03-06-2026]
+Cluster-and-annotate CellTypist model selection fix:
+- normalized `--celltypist-model None` and related null-like values so CellTypist can be cleanly disabled from the CLI
+- made cached CellTypist reuse model-aware, so stored predictions are only reused when they were generated with the same requested model
+- added model metadata to stored CellTypist outputs and recompute-on-mismatch behavior to prevent stale immune-model predictions from leaking into later clustering runs
+- added focused CLI/runtime tests covering disabled CellTypist mode and recomputation when the requested model changes

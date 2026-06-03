@@ -40,9 +40,14 @@ def get_celltypist_outputs(
         except Exception:
             proba = None
 
+    stored_meta = adata.uns.get("celltypist_meta", {})
+    if not isinstance(stored_meta, dict):
+        stored_meta = {}
+
     meta = {
         "labels_ok": labels is not None,
         "proba_ok": proba is not None,
+        "model_name": stored_meta.get("model_name", None),
     }
     return labels, proba, meta
 
@@ -53,6 +58,7 @@ def store_celltypist_outputs(
     labels: Optional[np.ndarray],
     proba: Optional[pd.DataFrame],
     *,
+    model_name: Optional[str] = None,
     proba_key: str = "celltypist_proba",
     proba_cols_key: str = "celltypist_proba_columns",
 ) -> None:
@@ -67,6 +73,10 @@ def store_celltypist_outputs(
         adata.obsm[proba_key] = pm.to_numpy()
         adata.uns[proba_cols_key] = list(pm.columns.astype(str))
 
+    adata.uns["celltypist_meta"] = {
+        "model_name": (None if model_name is None else str(model_name)),
+    }
+
 
 def ensure_celltypist(
     adata: ad.AnnData,
@@ -78,14 +88,36 @@ def ensure_celltypist(
     label_key = str(getattr(cfg, "celltypist_label_key", "celltypist_label"))
     proba_key = "celltypist_proba"
     proba_cols_key = "celltypist_proba_columns"
+    requested_model = getattr(cfg, "celltypist_model", None)
+
+    meta = {"reused": False, "requested_model": requested_model}
+
+    if requested_model is None:
+        LOGGER.info("No CellTypist model provided; skipping CellTypist.")
+        return None, None, meta
 
     if reuse:
         labels, proba, meta = get_celltypist_outputs(adata, label_key)
+        meta["reused"] = False
+        meta["requested_model"] = requested_model
+        stored_model = meta.get("model_name", None)
         # Reuse only when labels and a valid probability matrix are both present.
         # Otherwise recompute to avoid stale/inconsistent mask inputs on subsetted objects.
         if labels is not None and proba is not None:
-            meta["reused"] = True
-            return labels, proba, meta
+            if stored_model == requested_model:
+                meta["reused"] = True
+                return labels, proba, meta
+            if stored_model is None:
+                LOGGER.info(
+                    "CellTypist cached outputs found but lack model metadata; recomputing for requested model %r.",
+                    requested_model,
+                )
+            else:
+                LOGGER.info(
+                    "CellTypist cached outputs were generated with model %r, but %r was requested; recomputing.",
+                    stored_model,
+                    requested_model,
+                )
         if labels is not None or proba is not None:
             LOGGER.info(
                 "CellTypist reuse payload incomplete/invalid (labels_ok=%s, proba_ok=%s); recomputing.",
@@ -103,12 +135,11 @@ def ensure_celltypist(
                     del adata.uns[proba_cols_key]
             except Exception:
                 pass
-
-    meta = {"reused": False}
-
-    if getattr(cfg, "celltypist_model", None) is None:
-        LOGGER.info("No CellTypist model provided; skipping CellTypist.")
-        return None, None, meta
+            try:
+                if "celltypist_meta" in adata.uns:
+                    del adata.uns["celltypist_meta"]
+            except Exception:
+                pass
 
     try:
         LOGGER.info("Running CellTypist precompute (predictions + probabilities).")
@@ -146,7 +177,7 @@ def ensure_celltypist(
             adata_ct.obs_names = adata.obs_names.copy()
             adata_ct.var_names = adata.var_names.copy()
 
-        model_path = get_celltypist_model(cfg.celltypist_model)
+        model_path = get_celltypist_model(requested_model)
 
         from celltypist.models import Model
         import celltypist
@@ -180,7 +211,7 @@ def ensure_celltypist(
         if not isinstance(prob_matrix, pd.DataFrame) or prob_matrix.empty:
             LOGGER.warning("CellTypist returned no/empty probability_matrix; returning labels only.")
             if store:
-                store_celltypist_outputs(adata, label_key, labels, None)
+                store_celltypist_outputs(adata, label_key, labels, None, model_name=requested_model)
             return labels, None, meta
 
         try:
@@ -196,7 +227,7 @@ def ensure_celltypist(
         )
 
         if store:
-            store_celltypist_outputs(adata, label_key, labels, prob_matrix)
+            store_celltypist_outputs(adata, label_key, labels, prob_matrix, model_name=requested_model)
 
         return labels, prob_matrix, meta
 

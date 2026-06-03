@@ -188,8 +188,9 @@ def test_cluster_dispatch(mock_run):
         app,
         [
             "cluster-and-annotate",
-            "--input", "integrated.h5ad",
-            "--out", "out.h5ad",
+            "--input-path", "integrated.h5ad",
+            "--output-dir", "outdir",
+            "--output-name", "adata.clustered.annotated.test",
             "--res-min", "0.2",
             "--res-max", "1.2",
         ]
@@ -198,7 +199,8 @@ def test_cluster_dispatch(mock_run):
     mock_run.assert_called_once()
     cfg = mock_run.call_args[0][0]
     assert cfg.input_path == "integrated.h5ad"
-    assert cfg.output_path == "out.h5ad"
+    assert cfg.output_dir == "outdir"
+    assert cfg.output_name == "adata.clustered.annotated.test"
     assert cfg.res_min == 0.2
     assert cfg.res_max == 1.2
 
@@ -209,13 +211,28 @@ def test_cluster_dispatch_force_celltypist_recompute(mock_run):
         app,
         [
             "cluster-and-annotate",
-            "--input", "integrated.h5ad",
+            "--input-path", "integrated.h5ad",
             "--force-celltypist-recompute",
         ]
     )
     assert result.exit_code == 0
     cfg = mock_run.call_args[0][0]
     assert cfg.force_celltypist_recompute is True
+
+
+@patch("scomnom.cli.run_clustering")
+def test_cluster_dispatch_celltypist_model_none_string_disables(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "cluster-and-annotate",
+            "--input-path", "integrated.h5ad",
+            "--celltypist-model", "None",
+        ]
+    )
+    assert result.exit_code == 0
+    cfg = mock_run.call_args[0][0]
+    assert cfg.celltypist_model is None
 
 
 # ---------------------------------------------------------

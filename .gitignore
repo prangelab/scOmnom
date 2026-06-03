@@ -20,5 +20,8 @@ dist/
 # Local private design notes
 DESIGNGOALS.md
 
+# Local manuscript drafting workspace
+MANUSCRIPT/
+
 # Local R runtime libraries
 .r-libs/

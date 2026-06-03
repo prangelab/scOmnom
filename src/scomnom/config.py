@@ -8,6 +8,19 @@ from matplotlib.figure import Figure
 import multiprocessing
 
 
+def _normalize_optional_model_name(value: object) -> object:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw == "":
+            return None
+        if raw.lower() in {"none", "null", "na", "n/a"}:
+            return None
+        return raw
+    return value
+
+
 class LoadAndFilterConfig(BaseModel):
 
     # ---- Input ----
@@ -246,6 +259,11 @@ class IntegrateConfig(BaseModel):
         if v is None:
             return None
         return [m.lower() for m in v]
+
+    @field_validator("celltypist_model", mode="before")
+    @classmethod
+    def normalize_celltypist_model(cls, v):
+        return _normalize_optional_model_name(v)
 
     @field_validator("scanvi_label_source")
     @classmethod
@@ -593,6 +611,11 @@ class ClusterAnnotateConfig(BaseModel):
                 )
             out.append(fmt_l)
         return out
+
+    @field_validator("celltypist_model", mode="before")
+    @classmethod
+    def normalize_celltypist_model(cls, v):
+        return _normalize_optional_model_name(v)
 
     @field_validator("decoupler_pseudobulk_agg")
     @classmethod
