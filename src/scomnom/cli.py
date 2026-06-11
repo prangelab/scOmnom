@@ -737,7 +737,7 @@ def adata_ops_rename(
         None,
         "--output-dir",
         "-o",
-        help="[I/O] Output directory (default: input parent).",
+        help="[I/O] Output directory (default: sibling results/ directory, or input parent if already inside results/).",
     ),
     output_name: Optional[str] = typer.Option(
         None,
@@ -1020,7 +1020,7 @@ def adata_ops_metadata_import(
     output_format: Optional[Literal["zarr", "h5ad"]] = typer.Option(
         None,
         "--output-format",
-        help="[I/O] Output format for updated dataset. Default: match input when possible.",
+        help="[I/O] Output format for updated dataset. Default: .h5ad for .h5ad inputs, otherwise compressed .zarr.tar.zst.",
     ),
 ):
     out_dir = output_dir or input_path.parent

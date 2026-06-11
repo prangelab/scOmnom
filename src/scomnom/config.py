@@ -311,7 +311,12 @@ class AdataOpsConfig(BaseModel):
 
     @property
     def resolved_output_dir(self) -> Path:
-        return (self.output_dir or self.input_path.parent).resolve()
+        if self.output_dir is not None:
+            return self.output_dir.resolve()
+        base = self.input_path.parent
+        if self.operation == "metadata_import" and base.name != "results":
+            return (base / "results").resolve()
+        return base.resolve()
 
 
 # ---------------------------------------------------------------------

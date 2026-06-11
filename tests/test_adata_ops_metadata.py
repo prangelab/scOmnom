@@ -93,8 +93,8 @@ def test_import_dataset_obs_metadata_saves_output(tmp_path: Path, monkeypatch) -
 
     saved: list[tuple[str, str]] = []
 
-    def _fake_save_dataset(in_adata, out_path, fmt="zarr"):
-        saved.append((str(out_path), str(fmt)))
+    def _fake_save_dataset(in_adata, out_path, fmt="zarr", archive=True):
+        saved.append((str(out_path), str(fmt), bool(archive)))
 
     internal_ops = importlib.import_module("scomnom.adata_ops")
     monkeypatch.setattr(internal_ops, "save_dataset", _fake_save_dataset)
@@ -103,17 +103,29 @@ def test_import_dataset_obs_metadata_saves_output(tmp_path: Path, monkeypatch) -
         adata,
         metadata_path,
         output_root=tmp_path / "results",
-        output_format="zarr",
         metadata_key="sample_id",
         obs_key="sample_id",
         columns=("condition",),
     )
 
-    assert out_paths["metadata_imported"] == tmp_path / "results" / "metadata" / "adata.metadata_imported.zarr"
-    assert saved == [(str(tmp_path / "results" / "metadata" / "adata.metadata_imported.zarr"), "zarr")]
+    assert out_paths["metadata_imported"] == tmp_path / "results" / "adata.metadata_imported.zarr.tar.zst"
+    assert saved == [(str(tmp_path / "results" / "adata.metadata_imported.zarr.tar.zst"), "zarr", True)]
     assert (tmp_path / "results" / "tables" / "adata.metadata_imported__metadata_import_summary.tsv").exists()
     assert summary.loc[0, "imported_columns"] == "condition"
     assert "condition" in adata.obs
+
+
+def test_import_dataset_obs_metadata_infers_results_output_dir_for_metadata_import() -> None:
+    from scomnom.config import AdataOpsConfig
+
+    cfg = AdataOpsConfig(
+        input_path=Path("/tmp/project/adata.clustered.annotated.zarr.tar.zst"),
+        operation="metadata_import",
+        metadata_file=Path("/tmp/project/meta.tsv"),
+        metadata_key="sample_id",
+    )
+
+    assert cfg.resolved_output_dir == Path("/tmp/project/results").resolve()
 
 
 def test_public_api_add_obs_metadata_wrapper_updates_alias() -> None:

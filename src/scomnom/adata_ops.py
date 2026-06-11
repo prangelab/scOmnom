@@ -1385,11 +1385,13 @@ def import_dataset_obs_metadata(
     columns: tuple[str, ...] | list[str] = (),
 ) -> tuple[dict[str, Path], pd.DataFrame]:
     source_path: Path | None = None
+    source_name = ""
     if isinstance(adata_or_path, ad.AnnData):
         adata = adata_or_path
         dataset_stem = "adata"
     else:
         source_path = Path(adata_or_path)
+        source_name = source_path.name.lower()
         adata = load_dataset(source_path)
         dataset_stem = _dataset_stem_for_outputs(source_path)
 
@@ -1405,7 +1407,7 @@ def import_dataset_obs_metadata(
 
     fmt = str(output_format).lower().strip() if output_format else None
     if fmt is None:
-        if source_path is not None and source_path.suffix.lower() == ".h5ad":
+        if source_name.endswith(".h5ad"):
             fmt = "h5ad"
         else:
             fmt = "zarr"
@@ -1413,14 +1415,18 @@ def import_dataset_obs_metadata(
         raise ValueError("output_format must be 'zarr' or 'h5ad'.")
 
     output_root = Path(output_root)
-    out_dataset_dir = output_root / "metadata"
+    out_dataset_dir = output_root
     out_tables_dir = output_root / "tables"
     out_dataset_dir.mkdir(parents=True, exist_ok=True)
     out_tables_dir.mkdir(parents=True, exist_ok=True)
 
     stem = str(output_name).strip() if output_name else f"{dataset_stem}.metadata_imported"
-    out_path = out_dataset_dir / f"{stem}.{fmt}"
-    save_dataset(adata, out_path, fmt=fmt)
+    if fmt == "h5ad":
+        out_path = out_dataset_dir / f"{stem}.h5ad"
+        save_dataset(adata, out_path, fmt=fmt, archive=False)
+    else:
+        out_path = out_dataset_dir / f"{stem}.zarr.tar.zst"
+        save_dataset(adata, out_path, fmt=fmt, archive=True)
 
     summary_path = out_tables_dir / f"{stem}__metadata_import_summary.tsv"
     summary.to_csv(summary_path, sep="\t", index=False)
