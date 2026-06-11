@@ -153,7 +153,7 @@ def test_plateau_spans():
 # ---------------------------------------------------------------------
 # QC wrappers
 # ---------------------------------------------------------------------
-def test_umap_by(tmp_path, reset_root_figdir, mock_scanpy_plots, mock_save_multi):
+def test_umap_by(tmp_path, reset_root_figdir, monkeypatch):
     figdir = tmp_path / "figs"
     pu.setup_scanpy_figs(figdir)
 
@@ -161,9 +161,20 @@ def test_umap_by(tmp_path, reset_root_figdir, mock_scanpy_plots, mock_save_multi
     adata.obsm["X_umap"] = np.random.randn(adata.n_obs, 2)
     adata.obs["group"] = "A"
 
+    calls = []
+
+    def _fake_umap(*args, **kwargs):
+        calls.append(dict(kwargs))
+        ax = kwargs["ax"]
+        ax.scatter([0.0], [0.0], s=4.0)
+        return None
+
+    monkeypatch.setattr(pu.sc.pl, "umap", _fake_umap, raising=False)
+
     pu.umap_by(adata, keys="group", figdir=figdir, stem="my_umap")
 
-    assert ("my_umap", figdir) in mock_save_multi
+    assert len(calls) == 1
+    assert "rasterized" not in calls[0]
 
 
 def test_plot_elbow_knee(tmp_path, reset_root_figdir, mock_save_multi):

@@ -1759,6 +1759,7 @@ def umap_by(adata, keys, figdir: Path | None = None, stem: str | None = None):
         figdir = ROOT_FIGDIR
 
     umap_style = _scanpy_umap_style_kwargs(adata)
+    rasterized = bool(umap_style.pop("rasterized", False))
 
     # Plot each key separately so we can size per-legend and save cleanly.
     for key in keys:
@@ -1796,6 +1797,12 @@ def umap_by(adata, keys, figdir: Path | None = None, stem: str | None = None):
             legend_fontsize=(10 if is_cat else None),
             **umap_style,
         )
+        if rasterized:
+            for coll in ax.collections:
+                try:
+                    coll.set_rasterized(True)
+                except Exception:
+                    pass
 
         if is_cat and n_cats > 0:
             _tune_umap_legend(fig, n_cats)
