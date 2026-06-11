@@ -1,4 +1,5 @@
 import pytest
+from pathlib import Path
 from typer.testing import CliRunner
 from unittest.mock import patch, MagicMock
 
@@ -399,6 +400,7 @@ def test_markers_default_output_name_includes_round_id(mock_run):
     mock_run.assert_called_once()
     cfg = mock_run.call_args[0][0]
     assert cfg.output_name == "adata.markers_r4_subset_annotation"
+    assert cfg.output_dir == Path("results")
 
 
 @patch("scomnom.cli.run_within_cluster")
@@ -417,6 +419,24 @@ def test_de_default_output_name_includes_round_id(mock_run):
     mock_run.assert_called_once()
     cfg = mock_run.call_args[0][0]
     assert cfg.output_name == "adata.de_r5_archetypes"
+    assert cfg.output_dir == Path("results")
+
+
+@patch("scomnom.cli.run_within_cluster")
+def test_de_default_output_dir_uses_input_results_parent(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "markers-and-de",
+            "de",
+            "--input-path", "results/adata.zarr.tar.zst",
+            "--condition-keys", "timepoint",
+        ],
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.output_dir == Path("results")
 
 
 @patch("scomnom.cli.run_composition")

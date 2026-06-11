@@ -1560,6 +1560,13 @@ def _parse_csv_repeat(items: Optional[List[str]]) -> List[str]:
     return uniq
 
 
+def _default_results_dir_for_input(input_path: Path) -> Path:
+    parent = input_path.parent
+    if parent.name == "results":
+        return parent
+    return parent / "results"
+
+
 markers_and_de_app = typer.Typer(
     help="Discovery markers + DE (cluster-vs-rest and within-cluster contrasts).",
     invoke_without_command=True,
@@ -1672,7 +1679,7 @@ def _build_cfg(
     plot_sample_annotation_keys: Optional[List[str]],
     regenerate_figures: bool,
 ) -> MarkersAndDEConfig:
-    out_dir = output_dir or input_path.parent
+    out_dir = output_dir or _default_results_dir_for_input(input_path)
     log_dir = out_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "markers-and-de.log"
@@ -3128,7 +3135,12 @@ def ccc_nichenet(
 )
 def cluster_vs_rest(
     input_path: Path = typer.Option(..., "--input-path", "-i"),
-    output_dir: Optional[Path] = typer.Option(None, "--output-dir", "-o"),
+    output_dir: Optional[Path] = typer.Option(
+        None,
+        "--output-dir",
+        "-o",
+        help="[I/O] Output directory (default: sibling results/ directory, or input parent if already inside results/).",
+    ),
     output_name: Optional[str] = typer.Option(None, "--output-name"),
     save_h5ad: bool = typer.Option(False, "--save-h5ad/--no-save-h5ad"),
     n_jobs: int = typer.Option(1, "--n-jobs"),
@@ -3744,7 +3756,12 @@ def composition(
 )
 def within_cluster(
     input_path: Path = typer.Option(..., "--input-path", "-i"),
-    output_dir: Optional[Path] = typer.Option(None, "--output-dir", "-o"),
+    output_dir: Optional[Path] = typer.Option(
+        None,
+        "--output-dir",
+        "-o",
+        help="[I/O] Output directory (default: sibling results/ directory, or input parent if already inside results/).",
+    ),
     output_name: Optional[str] = typer.Option(None, "--output-name"),
     save_h5ad: bool = typer.Option(False, "--save-h5ad/--no-save-h5ad"),
     n_jobs: int = typer.Option(1, "--n-jobs"),

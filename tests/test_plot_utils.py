@@ -175,6 +175,7 @@ def test_umap_by(tmp_path, reset_root_figdir, monkeypatch):
 
     assert len(calls) == 1
     assert "rasterized" not in calls[0]
+    assert "edgecolors" not in calls[0]
 
 
 def test_plot_elbow_knee(tmp_path, reset_root_figdir, mock_save_multi):
@@ -519,7 +520,36 @@ def test_plot_cluster_umaps(tmp_path, reset_root_figdir, mock_scanpy_plots, mock
     assert f"cluster_umap_batch_and_cluster" in stems
 
 
-def test_umap_by_two_legend_styles_passes_visible_marker_defaults(tmp_path, reset_root_figdir, monkeypatch):
+def test_plot_cluster_umaps_does_not_forward_conflicting_scanpy_style_kwargs(tmp_path, reset_root_figdir, monkeypatch):
+    figdir = tmp_path / "figs"
+    pu.setup_scanpy_figs(figdir)
+
+    adata = synthetic_adata()
+    adata.obsm["X_umap"] = np.random.randn(adata.n_obs, 2)
+    adata.obs["cluster"] = ["0"] * adata.n_obs
+    adata.obs["batch"] = ["A"] * adata.n_obs
+
+    calls = []
+
+    def _fake_umap(*args, **kwargs):
+        calls.append(dict(kwargs))
+        fig = plt.figure()
+        ax = fig.add_subplot(111)
+        ax.scatter([0.0], [0.0], s=4.0)
+        return fig
+
+    monkeypatch.setattr(pu.sc.pl, "umap", _fake_umap, raising=False)
+
+    pu.plot_cluster_umaps(adata, label_key="cluster", batch_key="batch", figdir=figdir)
+
+    assert len(calls) == 3
+    for kwargs in calls:
+        assert "rasterized" not in kwargs
+        assert "edgecolors" not in kwargs
+        assert "linewidths" not in kwargs
+
+
+def test_umap_by_two_legend_styles_does_not_forward_conflicting_scanpy_style_kwargs(tmp_path, reset_root_figdir, monkeypatch):
     figdir = tmp_path / "figs"
     pu.setup_scanpy_figs(figdir)
 
@@ -547,9 +577,9 @@ def test_umap_by_two_legend_styles_passes_visible_marker_defaults(tmp_path, rese
     for kwargs in calls:
         assert kwargs["alpha"] == pytest.approx(0.94)
         assert 5.0 <= float(kwargs["size"]) <= 16.0
-        assert kwargs["edgecolors"] == "none"
-        assert kwargs["linewidths"] == pytest.approx(0.0)
-        assert kwargs["rasterized"] is True
+        assert "edgecolors" not in kwargs
+        assert "linewidths" not in kwargs
+        assert "rasterized" not in kwargs
 
 
 def test_plot_de_umap_single_uses_shared_umap_style_defaults(monkeypatch):

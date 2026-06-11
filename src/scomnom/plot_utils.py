@@ -1253,6 +1253,46 @@ def _scanpy_umap_style_kwargs(adata: ad.AnnData) -> dict[str, float]:
     }
 
 
+def _split_scanpy_umap_style_kwargs(
+    adata: ad.AnnData,
+) -> tuple[dict[str, float], dict[str, object]]:
+    scanpy_kwargs = dict(_scanpy_umap_style_kwargs(adata))
+    post_kwargs = {
+        "rasterized": bool(scanpy_kwargs.pop("rasterized", False)),
+        "edgecolors": scanpy_kwargs.pop("edgecolors", None),
+        "linewidths": scanpy_kwargs.pop("linewidths", None),
+    }
+    return scanpy_kwargs, post_kwargs
+
+
+def _apply_umap_collection_style(fig_or_ax, *, rasterized: bool, edgecolors, linewidths) -> None:
+    axes: list = []
+    if hasattr(fig_or_ax, "collections"):
+        axes = [fig_or_ax]
+    elif hasattr(fig_or_ax, "get_axes"):
+        try:
+            axes = list(fig_or_ax.get_axes())
+        except Exception:
+            axes = []
+    for ax in axes:
+        for coll in getattr(ax, "collections", []):
+            if rasterized:
+                try:
+                    coll.set_rasterized(True)
+                except Exception:
+                    pass
+            if edgecolors is not None:
+                try:
+                    coll.set_edgecolor(edgecolors)
+                except Exception:
+                    pass
+            if linewidths is not None:
+                try:
+                    coll.set_linewidth(linewidths)
+                except Exception:
+                    pass
+
+
 # -------------------------------------------------------------------------
 # Internal helpers
 # -------------------------------------------------------------------------
@@ -1758,8 +1798,7 @@ def umap_by(adata, keys, figdir: Path | None = None, stem: str | None = None):
     if figdir is None:
         figdir = ROOT_FIGDIR
 
-    umap_style = _scanpy_umap_style_kwargs(adata)
-    rasterized = bool(umap_style.pop("rasterized", False))
+    umap_style, umap_post_style = _split_scanpy_umap_style_kwargs(adata)
 
     # Plot each key separately so we can size per-legend and save cleanly.
     for key in keys:
@@ -1797,12 +1836,7 @@ def umap_by(adata, keys, figdir: Path | None = None, stem: str | None = None):
             legend_fontsize=(10 if is_cat else None),
             **umap_style,
         )
-        if rasterized:
-            for coll in ax.collections:
-                try:
-                    coll.set_rasterized(True)
-                except Exception:
-                    pass
+        _apply_umap_collection_style(ax, **umap_post_style)
 
         if is_cat and n_cats > 0:
             _tune_umap_legend(fig, n_cats)
@@ -2709,7 +2743,7 @@ def umap_plots(
     from pathlib import Path
 
     figdir = Path(figdir)
-    umap_style = _scanpy_umap_style_kwargs(adata)
+    umap_style, umap_post_style = _split_scanpy_umap_style_kwargs(adata)
 
     if "X_umap" not in adata.obsm:
         LOGGER.warning("Skipping UMAP plots: X_umap not found.")
@@ -2725,6 +2759,7 @@ def umap_plots(
             legend_loc="right margin",   # <- consistent, outside axes
             **umap_style,
         )
+        _apply_umap_collection_style(fig, **umap_post_style)
         save_umap_multi("umap_batch", figdir, fig, right=0.78)
     else:
         LOGGER.warning("Batch key '%s' not found in adata.obs", batch_key)
@@ -2739,6 +2774,7 @@ def umap_plots(
             legend_loc="right margin",   # <- NOT "on data" (avoids messy labels)
             **umap_style,
         )
+        _apply_umap_collection_style(fig, **umap_post_style)
         save_umap_multi(f"umap_{cluster_key}", figdir, fig, right=0.78)
     else:
         LOGGER.warning("Cluster key '%s' not found in adata.obs", cluster_key)
@@ -2790,7 +2826,7 @@ def umap_by_two_legend_styles(
         extra_w += min((n_cats - 9) * 0.18, 3.0)
     full_w = base_w + extra_w
     full_right = 0.64 if extra_w > 0.0 else 0.78
-    umap_style = _scanpy_umap_style_kwargs(adata)
+    umap_style, umap_post_style = _split_scanpy_umap_style_kwargs(adata)
 
     def _extract_cnn(x: str) -> str:
         s = str(x or "")
@@ -2844,6 +2880,7 @@ def umap_by_two_legend_styles(
         ax=ax_full,
         **umap_style,
     )
+    _apply_umap_collection_style(ax_full, **umap_post_style)
     save_umap_multi(f"{stem}__fulllegend", figdir=base, fig=fig_full, right=full_right)
 
     # 2) no legend
@@ -2857,6 +2894,7 @@ def umap_by_two_legend_styles(
         ax=ax_nolegend,
         **umap_style,
     )
+    _apply_umap_collection_style(ax_nolegend, **umap_post_style)
     save_umap_multi(f"{stem}__nolegend", figdir=base, fig=fig_nolegend)
 
     # 3) short legend (no legend; Cnn on clusters)
@@ -2870,6 +2908,7 @@ def umap_by_two_legend_styles(
         ax=ax_short,
         **umap_style,
     )
+    _apply_umap_collection_style(ax_short, **umap_post_style)
     _annotate_cnn(ax_short)
     save_umap_multi(f"{stem}__shortlegend", figdir=base, fig=fig_short)
 
@@ -3147,7 +3186,7 @@ def plot_cluster_umaps(
     _sanitize_uns_colors(adata, label_key)
     if batch_key is not None and batch_key in adata.obs:
         _sanitize_uns_colors(adata, batch_key)
-    umap_style = _scanpy_umap_style_kwargs(adata)
+    umap_style, umap_post_style = _split_scanpy_umap_style_kwargs(adata)
 
     fig = sc.pl.umap(
         adata,
@@ -3157,6 +3196,7 @@ def plot_cluster_umaps(
         legend_loc="right margin",
         **umap_style,
     )
+    _apply_umap_collection_style(fig, **umap_post_style)
     save_umap_multi(f"cluster_umap_{label_key}", figdir, fig, right=0.78)
 
     if batch_key in adata.obs:
@@ -3168,6 +3208,7 @@ def plot_cluster_umaps(
             legend_loc="right margin",
             **umap_style,
         )
+        _apply_umap_collection_style(fig, **umap_post_style)
         save_umap_multi(f"cluster_umap_{batch_key}", figdir, fig, right=0.78)
 
         fig = sc.pl.umap(
@@ -3178,6 +3219,7 @@ def plot_cluster_umaps(
             legend_loc="right margin",
             **umap_style,
         )
+        _apply_umap_collection_style(fig, **umap_post_style)
         save_umap_multi(f"cluster_umap_{batch_key}_and_{label_key}", figdir, fig, right=0.78)
 
 
