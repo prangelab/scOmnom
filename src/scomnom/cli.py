@@ -1023,15 +1023,9 @@ def adata_ops_metadata_import(
         help="[I/O] Output format for updated dataset. Default: .h5ad for .h5ad inputs, otherwise compressed .zarr.tar.zst.",
     ),
 ):
-    out_dir = output_dir or input_path.parent
-    log_dir = out_dir / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    logfile = log_dir / "adata-ops.log"
-    init_logging(logfile)
-
     cfg = AdataOpsConfig(
         input_path=input_path,
-        output_dir=out_dir,
+        output_dir=output_dir,
         operation="metadata_import",
         output_name=output_name,
         output_format=output_format,
@@ -1039,8 +1033,13 @@ def adata_ops_metadata_import(
         metadata_key=metadata_key,
         obs_key=obs_key,
         metadata_columns=tuple(columns),
-        logfile=logfile,
     )
+
+    log_dir = cfg.resolved_output_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    logfile = log_dir / "adata-ops.log"
+    init_logging(logfile)
+    cfg.logfile = logfile
     run_adata_ops(cfg)
 
 

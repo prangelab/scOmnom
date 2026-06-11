@@ -380,6 +380,8 @@ def test_adata_ops_metadata_import_dispatch(mock_run):
     assert cfg.metadata_key == "sample_id"
     assert cfg.obs_key == "sample_id"
     assert cfg.metadata_columns == ("condition", "patient")
+    assert cfg.output_dir is None
+    assert str(cfg.resolved_output_dir).endswith("/results")
 
 
 @patch("scomnom.cli.run_cluster_vs_rest")
