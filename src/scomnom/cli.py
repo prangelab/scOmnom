@@ -1564,7 +1564,19 @@ def _default_results_dir_for_input(input_path: Path) -> Path:
     parent = input_path.parent
     if parent.name == "results":
         return parent
+    for ancestor in parent.parents:
+        if ancestor.name == "results":
+            return ancestor
     return parent / "results"
+
+
+def _default_results_dir_for_input_dir(input_dir: Path) -> Path:
+    if input_dir.name == "results":
+        return input_dir
+    for ancestor in input_dir.parents:
+        if ancestor.name == "results":
+            return ancestor
+    return input_dir.parent / "results"
 
 
 markers_and_de_app = typer.Typer(
@@ -1815,7 +1827,7 @@ def _build_cfg_composition(
     graph_n_permutations: int,
     graph_effect_shrink_k: float,
 ) -> MarkersAndDEConfig:
-    out_dir = output_dir or input_path.parent
+    out_dir = output_dir or _default_results_dir_for_input(input_path)
     log_dir = out_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "markers-and-de.composition.log"
@@ -1892,6 +1904,16 @@ def _build_cfg_enrichment_cluster(
     msigdb_gene_sets: Optional[List[str]],
     msigdb_method: str,
     msigdb_min_n_targets: int,
+    run_gsea: bool,
+    gsea_min_size: int,
+    gsea_max_size: int,
+    gsea_eps: float,
+    gsea_rank_col: Optional[str],
+    joint_enrichment_alpha: float,
+    joint_enrichment_top_n: int,
+    joint_enrichment_require_concordant: bool,
+    joint_enrichment_require_gsea_sig: bool,
+    joint_enrichment_leading_edge_top_n: int,
     run_progeny: bool,
     progeny_method: str,
     progeny_min_n_targets: int,
@@ -1903,7 +1925,7 @@ def _build_cfg_enrichment_cluster(
     dorothea_confidence: Optional[List[str]],
     dorothea_organism: str,
 ) -> MarkersAndDEConfig:
-    out_dir = output_dir or input_path.parent
+    out_dir = output_dir or _default_results_dir_for_input(input_path)
     log_dir = out_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "markers-and-de.enrichment.log"
@@ -1941,6 +1963,16 @@ def _build_cfg_enrichment_cluster(
         msigdb_gene_sets=msigdb_sets if msigdb_sets is not None else ["HALLMARK", "REACTOME"],
         msigdb_method=str(msigdb_method),
         msigdb_min_n_targets=int(msigdb_min_n_targets),
+        run_gsea=bool(run_gsea),
+        gsea_min_size=int(gsea_min_size),
+        gsea_max_size=int(gsea_max_size),
+        gsea_eps=float(gsea_eps),
+        gsea_rank_col=None if gsea_rank_col is None else str(gsea_rank_col),
+        joint_enrichment_alpha=float(joint_enrichment_alpha),
+        joint_enrichment_top_n=int(joint_enrichment_top_n),
+        joint_enrichment_require_concordant=bool(joint_enrichment_require_concordant),
+        joint_enrichment_require_gsea_sig=bool(joint_enrichment_require_gsea_sig),
+        joint_enrichment_leading_edge_top_n=int(joint_enrichment_leading_edge_top_n),
         run_progeny=bool(run_progeny),
         progeny_method=str(progeny_method),
         progeny_min_n_targets=int(progeny_min_n_targets),
@@ -1986,7 +2018,7 @@ def _build_cfg_enrichment_de(
     dorothea_confidence: Optional[List[str]],
     dorothea_organism: str,
 ) -> MarkersAndDEConfig:
-    out_dir = output_dir or input_dir.parent
+    out_dir = output_dir or _default_results_dir_for_input_dir(input_dir)
     log_dir = out_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "markers-and-de.enrichment-de.log"
@@ -2057,7 +2089,7 @@ def _build_cfg_module_score(
     module_score_random_state: int,
     module_score_max_umaps: int,
 ) -> MarkersAndDEConfig:
-    out_dir = output_dir or input_path.parent
+    out_dir = output_dir or _default_results_dir_for_input(input_path)
     log_dir = out_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "markers-and-de.module-score.log"
@@ -2123,7 +2155,7 @@ def _build_cfg_ccc_liana(
     liana_top_n: int,
     liana_plot_top_n: int,
 ) -> MarkersAndDEConfig:
-    out_dir = output_dir or input_path.parent
+    out_dir = output_dir or _default_results_dir_for_input(input_path)
     log_dir = out_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "markers-and-de.ccc.liana.log"
@@ -2203,7 +2235,7 @@ def _build_cfg_ccc_nichenet(
     organism: str,
     install_missing_r_deps: bool,
 ) -> MarkersAndDEConfig:
-    out_dir = output_dir or input_path.parent
+    out_dir = output_dir or _default_results_dir_for_input(input_path)
     log_dir = out_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "markers-and-de.ccc.nichenet.log"
@@ -2279,7 +2311,7 @@ def _build_cfg_ccc_mebocost(
     plot_top_n: int,
     install_missing_python_deps: bool,
 ) -> MarkersAndDEConfig:
-    out_dir = output_dir or input_path.parent
+    out_dir = output_dir or _default_results_dir_for_input(input_path)
     log_dir = out_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "markers-and-de.ccc.mebocost.log"
@@ -2360,7 +2392,7 @@ def _build_cfg_ccc_mebocost_paired(
     min_scored_donors_per_group: int,
     install_missing_python_deps: bool,
 ) -> MarkersAndDEConfig:
-    out_dir = output_dir or input_path.parent
+    out_dir = output_dir or _default_results_dir_for_input(input_path)
     log_dir = out_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "markers-and-de.ccc.mebocost.paired.log"
@@ -2445,7 +2477,7 @@ def _build_cfg_ccc_liana_paired(
     min_receiver_cells: int,
     min_scored_donors_per_group: int,
 ) -> MarkersAndDEConfig:
-    out_dir = output_dir or input_path.parent
+    out_dir = output_dir or _default_results_dir_for_input(input_path)
     log_dir = out_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "markers-and-de.ccc.liana.paired.log"
@@ -3365,7 +3397,12 @@ def cluster_vs_rest(
 )
 def enrichment_cluster(
     input_path: Path = typer.Option(..., "--input-path", "-i"),
-    output_dir: Optional[Path] = typer.Option(None, "--output-dir", "-o"),
+    output_dir: Optional[Path] = typer.Option(
+        None,
+        "--output-dir",
+        "-o",
+        help="[I/O] Output directory (default: sibling results/ directory, or nearest results/ ancestor when the input already lives inside results/).",
+    ),
     output_name: Optional[str] = typer.Option(None, "--output-name"),
     save_h5ad: bool = typer.Option(False, "--save-h5ad/--no-save-h5ad"),
     n_jobs: int = typer.Option(1, "--n-jobs"),
@@ -3414,6 +3451,26 @@ def enrichment_cluster(
     ),
     msigdb_method: str = typer.Option("consensus", "--msigdb-method"),
     msigdb_min_n_targets: int = typer.Option(5, "--msigdb-min-n-targets"),
+    run_gsea: bool = typer.Option(True, "--run-gsea/--no-run-gsea"),
+    gsea_min_size: int = typer.Option(10, "--gsea-min-size"),
+    gsea_max_size: int = typer.Option(500, "--gsea-max-size"),
+    gsea_eps: float = typer.Option(1e-10, "--gsea-eps"),
+    gsea_rank_col: Optional[str] = typer.Option(
+        None,
+        "--gsea-rank-col",
+        help="Preferred statistic column for MSigDB GSEA. Defaults to the enrichment decoupler statistic column.",
+    ),
+    joint_enrichment_alpha: float = typer.Option(0.05, "--joint-enrichment-alpha"),
+    joint_enrichment_top_n: int = typer.Option(20, "--joint-enrichment-top-n"),
+    joint_enrichment_require_concordant: bool = typer.Option(
+        True,
+        "--joint-enrichment-require-concordant/--no-joint-enrichment-require-concordant",
+    ),
+    joint_enrichment_require_gsea_sig: bool = typer.Option(
+        True,
+        "--joint-enrichment-require-gsea-sig/--no-joint-enrichment-require-gsea-sig",
+    ),
+    joint_enrichment_leading_edge_top_n: int = typer.Option(8, "--joint-enrichment-leading-edge-top-n"),
     run_dorothea: bool = typer.Option(True, "--run-dorothea/--no-run-dorothea"),
     dorothea_method: str = typer.Option("consensus", "--dorothea-method"),
     dorothea_min_n_targets: int = typer.Option(5, "--dorothea-min-n-targets"),
@@ -3488,7 +3545,12 @@ def enrichment_cluster(
 )
 def enrichment_de(
     input_dir: Path = typer.Option(..., "--input-dir", "-i"),
-    output_dir: Optional[Path] = typer.Option(None, "--output-dir", "-o"),
+    output_dir: Optional[Path] = typer.Option(
+        None,
+        "--output-dir",
+        "-o",
+        help="[I/O] Output directory (default: sibling results/ directory, or nearest results/ ancestor when the input already lives inside results/).",
+    ),
     output_name: Optional[str] = typer.Option(None, "--output-name"),
     n_jobs: int = typer.Option(1, "--n-jobs"),
     make_figures: bool = typer.Option(True, "--make-figures/--no-make-figures"),

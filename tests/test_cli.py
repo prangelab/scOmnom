@@ -491,6 +491,7 @@ def test_ccc_liana_default_output_name_includes_round_id(mock_run):
     mock_run.assert_called_once()
     cfg = mock_run.call_args[0][0]
     assert cfg.output_name == "adata.ccc_liana_r5_archetypes"
+    assert cfg.output_dir == Path("results")
 
 
 @patch("scomnom.cli.run_liana_ccc")
@@ -538,6 +539,7 @@ def test_ccc_liana_method_and_resource_propagate_to_config(mock_run):
     assert cfg.liana_expr_prop == pytest.approx(0.2)
     assert cfg.liana_input_mode == "lognorm"
     assert cfg.liana_lognorm_target_sum == pytest.approx(5000.0)
+    assert cfg.output_dir == Path("results")
 
 
 @patch("scomnom.cli.run_liana_paired_rescore")
@@ -594,6 +596,7 @@ def test_ccc_liana_paired_config_propagates(mock_run):
     assert cfg.liana_min_sender_cells == 4
     assert cfg.liana_min_receiver_cells == 6
     assert cfg.liana_min_scored_donors_per_group == 2
+    assert cfg.output_dir == Path("results")
 
 
 @patch("scomnom.cli.run_nichenet_ccc")
@@ -645,6 +648,7 @@ def test_ccc_nichenet_config_propagates(mock_run):
     assert cfg.nichenet_min_logfc == pytest.approx(0.5)
     assert cfg.nichenet_padj_threshold == pytest.approx(0.01)
     assert cfg.nichenet_install_missing_r_deps is True
+    assert cfg.output_dir == Path("results")
 
 
 @patch("scomnom.cli.run_mebocost_ccc")
@@ -693,6 +697,7 @@ def test_ccc_mebocost_config_propagates(mock_run):
     assert cfg.mebocost_pval_cutoff == pytest.approx(0.01)
     assert cfg.mebocost_plot_top_n == 18
     assert cfg.mebocost_install_missing_python_deps is True
+    assert cfg.output_dir == Path("results")
 
 
 @patch("scomnom.cli.run_mebocost_paired_rescore")
@@ -758,6 +763,7 @@ def test_ccc_mebocost_paired_config_propagates(mock_run):
     assert cfg.mebocost_min_receiver_cells == 14
     assert cfg.mebocost_min_scored_donors_per_group == 4
     assert cfg.mebocost_install_missing_python_deps is True
+    assert cfg.output_dir == Path("results")
 
 
 @patch("scomnom.cli.run_enrichment_cluster")
@@ -799,6 +805,43 @@ def test_enrichment_cluster_condition_key_propagates_to_config(mock_run):
     mock_run.assert_called_once()
     cfg = mock_run.call_args[0][0]
     assert cfg.condition_key == "sex"
+    assert cfg.output_dir == Path("results")
+
+
+@patch("scomnom.cli.run_enrichment_cluster")
+def test_enrichment_cluster_gsea_flags_propagate_to_config(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "markers-and-de",
+            "enrichment",
+            "cluster",
+            "--input-path", "adata.zarr.tar.zst",
+            "--no-run-gsea",
+            "--gsea-min-size", "15",
+            "--gsea-max-size", "250",
+            "--gsea-eps", "1e-6",
+            "--gsea-rank-col", "score",
+            "--joint-enrichment-alpha", "0.1",
+            "--joint-enrichment-top-n", "12",
+            "--no-joint-enrichment-require-concordant",
+            "--no-joint-enrichment-require-gsea-sig",
+            "--joint-enrichment-leading-edge-top-n", "5",
+        ],
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.run_gsea is False
+    assert cfg.gsea_min_size == 15
+    assert cfg.gsea_max_size == 250
+    assert cfg.gsea_eps == pytest.approx(1e-6)
+    assert cfg.gsea_rank_col == "score"
+    assert cfg.joint_enrichment_alpha == pytest.approx(0.1)
+    assert cfg.joint_enrichment_top_n == 12
+    assert cfg.joint_enrichment_require_concordant is False
+    assert cfg.joint_enrichment_require_gsea_sig is False
+    assert cfg.joint_enrichment_leading_edge_top_n == 5
 
 
 @patch("scomnom.cli.run_enrichment_de_from_tables")
@@ -817,6 +860,7 @@ def test_enrichment_de_default_output_name_uses_input_dir_name(mock_run):
     cfg = mock_run.call_args[0][0]
     assert cfg.output_name == "enrichment_de_de_r5_archetypes_round1"
     assert cfg.input_dir.name == "de_r5_archetypes_round1"
+    assert cfg.output_dir == Path("results")
 
 
 @patch("scomnom.cli.run_enrichment_de_from_tables")
@@ -839,6 +883,23 @@ def test_enrichment_de_gene_filter_propagates_to_config(mock_run):
     assert cfg.de_decoupler_source == "cell"
 
 
+@patch("scomnom.cli.run_enrichment_de_from_tables")
+def test_enrichment_de_default_output_dir_uses_nearest_results_ancestor(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "markers-and-de",
+            "enrichment",
+            "de",
+            "--input-dir", "results/tables/de_r5_archetypes_round1",
+        ],
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.output_dir == Path("results")
+
+
 @patch("scomnom.cli.run_module_score")
 def test_enrichment_module_score_default_output_name_includes_round_and_set_name(mock_run):
     result = runner.invoke(
@@ -858,6 +919,7 @@ def test_enrichment_module_score_default_output_name_includes_round_and_set_name
     assert cfg.output_name == "adata.module_score_archetypes_r5_archetypes"
     assert cfg.module_set_name == "archetypes"
     assert cfg.module_files == ("archetypes.gmt",)
+    assert cfg.output_dir == Path("results")
 
 
 @patch("scomnom.cli.run_module_score")
@@ -881,6 +943,7 @@ def test_enrichment_module_score_method_propagates_to_config(mock_run):
     assert cfg.module_set_name == "my_modules"
     assert cfg.module_score_method == "aucell"
     assert cfg.condition_key == "sex:MASLD"
+    assert cfg.output_dir == Path("results")
 
 
 @patch("scomnom.cli.run_within_cluster")
