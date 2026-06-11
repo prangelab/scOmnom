@@ -17,6 +17,7 @@ from scomnom import __version__
 from . import io_utils
 from . import plot_utils
 from . import reporting
+from .adata_ops import add_obs_metadata
 
 LOGGER = logging.getLogger(__name__)
 
@@ -68,40 +69,19 @@ def _add_metadata(adata: ad.AnnData, metadata_tsv: Path, sample_id_col: str) -> 
     """
     Attach per-sample metadata from TSV to adata.obs, mirroring load_data.add_metadata.
     """
-    df = pd.read_csv(metadata_tsv, sep="\t")
-    if sample_id_col not in df.columns:
-        raise KeyError(
-            f"Metadata TSV does not contain required column '{sample_id_col}'. "
-            f"Found columns: {list(df.columns)}"
-        )
-
-    df[sample_id_col] = df[sample_id_col].astype(str)
-
-    obs_sample_ids = pd.Index(adata.obs[sample_id_col].astype(str))
-    meta_sample_ids = pd.Index(df[sample_id_col])
-
-    missing = obs_sample_ids.unique().difference(meta_sample_ids)
-    if len(missing) > 0:
-        raise ValueError(
-            "Some sample IDs in adata.obs are missing in metadata_tsv:\n"
-            f"  {list(missing)}"
-        )
-
-    obs_col = adata.obs[sample_id_col].astype(str)
-    temp = pd.DataFrame({sample_id_col: obs_col}, index=adata.obs_names)
-    merged = temp.merge(df, on=sample_id_col, how="left")
-
-    for col in df.columns:
-        if col == sample_id_col:
-            continue
-        adata.obs[col] = merged[col].values
-        if (
-            adata.obs[col].dtype == object
-            and adata.obs[col].nunique() < 0.1 * len(adata.obs)
-        ):
-            adata.obs[col] = adata.obs[col].astype("category")
-
+    _ = add_obs_metadata(
+        adata,
+        metadata_tsv,
+        metadata_key=sample_id_col,
+        obs_key=sample_id_col,
+        columns=(),
+        overwrite=True,
+        require_exact_match=True,
+    )
     return adata
+
+
+add_metadata = _add_metadata
 
 
 def _per_sample_qc_and_filter(

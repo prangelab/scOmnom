@@ -109,6 +109,29 @@ Parameters:
 - `join`: Feature join mode across inputs (`"outer"` or `"inner"`).
 - `recompute_embedding`: Whether to recompute PCA/neighbors/UMAP after merge.
 
+### `add_obs_metadata`
+
+Signature:
+```python
+add_obs_metadata(adata: ad.AnnData, metadata: pd.DataFrame | Path | str, *, metadata_key: str | None, obs_key: str | None = None, columns: Sequence[str] | None = None, overwrite: bool = True, require_exact_match: bool = True) -> pd.DataFrame
+```
+
+What it does:
+- Safely adds or replaces one or more `adata.obs` metadata columns using validated key alignment.
+- Mutates the AnnData object in place and returns a one-row summary dataframe describing the import.
+
+Parameters:
+- `adata`: Target AnnData object.
+- `metadata`: External metadata table, either as an in-memory dataframe or a `.tsv` / `.csv` path.
+- `metadata_key`: Key column in the metadata table. Use `None` to align on the dataframe index.
+- `obs_key`: Key in `adata.obs` used for alignment. Defaults to `adata.obs_names`.
+- `columns`: Optional subset of metadata columns to import. Defaults to all columns except `metadata_key`.
+- `overwrite`: Whether to allow replacement of existing `adata.obs` columns with the same names.
+- `require_exact_match`: If `True`, fail when the unique key set in the metadata table and target AnnData do not match exactly.
+
+Returns:
+- `pd.DataFrame`: One-row summary with imported columns, join keys, and matched key counts.
+
 Returns:
 - `tuple[dict[str, Path], DataFrame]`: merged output path dictionary and per-dataset merge summary table.
 

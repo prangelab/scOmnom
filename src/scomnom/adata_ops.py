@@ -28,6 +28,7 @@ from .rename_utils import rename_idents
 LOGGER = logging.getLogger(__name__)
 
 __all__ = [
+    "add_obs_metadata",
     "rename_idents",
     "load_subset_mapping_tsv",
     "subset_adata_by_cluster_mapping",
@@ -35,6 +36,7 @@ __all__ = [
     "rename_dataset_idents",
     "run_adata_ops",
     "merge_datasets",
+    "import_dataset_obs_metadata",
 ]
 
 
@@ -48,6 +50,149 @@ def _dataset_stem_for_outputs(path: Path) -> str:
     if lower.endswith(".h5ad"):
         return name[: -len(".h5ad")]
     return path.stem
+
+
+def _read_metadata_table(metadata_file: Path | str) -> pd.DataFrame:
+    path = Path(metadata_file)
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        return pd.read_csv(path)
+    return pd.read_csv(path, sep="\t")
+
+
+def _canonical_obs_key_name(key: str | None) -> str:
+    raw = str(key).strip() if key is not None else ""
+    if raw == "":
+        return "obs_names"
+    if raw.lower() in {"obs_names", "obs_name", "index", "__obs_names__"}:
+        return "obs_names"
+    return raw
+
+
+def _resolve_obs_join_values(adata: ad.AnnData, obs_key: str | None) -> tuple[pd.Series, str]:
+    key = _canonical_obs_key_name(obs_key)
+    if key == "obs_names":
+        return pd.Series(adata.obs_names.astype(str), index=adata.obs_names, name="obs_names"), key
+    if key not in adata.obs:
+        raise KeyError(f"obs key {key!r} not found in adata.obs.")
+    return adata.obs[key].astype(str), key
+
+
+def _resolve_metadata_join_values(
+    metadata: pd.DataFrame,
+    metadata_key: str | None,
+) -> tuple[pd.Series, str]:
+    if metadata_key is None:
+        return pd.Series(metadata.index.astype(str), index=metadata.index, name="index"), "index"
+    key = str(metadata_key).strip()
+    if not key:
+        return pd.Series(metadata.index.astype(str), index=metadata.index, name="index"), "index"
+    if key == "index":
+        return pd.Series(metadata.index.astype(str), index=metadata.index, name="index"), "index"
+    if key not in metadata.columns:
+        raise KeyError(
+            f"Metadata table does not contain required key column {key!r}. "
+            f"Found columns: {list(metadata.columns)}"
+        )
+    return metadata[key].astype(str), key
+
+
+def add_obs_metadata(
+    adata: ad.AnnData,
+    metadata: pd.DataFrame | Path | str,
+    *,
+    metadata_key: str | None,
+    obs_key: str | None = None,
+    columns: list[str] | tuple[str, ...] | None = None,
+    overwrite: bool = True,
+    require_exact_match: bool = True,
+) -> pd.DataFrame:
+    """
+    Safely add or replace obs metadata columns by validated key alignment.
+
+    The AnnData object is updated in place and a one-row summary dataframe is returned.
+    """
+    meta_df = _read_metadata_table(metadata) if isinstance(metadata, (str, Path)) else metadata.copy()
+
+    obs_join, resolved_obs_key = _resolve_obs_join_values(adata, obs_key)
+    meta_join, resolved_meta_key = _resolve_metadata_join_values(meta_df, metadata_key)
+
+    duplicated_meta = meta_join[meta_join.duplicated()].unique().tolist()
+    if duplicated_meta:
+        raise ValueError(
+            f"Metadata key {resolved_meta_key!r} must be unique, but duplicates were found: "
+            f"{duplicated_meta[:10]}"
+        )
+
+    if columns is None or len(columns) == 0:
+        import_cols = [c for c in meta_df.columns if c != resolved_meta_key]
+    else:
+        import_cols = [str(c) for c in columns]
+
+    if not import_cols:
+        raise ValueError("No metadata columns selected for import.")
+
+    missing_cols = [c for c in import_cols if c not in meta_df.columns]
+    if missing_cols:
+        raise KeyError(
+            f"Metadata table is missing requested import columns: {missing_cols}. "
+            f"Available columns: {list(meta_df.columns)}"
+        )
+
+    existing_cols = [c for c in import_cols if c in adata.obs.columns]
+    if existing_cols and not overwrite:
+        raise ValueError(
+            f"Refusing to overwrite existing obs columns without overwrite=True: {existing_cols}"
+        )
+
+    obs_unique = pd.Index(pd.unique(obs_join.astype(str)))
+    meta_unique = pd.Index(meta_join.astype(str))
+
+    missing_in_meta = obs_unique.difference(meta_unique)
+    extra_in_meta = meta_unique.difference(obs_unique)
+    if require_exact_match and len(missing_in_meta) > 0:
+        raise ValueError(
+            "Some join keys in adata.obs are missing from the metadata table:\n"
+            f"  {list(missing_in_meta[:20])}"
+        )
+    if require_exact_match and len(extra_in_meta) > 0:
+        raise ValueError(
+            "Some join keys in the metadata table are not present in adata.obs:\n"
+            f"  {list(extra_in_meta[:20])}"
+        )
+
+    key_aligned = meta_df.copy()
+    key_aligned["__metadata_join_key__"] = meta_join.to_numpy(dtype="object")
+    key_aligned = key_aligned.set_index("__metadata_join_key__", drop=True)
+    aligned = key_aligned.reindex(obs_join.astype(str).to_numpy())
+
+    for col in import_cols:
+        values = aligned[col].copy()
+        if values.isna().any():
+            missing_count = int(values.isna().sum())
+            raise ValueError(
+                f"Imported column {col!r} has {missing_count} missing values after alignment. "
+                "This usually indicates incomplete join coverage."
+            )
+        adata.obs[col] = values.to_numpy()
+        if pd.api.types.is_object_dtype(adata.obs[col]) and adata.obs[col].nunique(dropna=False) < 0.1 * len(adata.obs):
+            adata.obs[col] = adata.obs[col].astype("category")
+
+    summary = pd.DataFrame(
+        [
+            {
+                "obs_key": resolved_obs_key,
+                "metadata_key": resolved_meta_key,
+                "n_obs": int(adata.n_obs),
+                "n_unique_obs_keys": int(obs_unique.size),
+                "n_unique_metadata_keys": int(meta_unique.size),
+                "n_imported_columns": int(len(import_cols)),
+                "imported_columns": ",".join(import_cols),
+                "overwritten_columns": ",".join(existing_cols),
+            }
+        ]
+    )
+    return summary
 
 
 def _extract_cnn(label: str) -> str | None:
@@ -1228,6 +1373,69 @@ def subset_dataset_from_tsv(
     return out_paths, summary_df
 
 
+def import_dataset_obs_metadata(
+    adata_or_path: ad.AnnData | Path | str,
+    metadata_file: Path | str,
+    *,
+    output_root: Path | str,
+    output_name: str | None = None,
+    output_format: str | None = None,
+    metadata_key: str,
+    obs_key: str | None = None,
+    columns: tuple[str, ...] | list[str] = (),
+) -> tuple[dict[str, Path], pd.DataFrame]:
+    source_path: Path | None = None
+    if isinstance(adata_or_path, ad.AnnData):
+        adata = adata_or_path
+        dataset_stem = "adata"
+    else:
+        source_path = Path(adata_or_path)
+        adata = load_dataset(source_path)
+        dataset_stem = _dataset_stem_for_outputs(source_path)
+
+    summary = add_obs_metadata(
+        adata,
+        metadata_file,
+        metadata_key=metadata_key,
+        obs_key=obs_key,
+        columns=tuple(columns),
+        overwrite=True,
+        require_exact_match=True,
+    )
+
+    fmt = str(output_format).lower().strip() if output_format else None
+    if fmt is None:
+        if source_path is not None and source_path.suffix.lower() == ".h5ad":
+            fmt = "h5ad"
+        else:
+            fmt = "zarr"
+    if fmt not in {"zarr", "h5ad"}:
+        raise ValueError("output_format must be 'zarr' or 'h5ad'.")
+
+    output_root = Path(output_root)
+    out_dataset_dir = output_root / "metadata"
+    out_tables_dir = output_root / "tables"
+    out_dataset_dir.mkdir(parents=True, exist_ok=True)
+    out_tables_dir.mkdir(parents=True, exist_ok=True)
+
+    stem = str(output_name).strip() if output_name else f"{dataset_stem}.metadata_imported"
+    out_path = out_dataset_dir / f"{stem}.{fmt}"
+    save_dataset(adata, out_path, fmt=fmt)
+
+    summary_path = out_tables_dir / f"{stem}__metadata_import_summary.tsv"
+    summary.to_csv(summary_path, sep="\t", index=False)
+
+    LOGGER.info(
+        "metadata-import: imported %d column(s) via obs_key=%r metadata_key=%r into %d cells.",
+        int(summary.loc[0, "n_imported_columns"]),
+        str(summary.loc[0, "obs_key"]),
+        str(summary.loc[0, "metadata_key"]),
+        int(summary.loc[0, "n_obs"]),
+    )
+
+    return {"metadata_imported": out_path}, summary
+
+
 def run_adata_ops(cfg: AdataOpsConfig) -> tuple[dict[str, Path], pd.DataFrame]:
     op = str(cfg.operation).strip().lower()
     if op == "subset":
@@ -1282,5 +1490,20 @@ def run_adata_ops(cfg: AdataOpsConfig) -> tuple[dict[str, Path], pd.DataFrame]:
             cluster_key=cfg.cluster_key,
             join=cfg.join,
             recompute_embedding=cfg.recompute_embedding,
+        )
+    if op == "metadata_import":
+        if cfg.metadata_file is None:
+            raise ValueError("metadata_import operation requires metadata_file.")
+        if cfg.metadata_key is None:
+            raise ValueError("metadata_import operation requires metadata_key.")
+        return import_dataset_obs_metadata(
+            cfg.input_path,
+            cfg.metadata_file,
+            output_root=cfg.resolved_output_dir,
+            output_name=cfg.output_name,
+            output_format=cfg.output_format,
+            metadata_key=cfg.metadata_key,
+            obs_key=cfg.obs_key,
+            columns=cfg.metadata_columns,
         )
     raise ValueError(f"Unsupported adata-ops operation: {cfg.operation!r}")

@@ -5,17 +5,18 @@ import pandas as pd
 import scanpy as sc
 import pytest
 from pathlib import Path
+from scipy import sparse
 
 from scomnom.load_and_filter import (
     add_metadata,
     compute_qc_metrics,
-    filter_and_doublets,
+    call_doublets,
+    cleanup_after_solo,
     normalize_and_hvg,
     pca_neighbors_umap,
-    cluster_and_cleanup_qc,
     run_load_and_filter,
 )
-from scomnom.config import LoadAndQCConfig
+from scomnom.config import LoadAndFilterConfig
 
 
 # -------------------------------------------------------------------------
@@ -23,7 +24,7 @@ from scomnom.config import LoadAndQCConfig
 # -------------------------------------------------------------------------
 def synthetic_adata(n_cells=300, n_genes=50, seed=0):
     rng = np.random.default_rng(seed)
-    X = rng.poisson(1.0, size=(n_cells, n_genes))
+    X = sparse.csr_matrix(rng.poisson(1.0, size=(n_cells, n_genes)))
 
     adata = sc.AnnData(X)
     adata.var_names = [f"g{i}" for i in range(n_genes)]
@@ -41,13 +42,11 @@ def synthetic_adata(n_cells=300, n_genes=50, seed=0):
 # -------------------------------------------------------------------------
 @pytest.fixture
 def mock_scrublet(monkeypatch):
-    # Scanpy Scrublet modifies adata in-place; mock with deterministic flags
-    def fake_scrublet(adata, *args, **kwargs):
+    def fake_run_solo_with_scvi(adata, *args, **kwargs):
         adata.obs["doublet_score"] = 0.01
-        adata.obs["predicted_doublet"] = False
         return adata
 
-    monkeypatch.setattr("scanpy.pp.scrublet", fake_scrublet)
+    monkeypatch.setattr("scomnom.load_and_filter.run_solo_with_scvi", fake_run_solo_with_scvi)
     return True
 
 
@@ -60,7 +59,7 @@ def mock_io(monkeypatch):
         io,
         "load_raw_data",
         lambda cfg, plot_dir=None: (
-            {"A": synthetic_adata(100), "B": synthetic_adata(80)},
+            {"A": synthetic_adata(100, n_genes=120), "B": synthetic_adata(80, n_genes=120)},
             {"A": 10_000, "B": 8_000},
             None,
         ),
@@ -68,12 +67,12 @@ def mock_io(monkeypatch):
     monkeypatch.setattr(
         io,
         "load_filtered_data",
-        lambda cfg: ({"A": synthetic_adata(100)}, {"A": 10_000}),
+        lambda cfg: ({"A": synthetic_adata(100, n_genes=120)}, {"A": 10_000}),
     )
     monkeypatch.setattr(
         io,
-        "load_cellbender_data",
-        lambda cfg: ({"A": synthetic_adata(100)}, {"A": 10_000}),
+        "load_cellbender_filtered_data",
+        lambda cfg: ({"A": synthetic_adata(100, n_genes=120)}, {"A": 10_000}),
     )
 
     monkeypatch.setattr(
@@ -84,12 +83,17 @@ def mock_io(monkeypatch):
     monkeypatch.setattr(
         io,
         "merge_samples",
-        lambda sm, batch_key="sample": sc.concat(sm, label=batch_key, merge="same"),
+        lambda sm, batch_key="sample", input_layer_name=None: sc.concat(sm, label=batch_key, merge="same"),
     )
     monkeypatch.setattr(
         io,
-        "save_adata",
+        "save_dataset",
         lambda *args, **kw: None,
+    )
+    monkeypatch.setattr(
+        io,
+        "attach_raw_counts_postfilter",
+        lambda cfg, adata: adata,
     )
 
     return True
@@ -98,12 +102,18 @@ def mock_io(monkeypatch):
 @pytest.fixture
 def mock_plots(monkeypatch):
     import scomnom.plot_utils as pu
+    import scomnom.reporting as reporting
     monkeypatch.setattr(pu, "setup_scanpy_figs", lambda *a, **k: None)
-    monkeypatch.setattr(pu, "save_multi", lambda *a, **k: None)
-    monkeypatch.setattr(pu, "run_qc_plots_pre_filter", lambda *a, **k: None)
-    monkeypatch.setattr(pu, "run_qc_plots_postfilter", lambda *a, **k: None)
-    monkeypatch.setattr(pu, "plot_elbow_knee", lambda *a, **k: None)
-    monkeypatch.setattr(pu, "plot_final_cell_counts", lambda *a, **k: None)
+    monkeypatch.setattr(pu, "persist_plot_artifacts", lambda *a, **k: None)
+    monkeypatch.setattr(pu, "run_qc_plots_pre_filter_df", lambda *a, **k: [])
+    monkeypatch.setattr(pu, "run_qc_plots_postfilter", lambda *a, **k: [])
+    monkeypatch.setattr(pu, "plot_final_cell_counts", lambda *a, **k: [])
+    monkeypatch.setattr(pu, "plot_cellbender_effects", lambda *a, **k: [])
+    monkeypatch.setattr(pu, "plot_qc_filter_stack", lambda *a, **k: [])
+    monkeypatch.setattr(pu, "doublet_plots", lambda *a, **k: [])
+    monkeypatch.setattr(pu, "umap_plots", lambda *a, **k: [])
+    monkeypatch.setattr(pu, "capture_plot_artifacts", lambda *a, **k: __import__("contextlib").nullcontext([]))
+    monkeypatch.setattr(reporting, "generate_qc_report", lambda *a, **k: None)
     return True
 
 
@@ -172,73 +182,42 @@ def test_compute_qc_metrics():
 
 
 # -------------------------------------------------------------------------
-# filter_and_doublets
+# call_doublets / cleanup_after_solo
 # -------------------------------------------------------------------------
-def test_filter_and_doublets(mock_scrublet):
-    cfg = type("cfg", (), dict(
-        batch_key="sample",
-        min_genes=1,
-        min_cells=1,
-        n_jobs=1,
-    ))
-
+def test_call_doublets_and_cleanup_after_solo():
     adata = synthetic_adata()
-    out = filter_and_doublets(adata, cfg)
+    adata.obs["doublet_score"] = np.linspace(0.0, 1.0, adata.n_obs)
+    call_doublets(adata, batch_key="sample", expected_doublet_rate=0.1)
 
-    # doublet flags must exist (from mocked scrublet)
-    assert "predicted_doublet" in out.obs
-    assert out.obs["predicted_doublet"].dtype.name == "bool"
-    assert out.n_obs > 0
+    assert "predicted_doublet" in adata.obs
+    assert adata.obs["predicted_doublet"].dtype.name == "bool"
+
+    out = cleanup_after_solo(adata, batch_key="sample", min_cells_per_sample=0)
+    assert out.n_obs <= adata.n_obs
 
 
 # -------------------------------------------------------------------------
 # normalize_and_hvg
 # -------------------------------------------------------------------------
 def test_normalize_and_hvg():
-    cfg = type("cfg", (), dict(
-        batch_key="sample",
-        n_top_genes=10,
-    ))
-
     adata = synthetic_adata()
-    out = normalize_and_hvg(adata, cfg)
+    out = normalize_and_hvg(adata, n_top_genes=10, batch_key="sample")
 
     assert "highly_variable" in out.var
-    assert "counts" in out.layers
+    assert np.issubdtype(out.X.dtype, np.floating)
 
 
 # -------------------------------------------------------------------------
 # pca_neighbors_umap
 # -------------------------------------------------------------------------
 def test_pca_neighbors_umap():
-    cfg = type("cfg", (), dict(
-        max_pcs_plot=5,
-    ))
-
-    adata = synthetic_adata()
-    out = pca_neighbors_umap(adata, cfg)
+    adata = synthetic_adata(n_genes=60)
+    adata = normalize_and_hvg(adata, n_top_genes=30, batch_key="sample")
+    out = pca_neighbors_umap(adata, var_explained=0.85, min_pcs=5, max_pcs=20)
 
     assert "X_umap" in out.obsm
-    assert "n_pcs_elbow" in out.uns
-    assert isinstance(out.uns["n_pcs_elbow"], int)
-
-
-# -------------------------------------------------------------------------
-# cluster_and_cleanup_qc
-# -------------------------------------------------------------------------
-def test_cluster_and_cleanup_qc(mock_scrublet):
-    cfg = type("cfg", (), dict(
-        batch_key="sample",
-        max_pct_mt=100,
-        min_cells_per_sample=0,
-    ))
-
-    adata = synthetic_adata()
-    sc.pp.scrublet(adata)  # so predicted_doublet exists
-    adata.obs["pct_counts_mt"] = 0.5
-
-    out = cluster_and_cleanup_qc(adata, cfg)
-    assert "leiden" in out.obs
+    assert "n_pcs" in out.uns
+    assert isinstance(out.uns["n_pcs"], int)
 
 
 # -------------------------------------------------------------------------
@@ -258,18 +237,18 @@ def test_run_load_and_filter(
     mpath = tmp_path / "meta.tsv"
     meta.to_csv(mpath, sep="\t", index=False)
 
-    cfg = LoadAndQCConfig(
+    cfg = LoadAndFilterConfig(
         metadata_tsv=mpath,
         batch_key="sample",
         raw_sample_dir=tmp_path / "raw",     # triggers load_raw_data mock
         filtered_sample_dir=None,
         cellbender_dir=None,
-        figdir=tmp_path / "figs",
         output_dir=tmp_path,
         output_name="out.h5ad",
         mt_prefix="g",
         ribo_prefixes=["r"],
         hb_regex="hb",
+        n_top_genes=60,
         min_genes=1,
         min_cells=1,
         min_cells_per_sample=0,
@@ -280,7 +259,7 @@ def test_run_load_and_filter(
     # Ensure input directory exists
     (tmp_path / "raw").mkdir(exist_ok=True)
 
-    out = run_load_and_filter(cfg, logfile=None)
+    out = run_load_and_filter(cfg)
 
     # Basic checks
     assert isinstance(out, sc.AnnData)

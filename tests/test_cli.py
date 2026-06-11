@@ -245,6 +245,7 @@ def test_adata_ops_help():
     assert "rename" in result.output
     assert "subset" in result.output
     assert "annotation-merge" in result.output
+    assert "metadata-import" in result.output
 
 
 def test_markers_and_de_help_includes_enrichment():
@@ -353,6 +354,32 @@ def test_adata_ops_annotation_merge_dispatch(mock_run):
     assert tuple(map(str, cfg.child_paths)) == ("child1.h5ad", "child2.h5ad")
     assert cfg.update_existing_round is True
     assert cfg.target_round_id == "r4_subset_annotation"
+
+
+@patch("scomnom.cli.run_adata_ops")
+def test_adata_ops_metadata_import_dispatch(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "adata-ops",
+            "metadata-import",
+            "--input-path", "adata.h5ad",
+            "--metadata-file", "meta.tsv",
+            "--metadata-key", "sample_id",
+            "--obs-key", "sample_id",
+            "--column", "condition",
+            "--column", "patient",
+        ],
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert str(cfg.input_path) == "adata.h5ad"
+    assert cfg.operation == "metadata_import"
+    assert str(cfg.metadata_file) == "meta.tsv"
+    assert cfg.metadata_key == "sample_id"
+    assert cfg.obs_key == "sample_id"
+    assert cfg.metadata_columns == ("condition", "patient")
 
 
 @patch("scomnom.cli.run_cluster_vs_rest")

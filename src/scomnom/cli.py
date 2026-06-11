@@ -974,6 +974,76 @@ def adata_ops_merge(
     run_adata_ops(cfg)
 
 
+@adata_ops_app.command(
+    "metadata-import",
+    help="Import or replace one or more obs metadata columns from an external table using strict key alignment.",
+)
+def adata_ops_metadata_import(
+    input_path: Path = typer.Option(
+        ...,
+        "--input-path",
+        "-i",
+        help="[I/O] Input dataset (.zarr, .zarr.tar.zst, or .h5ad).",
+    ),
+    metadata_file: Path = typer.Option(
+        ...,
+        "--metadata-file",
+        "-m",
+        help="[Metadata] External metadata table (.tsv by default, .csv supported).",
+    ),
+    metadata_key: str = typer.Option(
+        ...,
+        "--metadata-key",
+        help="[Metadata] Column in the metadata table used for key alignment.",
+    ),
+    obs_key: Optional[str] = typer.Option(
+        None,
+        "--obs-key",
+        help="[Metadata] obs column used for key alignment. Default: obs_names.",
+    ),
+    columns: List[str] = typer.Option(
+        [],
+        "--column",
+        help="[Metadata] Column(s) to import. Repeat to restrict import. Default: import all columns except --metadata-key.",
+    ),
+    output_dir: Optional[Path] = typer.Option(
+        None,
+        "--output-dir",
+        "-o",
+        help="[I/O] Output directory (default: input parent).",
+    ),
+    output_name: Optional[str] = typer.Option(
+        None,
+        "--output-name",
+        help="[I/O] Base name for metadata-imported output dataset.",
+    ),
+    output_format: Optional[Literal["zarr", "h5ad"]] = typer.Option(
+        None,
+        "--output-format",
+        help="[I/O] Output format for updated dataset. Default: match input when possible.",
+    ),
+):
+    out_dir = output_dir or input_path.parent
+    log_dir = out_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    logfile = log_dir / "adata-ops.log"
+    init_logging(logfile)
+
+    cfg = AdataOpsConfig(
+        input_path=input_path,
+        output_dir=out_dir,
+        operation="metadata_import",
+        output_name=output_name,
+        output_format=output_format,
+        metadata_file=metadata_file,
+        metadata_key=metadata_key,
+        obs_key=obs_key,
+        metadata_columns=tuple(columns),
+        logfile=logfile,
+    )
+    run_adata_ops(cfg)
+
+
 # ======================================================================
 #  cluster-and-annotate
 # ======================================================================

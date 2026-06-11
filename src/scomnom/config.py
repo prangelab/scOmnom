@@ -284,7 +284,7 @@ class AdataOpsConfig(BaseModel):
     input_paths: Tuple[Path, ...] = ()
     dataset_short_labels: Tuple[str, ...] = ()
     output_dir: Optional[Path] = None
-    operation: Literal["subset", "rename", "annotation_merge", "merge"] = "subset"
+    operation: Literal["subset", "rename", "annotation_merge", "merge", "metadata_import"] = "subset"
     output_name: Optional[str] = None
     subset_mapping_tsv: Optional[Path] = None
     subset_merge_tsv: Optional[Path] = None
@@ -303,6 +303,10 @@ class AdataOpsConfig(BaseModel):
     target_round_id: Optional[str] = None
     update_existing_round: bool = False
     annotation_merge_round_name: str = "subset_annotation"
+    metadata_file: Optional[Path] = None
+    metadata_key: Optional[str] = None
+    obs_key: Optional[str] = None
+    metadata_columns: Tuple[str, ...] = ()
     logfile: Optional[Path] = None
 
     @property

@@ -9,6 +9,7 @@ import pandas as pd
 
 from .adata_ops import subset_adata_by_cluster_mapping as _subset_adata_by_cluster_mapping
 from .adata_ops import merge_datasets as _merge_datasets
+from .adata_ops import add_obs_metadata as _add_obs_metadata
 from .annotation_utils import run_decoupler_for_round
 from .markers_and_de import _compute_de_enrichment_from_dir, _compute_module_score_on_adata
 from .rename_utils import rename_idents
@@ -90,6 +91,32 @@ def merge_datasets(
         cluster_key=cluster_key,
         join=join,
         recompute_embedding=recompute_embedding,
+    )
+
+
+def add_obs_metadata(
+    adata: ad.AnnData,
+    metadata: pd.DataFrame | Path | str,
+    *,
+    metadata_key: str | None,
+    obs_key: str | None = None,
+    columns: Sequence[str] | None = None,
+    overwrite: bool = True,
+    require_exact_match: bool = True,
+) -> pd.DataFrame:
+    """
+    Safely add or replace obs metadata columns by validated key alignment.
+
+    The AnnData object is updated in place and a one-row summary dataframe is returned.
+    """
+    return _add_obs_metadata(
+        adata,
+        metadata,
+        metadata_key=metadata_key,
+        obs_key=obs_key,
+        columns=tuple(columns) if columns is not None else None,
+        overwrite=overwrite,
+        require_exact_match=require_exact_match,
     )
 
 
@@ -273,6 +300,7 @@ __all__ = [
     "rename_idents",
     "subset_adata_by_cluster_mapping",
     "merge_datasets",
+    "add_obs_metadata",
     "enrichment_cluster",
     "enrichment_de_from_tables",
     "module_score",
