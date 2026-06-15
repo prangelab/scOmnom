@@ -128,6 +128,7 @@ def _per_sample_qc_and_filter(
             a,
             min_genes=cfg.min_genes,
             min_cells=cfg.min_cells,
+            min_counts=cfg.min_counts,
             max_pct_mt=cfg.max_pct_mt,
             max_genes_mad=cfg.max_genes_mad,
             max_genes_quantile=cfg.max_genes_quantile,
@@ -338,6 +339,7 @@ def sparse_filter_cells_and_genes(
     *,
     min_genes: int,
     min_cells: int,
+    min_counts: int | None = None,
     max_pct_mt: float | None = None,
     # --- new: upper-cut filtering ---
     max_genes_mad: float | None = None,
@@ -420,6 +422,27 @@ def sparse_filter_cells_and_genes(
 
     adata = adata[cell_mask].copy()
     X = adata.X
+
+    # --------------------------------------------------
+    # Cell filtering: min_counts
+    # --------------------------------------------------
+    if min_counts is not None:
+        total_counts = np.add.reduceat(X.data, X.indptr[:-1])
+        before = np.ones(adata.n_obs, dtype=bool)
+        count_mask = total_counts >= min_counts
+
+        if count_mask.sum() == 0:
+            raise ValueError(f"All cells removed by min_counts={min_counts}.")
+
+        _log_cell_filter(
+            filter_name="min_counts",
+            before_mask=before,
+            after_mask=count_mask,
+            adata_obs=adata.obs,
+        )
+
+        adata = adata[count_mask].copy()
+        X = adata.X
 
     # --------------------------------------------------
     # Cell filtering: max_pct_mt

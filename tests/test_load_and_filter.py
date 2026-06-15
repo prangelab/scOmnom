@@ -15,6 +15,7 @@ from scomnom.load_and_filter import (
     normalize_and_hvg,
     pca_neighbors_umap,
     run_load_and_filter,
+    sparse_filter_cells_and_genes,
 )
 from scomnom.config import LoadAndFilterConfig
 
@@ -179,6 +180,66 @@ def test_compute_qc_metrics():
     assert "total_counts" in out.obs
     assert "pct_counts_mt" in out.obs
     assert "mt" in out.var
+
+
+def test_sparse_filter_cells_and_genes_applies_min_counts():
+    X = sparse.csr_matrix(
+        np.array(
+            [
+                [1, 0, 0],
+                [2, 2, 1],
+                [5, 1, 0],
+            ],
+            dtype=np.int64,
+        )
+    )
+    adata = sc.AnnData(X)
+    adata.var_names = ["g0", "g1", "g2"]
+    adata.obs_names = ["c0", "c1", "c2"]
+    adata.obs["sample"] = pd.Categorical(["A", "A", "A"])
+    adata.obs["pct_counts_mt"] = 0.0
+
+    qc_rows = []
+    out = sparse_filter_cells_and_genes(
+        adata,
+        min_genes=1,
+        min_cells=1,
+        min_counts=4,
+        max_pct_mt=100,
+        batch_key="sample",
+        qc_rows=qc_rows,
+    )
+
+    assert list(out.obs_names) == ["c1", "c2"]
+    assert any(row["filter"] == "min_counts" for row in qc_rows)
+
+
+def test_sparse_filter_cells_and_genes_min_counts_can_remove_all_cells():
+    X = sparse.csr_matrix(
+        np.array(
+            [
+                [1, 0, 0],
+                [2, 0, 0],
+            ],
+            dtype=np.int64,
+        )
+    )
+    adata = sc.AnnData(X)
+    adata.var_names = ["g0", "g1", "g2"]
+    adata.obs_names = ["c0", "c1"]
+    adata.obs["sample"] = pd.Categorical(["A", "A"])
+    adata.obs["pct_counts_mt"] = 0.0
+
+    with pytest.raises(ValueError, match="All cells removed by min_counts=10"):
+        sparse_filter_cells_and_genes(
+            adata,
+            min_genes=1,
+            min_cells=1,
+            min_counts=10,
+            max_pct_mt=100,
+            batch_key="sample",
+            qc_rows=[],
+        )
 
 
 # -------------------------------------------------------------------------

@@ -2,7 +2,7 @@ import pytest
 from pathlib import Path
 
 from scomnom.config import (
-    LoadAndQCConfig,
+    LoadAndFilterConfig,
     IntegrationConfig,
     CellQCConfig,
     ClusterAnnotateConfig,
@@ -19,14 +19,14 @@ def tmpfile(tmp_path, name="x.txt", content=""):
 
 
 # -------------------------------------------------------------------------
-# LoadAndQCConfig
+# LoadAndFilterConfig
 # -------------------------------------------------------------------------
 def test_loadandqc_requires_exactly_one_input(tmp_path):
     out = tmp_path
 
     # 0 inputs -> error
     with pytest.raises(ValueError):
-        LoadAndQCConfig(
+        LoadAndFilterConfig(
             raw_sample_dir=None,
             filtered_sample_dir=None,
             cellbender_dir=None,
@@ -36,7 +36,7 @@ def test_loadandqc_requires_exactly_one_input(tmp_path):
 
     # 2 inputs -> error
     with pytest.raises(ValueError):
-        LoadAndQCConfig(
+        LoadAndFilterConfig(
             raw_sample_dir="raw",
             filtered_sample_dir="filtered",
             cellbender_dir=None,
@@ -45,7 +45,7 @@ def test_loadandqc_requires_exactly_one_input(tmp_path):
         )
 
     # 1 valid input -> OK
-    cfg = LoadAndQCConfig(
+    cfg = LoadAndFilterConfig(
         raw_sample_dir="raw",
         filtered_sample_dir=None,
         cellbender_dir=None,
@@ -56,14 +56,14 @@ def test_loadandqc_requires_exactly_one_input(tmp_path):
 
 
 def test_loadandqc_output_name_coerced_to_h5ad(tmp_path):
-    cfg1 = LoadAndQCConfig(
+    cfg1 = LoadAndFilterConfig(
         raw_sample_dir="raw",
         output_dir=tmp_path,
         output_name="mydata",
     )
     assert cfg1.output_name == "mydata.h5ad"
 
-    cfg2 = LoadAndQCConfig(
+    cfg2 = LoadAndFilterConfig(
         raw_sample_dir="raw",
         output_dir=tmp_path,
         output_name="already.h5ad",
@@ -73,7 +73,7 @@ def test_loadandqc_output_name_coerced_to_h5ad(tmp_path):
 
 def test_loadandqc_figure_format_validation(tmp_path):
     # valid
-    cfg = LoadAndQCConfig(
+    cfg = LoadAndFilterConfig(
         raw_sample_dir="raw",
         output_dir=tmp_path,
         figure_formats=["png", "pdf"],
@@ -82,7 +82,7 @@ def test_loadandqc_figure_format_validation(tmp_path):
 
     # invalid
     with pytest.raises(ValueError):
-        LoadAndQCConfig(
+        LoadAndFilterConfig(
             raw_sample_dir="raw",
             output_dir=tmp_path,
             figure_formats=["not_a_format"],
@@ -90,12 +90,29 @@ def test_loadandqc_figure_format_validation(tmp_path):
 
 
 def test_loadandqc_figdir_property(tmp_path):
-    cfg = LoadAndQCConfig(
+    cfg = LoadAndFilterConfig(
         raw_sample_dir="raw",
         output_dir=tmp_path,
         figdir_name="figs",
     )
     assert cfg.figdir == tmp_path / "figs"
+
+
+def test_loadandfilter_min_counts_defaults_to_none(tmp_path):
+    cfg = LoadAndFilterConfig(
+        raw_sample_dir="raw",
+        output_dir=tmp_path,
+    )
+    assert cfg.min_counts is None
+
+
+def test_loadandfilter_accepts_min_counts(tmp_path):
+    cfg = LoadAndFilterConfig(
+        raw_sample_dir="raw",
+        output_dir=tmp_path,
+        min_counts=1000,
+    )
+    assert cfg.min_counts == 1000
 
 
 # -------------------------------------------------------------------------

@@ -264,6 +264,11 @@ def load_and_filter(
     # -------------------------------------------------------------
     min_cells: int = typer.Option(3, help="[QC] Minimum cells per gene."),
     min_genes: int = typer.Option(500, help="[QC] Minimum genes per cell."),
+    min_counts: Optional[int] = typer.Option(
+        None,
+        "--min-counts",
+        help="[QC] Minimum total UMI counts per cell.",
+    ),
     min_cells_per_sample: int = typer.Option(20, help="[QC] Minimum cells per sample."),
     max_pct_mt: float = typer.Option(5.0, help="[QC] Max mitochondrial percentage."),
     n_top_genes: int = typer.Option(2000, help="Number of highly variable genes to select"),
@@ -363,6 +368,7 @@ def load_and_filter(
         n_jobs=n_jobs or 4,
         min_cells=min_cells,
         min_genes=min_genes,
+        min_counts=min_counts,
         min_cells_per_sample=min_cells_per_sample,
         max_pct_mt=max_pct_mt,
         n_top_genes=n_top_genes,

@@ -42,6 +42,7 @@ class LoadAndFilterConfig(BaseModel):
     # ---- QC ----
     min_cells: int = 3
     min_genes: int = 500
+    min_counts: Optional[int] = None
     min_cells_per_sample: int = 20
     max_pct_mt: float = 5.0
     n_top_genes: int = 2000
