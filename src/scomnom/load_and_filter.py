@@ -129,6 +129,8 @@ def _per_sample_qc_and_filter(
             min_genes=cfg.min_genes,
             min_cells=cfg.min_cells,
             min_counts=cfg.min_counts,
+            min_counts_mad=cfg.min_counts_mad,
+            min_counts_quantile=cfg.min_counts_quantile,
             max_pct_mt=cfg.max_pct_mt,
             max_genes_mad=cfg.max_genes_mad,
             max_genes_quantile=cfg.max_genes_quantile,
@@ -340,6 +342,8 @@ def sparse_filter_cells_and_genes(
     min_genes: int,
     min_cells: int,
     min_counts: int | None = None,
+    min_counts_mad: float | None = 5.0,
+    min_counts_quantile: float | None = 0.01,
     max_pct_mt: float | None = None,
     # --- new: upper-cut filtering ---
     max_genes_mad: float | None = None,
@@ -426,13 +430,41 @@ def sparse_filter_cells_and_genes(
     # --------------------------------------------------
     # Cell filtering: min_counts
     # --------------------------------------------------
-    if min_counts is not None:
-        total_counts = np.add.reduceat(X.data, X.indptr[:-1])
+    def _lower_cut(values: np.ndarray, *, k_mad: float | None, q: float | None):
+        cuts = []
+
+        if k_mad is not None:
+            med = np.median(values)
+            mad = np.median(np.abs(values - med))
+            cuts.append(med - k_mad * mad)
+
+        if q is not None:
+            cuts.append(np.quantile(values, q))
+
+        if not cuts:
+            return None
+
+        return int(np.ceil(max(max(cuts), 0.0)))
+
+    total_counts = np.add.reduceat(X.data, X.indptr[:-1])
+    auto_min_counts = _lower_cut(
+        total_counts,
+        k_mad=min_counts_mad,
+        q=min_counts_quantile,
+    )
+    lower_count_cuts = [
+        cut for cut in (min_counts, auto_min_counts) if cut is not None
+    ]
+
+    if lower_count_cuts:
+        effective_min_counts = max(lower_count_cuts)
         before = np.ones(adata.n_obs, dtype=bool)
-        count_mask = total_counts >= min_counts
+        count_mask = total_counts >= effective_min_counts
 
         if count_mask.sum() == 0:
-            raise ValueError(f"All cells removed by min_counts={min_counts}.")
+            raise ValueError(
+                f"All cells removed by min_counts={effective_min_counts}."
+            )
 
         _log_cell_filter(
             filter_name="min_counts",

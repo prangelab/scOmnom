@@ -120,6 +120,24 @@ def validate_decoupler_consensus_methods(
     return methods
 
 
+def _parse_optional_float_or_none(value: Optional[str], *, param_name: str) -> Optional[float]:
+    if value is None:
+        return None
+
+    raw = value.strip()
+    if raw == "":
+        raise typer.BadParameter(f"{param_name} cannot be empty.")
+    if raw.lower() in {"none", "null", "na", "n/a"}:
+        return None
+
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise typer.BadParameter(
+            f"{param_name} must be a float or 'none'."
+        ) from exc
+
+
 def validate_liana_methods(
     value: Optional[List[str]],
 ) -> Optional[List[str]]:
@@ -267,7 +285,17 @@ def load_and_filter(
     min_counts: Optional[int] = typer.Option(
         None,
         "--min-counts",
-        help="[QC] Minimum total UMI counts per cell.",
+        help="[QC] Minimum total UMI counts per cell. Default: None.",
+    ),
+    min_counts_mad: str = typer.Option(
+        "5.0",
+        "--min-counts-mad",
+        help="[QC] Lower cutoff for total UMI counts as median - k*MAD. Use 'none' to disable. Default: 5.0.",
+    ),
+    min_counts_quantile: str = typer.Option(
+        "0.01",
+        "--min-counts-quantile",
+        help="[QC] Lower quantile cutoff for total UMI counts. Use 'none' to disable. Default: 0.01.",
     ),
     min_cells_per_sample: int = typer.Option(20, help="[QC] Minimum cells per sample."),
     max_pct_mt: float = typer.Option(5.0, help="[QC] Max mitochondrial percentage."),
@@ -358,6 +386,15 @@ def load_and_filter(
         if apply_doublet_score_path is None:
             apply_doublet_score_path = output_dir / "adata.merged.zarr"
 
+    min_counts_mad_parsed = _parse_optional_float_or_none(
+        min_counts_mad,
+        param_name="--min-counts-mad",
+    )
+    min_counts_quantile_parsed = _parse_optional_float_or_none(
+        min_counts_quantile,
+        param_name="--min-counts-quantile",
+    )
+
     cfg = LoadAndFilterConfig(
         raw_sample_dir=raw_sample_dir,
         filtered_sample_dir=filtered_sample_dir,
@@ -369,6 +406,8 @@ def load_and_filter(
         min_cells=min_cells,
         min_genes=min_genes,
         min_counts=min_counts,
+        min_counts_mad=min_counts_mad_parsed,
+        min_counts_quantile=min_counts_quantile_parsed,
         min_cells_per_sample=min_cells_per_sample,
         max_pct_mt=max_pct_mt,
         n_top_genes=n_top_genes,

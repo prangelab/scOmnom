@@ -72,6 +72,11 @@ scomnom markers-and-de da \
   --condition-key condition
 ```
 
+By default, `load-and-filter` applies per-sample lower-tail filtering on `total_counts`
+using `--min-counts-mad 5.0` and `--min-counts-quantile 0.01`. Add a fixed extra floor
+with `--min-counts`, or disable one or both automatic components with
+`--min-counts-mad none` and/or `--min-counts-quantile none`.
+
 Use `scomnom --help` and `scomnom <command> --help` for command-specific options.
 
 ## Standard Workflow

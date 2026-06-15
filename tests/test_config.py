@@ -104,6 +104,8 @@ def test_loadandfilter_min_counts_defaults_to_none(tmp_path):
         output_dir=tmp_path,
     )
     assert cfg.min_counts is None
+    assert cfg.min_counts_mad == 5.0
+    assert cfg.min_counts_quantile == 0.01
 
 
 def test_loadandfilter_accepts_min_counts(tmp_path):
@@ -113,6 +115,17 @@ def test_loadandfilter_accepts_min_counts(tmp_path):
         min_counts=1000,
     )
     assert cfg.min_counts == 1000
+
+
+def test_loadandfilter_accepts_disabling_auto_min_counts(tmp_path):
+    cfg = LoadAndFilterConfig(
+        raw_sample_dir="raw",
+        output_dir=tmp_path,
+        min_counts_mad=None,
+        min_counts_quantile=None,
+    )
+    assert cfg.min_counts_mad is None
+    assert cfg.min_counts_quantile is None
 
 
 # -------------------------------------------------------------------------

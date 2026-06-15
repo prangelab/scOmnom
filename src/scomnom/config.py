@@ -43,6 +43,14 @@ class LoadAndFilterConfig(BaseModel):
     min_cells: int = 3
     min_genes: int = 500
     min_counts: Optional[int] = None
+    min_counts_mad: Optional[float] = Field(
+        5.0,
+        description="Lower cutoff for total_counts as median - k*MAD (default: 5).",
+    )
+    min_counts_quantile: Optional[float] = Field(
+        0.01,
+        description="Lower quantile cutoff for total_counts (default: 0.01).",
+    )
     min_cells_per_sample: int = 20
     max_pct_mt: float = 5.0
     n_top_genes: int = 2000
@@ -115,6 +123,24 @@ class LoadAndFilterConfig(BaseModel):
             raise ValueError("Must provide raw_sample_dir or filtered_sample_dir")
 
         return self
+
+    @field_validator("min_counts_mad")
+    @classmethod
+    def validate_min_counts_mad(cls, value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        if value < 0:
+            raise ValueError("min_counts_mad must be >= 0 or None")
+        return value
+
+    @field_validator("min_counts_quantile")
+    @classmethod
+    def validate_min_counts_quantile(cls, value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        if not 0 < value < 1:
+            raise ValueError("min_counts_quantile must be between 0 and 1, or None")
+        return value
 
 
 from pathlib import Path

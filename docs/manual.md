@@ -366,11 +366,36 @@ scomnom load-and-filter \
   --out results/load_and_filter/
 ```
 
+Default lower-count QC behavior:
+
+* `min_genes` remains a fixed threshold.
+* `total_counts` is filtered per sample using a lower auto cutoff derived as the stricter of:
+  * `--min-counts-mad 5.0`
+  * `--min-counts-quantile 0.01`
+* `--min-counts` remains available as an additional fixed floor on top of the automatic cutoff.
+* Use `--min-counts-mad none` and/or `--min-counts-quantile none` to disable either automatic component.
+
+Examples:
+
+```bash
+# keep defaults
+scomnom load-and-filter ...
+
+# add an extra fixed floor
+scomnom load-and-filter ... --min-counts 1000
+
+# disable the quantile component
+scomnom load-and-filter ... --min-counts-quantile none
+
+# disable all automatic lower-count filtering
+scomnom load-and-filter ... --min-counts-mad none --min-counts-quantile none
+```
+
 ### What it does
 
 * Discovers samples from the provided parent directories (glob patterns can be overridden).
 * Resolves droplets from CellBender or Cell Ranger, or infers droplets in raw-only mode.
-* Runs QC filters, HVG selection, and doublet detection.
+* Runs QC filters, including fixed `min_genes`, per-sample lower-count filtering on `total_counts`, upper-tail trimming, HVG selection, and doublet detection.
 * Merges per-sample AnnData into a single dataset with consistent metadata.
 
 ### Outputs

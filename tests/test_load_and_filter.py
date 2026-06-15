@@ -214,6 +214,71 @@ def test_sparse_filter_cells_and_genes_applies_min_counts():
     assert any(row["filter"] == "min_counts" for row in qc_rows)
 
 
+def test_sparse_filter_cells_and_genes_applies_auto_min_counts():
+    X = sparse.csr_matrix(
+        np.array(
+            [
+                [1, 0, 0],
+                [2, 2, 1],
+                [5, 1, 0],
+                [6, 2, 1],
+            ],
+            dtype=np.int64,
+        )
+    )
+    adata = sc.AnnData(X)
+    adata.var_names = ["g0", "g1", "g2"]
+    adata.obs_names = ["c0", "c1", "c2", "c3"]
+    adata.obs["sample"] = pd.Categorical(["A", "A", "A", "A"])
+    adata.obs["pct_counts_mt"] = 0.0
+
+    out = sparse_filter_cells_and_genes(
+        adata,
+        min_genes=1,
+        min_cells=1,
+        min_counts=None,
+        min_counts_mad=5.0,
+        min_counts_quantile=0.25,
+        max_pct_mt=100,
+        batch_key="sample",
+        qc_rows=[],
+    )
+
+    assert list(out.obs_names) == ["c1", "c2", "c3"]
+
+
+def test_sparse_filter_cells_and_genes_fixed_floor_combines_with_auto_min_counts():
+    X = sparse.csr_matrix(
+        np.array(
+            [
+                [2, 2, 1],
+                [5, 1, 0],
+                [6, 2, 1],
+            ],
+            dtype=np.int64,
+        )
+    )
+    adata = sc.AnnData(X)
+    adata.var_names = ["g0", "g1", "g2"]
+    adata.obs_names = ["c0", "c1", "c2"]
+    adata.obs["sample"] = pd.Categorical(["A", "A", "A"])
+    adata.obs["pct_counts_mt"] = 0.0
+
+    out = sparse_filter_cells_and_genes(
+        adata,
+        min_genes=1,
+        min_cells=1,
+        min_counts=6,
+        min_counts_mad=5.0,
+        min_counts_quantile=0.01,
+        max_pct_mt=100,
+        batch_key="sample",
+        qc_rows=[],
+    )
+
+    assert list(out.obs_names) == ["c1", "c2"]
+
+
 def test_sparse_filter_cells_and_genes_min_counts_can_remove_all_cells():
     X = sparse.csr_matrix(
         np.array(
@@ -240,6 +305,37 @@ def test_sparse_filter_cells_and_genes_min_counts_can_remove_all_cells():
             batch_key="sample",
             qc_rows=[],
         )
+
+
+def test_sparse_filter_cells_and_genes_can_disable_auto_min_counts():
+    X = sparse.csr_matrix(
+        np.array(
+            [
+                [1, 0, 0],
+                [2, 2, 1],
+            ],
+            dtype=np.int64,
+        )
+    )
+    adata = sc.AnnData(X)
+    adata.var_names = ["g0", "g1", "g2"]
+    adata.obs_names = ["c0", "c1"]
+    adata.obs["sample"] = pd.Categorical(["A", "A"])
+    adata.obs["pct_counts_mt"] = 0.0
+
+    out = sparse_filter_cells_and_genes(
+        adata,
+        min_genes=1,
+        min_cells=1,
+        min_counts=None,
+        min_counts_mad=None,
+        min_counts_quantile=None,
+        max_pct_mt=100,
+        batch_key="sample",
+        qc_rows=[],
+    )
+
+    assert list(out.obs_names) == ["c0", "c1"]
 
 
 # -------------------------------------------------------------------------
