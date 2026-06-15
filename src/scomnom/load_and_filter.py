@@ -77,6 +77,7 @@ def _add_metadata(adata: ad.AnnData, metadata_tsv: Path, sample_id_col: str) -> 
         columns=(),
         overwrite=True,
         require_exact_match=True,
+        require_non_missing_values=False,
     )
     return adata
 
@@ -336,6 +337,37 @@ def compute_qc_metrics(adata: ad.AnnData, cfg: QCFilterConfig) -> ad.AnnData:
 # ---------------------------------------------------------------------
 # Sparse filtering
 # ---------------------------------------------------------------------
+def derive_lower_count_cutoff(
+    total_counts,
+    *,
+    min_counts: int | None = None,
+    min_counts_mad: float | None = 5.0,
+    min_counts_quantile: float | None = 0.01,
+) -> int | None:
+    import numpy as np
+
+    values = np.asarray(total_counts)
+    cuts: list[float] = []
+
+    if min_counts_mad is not None:
+        med = np.median(values)
+        mad = np.median(np.abs(values - med))
+        cuts.append(med - min_counts_mad * mad)
+
+    if min_counts_quantile is not None:
+        cuts.append(np.quantile(values, min_counts_quantile))
+
+    auto_cutoff = None
+    if cuts:
+        auto_cutoff = int(np.ceil(max(max(cuts), 0.0)))
+
+    active_cuts = [cut for cut in (min_counts, auto_cutoff) if cut is not None]
+    if not active_cuts:
+        return None
+
+    return int(max(active_cuts))
+
+
 def sparse_filter_cells_and_genes(
     adata: ad.AnnData,
     *,
@@ -430,34 +462,15 @@ def sparse_filter_cells_and_genes(
     # --------------------------------------------------
     # Cell filtering: min_counts
     # --------------------------------------------------
-    def _lower_cut(values: np.ndarray, *, k_mad: float | None, q: float | None):
-        cuts = []
-
-        if k_mad is not None:
-            med = np.median(values)
-            mad = np.median(np.abs(values - med))
-            cuts.append(med - k_mad * mad)
-
-        if q is not None:
-            cuts.append(np.quantile(values, q))
-
-        if not cuts:
-            return None
-
-        return int(np.ceil(max(max(cuts), 0.0)))
-
     total_counts = np.add.reduceat(X.data, X.indptr[:-1])
-    auto_min_counts = _lower_cut(
+    effective_min_counts = derive_lower_count_cutoff(
         total_counts,
-        k_mad=min_counts_mad,
-        q=min_counts_quantile,
+        min_counts=min_counts,
+        min_counts_mad=min_counts_mad,
+        min_counts_quantile=min_counts_quantile,
     )
-    lower_count_cuts = [
-        cut for cut in (min_counts, auto_min_counts) if cut is not None
-    ]
 
-    if lower_count_cuts:
-        effective_min_counts = max(lower_count_cuts)
+    if effective_min_counts is not None:
         before = np.ones(adata.n_obs, dtype=bool)
         count_mask = total_counts >= effective_min_counts
 

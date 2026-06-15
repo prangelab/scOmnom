@@ -106,6 +106,7 @@ def add_obs_metadata(
     columns: list[str] | tuple[str, ...] | None = None,
     overwrite: bool = True,
     require_exact_match: bool = True,
+    require_non_missing_values: bool = True,
 ) -> pd.DataFrame:
     """
     Safely add or replace obs metadata columns by validated key alignment.
@@ -168,7 +169,7 @@ def add_obs_metadata(
 
     for col in import_cols:
         values = aligned[col].copy()
-        if values.isna().any():
+        if require_non_missing_values and values.isna().any():
             missing_count = int(values.isna().sum())
             raise ValueError(
                 f"Imported column {col!r} has {missing_count} missing values after alignment. "

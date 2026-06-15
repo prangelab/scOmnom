@@ -113,7 +113,7 @@ Parameters:
 
 Signature:
 ```python
-add_obs_metadata(adata: ad.AnnData, metadata: pd.DataFrame | Path | str, *, metadata_key: str | None, obs_key: str | None = None, columns: Sequence[str] | None = None, overwrite: bool = True, require_exact_match: bool = True) -> pd.DataFrame
+ add_obs_metadata(adata: ad.AnnData, metadata: pd.DataFrame | Path | str, *, metadata_key: str | None, obs_key: str | None = None, columns: Sequence[str] | None = None, overwrite: bool = True, require_exact_match: bool = True, require_non_missing_values: bool = True) -> pd.DataFrame
 ```
 
 What it does:
@@ -128,6 +128,7 @@ Parameters:
 - `columns`: Optional subset of metadata columns to import. Defaults to all columns except `metadata_key`.
 - `overwrite`: Whether to allow replacement of existing `adata.obs` columns with the same names.
 - `require_exact_match`: If `True`, fail when the unique key set in the metadata table and target AnnData do not match exactly.
+- `require_non_missing_values`: If `True`, fail when imported columns contain missing values after alignment. Set `False` when sparse metadata values are acceptable but key coverage is still exact.
 
 Returns:
 - `pd.DataFrame`: One-row summary with imported columns, join keys, and matched key counts.

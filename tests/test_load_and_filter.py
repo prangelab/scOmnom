@@ -139,6 +139,24 @@ def test_add_metadata_basic(tmp_path):
     assert set(out.obs["patient"].cat.categories) == {"P1", "P2", "P3"}
 
 
+def test_add_metadata_allows_sparse_numeric_sample_metadata(tmp_path):
+    adata = synthetic_adata()
+
+    meta = pd.DataFrame(
+        {
+            "sample": ["0", "1", "2"],
+            "portal_ethanol": [1.0, np.nan, 3.0],
+        }
+    )
+    mpath = tmp_path / "meta.tsv"
+    meta.to_csv(mpath, sep="\t", index=False)
+
+    out = add_metadata(adata, mpath, "sample")
+
+    assert "portal_ethanol" in out.obs
+    assert int(pd.isna(out.obs["portal_ethanol"]).sum()) > 0
+
+
 def test_add_metadata_missing_column(tmp_path):
     adata = synthetic_adata()
 

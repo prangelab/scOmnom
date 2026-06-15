@@ -80,6 +80,29 @@ def test_add_obs_metadata_rejects_duplicate_metadata_keys() -> None:
         )
 
 
+def test_add_obs_metadata_allows_missing_values_when_requested() -> None:
+    adata = _make_metadata_test_adata()
+    metadata = pd.DataFrame(
+        {
+            "sample_id": ["S1", "S2", "S3"],
+            "portal_ethanol": [1.0, np.nan, 3.0],
+        }
+    )
+
+    summary = add_obs_metadata(
+        adata,
+        metadata,
+        metadata_key="sample_id",
+        obs_key="sample_id",
+        columns=("portal_ethanol",),
+        require_non_missing_values=False,
+    )
+
+    assert "portal_ethanol" in adata.obs
+    assert int(pd.isna(adata.obs["portal_ethanol"]).sum()) == 2
+    assert summary.loc[0, "imported_columns"] == "portal_ethanol"
+
+
 def test_import_dataset_obs_metadata_saves_output(tmp_path: Path, monkeypatch) -> None:
     adata = _make_metadata_test_adata()
     metadata = pd.DataFrame(
