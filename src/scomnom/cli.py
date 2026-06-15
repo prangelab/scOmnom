@@ -543,6 +543,7 @@ def integrate(
     celltypist_model: Optional[str] = typer.Option(
         "Immune_All_Low.pkl",
         "--celltypist-model",
+        "-M",
         help="[CellTypist] Path or name of model. If None, skip annotation.",
         autocompletion=_celltypist_models_completion,
     ),

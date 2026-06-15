@@ -131,7 +131,7 @@ def test_integrate_invalid_method_rejected():
     assert "Invalid method" in result.output
 
 
-@patch("scomnom.cli.run_integration")
+@patch("scomnom.cli.run_integrate")
 def test_integrate_dispatch(mock_run):
     result = runner.invoke(
         app,
@@ -145,8 +145,24 @@ def test_integrate_dispatch(mock_run):
     assert result.exit_code == 0
     mock_run.assert_called_once()
     cfg = mock_run.call_args[0][0]
-    assert cfg.methods == ["Scanorama", "Harmony"]
-    assert cfg.input_path == "adata.h5ad"
+    assert cfg.methods == ["scanorama", "harmony"]
+    assert cfg.input_path == Path("adata.h5ad")
+
+
+@patch("scomnom.cli.run_integrate")
+def test_integrate_celltypist_model_short_flag_propagates(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "integrate",
+            "--input-path", "adata.h5ad",
+            "-M", "Immune_All_Low.pkl",
+        ]
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.celltypist_model == "Immune_All_Low.pkl"
 
 
 # ---------------------------------------------------------
@@ -897,6 +913,26 @@ def test_enrichment_de_default_output_dir_uses_nearest_results_ancestor(mock_run
     assert result.exit_code == 0
     mock_run.assert_called_once()
     cfg = mock_run.call_args[0][0]
+    assert cfg.output_dir == Path("results")
+
+
+@patch("scomnom.cli.run_enrichment_de_from_tables")
+def test_enrichment_de_preserves_explicit_input_dir_name(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "markers-and-de",
+            "enrichment",
+            "de",
+            "--input-dir", "cell_based_clean",
+        ],
+    )
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.input_dir == Path("cell_based_clean")
+    assert cfg.input_path == Path("cell_based_clean")
+    assert cfg.output_name == "enrichment_de_cell_based_clean"
     assert cfg.output_dir == Path("results")
 
 
