@@ -28,3 +28,6 @@ MANUSCRIPT/
 
 # Local R runtime libraries
 .r-libs/
+
+# Local runtime logs
+logs/
