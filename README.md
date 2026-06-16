@@ -73,8 +73,8 @@ scomnom markers-and-de da \
 ```
 
 By default, `load-and-filter` applies per-sample lower-tail filtering on `total_counts`
-using `--min-counts-mad 5.0` and `--min-counts-quantile 0.05`. Add a fixed extra floor
-with `--min-counts`. The automatic lower-count filter only activates for samples whose
+using `--min-counts-mad 5.0`, while fixed `--min-counts` and lower quantile filtering
+stay off by default. The automatic lower-count filter only activates for samples whose
 `--min-counts-auto-activate-quantile 0.01` falls below
 `--min-counts-auto-activate-below 1000`. Disable components with
 `--min-counts-mad none`, `--min-counts-quantile none`,

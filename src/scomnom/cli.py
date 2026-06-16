@@ -311,9 +311,9 @@ def load_and_filter(
         help="[QC] Lower cutoff for total UMI counts as median - k*MAD. Use 'none' to disable. Default: 5.0.",
     ),
     min_counts_quantile: str = typer.Option(
-        "0.05",
+        "none",
         "--min-counts-quantile",
-        help="[QC] Lower quantile cutoff for total UMI counts. Use 'none' to disable. Default: 0.05.",
+        help="[QC] Lower quantile cutoff for total UMI counts. Use 'none' to disable. Default: None.",
     ),
     min_counts_auto_activate_quantile: str = typer.Option(
         "0.01",

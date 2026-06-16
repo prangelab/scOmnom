@@ -48,8 +48,8 @@ class LoadAndFilterConfig(BaseModel):
         description="Lower cutoff for total_counts as median - k*MAD (default: 5).",
     )
     min_counts_quantile: Optional[float] = Field(
-        0.05,
-        description="Lower quantile cutoff for total_counts (default: 0.05).",
+        None,
+        description="Lower quantile cutoff for total_counts (default: None).",
     )
     min_counts_auto_activate_quantile: Optional[float] = Field(
         0.01,

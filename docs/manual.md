@@ -369,15 +369,16 @@ scomnom load-and-filter \
 Default lower-count QC behavior:
 
 * `min_genes` remains a fixed threshold.
-* `total_counts` is filtered per sample using a lower auto cutoff derived as the stricter of:
+* `total_counts` is filtered per sample by default using:
   * `--min-counts-mad 5.0`
-  * `--min-counts-quantile 0.05`
 * The automatic lower-count filter only activates for samples whose:
   * `--min-counts-auto-activate-quantile 0.01`
   * falls below `--min-counts-auto-activate-below 1000`
-* `--min-counts` remains available as an additional fixed floor on top of the automatic cutoff.
+* `--min-counts` remains available as an additional fixed floor.
+* `--min-counts-quantile` remains available as an optional stricter lower-bound component, but stays off by default.
 * The intended default policy is:
   * fixed `min_counts` stays off
+  * fixed lower quantile filtering stays off
   * automatic lower-count filtering stays on
   * defaults clean up obvious low-count noise in ordinary datasets
   * stronger fixed intervention is available when a dataset clearly needs it
@@ -393,6 +394,9 @@ scomnom load-and-filter ...
 
 # add an extra fixed floor
 scomnom load-and-filter ... --min-counts 1000
+
+# add an explicit lower quantile cutoff
+scomnom load-and-filter ... --min-counts-quantile 0.05
 
 # disable the quantile component
 scomnom load-and-filter ... --min-counts-quantile none

@@ -344,7 +344,7 @@ def derive_lower_count_cutoff(
     *,
     min_counts: int | None = None,
     min_counts_mad: float | None = 5.0,
-    min_counts_quantile: float | None = 0.05,
+    min_counts_quantile: float | None = None,
     min_counts_auto_activate_quantile: float | None = 0.01,
     min_counts_auto_activate_below: int | None = 1000,
 ) -> int | None:
@@ -393,7 +393,7 @@ def sparse_filter_cells_and_genes(
     min_cells: int,
     min_counts: int | None = None,
     min_counts_mad: float | None = 5.0,
-    min_counts_quantile: float | None = 0.05,
+    min_counts_quantile: float | None = None,
     min_counts_auto_activate_quantile: float | None = 0.01,
     min_counts_auto_activate_below: int | None = 1000,
     max_pct_mt: float | None = None,
