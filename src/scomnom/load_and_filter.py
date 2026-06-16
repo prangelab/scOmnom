@@ -132,6 +132,8 @@ def _per_sample_qc_and_filter(
             min_counts=cfg.min_counts,
             min_counts_mad=cfg.min_counts_mad,
             min_counts_quantile=cfg.min_counts_quantile,
+            min_counts_auto_activate_quantile=cfg.min_counts_auto_activate_quantile,
+            min_counts_auto_activate_below=cfg.min_counts_auto_activate_below,
             max_pct_mt=cfg.max_pct_mt,
             max_genes_mad=cfg.max_genes_mad,
             max_genes_quantile=cfg.max_genes_quantile,
@@ -342,7 +344,9 @@ def derive_lower_count_cutoff(
     *,
     min_counts: int | None = None,
     min_counts_mad: float | None = 5.0,
-    min_counts_quantile: float | None = 0.01,
+    min_counts_quantile: float | None = 0.05,
+    min_counts_auto_activate_quantile: float | None = 0.01,
+    min_counts_auto_activate_below: int | None = 1000,
 ) -> int | None:
     import numpy as np
 
@@ -361,6 +365,20 @@ def derive_lower_count_cutoff(
     if cuts:
         auto_cutoff = int(np.ceil(max(max(cuts), 0.0)))
 
+    auto_active = True
+    if (
+        auto_cutoff is not None
+        and min_counts_auto_activate_quantile is not None
+        and min_counts_auto_activate_below is not None
+    ):
+        activation_value = float(
+            np.quantile(values, min_counts_auto_activate_quantile)
+        )
+        auto_active = activation_value < float(min_counts_auto_activate_below)
+
+    if not auto_active:
+        auto_cutoff = None
+
     active_cuts = [cut for cut in (min_counts, auto_cutoff) if cut is not None]
     if not active_cuts:
         return None
@@ -375,7 +393,9 @@ def sparse_filter_cells_and_genes(
     min_cells: int,
     min_counts: int | None = None,
     min_counts_mad: float | None = 5.0,
-    min_counts_quantile: float | None = 0.01,
+    min_counts_quantile: float | None = 0.05,
+    min_counts_auto_activate_quantile: float | None = 0.01,
+    min_counts_auto_activate_below: int | None = 1000,
     max_pct_mt: float | None = None,
     # --- new: upper-cut filtering ---
     max_genes_mad: float | None = None,
@@ -468,6 +488,8 @@ def sparse_filter_cells_and_genes(
         min_counts=min_counts,
         min_counts_mad=min_counts_mad,
         min_counts_quantile=min_counts_quantile,
+        min_counts_auto_activate_quantile=min_counts_auto_activate_quantile,
+        min_counts_auto_activate_below=min_counts_auto_activate_below,
     )
 
     if effective_min_counts is not None:

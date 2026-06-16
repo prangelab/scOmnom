@@ -48,8 +48,16 @@ class LoadAndFilterConfig(BaseModel):
         description="Lower cutoff for total_counts as median - k*MAD (default: 5).",
     )
     min_counts_quantile: Optional[float] = Field(
+        0.05,
+        description="Lower quantile cutoff for total_counts (default: 0.05).",
+    )
+    min_counts_auto_activate_quantile: Optional[float] = Field(
         0.01,
-        description="Lower quantile cutoff for total_counts (default: 0.01).",
+        description="Quantile of total_counts used to decide whether auto lower-count filtering should activate (default: 0.01).",
+    )
+    min_counts_auto_activate_below: Optional[int] = Field(
+        1000,
+        description="Activate auto lower-count filtering only if the activation quantile is below this total_counts floor (default: 1000).",
     )
     min_cells_per_sample: int = 20
     max_pct_mt: float = 5.0
@@ -140,6 +148,26 @@ class LoadAndFilterConfig(BaseModel):
             return None
         if not 0 < value < 1:
             raise ValueError("min_counts_quantile must be between 0 and 1, or None")
+        return value
+
+    @field_validator("min_counts_auto_activate_quantile")
+    @classmethod
+    def validate_min_counts_auto_activate_quantile(cls, value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        if not 0 < value < 1:
+            raise ValueError(
+                "min_counts_auto_activate_quantile must be between 0 and 1, or None"
+            )
+        return value
+
+    @field_validator("min_counts_auto_activate_below")
+    @classmethod
+    def validate_min_counts_auto_activate_below(cls, value: Optional[int]) -> Optional[int]:
+        if value is None:
+            return None
+        if value < 0:
+            raise ValueError("min_counts_auto_activate_below must be >= 0 or None")
         return value
 
 

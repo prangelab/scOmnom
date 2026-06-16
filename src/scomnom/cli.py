@@ -138,6 +138,24 @@ def _parse_optional_float_or_none(value: Optional[str], *, param_name: str) -> O
         ) from exc
 
 
+def _parse_optional_int_or_none(value: Optional[str], *, param_name: str) -> Optional[int]:
+    if value is None:
+        return None
+
+    raw = value.strip()
+    if raw == "":
+        raise typer.BadParameter(f"{param_name} cannot be empty.")
+    if raw.lower() in {"none", "null", "na", "n/a"}:
+        return None
+
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise typer.BadParameter(
+            f"{param_name} must be an integer or 'none'."
+        ) from exc
+
+
 def validate_liana_methods(
     value: Optional[List[str]],
 ) -> Optional[List[str]]:
@@ -293,9 +311,19 @@ def load_and_filter(
         help="[QC] Lower cutoff for total UMI counts as median - k*MAD. Use 'none' to disable. Default: 5.0.",
     ),
     min_counts_quantile: str = typer.Option(
-        "0.01",
+        "0.05",
         "--min-counts-quantile",
-        help="[QC] Lower quantile cutoff for total UMI counts. Use 'none' to disable. Default: 0.01.",
+        help="[QC] Lower quantile cutoff for total UMI counts. Use 'none' to disable. Default: 0.05.",
+    ),
+    min_counts_auto_activate_quantile: str = typer.Option(
+        "0.01",
+        "--min-counts-auto-activate-quantile",
+        help="[QC] Auto lower-count filtering only activates if this quantile of total UMI counts falls below --min-counts-auto-activate-below. Use 'none' to disable. Default: 0.01.",
+    ),
+    min_counts_auto_activate_below: str = typer.Option(
+        "1000",
+        "--min-counts-auto-activate-below",
+        help="[QC] Auto lower-count filtering only activates if the activation quantile falls below this total UMI count floor. Use 'none' to disable. Default: 1000.",
     ),
     min_cells_per_sample: int = typer.Option(20, help="[QC] Minimum cells per sample."),
     max_pct_mt: float = typer.Option(5.0, help="[QC] Max mitochondrial percentage."),
@@ -394,6 +422,14 @@ def load_and_filter(
         min_counts_quantile,
         param_name="--min-counts-quantile",
     )
+    min_counts_auto_activate_quantile_parsed = _parse_optional_float_or_none(
+        min_counts_auto_activate_quantile,
+        param_name="--min-counts-auto-activate-quantile",
+    )
+    min_counts_auto_activate_below_parsed = _parse_optional_int_or_none(
+        min_counts_auto_activate_below,
+        param_name="--min-counts-auto-activate-below",
+    )
 
     cfg = LoadAndFilterConfig(
         raw_sample_dir=raw_sample_dir,
@@ -408,6 +444,8 @@ def load_and_filter(
         min_counts=min_counts,
         min_counts_mad=min_counts_mad_parsed,
         min_counts_quantile=min_counts_quantile_parsed,
+        min_counts_auto_activate_quantile=min_counts_auto_activate_quantile_parsed,
+        min_counts_auto_activate_below=min_counts_auto_activate_below_parsed,
         min_cells_per_sample=min_cells_per_sample,
         max_pct_mt=max_pct_mt,
         n_top_genes=n_top_genes,

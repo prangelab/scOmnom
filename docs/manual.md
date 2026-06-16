@@ -371,9 +371,19 @@ Default lower-count QC behavior:
 * `min_genes` remains a fixed threshold.
 * `total_counts` is filtered per sample using a lower auto cutoff derived as the stricter of:
   * `--min-counts-mad 5.0`
-  * `--min-counts-quantile 0.01`
+  * `--min-counts-quantile 0.05`
+* The automatic lower-count filter only activates for samples whose:
+  * `--min-counts-auto-activate-quantile 0.01`
+  * falls below `--min-counts-auto-activate-below 1000`
 * `--min-counts` remains available as an additional fixed floor on top of the automatic cutoff.
-* Use `--min-counts-mad none` and/or `--min-counts-quantile none` to disable either automatic component.
+* The intended default policy is:
+  * fixed `min_counts` stays off
+  * automatic lower-count filtering stays on
+  * defaults clean up obvious low-count noise in ordinary datasets
+  * stronger fixed intervention is available when a dataset clearly needs it
+* Use `--min-counts-mad none`, `--min-counts-quantile none`,
+  `--min-counts-auto-activate-quantile none`, and/or
+  `--min-counts-auto-activate-below none` to disable components.
 
 Examples:
 
@@ -388,7 +398,14 @@ scomnom load-and-filter ... --min-counts 1000
 scomnom load-and-filter ... --min-counts-quantile none
 
 # disable all automatic lower-count filtering
-scomnom load-and-filter ... --min-counts-mad none --min-counts-quantile none
+scomnom load-and-filter ... \
+  --min-counts-mad none \
+  --min-counts-quantile none
+
+# keep auto cutoff settings but disable the activation gate
+scomnom load-and-filter ... \
+  --min-counts-auto-activate-quantile none \
+  --min-counts-auto-activate-below none
 ```
 
 ### What it does

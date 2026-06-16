@@ -1979,11 +1979,19 @@ def run_qc_plots_pre_filter_df(qc_df: pd.DataFrame, cfg) -> None:
     qc_adata = ad.AnnData(obs=qc_df)
     qc_adata.obs[cfg.batch_key] = qc_df["sample"].values
 
-    qc_violin_panels(qc_adata, cfg, "prefilter")
+    lower_count_cutoffs = _prefilter_lower_count_cutoffs(qc_df, cfg)
+
+    qc_violin_panels(
+        qc_adata,
+        cfg,
+        "prefilter",
+        lower_count_cutoffs=lower_count_cutoffs,
+    )
     qc_scatter_panels(qc_adata, cfg, "prefilter")
     plot_mt_histogram(qc_adata, cfg, "prefilter")
     plot_hist_n_genes(qc_adata, cfg, "prefilter")
     plot_hist_total_counts(qc_adata, cfg, "prefilter")
+    plot_prefilter_lower_count_summary(qc_df, cfg, lower_count_cutoffs)
 
 
 @collect_plot_artifacts
@@ -2118,7 +2126,107 @@ def plot_hist_n_genes(adata, cfg, stage: str):
     close_plot()
 
 
-def qc_violin_panels(adata, cfg, stage: str):
+def _prefilter_lower_count_cutoffs(
+    qc_df: pd.DataFrame,
+    cfg,
+) -> dict[str, int]:
+    from .load_and_filter import derive_lower_count_cutoff
+
+    if (
+        cfg.min_counts is None
+        and cfg.min_counts_mad is None
+        and cfg.min_counts_quantile is None
+    ):
+        return {}
+
+    cutoffs: dict[str, int] = {}
+    for sample, g in qc_df.groupby("sample", sort=False):
+        cutoff = derive_lower_count_cutoff(
+            g["total_counts"].to_numpy(),
+            min_counts=cfg.min_counts,
+            min_counts_mad=cfg.min_counts_mad,
+            min_counts_quantile=cfg.min_counts_quantile,
+            min_counts_auto_activate_quantile=cfg.min_counts_auto_activate_quantile,
+            min_counts_auto_activate_below=cfg.min_counts_auto_activate_below,
+        )
+        if cutoff is not None:
+            cutoffs[str(sample)] = int(cutoff)
+
+    return cutoffs
+
+
+@collect_plot_artifacts
+def plot_prefilter_lower_count_summary(
+    qc_df: pd.DataFrame,
+    cfg,
+    lower_count_cutoffs: dict[str, int],
+):
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+
+    if not cfg.make_figures or not lower_count_cutoffs:
+        return
+
+    rows = []
+    for sample, g in qc_df.groupby("sample", sort=False):
+        sample_key = str(sample)
+        cutoff = lower_count_cutoffs.get(sample_key)
+        if cutoff is None:
+            continue
+        counts = g["total_counts"].to_numpy()
+        frac_removed = float((counts < cutoff).mean())
+        rows.append(
+            {
+                "sample": sample_key,
+                "cutoff": cutoff,
+                "frac_removed": frac_removed,
+            }
+        )
+
+    if not rows:
+        return
+
+    plot_df = pd.DataFrame(rows)
+
+    fig, ax = plt.subplots(figsize=(max(7, 0.45 * len(plot_df)), 4))
+    x = np.arange(len(plot_df))
+    bars = ax.bar(
+        x,
+        plot_df["frac_removed"],
+        color="indianred",
+        edgecolor="black",
+        linewidth=0.3,
+    )
+    ax.set_xticks(x)
+    ax.set_xticklabels(plot_df["sample"], rotation=45, ha="right")
+    ax.set_ylim(0, min(1.0, max(plot_df["frac_removed"].max() * 1.2, 0.05)))
+    ax.set_ylabel("Fraction below lower-count cutoff")
+    ax.set_title("Per-sample lower-count filter effect (prefilter)")
+    _clean_axes(ax)
+
+    for bar, cutoff in zip(bars, plot_df["cutoff"]):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height(),
+            f"{int(cutoff)}",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+            rotation=90,
+        )
+
+    fig.tight_layout()
+    record_plot_artifact("prefilter_lower_count_filter_effect", Path("QC_plots") / "qc_metrics", fig)
+    close_plot(fig)
+
+
+def qc_violin_panels(
+    adata,
+    cfg,
+    stage: str,
+    lower_count_cutoffs: dict[str, int] | None = None,
+):
     """
     Three-panel QC violin summary:
       1) n_genes_by_counts
@@ -2185,6 +2293,38 @@ def qc_violin_panels(adata, cfg, stage: str):
             stripplot=False,
             ax=ax,
         )
+
+        if metric == "total_counts" and lower_count_cutoffs:
+            cats = adata.obs[batch_key].astype("category").cat.categories
+            added_label = False
+            for i, cat in enumerate(cats):
+                cutoff = lower_count_cutoffs.get(str(cat))
+                if cutoff is None:
+                    continue
+                label = "Lower-count cutoff" if not added_label else None
+                if horizontal:
+                    ax.hlines(
+                        cutoff,
+                        i - 0.35,
+                        i + 0.35,
+                        color="crimson",
+                        linewidth=1.5,
+                        zorder=5,
+                        label=label,
+                    )
+                else:
+                    ax.vlines(
+                        cutoff,
+                        i - 0.35,
+                        i + 0.35,
+                        color="crimson",
+                        linewidth=1.5,
+                        zorder=5,
+                        label=label,
+                    )
+                added_label = True
+            if added_label:
+                ax.legend(loc="upper right", frameon=False)
 
         _clean_axes(ax)
         ax.set_title(f"{metric} ({stage})")

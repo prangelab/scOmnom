@@ -73,9 +73,13 @@ scomnom markers-and-de da \
 ```
 
 By default, `load-and-filter` applies per-sample lower-tail filtering on `total_counts`
-using `--min-counts-mad 5.0` and `--min-counts-quantile 0.01`. Add a fixed extra floor
-with `--min-counts`, or disable one or both automatic components with
-`--min-counts-mad none` and/or `--min-counts-quantile none`.
+using `--min-counts-mad 5.0` and `--min-counts-quantile 0.05`. Add a fixed extra floor
+with `--min-counts`. The automatic lower-count filter only activates for samples whose
+`--min-counts-auto-activate-quantile 0.01` falls below
+`--min-counts-auto-activate-below 1000`. Disable components with
+`--min-counts-mad none`, `--min-counts-quantile none`,
+`--min-counts-auto-activate-quantile none`, and/or
+`--min-counts-auto-activate-below none`.
 
 Use `scomnom --help` and `scomnom <command> --help` for command-specific options.
 
