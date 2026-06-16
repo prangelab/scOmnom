@@ -5,13 +5,13 @@ All notable changes to this project will be documented in this file.
 ## 0.7.1 [16-06-2026]
 Load-and-filter QC refinement release:
 - added optional fixed lower-count filtering via `--min-counts`
-- added automatic per-sample lower-count filtering on `total_counts` using a combined lower MAD and lower quantile rule
+- added automatic per-sample lower-count filtering on `total_counts` using a lower MAD rule, with an optional lower quantile component for stricter datasets
 - set default automatic lower-count behavior to:
   - `--min-counts-mad 5.0`
-  - `--min-counts-quantile 0.05`
+  - `--min-counts-quantile none`
   - activation gate `--min-counts-auto-activate-quantile 0.01`
   - activation floor `--min-counts-auto-activate-below 1000`
-- kept fixed `--min-counts` off by default, so the pipeline now applies conservative automatic lower-tail cleanup for ordinary datasets while leaving stronger intervention to explicit user choice
+- kept fixed `--min-counts` and lower quantile filtering off by default, so the pipeline now applies conservative automatic lower-tail cleanup for ordinary datasets while leaving stronger intervention to explicit user choice
 - added prefilter QC diagnostics for the lower-count rule:
   - per-sample cutoff overlays on the `total_counts` violins
   - per-sample summary of the fraction of cells below the lower-count cutoff

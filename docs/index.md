@@ -49,6 +49,10 @@ scomnom markers-and-de da \
 
 Use `scomnom --help` and `scomnom <command> --help` for command-specific options.
 
+## QC Defaults
+
+By default, `load-and-filter` applies conservative per-sample lower-tail filtering on `total_counts` with `--min-counts-mad 5.0`. Fixed `--min-counts` and lower quantile filtering stay off by default; add `--min-counts-quantile 0.05` only when a stricter lower-count component is useful for a dataset.
+
 ## Core References
 
 - [Manual](manual.md): full workflow reference, examples, expected outputs, AnnData conventions, and HPC notes.
