@@ -1,0 +1,35 @@
+site_name: scOmnom
+site_description: Read-the-docs style manual for the scOmnom single-cell RNA-seq workflow.
+site_url: https://prangelab.org/scOmnom/
+repo_name: prangelab/scOmnom
+repo_url: https://github.com/prangelab/scOmnom
+edit_uri: edit/main/docs/
+
+theme:
+  name: readthedocs
+  highlightjs: true
+  hljs_languages:
+    - bash
+    - python
+    - yaml
+    - r
+
+nav:
+  - Home: index.md
+  - Manual: manual.md
+  - API Reference: api-reference.md
+  - Changelog: changelog.md
+  - Contributing: contributing.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - sane_lists
+  - tables
+  - toc:
+      permalink: true
+
+extra_css:
+  - stylesheets/extra.css
+
+strict: true

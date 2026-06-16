@@ -11,7 +11,7 @@ The pipeline combines established single-cell packages with scOmnom-specific wor
 * robust marker discovery, within-cluster DE, cell-cell communication, enrichment, and differential abundance
 * GraphDA, a graph-local differential abundance implementation using neighborhood counts and spatial weighted FDR
 
-For the full workflow manual, see [docs/manual.md](docs/manual.md). For the public Python API, see [API_REFERENCE.md](API_REFERENCE.md).
+For the hosted workflow manual, see [prangelab.org/scOmnom](https://prangelab.org/scOmnom/). For the source manual, see [docs/manual.md](docs/manual.md), and for the public Python API, see [API_REFERENCE.md](API_REFERENCE.md).
 
 ## Installation
 
@@ -98,7 +98,7 @@ The recommended full workflow is:
 9. optional `markers-and-de enrichment cluster`
 10. optional `markers-and-de ccc ...`
 
-Detailed command examples, expected outputs, AnnData conventions, and HPC notes are in [docs/manual.md](docs/manual.md).
+Detailed command examples, expected outputs, AnnData conventions, and HPC notes are in the [hosted manual](https://prangelab.org/scOmnom/) and [source manual](docs/manual.md).
 
 ## Data Conventions
 
@@ -117,7 +117,8 @@ Clustering state is stored as rounds in `adata.uns["cluster_rounds"]`, with the 
 
 ## Documentation
 
-* [Full manual](docs/manual.md)
+* [Hosted manual](https://prangelab.org/scOmnom/)
+* [Source manual](docs/manual.md)
 * [API reference](API_REFERENCE.md)
 * [Design goals](DESIGNGOALS.md)
 * [Contributing](contributing.md)

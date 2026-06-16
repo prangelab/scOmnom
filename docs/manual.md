@@ -1,6 +1,6 @@
 # scOmnom Manual
 
-This manual contains the full scOmnom workflow reference. For a short project overview and quick start, see [README.md](../README.md).
+This manual contains the full scOmnom workflow reference. For a short project overview and quick start, see the [documentation home](index.md).
 
 Modular scRNA-seq preprocessing and analysis pipeline built on the scVerse ecosystem.
 
@@ -62,7 +62,7 @@ This registers the `scomnom` command-line interface and ensures local code chang
 
 ### Optional: run with a memory guard on macOS
 
-For large local runs on macOS, you can wrap `scomnom` with [`scripts/run_with_mem_limit.py`](/Users/k.h.prange/Library/CloudStorage/OneDrive-AmsterdamUMC/Documenten/Tech/scOmnom/scripts/run_with_mem_limit.py) to kill the run if either the combined process-tree RSS or macOS system pressure indicators grow too far.
+For large local runs on macOS, you can wrap `scomnom` with [`scripts/run_with_mem_limit.py`](https://github.com/prangelab/scOmnom/blob/main/scripts/run_with_mem_limit.py) to kill the run if either the combined process-tree RSS or macOS system pressure indicators grow too far.
 
 ```bash
 python scripts/run_with_mem_limit.py \
@@ -271,7 +271,7 @@ For manual analysis in notebooks or scripts, always use `load_dataset()` and `sa
 
 For large Zarr saves with heavy `adata.uns` payloads, `save_dataset()` now stores heavy payloads via sidecar serialization under `__scomnom_payloads__/v1` inside the same store, which reduces save-time memory spikes while keeping `load_dataset()` round-trip behavior.
 
-See also: [`API_REFERENCE.md`](API_REFERENCE.md) for the current Python API namespaces (`scomnom.plotting`, `scomnom.adata_ops`).
+See also: the [API reference](api-reference.md) for the current Python API namespaces (`scomnom.plotting`, `scomnom.adata_ops`).
 
 ```python
 from pathlib import Path
@@ -1306,7 +1306,7 @@ In this mode, scOmnom still runs LIANA on the merged AnnData object, but filters
 
 **CellChatDB-backed pathway families**
 
-The LIANA family / route plots use a vendored CellChatDB annotation table at [src/scomnom/resources/cellchatdb_interaction_annotations.tsv](/Users/k.h.prange/Library/CloudStorage/OneDrive-AmsterdamUMC/Documenten/Tech/scOmnom/src/scomnom/resources/cellchatdb_interaction_annotations.tsv:1). This table was exported one time from the official `jinworks/CellChat` package source at version `2.2.0.9001`.
+The LIANA family / route plots use a vendored CellChatDB annotation table at [`src/scomnom/resources/cellchatdb_interaction_annotations.tsv`](https://github.com/prangelab/scOmnom/blob/main/src/scomnom/resources/cellchatdb_interaction_annotations.tsv). This table was exported one time from the official `jinworks/CellChat` package source at version `2.2.0.9001`.
 
 scOmnom first tries to map each LIANA `ligand_complex` / `receptor_complex` pair onto CellChatDB and uses CellChat `pathway_name` values such as `BMP`, `TGFb`, `NOTCH`, or `CXCL` as the route family. If no exact CellChatDB match is found, scOmnom falls back to its internal heuristic family classifier.
 
@@ -1448,12 +1448,12 @@ To install it manually into the same cache library, run:
 tmpdir=$(mktemp -d) && \
 R_LIBS_USER="$HOME/Library/Caches/scOmnom/r-libs/nichenet" \
 R_LIBS="$HOME/Library/Caches/scOmnom/r-libs/nichenet" \
-/Users/k.h.prange/miniconda3/envs/scOmnom_env/bin/Rscript -e 'dir.create(Sys.getenv("R_LIBS_USER"), recursive=TRUE, showWarnings=FALSE); .libPaths(c(Sys.getenv("R_LIBS_USER"), .Library, .Library.site)); pkgs <- c("DiceKriging", "emoa", "fdrtool", "mlrMBO"); missing_pkgs <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly=TRUE)]; if (length(missing_pkgs)) install.packages(missing_pkgs, repos="https://cloud.r-project.org", lib=Sys.getenv("R_LIBS_USER"))' && \
+Rscript -e 'dir.create(Sys.getenv("R_LIBS_USER"), recursive=TRUE, showWarnings=FALSE); .libPaths(c(Sys.getenv("R_LIBS_USER"), .Library, .Library.site)); pkgs <- c("DiceKriging", "emoa", "fdrtool", "mlrMBO"); missing_pkgs <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly=TRUE)]; if (length(missing_pkgs)) install.packages(missing_pkgs, repos="https://cloud.r-project.org", lib=Sys.getenv("R_LIBS_USER"))' && \
 git clone --depth 1 https://github.com/saeyslab/nichenetr.git "$tmpdir/nichenetr" && \
 mkdir -p "$HOME/Library/Caches/scOmnom/r-libs/nichenet" && \
 R_LIBS_USER="$HOME/Library/Caches/scOmnom/r-libs/nichenet" \
 R_LIBS="$HOME/Library/Caches/scOmnom/r-libs/nichenet" \
-/Users/k.h.prange/miniconda3/envs/scOmnom_env/bin/R CMD INSTALL --no-test-load -l "$HOME/Library/Caches/scOmnom/r-libs/nichenet" "$tmpdir/nichenetr"
+R CMD INSTALL --no-test-load -l "$HOME/Library/Caches/scOmnom/r-libs/nichenet" "$tmpdir/nichenetr"
 ```
 
 **Example**
