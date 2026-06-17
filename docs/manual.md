@@ -6,7 +6,6 @@ The manual is split into focused sections so the left navigation can be used as 
 - [Usage](usage.md)
 - [Pipeline overview](pipeline-overview.md)
 - [scOmnom AnnData structure](adata-structure.md)
-- [Input modes](input-modes.md)
 - [Load and filter](load-and-filter.md)
 - [Integrate](integrate.md)
 - [Cluster and annotate](cluster-and-annotate.md)

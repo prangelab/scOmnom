@@ -22,8 +22,11 @@ nav:
       - Usage: usage.md
       - Pipeline Overview: pipeline-overview.md
       - scOmnom AnnData Structure: adata-structure.md
-      - Input Modes: input-modes.md
-      - Load And Filter: load-and-filter.md
+      - Load And Filter:
+          - Overview: load-and-filter.md
+          - Input Modes: load-and-filter/input-modes.md
+          - Filtering Defaults: load-and-filter/filtering.md
+          - Outputs: load-and-filter/outputs.md
       - Integrate:
           - Overview: integrate.md
           - Supported Methods: integrate/methods.md

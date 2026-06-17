@@ -51,7 +51,9 @@ Use `scomnom --help` and `scomnom <command> --help` for command-specific options
 
 ## QC Defaults
 
-By default, `load-and-filter` applies conservative per-sample lower-tail filtering on `total_counts` with `--min-counts-mad 5.0`. Fixed `--min-counts` and lower quantile filtering stay off by default; add `--min-counts-quantile 0.05` only when a stricter lower-count component is useful for a dataset.
+`load-and-filter` applies conservative default QC: a fixed `min_genes` guard, per-sample lower-tail `total_counts` filtering, upper-tail guards for genes/counts, mitochondrial filtering, and doublet detection. Fixed lower `--min-counts` and lower quantile filtering stay off by default.
+
+See [Filtering Defaults And Rationale](load-and-filter/filtering.md) for the full table of defaults and tuning guidance.
 
 ## SLURM Scripts
 
