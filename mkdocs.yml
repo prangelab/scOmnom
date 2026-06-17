@@ -24,9 +24,40 @@ nav:
       - scOmnom AnnData Structure: adata-structure.md
       - Input Modes: input-modes.md
       - Load And Filter: load-and-filter.md
-      - Integrate: integrate.md
-      - Cluster And Annotate: cluster-and-annotate.md
-      - Markers And DE: markers-and-de.md
+      - Integrate:
+          - Overview: integrate.md
+          - Supported Methods: integrate/methods.md
+          - scANVI Supervision: integrate/scanvi-supervision.md
+          - scIB Benchmarking: integrate/benchmarking.md
+          - Annotated Refinement: integrate/annotated-run.md
+          - Outputs: integrate/outputs.md
+          - Cluster Relationship: integrate/cluster-relationship.md
+      - Cluster And Annotate:
+          - Overview: cluster-and-annotate.md
+          - CellTypist Models: cluster-and-annotate/celltypist.md
+          - Reproducibility: cluster-and-annotate/reproducibility.md
+          - BISC: cluster-and-annotate/bisc.md
+          - Cluster Annotation: cluster-and-annotate/cluster-annotation.md
+          - Compaction: cluster-and-annotate/compaction.md
+          - Decoupler Configuration: cluster-and-annotate/decoupler.md
+          - Outputs: cluster-and-annotate/outputs.md
+          - Reporting: cluster-and-annotate/reporting.md
+      - AnnData Operations:
+          - Overview: adata-ops.md
+          - Subset: adata-ops/subset.md
+          - Annotation Merge: adata-ops/annotation-merge.md
+          - Manual Renaming: adata-ops/rename.md
+          - Multi-adata Merge: adata-ops/merge.md
+      - Markers And DE:
+          - Overview: markers-and-de.md
+          - Markers: markers-and-de/markers.md
+          - Within-cluster DE: markers-and-de/de.md
+          - Cell-level vs Pseudobulk: markers-and-de/cell-vs-pseudobulk.md
+          - Differential Abundance: markers-and-de/da.md
+          - Enrichment: markers-and-de/enrichment.md
+          - LIANA CCC: markers-and-de/liana.md
+          - NicheNet CCC: markers-and-de/nichenet.md
+          - MEBOCOST CCC: markers-and-de/mebocost.md
       - SLURM And HPC: hpc-slurm.md
   - Design Goals: design-goals.md
   - API Reference: api-reference.md

@@ -10,5 +10,6 @@ The manual is split into focused sections so the left navigation can be used as 
 - [Load and filter](load-and-filter.md)
 - [Integrate](integrate.md)
 - [Cluster and annotate](cluster-and-annotate.md)
+- [AnnData operations](adata-ops.md)
 - [Markers and DE](markers-and-de.md)
 - [SLURM and HPC](hpc-slurm.md)
