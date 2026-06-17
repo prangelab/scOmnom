@@ -53,9 +53,17 @@ Use `scomnom --help` and `scomnom <command> --help` for command-specific options
 
 By default, `load-and-filter` applies conservative per-sample lower-tail filtering on `total_counts` with `--min-counts-mad 5.0`. Fixed `--min-counts` and lower quantile filtering stay off by default; add `--min-counts-quantile 0.05` only when a stricter lower-count component is useful for a dataset.
 
+## SLURM Scripts
+
+Example SLURM job scripts are included under [`slurm/`](https://github.com/prangelab/scOmnom/tree/main/slurm). They are configured as starting points for SURF's Snellius cluster and should be adapted for local module names, CUDA/driver versions, wall time, CPU allocation, memory policy, and GPU resources.
+
+See [SLURM and HPC](hpc-slurm.md) for the manual section.
+
 ## Core References
 
 - [Manual](manual.md): full workflow reference, examples, expected outputs, AnnData conventions, and HPC notes.
+- [Data conventions](adata-structure.md): scOmnom AnnData structure, count layers, clustering rounds, annotations, and notebook IO guidance.
+- [Design goals](design-goals.md): placeholder for the project design principles.
 - [API Reference](api-reference.md): public Python API exposed through `scomnom`, `scomnom.adata_ops`, `scomnom.markers_and_de`, and `scomnom.plotting`.
 - [Changelog](changelog.md): release notes and user-facing behavior changes.
 - [Contributing](contributing.md): project contribution guidelines.

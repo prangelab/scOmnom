@@ -11,9 +11,16 @@ The pipeline combines established single-cell packages with scOmnom-specific wor
 * robust marker discovery, within-cluster DE, cell-cell communication, enrichment, and differential abundance
 * GraphDA, a graph-local differential abundance implementation using neighborhood counts and spatial weighted FDR
 
-For the hosted workflow manual, see [prangelab.org/scOmnom](https://prangelab.org/scOmnom/). For the source manual, see [docs/manual.md](docs/manual.md), and for the public Python API, see [API_REFERENCE.md](API_REFERENCE.md).
+For the workflow manual, see [prangelab.org/scOmnom](https://prangelab.org/scOmnom/). For the public Python API, see [API_REFERENCE.md](API_REFERENCE.md).
 
 ## Installation
+
+Clone the repository:
+
+```bash
+git clone https://github.com/prangelab/scOmnom.git
+cd scOmnom
+```
 
 Create the platform-specific environment:
 
@@ -27,13 +34,13 @@ conda env create -f environment_macos.yml
 conda activate scOmnom_env
 ```
 
-Install the package in editable mode:
+Install the package:
 
 ```bash
-pip install -e .
+pip install .
 ```
 
-This registers the `scomnom` command-line interface.
+For development, use `pip install -e .` instead. Both install modes register the `scomnom` command-line interface.
 
 ## Quick Start
 
@@ -98,7 +105,7 @@ The recommended full workflow is:
 9. optional `markers-and-de enrichment cluster`
 10. optional `markers-and-de ccc ...`
 
-Detailed command examples, expected outputs, AnnData conventions, and HPC notes are in the [hosted manual](https://prangelab.org/scOmnom/) and [source manual](docs/manual.md).
+Detailed command examples, expected outputs, AnnData conventions, and HPC notes are in the [manual](https://prangelab.org/scOmnom/).
 
 ## Data Conventions
 
@@ -117,10 +124,9 @@ Clustering state is stored as rounds in `adata.uns["cluster_rounds"]`, with the 
 
 ## Documentation
 
-* [Hosted manual](https://prangelab.org/scOmnom/)
-* [Source manual](docs/manual.md)
+* [Manual](https://prangelab.org/scOmnom/)
 * [API reference](API_REFERENCE.md)
-* [Design goals](DESIGNGOALS.md)
+* [Design goals](https://prangelab.org/scOmnom/design-goals/)
 * [Contributing](contributing.md)
 * [Changelog](changelog.md)
 

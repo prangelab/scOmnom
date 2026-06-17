@@ -16,7 +16,19 @@ theme:
 
 nav:
   - Home: index.md
-  - Manual: manual.md
+  - Manual:
+      - Overview: manual.md
+      - Installation: installation.md
+      - Usage: usage.md
+      - Pipeline Overview: pipeline-overview.md
+      - scOmnom AnnData Structure: adata-structure.md
+      - Input Modes: input-modes.md
+      - Load And Filter: load-and-filter.md
+      - Integrate: integrate.md
+      - Cluster And Annotate: cluster-and-annotate.md
+      - Markers And DE: markers-and-de.md
+      - SLURM And HPC: hpc-slurm.md
+  - Design Goals: design-goals.md
   - API Reference: api-reference.md
   - Changelog: changelog.md
   - Contributing: contributing.md
