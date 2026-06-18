@@ -21,6 +21,38 @@ def _normalize_optional_model_name(value: object) -> object:
     return value
 
 
+def _normalize_figure_formats(value: object) -> list[str]:
+    if value is None:
+        values: list[object] = ["png", "pdf"]
+    elif isinstance(value, str):
+        values = [value]
+    else:
+        values = list(value)
+
+    out: list[str] = []
+    for item in values:
+        for part in str(item).split(","):
+            fmt = part.strip().lower().lstrip(".")
+            if fmt:
+                out.append(fmt)
+
+    if not out:
+        raise ValueError("figure_formats must contain at least one format")
+
+    supported = Figure().canvas.get_supported_filetypes()
+    deduped: list[str] = []
+    for fmt in out:
+        if fmt not in supported:
+            raise ValueError(
+                f"Unsupported figure format '{fmt}'. "
+                f"Supported formats include: {', '.join(sorted(supported))}"
+            )
+        if fmt not in deduped:
+            deduped.append(fmt)
+
+    return deduped
+
+
 class LoadAndFilterConfig(BaseModel):
 
     # ---- Input ----
@@ -110,6 +142,11 @@ class LoadAndFilterConfig(BaseModel):
         return self.output_dir / self.figdir_name
 
     # ---- Validators ----
+    @field_validator("figure_formats", mode="before")
+    @classmethod
+    def validate_formats(cls, fmts) -> list[str]:
+        return _normalize_figure_formats(fmts)
+
     @model_validator(mode="after")
     def check_inputs(self):
         # --apply-doublet-score mode
@@ -314,6 +351,11 @@ class IntegrateConfig(BaseModel):
         if v is None:
             return None
         return [m.lower() for m in v]
+
+    @field_validator("figure_formats", mode="before")
+    @classmethod
+    def validate_formats(cls, fmts) -> list[str]:
+        return _normalize_figure_formats(fmts)
 
     @field_validator("celltypist_model", mode="before")
     @classmethod
@@ -661,20 +703,10 @@ class ClusterAnnotateConfig(BaseModel):
             raise ValueError("res_min must be < res_max")
         return self
 
-    @field_validator("figure_formats")
+    @field_validator("figure_formats", mode="before")
     @classmethod
-    def validate_formats(cls, fmts: list[str]) -> list[str]:
-        supported = Figure().canvas.get_supported_filetypes()
-        out: list[str] = []
-        for fmt in fmts:
-            fmt_l = str(fmt).lower()
-            if fmt_l not in supported:
-                raise ValueError(
-                    f"Unsupported figure format '{fmt}'. "
-                    f"Supported formats include: {', '.join(sorted(supported))}"
-                )
-            out.append(fmt_l)
-        return out
+    def validate_formats(cls, fmts) -> list[str]:
+        return _normalize_figure_formats(fmts)
 
     @field_validator("celltypist_model", mode="before")
     @classmethod
@@ -777,6 +809,11 @@ class MarkersAndDEConfig(BaseModel):
     save_h5ad: bool = False
 
     n_jobs: int = 1
+
+    @field_validator("figure_formats", mode="before")
+    @classmethod
+    def validate_formats(cls, fmts) -> list[str]:
+        return _normalize_figure_formats(fmts)
 
     # ------------------------------------------------------------------
     # Grouping / round awareness

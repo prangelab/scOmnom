@@ -982,9 +982,19 @@ RUN_KEY: str | None = None
 # -------------------------------------------------------------------------
 # Setup + saving
 # -------------------------------------------------------------------------
+def _normalize_figure_formats(formats: Sequence[str]) -> list[str]:
+    out: list[str] = []
+    for item in formats:
+        for part in str(item).split(","):
+            fmt = part.strip().lower().lstrip(".")
+            if fmt and fmt not in out:
+                out.append(fmt)
+    return out or ["png", "pdf"]
+
+
 def set_figure_formats(formats: Sequence[str]) -> None:
     global FIGURE_FORMATS
-    FIGURE_FORMATS = list(formats)
+    FIGURE_FORMATS = _normalize_figure_formats(formats)
 
 
 def setup_scanpy_figs(figdir: Path, formats: Sequence[str] | None = None) -> None:
