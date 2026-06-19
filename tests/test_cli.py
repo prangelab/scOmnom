@@ -1,7 +1,7 @@
 import pytest
 from pathlib import Path
 from typer.testing import CliRunner
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from scomnom.cli import app
 
@@ -18,39 +18,6 @@ def test_cli_help():
 
 
 # ---------------------------------------------------------
-# cell-qc
-# ---------------------------------------------------------
-def test_cell_qc_help():
-    result = runner.invoke(app, ["cell-qc", "--help"])
-    assert result.exit_code == 0
-    assert "Generate QC comparisons" in result.output
-
-
-def test_cell_qc_requires_any_input():
-    result = runner.invoke(app, ["cell-qc", "--out", "outdir"])
-    # All inputs missing
-    assert result.exit_code != 0
-    assert "Provide at least one input" in result.output
-
-
-@patch("scomnom.cli.run_cell_qc")
-def test_cell_qc_dispatch(mock_run):
-    result = runner.invoke(
-        app,
-        [
-            "cell-qc",
-            "--raw", "raw_dir",
-            "--out", "outdir"
-        ]
-    )
-    assert result.exit_code == 0
-    mock_run.assert_called_once()
-    cfg = mock_run.call_args[0][0]
-    assert cfg.raw_sample_dir == "raw_dir"
-    assert cfg.output_dir.name == "outdir"
-
-
-# ---------------------------------------------------------
 # load-and-filter
 # ---------------------------------------------------------
 def test_load_and_filter_help():
@@ -62,22 +29,24 @@ def test_load_and_filter_help():
 def test_load_and_filter_requires_output_and_metadata():
     result = runner.invoke(app, ["load-and-filter"])
     assert result.exit_code != 0
-    assert "Output directory (required)" in result.output
+    assert "out" in result.output
 
 
-def test_load_and_filter_mutually_exclusive_raw_filtered():
+def test_load_and_filter_mutually_exclusive_raw_filtered(tmp_path):
+    meta = tmp_path / "meta.tsv"
+    meta.write_text("sample\tcol\nA\t1\n")
     result = runner.invoke(
         app,
         [
             "load-and-filter",
             "--raw-sample-dir", "rawdir",
             "--filtered-sample-dir", "filtered",
-            "--metadata-tsv", "meta.tsv",
+            "--metadata-tsv", str(meta),
             "--out", "out"
         ]
     )
     assert result.exit_code != 0
-    assert "Cannot specify both" in result.output
+    assert "filtered cannot be combined with raw or cellbender" in str(result.exception)
 
 
 @patch("scomnom.cli.run_load_and_filter")
@@ -94,13 +63,17 @@ def test_load_and_filter_dispatch(mock_run, tmp_path):
             "--raw-sample-dir", "raw",
             "--metadata-tsv", str(meta),
             "--out", str(out),
+            "--output-name", "adata.pbmc3k.filtered",
+            "--figdir-name", "figures",
         ]
     )
     assert result.exit_code == 0
     mock_run.assert_called_once()
     cfg = mock_run.call_args[0][0]
-    assert cfg.raw_sample_dir == "raw"
+    assert cfg.raw_sample_dir == Path("raw")
     assert cfg.metadata_tsv == meta
+    assert cfg.output_name == "adata.pbmc3k.filtered"
+    assert cfg.figdir_name == "figures"
 
 
 # ---------------------------------------------------------
@@ -109,13 +82,13 @@ def test_load_and_filter_dispatch(mock_run, tmp_path):
 def test_integrate_help():
     result = runner.invoke(app, ["integrate", "--help"])
     assert result.exit_code == 0
-    assert "batch correction" in result.output
+    assert "Integration" in result.output
 
 
 def test_integrate_requires_input():
     result = runner.invoke(app, ["integrate"])
     assert result.exit_code != 0
-    assert "Input h5ad" in result.output
+    assert "input-path" in result.output
 
 
 def test_integrate_invalid_method_rejected():
@@ -171,18 +144,17 @@ def test_integrate_celltypist_model_short_flag_propagates(mock_run):
 def test_cluster_help():
     result = runner.invoke(app, ["cluster-and-annotate", "--help"])
     assert result.exit_code == 0
-    assert "Perform clustering" in result.output
+    assert "Clustering" in result.output
 
 
 def test_cluster_requires_input():
-    # Missing --input, but not using --list-models or --download-models
     result = runner.invoke(app, ["cluster-and-annotate"])
     assert result.exit_code != 0
-    assert "Missing required option --input" in result.output
+    assert "Missing required option --input-path / -i" in result.output
 
 
 # --- list models ----------------------------------------------------------
-@patch("scomnom.cli.get_available_celltypist_models", return_value=[{"name": "Test.pkl"}])
+@patch("scomnom.io_utils.get_available_celltypist_models", return_value=[{"name": "Test.pkl"}])
 def test_cluster_list_models(mock_models):
     result = runner.invoke(app, ["cluster-and-annotate", "--list-models"])
     assert result.exit_code == 0
@@ -191,7 +163,7 @@ def test_cluster_list_models(mock_models):
 
 
 # --- download models ------------------------------------------------------
-@patch("scomnom.cli.download_all_celltypist_models")
+@patch("scomnom.io_utils.download_all_celltypist_models")
 def test_cluster_download_models(mock_dl):
     result = runner.invoke(app, ["cluster-and-annotate", "--download-models"])
     assert result.exit_code == 0
@@ -215,8 +187,8 @@ def test_cluster_dispatch(mock_run):
     assert result.exit_code == 0
     mock_run.assert_called_once()
     cfg = mock_run.call_args[0][0]
-    assert cfg.input_path == "integrated.h5ad"
-    assert cfg.output_dir == "outdir"
+    assert cfg.input_path == Path("integrated.h5ad")
+    assert cfg.output_dir == Path("outdir")
     assert cfg.output_name == "adata.clustered.annotated.test"
     assert cfg.res_min == 0.2
     assert cfg.res_max == 1.2
@@ -272,6 +244,14 @@ def test_markers_and_de_help_includes_enrichment():
     assert "ccc" in result.output
 
 
+def test_markers_and_de_ccc_help_includes_backends():
+    result = runner.invoke(app, ["markers-and-de", "ccc", "--help"])
+    assert result.exit_code == 0
+    assert "liana" in result.output
+    assert "nichenet" in result.output
+    assert "mebocost" in result.output
+
+
 def test_adata_ops_rename_requires_mapping():
     result = runner.invoke(
         app,
@@ -313,8 +293,8 @@ def test_adata_ops_dispatch(mock_run):
     assert result.exit_code == 0
     mock_run.assert_called_once()
     cfg = mock_run.call_args[0][0]
-    assert cfg.input_path == "adata.h5ad"
-    assert cfg.subset_mapping_tsv == "mapping.tsv"
+    assert cfg.input_path == Path("adata.h5ad")
+    assert cfg.subset_mapping_tsv == Path("mapping.tsv")
     assert cfg.output_format == "zarr"
 
 

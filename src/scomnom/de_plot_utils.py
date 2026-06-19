@@ -763,7 +763,7 @@ def heatmap_top_genes_by_sample(
     keys = [str(k).strip() for k in (annotation_keys or []) if k]
     if not keys and condition_key:
         keys = [str(condition_key)]
-    keys = [k for k in keys if k in adata.obs]
+    keys = [k for k in keys if k in adata.obs and k != sample_key]
     keys = _unique_keep_order(keys)
 
     if keys:

@@ -2581,13 +2581,35 @@ def plot_qc_filter_stack(
     # --------------------------------------------------
     # Keep only per-sample cell filters
     # --------------------------------------------------
-    df = df[
+    per_sample_df = df[
         (df["scope"] == "cell")
         & (df["batch"] != "ALL")
     ]
 
-    if df.empty:
-        raise ValueError("No per-sample QC filter stats available")
+    if per_sample_df.empty:
+        df = df[(df["scope"] == "cell") & (df["batch"] == "ALL")].copy()
+        if df.empty:
+            LOGGER.warning("No cell-level QC filter stats available; skipping QC filter stack plot.")
+            return
+        if batch_key in adata.obs and adata.obs[batch_key].nunique(dropna=True) == 1:
+            df["batch"] = str(adata.obs[batch_key].dropna().astype(str).iloc[0])
+        else:
+            df["batch"] = "ALL"
+    else:
+        df = per_sample_df
+
+    if df.duplicated(subset=["batch", "filter"]).any():
+        df = (
+            df
+            .groupby(["batch", "filter"], as_index=False, sort=False)
+            .agg(
+                scope=("scope", "first"),
+                n_before=("n_before", "sum"),
+                n_after=("n_after", "sum"),
+                n_removed=("n_removed", "sum"),
+                frac_removed=("frac_removed", "mean"),
+            )
+        )
 
     # --------------------------------------------------
     # Determine filter order (as applied)

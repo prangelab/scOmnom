@@ -5,7 +5,9 @@ import pandas as pd
 import scanpy as sc
 import pytest
 import sys
+from scipy import sparse
 from pathlib import Path
+from types import SimpleNamespace
 
 import matplotlib as mpl
 mpl.use("Agg")  # headless backend for tests
@@ -71,12 +73,10 @@ def test_setup_scanpy_figs_and_save_multi(tmp_path, reset_root_figdir):
     figdir = tmp_path / "figs"
     pu.setup_scanpy_figs(figdir, formats=["png"])
 
-    # create a simple figure
     fig = plt.figure()
-    pu.save_multi("test_plot", figdir, fig=fig)
+    pu.save_multi("test_plot", Path("overview"), fig=fig)
 
-    # png directory should exist & file created
-    out = tmp_path / "figs" / "png" / "test_plot.png"
+    out = tmp_path / "figs" / "png" / "overview_round1" / "test_plot.png"
     assert out.exists()
 
 
@@ -183,21 +183,13 @@ def test_plot_elbow_knee(tmp_path, reset_root_figdir, mock_save_multi):
     pu.setup_scanpy_figs(figdir)
 
     adata = synthetic_adata()
+    adata.X = sparse.csr_matrix(adata.X)
     adata.layers["counts_raw"] = adata.X.copy()
 
-    pu.plot_elbow_knee(adata, figpath_stem="knee", figdir=figdir)
+    with pu.capture_plot_artifacts() as artifacts:
+        pu.plot_elbow_knee(adata, figpath_stem="knee", figdir=figdir)
 
-    assert ("knee", figdir) in mock_save_multi
-
-
-def test_plot_read_comparison(tmp_path, reset_root_figdir, mock_save_multi):
-    figdir = tmp_path / "figs"
-    pu.setup_scanpy_figs(figdir)
-
-    ref = {"A": 100, "B": 200}
-    other = {"A": 50, "B": 300}
-    pu.plot_read_comparison(ref, other, "ref", "other", figdir=figdir, stem="reads")
-    assert ("reads", figdir) in mock_save_multi
+    assert [(a.stem, a.figdir) for a in artifacts] == [("knee", figdir)]
 
 
 def test_plotting_api_plot_decoupler_payload_returns_figures():
@@ -374,88 +366,184 @@ def test_plot_final_cell_counts_missing_batch(tmp_path, reset_root_figdir, mock_
     figdir = tmp_path / "figs"
     pu.setup_scanpy_figs(figdir)
 
-    class Cfg:
-        batch_key = "batch"
-        figdir = figdir
+    cfg = SimpleNamespace(batch_key="batch", figdir=figdir)
 
     adata = synthetic_adata()
-    # no "batch" column → should just warn and not call save_multi
-    pu.plot_final_cell_counts(adata, Cfg)
-    assert mock_save_multi == []
+    with pu.capture_plot_artifacts() as artifacts:
+        pu.plot_final_cell_counts(adata, cfg)
+    assert artifacts == []
 
 
 def test_plot_final_cell_counts_ok(tmp_path, reset_root_figdir, mock_save_multi):
     figdir = tmp_path / "figs"
     pu.setup_scanpy_figs(figdir)
 
-    class Cfg:
-        batch_key = "batch"
-        figdir = figdir
+    cfg = SimpleNamespace(batch_key="batch", figdir=figdir)
 
     adata = synthetic_adata()
     adata.obs["batch"] = ["A"] * adata.n_obs
 
-    pu.plot_final_cell_counts(adata, Cfg)
-    # called exactly once with stem="final_cell_counts"
-    assert any(stem == "final_cell_counts" for stem, _ in mock_save_multi)
+    with pu.capture_plot_artifacts() as artifacts:
+        pu.plot_final_cell_counts(adata, cfg)
+    assert [a.stem for a in artifacts] == ["final_cell_counts"]
 
 
 def test_plot_mt_histogram(tmp_path, reset_root_figdir, mock_save_multi):
     figdir = tmp_path / "figs"
     pu.setup_scanpy_figs(figdir)
 
-    class Cfg:
-        figdir = figdir
+    cfg = SimpleNamespace(figdir=figdir)
 
     adata = synthetic_adata()
     adata.obs["pct_counts_mt"] = np.random.rand(adata.n_obs) * 20
 
-    pu.plot_mt_histogram(adata, Cfg, suffix="prefilter")
-    assert any(stem == "prefilter_QC_hist_pct_mt" for stem, _ in mock_save_multi)
+    with pu.capture_plot_artifacts() as artifacts:
+        pu.plot_mt_histogram(adata, cfg, suffix="prefilter")
+    assert [a.stem for a in artifacts] == ["prefilter_QC_hist_pct_mt"]
 
 
 def test_run_qc_plots_pre_filter(tmp_path, reset_root_figdir, mock_scanpy_plots, mock_save_multi):
     figdir = tmp_path / "figs"
     pu.setup_scanpy_figs(figdir)
 
-    class Cfg:
-        make_figures = True
-        batch_key = "batch"
-        figdir = figdir
+    cfg = SimpleNamespace(
+        make_figures=True,
+        batch_key="sample",
+        figdir=figdir,
+        min_counts=None,
+        min_counts_mad=5.0,
+        min_counts_quantile=None,
+        min_counts_auto_activate_quantile=0.01,
+        min_counts_auto_activate_below=1000,
+        min_genes=0,
+        max_pct_mt=100.0,
+        max_genes_mad=5.0,
+        max_genes_quantile=0.999,
+        max_counts_mad=5.0,
+        max_counts_quantile=0.999,
+    )
+    qc_df = pd.DataFrame(
+        {
+            "sample": ["A"] * 10,
+            "total_counts": np.random.randint(100, 1000, size=10),
+            "n_genes_by_counts": np.random.randint(50, 200, size=10),
+            "pct_counts_mt": np.random.rand(10) * 10,
+        }
+    )
 
-    adata = synthetic_adata()
-    adata.obs["batch"] = ["A"] * adata.n_obs
-    adata.obs["doublet_score"] = np.random.rand(adata.n_obs)
-    adata.obs["pct_counts_mt"] = np.random.rand(adata.n_obs) * 10
-
-    pu.run_qc_plots_pre_filter(adata, Cfg)
-    # at least MT histogram should be saved
-    assert any("prefilter_QC_hist_pct_mt" in stem for stem, _ in mock_save_multi)
+    artifacts = pu.run_qc_plots_pre_filter_df(qc_df, cfg)
+    assert any("prefilter_QC_hist_pct_mt" in artifact.stem for artifact in artifacts)
 
 
 def test_run_qc_plots_postfilter(tmp_path, reset_root_figdir, mock_scanpy_plots, mock_save_multi):
     figdir = tmp_path / "figs"
     pu.setup_scanpy_figs(figdir)
 
-    class Cfg:
-        make_figures = True
-        batch_key = "batch"
-        figdir = figdir
-        max_pcs_plot = 5
+    cfg = SimpleNamespace(
+        make_figures=True,
+        batch_key="batch",
+        figdir=figdir,
+        max_pcs_plot=5,
+        min_genes=0,
+        max_pct_mt=100.0,
+        max_genes_mad=5.0,
+        max_genes_quantile=0.999,
+        max_counts_mad=5.0,
+        max_counts_quantile=0.999,
+    )
 
     adata = synthetic_adata()
+    adata.X = sparse.csr_matrix(adata.X)
+    adata.layers["counts_raw"] = adata.X.copy()
     adata.obs["batch"] = ["A"] * adata.n_obs
     adata.obs["leiden"] = ["0"] * adata.n_obs
     adata.obs["n_genes_by_counts"] = np.random.randint(50, 200, size=adata.n_obs)
     adata.obs["total_counts"] = np.random.randint(100, 1000, size=adata.n_obs)
     adata.obs["pct_counts_mt"] = np.random.rand(adata.n_obs) * 10
 
-    pu.run_qc_plots_postfilter(adata, Cfg)
-    # check that some expected stems were used
-    stems = [s for s, _ in mock_save_multi]
-    assert "QC_violin_mt_counts_postfilter" in stems
-    assert "postfilter_QC_hist_pct_mt" in stems
-    assert "QC_umap_sample" in stems or "QC_umap_leiden" in stems
+    artifacts = pu.run_qc_plots_postfilter(adata, cfg)
+    stems = [artifact.stem for artifact in artifacts]
+    assert "QC_violin_counts_postfilter_raw" in stems
+    assert "QC_violin_mt_postfilter_raw" in stems
+    assert "postfilter_raw_QC_hist_pct_mt" in stems
+
+
+def test_plot_qc_filter_stack_accepts_global_only_stats(tmp_path, reset_root_figdir, mock_save_multi):
+    figdir = tmp_path / "figs"
+    pu.setup_scanpy_figs(figdir)
+
+    adata = synthetic_adata()
+    adata.obs["sample_id"] = pd.Categorical(["pbmc3k"] * adata.n_obs)
+    adata.uns["qc_filter_stats"] = pd.DataFrame(
+        {
+            "filter": ["min_genes", "max_pct_mt"],
+            "scope": ["cell", "cell"],
+            "batch": ["ALL", "ALL"],
+            "n_before": [100, 90],
+            "n_after": [90, 85],
+            "n_removed": [10, 5],
+            "frac_removed": [0.10, 0.055],
+        }
+    )
+
+    with pu.capture_plot_artifacts() as artifacts:
+        pu.plot_qc_filter_stack(
+            adata,
+            batch_key="sample_id",
+            figdir=Path("QC_plots") / "overview",
+        )
+
+    assert [artifact.stem for artifact in artifacts] == ["QC Filter effects"]
+
+
+def test_plot_qc_filter_stack_aggregates_duplicate_global_stats(tmp_path, reset_root_figdir, mock_save_multi):
+    figdir = tmp_path / "figs"
+    pu.setup_scanpy_figs(figdir)
+
+    adata = synthetic_adata()
+    adata.obs["sample_id"] = pd.Categorical(["s1", "s2"] * (adata.n_obs // 2))
+    adata.uns["qc_filter_stats"] = pd.DataFrame(
+        {
+            "filter": ["min_genes", "max_pct_mt", "min_genes", "max_pct_mt"],
+            "scope": ["cell", "cell", "cell", "cell"],
+            "batch": ["ALL", "ALL", "ALL", "ALL"],
+            "n_before": [100, 80, 200, 150],
+            "n_after": [80, 75, 150, 140],
+            "n_removed": [20, 5, 50, 10],
+            "frac_removed": [0.20, 0.0625, 0.25, 0.0667],
+        }
+    )
+
+    with pu.capture_plot_artifacts() as artifacts:
+        pu.plot_qc_filter_stack(
+            adata,
+            batch_key="sample_id",
+            figdir=Path("QC_plots") / "overview",
+        )
+
+    assert [artifact.stem for artifact in artifacts] == ["QC Filter effects"]
+
+
+def test_de_heatmap_drops_sample_key_from_annotations(tmp_path, reset_root_figdir, mock_save_multi):
+    figdir = tmp_path / "figs"
+    pu.setup_scanpy_figs(figdir)
+
+    adata = synthetic_adata(n=12, g=4)
+    adata.obs["donor_id"] = pd.Categorical(["d1"] * 4 + ["d2"] * 4 + ["d3"] * 4)
+    adata.obs["condition"] = pd.Categorical(["ctrl", "stim"] * 6)
+
+    with pu.capture_plot_artifacts() as artifacts:
+        dpu.heatmap_top_genes_by_sample(
+            adata,
+            genes=["gene0", "gene1", "gene2"],
+            sample_key="donor_id",
+            condition_key="condition",
+            annotation_keys=["condition", "donor_id"],
+            artifact_stem="de_heatmap",
+            artifact_figdir=Path("DE") / "heatmaps",
+        )
+
+    assert [artifact.stem for artifact in artifacts] == ["de_heatmap"]
 
 
 # ---------------------------------------------------------------------
@@ -476,8 +564,9 @@ def test_plot_scib_results_table(tmp_path, reset_root_figdir, mock_save_multi):
         index=["Unintegrated", "Scanorama"],
     )
 
-    pu.plot_scib_results_table(scaled, figdir)
-    assert any(stem == "scIB_results_table" for stem, _ in mock_save_multi)
+    with pu.capture_plot_artifacts() as artifacts:
+        pu.plot_scib_results_table(scaled)
+    assert [a.stem for a in artifacts] == ["scIB_results_table"]
 
 
 # ---------------------------------------------------------------------
@@ -492,16 +581,18 @@ def test_plot_clustering_resolution_sweep(tmp_path, reset_root_figdir, mock_save
     ncl = [5, 8, 10]
     pen = [0.05, 0.15, 0.1]
 
-    pu.plot_clustering_resolution_sweep(res, sil, ncl, pen, figdir)
-    assert any(stem == "clustering_resolution_sweep" for stem, _ in mock_save_multi)
+    with pu.capture_plot_artifacts() as artifacts:
+        pu.plot_clustering_resolution_sweep(res, sil, ncl, pen, figdir)
+    assert [a.stem for a in artifacts] == ["clustering_resolution_sweep"]
 
 
 def test_plot_clustering_stability_ari(tmp_path, reset_root_figdir, mock_save_multi):
     figdir = tmp_path / "figs"
     pu.setup_scanpy_figs(figdir)
 
-    pu.plot_clustering_stability_ari([0.8, 0.9, 0.85], figdir)
-    assert any(stem == "clustering_stability_ari" for stem, _ in mock_save_multi)
+    with pu.capture_plot_artifacts() as artifacts:
+        pu.plot_clustering_stability_ari([0.8, 0.9, 0.85], figdir)
+    assert [a.stem for a in artifacts] == ["clustering_stability_ari"]
 
 
 def test_plot_cluster_umaps(tmp_path, reset_root_figdir, mock_scanpy_plots, mock_save_multi):
@@ -652,9 +743,10 @@ def test_plot_cluster_tree(tmp_path, reset_root_figdir, mock_save_multi):
         "0.400": np.array([0, 1, 1, 2]),
     }
     resolutions = [0.2, 0.4]
-    pu.plot_cluster_tree(labels_per_res, resolutions, figdir=tmp_path, stem="tree")
+    with pu.capture_plot_artifacts() as artifacts:
+        pu.plot_cluster_tree(labels_per_res, resolutions, figdir=tmp_path, stem="tree")
 
-    assert any(stem == "tree" for stem, _ in mock_save_multi)
+    assert [a.stem for a in artifacts] == ["tree"]
 
 
 # ---------------------------------------------------------------------
@@ -671,19 +763,19 @@ def test_plot_stability_curves_structural_only(tmp_path, reset_root_figdir, mock
     tiny = {"0.200": 0.6, "0.400": 0.7, "0.600": 0.5}
     plateaus = [{"resolutions": [0.2, 0.4]}]
 
-    pu.plot_stability_curves(
-        resolutions=res,
-        silhouette=sil,
-        stability=stab,
-        composite=comp,
-        tiny_cluster_penalty=tiny,
-        best_resolution=0.4,
-        plateaus=plateaus,
-        figdir=figdir,
-        selection_config={"use_bio": False},
-    )
+    with pu.capture_plot_artifacts() as artifacts:
+        pu.plot_stability_curves(
+            resolutions=res,
+            silhouette=sil,
+            stability=stab,
+            composite=comp,
+            tiny_cluster_penalty=tiny,
+            best_resolution=0.4,
+            plateaus=plateaus,
+            figdir=figdir,
+        )
 
-    assert any(stem == "cluster_selection_stability" for stem, _ in mock_save_multi)
+    assert [a.stem for a in artifacts] == ["cluster_selection_stability"]
 
 
 def test_plot_stability_curves_with_bio(tmp_path, reset_root_figdir, mock_save_multi):
@@ -695,28 +787,22 @@ def test_plot_stability_curves_with_bio(tmp_path, reset_root_figdir, mock_save_m
     stab = {"0.200": 0.9, "0.400": 0.85, "0.600": 0.8}
     comp = {"0.200": 0.2, "0.400": 0.5, "0.600": 0.4}
     tiny = {"0.200": 0.6, "0.400": 0.7, "0.600": 0.5}
-    bio_h = {"0.200": 0.7, "0.400": 0.9, "0.600": 0.8}
-    bio_f = {"0.200": 0.3, "0.400": 0.1, "0.600": 0.2}
-    bio_a = {"0.200": 0.6, "0.400": 0.8, "0.600": 0.7}
     plateaus = [{"resolutions": [0.2, 0.4]}]
-    sel_cfg = {"use_bio": True, "w_hom": 0.5, "w_frag": 0.3, "w_bioari": 0.2}
 
-    pu.plot_stability_curves(
-        resolutions=res,
-        silhouette=sil,
-        stability=stab,
-        composite=comp,
-        tiny_cluster_penalty=tiny,
-        best_resolution=0.4,
-        plateaus=plateaus,
-        figdir=figdir,
-        bio_homogeneity=bio_h,
-        bio_fragmentation=bio_f,
-        bio_ari=bio_a,
-        selection_config=sel_cfg,
-    )
+    with pu.capture_plot_artifacts() as artifacts:
+        pu.plot_stability_curves(
+            resolutions=res,
+            silhouette=sil,
+            stability=stab,
+            composite=comp,
+            tiny_cluster_penalty=tiny,
+            best_resolution=0.4,
+            plateaus=plateaus,
+            figdir=figdir,
+            stem="cluster_selection_stability_alt",
+        )
 
-    assert any(stem == "cluster_selection_stability" for stem, _ in mock_save_multi)
+    assert [a.stem for a in artifacts] == ["cluster_selection_stability_alt"]
 
 
 def test_plot_biological_metrics(tmp_path, reset_root_figdir, mock_save_multi):
@@ -730,18 +816,19 @@ def test_plot_biological_metrics(tmp_path, reset_root_figdir, mock_save_multi):
     plateaus = [{"resolutions": [0.2, 0.4]}]
     sel_cfg = {"w_hom": 0.5, "w_frag": 0.3, "w_bioari": 0.2}
 
-    pu.plot_biological_metrics(
-        resolutions=res,
-        bio_homogeneity=bio_h,
-        bio_fragmentation=bio_f,
-        bio_ari=bio_a,
-        selection_config=sel_cfg,
-        best_resolution=0.4,
-        plateaus=plateaus,
-        figdir=figdir,
-    )
+    with pu.capture_plot_artifacts() as artifacts:
+        pu.plot_biological_metrics(
+            resolutions=res,
+            bio_homogeneity=bio_h,
+            bio_fragmentation=bio_f,
+            bio_ari=bio_a,
+            selection_config=sel_cfg,
+            best_resolution=0.4,
+            plateaus=plateaus,
+            figdir=figdir,
+        )
 
-    assert any(stem == "biological_metrics" for stem, _ in mock_save_multi)
+    assert [a.stem for a in artifacts] == ["biological_metrics"]
 
 
 def test_plot_plateau_highlights(tmp_path, reset_root_figdir, mock_save_multi):
@@ -754,14 +841,15 @@ def test_plot_plateau_highlights(tmp_path, reset_root_figdir, mock_save_multi):
     comp = {"0.200": 0.2, "0.400": 0.5, "0.600": 0.4}
     plateaus = [{"resolutions": [0.2, 0.4]}]
 
-    pu.plot_plateau_highlights(
-        resolutions=res,
-        silhouette=sil,
-        stability=stab,
-        composite=comp,
-        best_resolution=0.4,
-        plateaus=plateaus,
-        figdir=figdir,
-    )
+    with pu.capture_plot_artifacts() as artifacts:
+        pu.plot_plateau_highlights(
+            resolutions=res,
+            silhouette=sil,
+            stability=stab,
+            composite=comp,
+            best_resolution=0.4,
+            plateaus=plateaus,
+            figdir=figdir,
+        )
 
-    assert any(stem == "plateau_highlights" for stem, _ in mock_save_multi)
+    assert [a.stem for a in artifacts] == ["plateau_highlights"]

@@ -150,7 +150,7 @@ class LoadAndFilterConfig(BaseModel):
     @model_validator(mode="after")
     def check_inputs(self):
         # --apply-doublet-score mode
-        if self.apply_doublet_score is not None:
+        if self.apply_doublet_score is True:
             # metadata not required
             return self
 
@@ -350,7 +350,7 @@ class IntegrateConfig(BaseModel):
     def normalize_methods(cls, v):
         if v is None:
             return None
-        return [m.lower() for m in v]
+        return [str(m).strip().lower() for m in v]
 
     @field_validator("figure_formats", mode="before")
     @classmethod

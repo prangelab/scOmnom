@@ -22,6 +22,17 @@ from .adata_ops import add_obs_metadata
 LOGGER = logging.getLogger(__name__)
 
 
+def _dataset_output_stem(output_name: str) -> str:
+    stem = str(output_name).strip()
+    for suffix in (".zarr.tar.zst", ".zarr", ".h5ad"):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    if not stem:
+        raise ValueError("output_name must not be empty.")
+    return stem
+
+
 def _validate_metadata_samples(
     metadata_tsv: Path,
     batch_key: str,
@@ -407,8 +418,18 @@ def sparse_filter_cells_and_genes(
 ) -> ad.AnnData:
     import numpy as np
     import pandas as pd
+    from scipy import sparse
 
-    X = adata.X  # assumed CSR
+    def _ensure_csr(in_adata: ad.AnnData):
+        X_local = in_adata.X
+        if sparse.issparse(X_local):
+            X_local = X_local.tocsr()
+        else:
+            X_local = sparse.csr_matrix(X_local)
+        in_adata.X = X_local
+        return X_local
+
+    X = _ensure_csr(adata)
 
     # --------------------------------------------------
     # QC logging helpers
@@ -477,7 +498,7 @@ def sparse_filter_cells_and_genes(
     )
 
     adata = adata[cell_mask].copy()
-    X = adata.X
+    X = _ensure_csr(adata)
 
     # --------------------------------------------------
     # Cell filtering: min_counts
@@ -509,7 +530,7 @@ def sparse_filter_cells_and_genes(
         )
 
         adata = adata[count_mask].copy()
-        X = adata.X
+        X = _ensure_csr(adata)
 
     # --------------------------------------------------
     # Cell filtering: max_pct_mt
@@ -537,7 +558,7 @@ def sparse_filter_cells_and_genes(
         )
 
         adata = adata[mt_mask].copy()
-        X = adata.X
+        X = _ensure_csr(adata)
 
     # --------------------------------------------------
     # Cell filtering: UPPER CUTS (MAD + quantile)
@@ -581,7 +602,7 @@ def sparse_filter_cells_and_genes(
             )
 
             adata = adata[keep].copy()
-            X = adata.X
+            X = _ensure_csr(adata)
 
     # --- total_counts upper cut ---
     if max_counts_mad is not None or max_counts_quantile is not None:
@@ -607,7 +628,7 @@ def sparse_filter_cells_and_genes(
             )
 
             adata = adata[keep].copy()
-            X = adata.X
+            X = _ensure_csr(adata)
 
     # --------------------------------------------------
     # Gene filtering: min_cells (not logged here)
@@ -1205,12 +1226,13 @@ def run_load_and_filter(
     # ---------------------------------------------------------
     # Save final filtered dataset
     # ---------------------------------------------------------
-    out_zarr = cfg.output_dir / "adata.filtered.zarr"
+    output_stem = _dataset_output_stem(cfg.output_name)
+    out_zarr = cfg.output_dir / f"{output_stem}.zarr"
     LOGGER.info("Saving filtered dataset → %s", out_zarr)
     io_utils.save_dataset(adata, out_zarr, fmt="zarr")
 
     if cfg.save_h5ad:
-        out_h5ad = cfg.output_dir / "adata.filtered.h5ad"
+        out_h5ad = cfg.output_dir / f"{output_stem}.h5ad"
         LOGGER.warning("Writing H5AD copy (loads data into RAM).")
         io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
 

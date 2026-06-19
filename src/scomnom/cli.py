@@ -68,7 +68,7 @@ def _normalize_methods(methods):
 
     invalid = [m for m in expanded if m not in ALLOWED_METHODS]
     if invalid:
-        raise ValueError(
+        raise typer.BadParameter(
             f"Invalid method(s): {', '.join(invalid)}. "
             f"Allowed: {', '.join(sorted(ALLOWED_METHODS))}"
         )
@@ -280,6 +280,11 @@ def load_and_filter(
         ..., "--out", "-o",
         help="[I/O] Output directory for anndata and figures/",
     ),
+    output_name: str = typer.Option(
+        "adata.filtered",
+        "--output-name",
+        help="[I/O] Base name for filtered output dataset.",
+    ),
     metadata_tsv: Optional[Path] = typer.Option(
         None, "--metadata-tsv", "-m", exists=True,
         help="[I/O] TSV with sample metadata (not required with --apply-doublet-score).",
@@ -376,6 +381,11 @@ def load_and_filter(
     # Figures
     # -------------------------------------------------------------
     make_figures: bool = typer.Option(True, help="[Figures] Whether to create QC plots."),
+    figdir_name: str = typer.Option(
+        "figures",
+        "--figdir-name",
+        help="[Figures] Name of figure directory.",
+    ),
     figure_formats: List[str] = typer.Option(
         ["png", "pdf"], "--figure-formats", "-F",
         help="[Figures] Formats to save."
@@ -437,6 +447,7 @@ def load_and_filter(
         cellbender_dir=cellbender_dir,
         metadata_tsv=metadata_tsv,
         output_dir=output_dir,
+        output_name=output_name,
         save_h5ad=save_h5ad,
         n_jobs=n_jobs or 4,
         min_cells=min_cells,
@@ -457,6 +468,7 @@ def load_and_filter(
         apply_doublet_score=apply_doublet_score,
         apply_doublet_score_path=apply_doublet_score_path,
         make_figures=make_figures,
+        figdir_name=figdir_name,
         figure_formats=figure_formats,
         batch_key=batch_key,
         raw_pattern=raw_pattern,
@@ -680,6 +692,8 @@ def integrate(
              "(final_label where confident, else 'Unknown').",
     ),
 ):
+    methods = _normalize_methods(methods)
+
     outdir = output_dir or input_path.parent
     log_dir = outdir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)

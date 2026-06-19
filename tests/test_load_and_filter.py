@@ -55,6 +55,8 @@ def mock_scrublet(monkeypatch):
 def mock_io(monkeypatch):
     import scomnom.io_utils as io
 
+    save_calls = []
+
     # Simulate minimal raw loading: return simple sample_map & read_counts
     monkeypatch.setattr(
         io,
@@ -89,7 +91,7 @@ def mock_io(monkeypatch):
     monkeypatch.setattr(
         io,
         "save_dataset",
-        lambda *args, **kw: None,
+        lambda *args, **kw: save_calls.append((args, kw)),
     )
     monkeypatch.setattr(
         io,
@@ -97,7 +99,7 @@ def mock_io(monkeypatch):
         lambda cfg, adata: adata,
     )
 
-    return True
+    return save_calls
 
 
 @pytest.fixture
@@ -230,6 +232,37 @@ def test_sparse_filter_cells_and_genes_applies_min_counts():
 
     assert list(out.obs_names) == ["c1", "c2"]
     assert any(row["filter"] == "min_counts" for row in qc_rows)
+
+
+def test_sparse_filter_cells_and_genes_accepts_csc_matrix():
+    X = sparse.csc_matrix(
+        np.array(
+            [
+                [1, 0, 0],
+                [2, 2, 1],
+                [5, 1, 0],
+            ],
+            dtype=np.int64,
+        )
+    )
+    adata = sc.AnnData(X)
+    adata.var_names = ["g0", "g1", "g2"]
+    adata.obs_names = ["c0", "c1", "c2"]
+    adata.obs["sample"] = pd.Categorical(["A", "A", "A"])
+    adata.obs["pct_counts_mt"] = 0.0
+
+    out = sparse_filter_cells_and_genes(
+        adata,
+        min_genes=1,
+        min_cells=1,
+        min_counts=4,
+        max_pct_mt=100,
+        batch_key="sample",
+        qc_rows=[],
+    )
+
+    assert list(out.obs_names) == ["c1", "c2"]
+    assert sparse.isspmatrix_csr(out.X)
 
 
 def test_sparse_filter_cells_and_genes_applies_auto_min_counts():
@@ -513,3 +546,5 @@ def test_run_load_and_filter(
     assert "leiden" in out.obs
     assert "X_umap" in out.obsm
     assert "batch_key" in out.uns
+    assert mock_io[-1][0][1] == tmp_path / "out.zarr"
+    assert mock_io[-1][1]["fmt"] == "zarr"

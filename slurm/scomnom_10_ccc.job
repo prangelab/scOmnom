@@ -1,0 +1,94 @@
+#!/bin/bash
+# scOmnom module example: 10) markers-and-de ccc
+
+#SBATCH --job-name=scomnom_ccc
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+
+# Adapt these to your HPC setup:
+#SBATCH --partition=rome
+#SBATCH --constraint=scratch-node
+#SBATCH --cpus-per-task=16
+#SBATCH --time=08:00:00
+
+set -eo pipefail
+
+# ---------- user-configurable ----------
+INPUT_ARCHIVE="results/adata.clustered.annotated.projected.de.zarr.tar.zst"
+SCRATCH_INPUT_NAME="$(basename "$INPUT_ARCHIVE")"
+RESULTS_DIR_NAME="results"
+FIGURES_SOURCE_DIR="results/figures"
+
+# Default pooled LIANA CCC run. Adapt condition/cross-tissue options per dataset.
+SCOMNOM_CMD=(
+  scomnom markers-and-de ccc liana
+  -i "$SCRATCH_INPUT_NAME"
+  -o "$RESULTS_DIR_NAME"
+  --n-jobs "$SLURM_CPUS_PER_TASK"
+  --condition-key sex
+  --condition-key MASLD
+  --condition-key sex@MASLD
+)
+
+# NicheNet example:
+# SCOMNOM_CMD=(
+#   scomnom markers-and-de ccc nichenet
+#   -i "$SCRATCH_INPUT_NAME"
+#   -o "$RESULTS_DIR_NAME"
+#   --n-jobs "$SLURM_CPUS_PER_TASK"
+#   --condition-key MASLD
+#   --compare-level no
+#   --compare-level yes
+# )
+
+# MEBOCOST example:
+# SCOMNOM_CMD=(
+#   scomnom markers-and-de ccc mebocost
+#   -i "$SCRATCH_INPUT_NAME"
+#   -o "$RESULTS_DIR_NAME"
+#   --n-jobs "$SLURM_CPUS_PER_TASK"
+#   --condition-key MASLD
+# )
+# --------------------------------------
+
+module load 2025
+
+eval "$(micromamba shell hook -s bash)"
+set +u
+micromamba activate scOmnom_env
+set -u
+
+echo "Copying input to scratch..."
+cp -R "$INPUT_ARCHIVE" "$TMPDIR/."
+
+mkdir -p "$TMPDIR/$RESULTS_DIR_NAME/figures"
+# Copy only the empty directory tree so existing round folders are visible on scratch.
+# This helps scOmnom continue round numbering correctly and prevents output-name collisions.
+if [ -d "$FIGURES_SOURCE_DIR" ]; then
+  rsync -a --include='*/' --exclude='*' "$FIGURES_SOURCE_DIR/" "$TMPDIR/$RESULTS_DIR_NAME/figures/"
+fi
+
+PREVLOC="$(pwd)"
+cd "$TMPDIR"
+pwd
+
+# Prevent BLAS/OpenMP oversubscription
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
+export IGRAPH_OPENMP_NUM_THREADS=1
+
+echo "Running scomnom..."
+if "${SCOMNOM_CMD[@]}"; then
+  :
+else
+  status=$?
+  echo "scOmnom failed with exit code $status"
+  exit "$status"
+fi
+
+echo "Copying results back to $PREVLOC"
+rsync -a "$RESULTS_DIR_NAME" "$PREVLOC/."
+echo "Done!"
