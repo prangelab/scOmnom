@@ -16,16 +16,14 @@ Use the YAML that matches your platform:
 - Linux/HPC: `environment_linux.yml`
 - macOS: `environment_macos.yml`
 
-On Linux or HPC systems, create the environment with `micromamba`:
+Create and activate the environment:
 
 ```bash
-micromamba create -f environment_linux.yml
-micromamba activate scOmnom_env
-```
+# Linux / HPC
+conda env create -f environment_linux.yml
+conda activate scOmnom_env
 
-On macOS, create the environment with Conda:
-
-```bash
+# macOS
 conda env create -f environment_macos.yml
 conda activate scOmnom_env
 ```
@@ -40,13 +38,7 @@ For normal use, install the package into the active environment:
 pip install .
 ```
 
-For development, install in editable mode:
-
-```bash
-pip install -e .
-```
-
-Both commands register the `scomnom` command-line interface.
+This registers the `scomnom` command-line interface.
 
 ## Optional: Run With A Memory Guard On macOS
 

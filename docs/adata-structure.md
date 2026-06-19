@@ -37,7 +37,7 @@
 
 ## Using scOmnom AnnData in notebooks/scripts
 
-For manual analysis in notebooks or scripts, always use `load_dataset()` and `save_dataset()` from `src/scomnom/io_utils.py`. This ensures consistent handling of Zarr/H5AD, metadata, and safety checks.
+When accessing a scOmnom AnnData object in a Python session, always load and save through `scomnom.load_dataset()` and `scomnom.save_dataset()`. This ensures consistent handling of Zarr/H5AD, metadata, and safety checks.
 
 For large Zarr saves with heavy `adata.uns` payloads, `save_dataset()` now stores heavy payloads via sidecar serialization under `__scomnom_payloads__/v1` inside the same store, which reduces save-time memory spikes while keeping `load_dataset()` round-trip behavior.
 
@@ -45,7 +45,7 @@ See also: the [API reference](api-reference.md) for the current Python API names
 
 ```python
 from pathlib import Path
-from scomnom.io_utils import load_dataset, save_dataset
+from scomnom import load_dataset, save_dataset
 
 adata = load_dataset("results/integrate/adata.integrated.zarr")
 

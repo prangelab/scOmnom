@@ -4,7 +4,7 @@
 
 The pipeline combines established single-cell packages with scOmnom-specific workflow machinery, including:
 
-* OOM-aware dataset IO and sidecar serialization for heavy AnnData payloads
+* memory pressure-aware dataset IO and sidecar serialization for heavy AnnData payloads
 * BISC, a biology-informed structural clustering workflow for Leiden resolution selection
 * round-aware clustering, annotation, enrichment, renaming, subsetting, and merge operations
 * CellBender-aware count layer conventions
@@ -26,8 +26,8 @@ Create the platform-specific environment:
 
 ```bash
 # Linux / HPC
-micromamba create -f environment_linux.yml
-micromamba activate scOmnom_env
+conda env create -f environment_linux.yml
+conda activate scOmnom_env
 
 # macOS
 conda env create -f environment_macos.yml
@@ -40,7 +40,7 @@ Install the package:
 pip install .
 ```
 
-For development, use `pip install -e .` instead. Both install modes register the `scomnom` command-line interface.
+This registers the `scomnom` command-line interface.
 
 ## Quick Start
 
@@ -79,14 +79,25 @@ scomnom markers-and-de da \
   --condition-key condition
 ```
 
-By default, `load-and-filter` applies per-sample lower-tail filtering on `total_counts`
-using `--min-counts-mad 5.0`, while fixed `--min-counts` and lower quantile filtering
-stay off by default. The automatic lower-count filter only activates for samples whose
-`--min-counts-auto-activate-quantile 0.01` falls below
-`--min-counts-auto-activate-below 1000`. Disable components with
-`--min-counts-mad none`, `--min-counts-quantile none`,
-`--min-counts-auto-activate-quantile none`, and/or
-`--min-counts-auto-activate-below none`.
+Default `load-and-filter` thresholds:
+
+| Filter | Default |
+| --- | --- |
+| `--min-cells` | `3` |
+| `--min-genes` | `500` |
+| `--min-counts` | `none` |
+| `--min-counts-mad` | `5.0` |
+| `--min-counts-quantile` | `none` |
+| `--min-counts-auto-activate-quantile` | `0.01` |
+| `--min-counts-auto-activate-below` | `1000` |
+| `--max-pct-mt` | `5.0` |
+| `--max-genes-mad` | `5.0` |
+| `--max-genes-quantile` | `0.999` |
+| `--max-counts-mad` | `5.0` |
+| `--max-counts-quantile` | `0.999` |
+| `--expected-doublet-rate` | `0.1` |
+
+See the [filtering defaults and rationale](https://prangelab.org/scOmnom/load-and-filter/filtering/) section for details.
 
 Use `scomnom --help` and `scomnom <command> --help` for command-specific options.
 
@@ -109,7 +120,7 @@ Detailed command examples, expected outputs, AnnData conventions, and HPC notes 
 
 ## Data Conventions
 
-All new or modified code should load and save datasets through:
+When accessing a scOmnom AnnData object in a Python session, always load and save through:
 
 * `scomnom.load_dataset`
 * `scomnom.save_dataset`

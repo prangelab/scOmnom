@@ -51,7 +51,23 @@ Use `scomnom --help` and `scomnom <command> --help` for command-specific options
 
 ## QC Defaults
 
-`load-and-filter` applies conservative default QC: a fixed `min_genes` guard, per-sample lower-tail `total_counts` filtering, upper-tail guards for genes/counts, mitochondrial filtering, and doublet detection. Fixed lower `--min-counts` and lower quantile filtering stay off by default.
+`load-and-filter` applies conservative default QC:
+
+| Filter | Default |
+| --- | --- |
+| `--min-cells` | `3` |
+| `--min-genes` | `500` |
+| `--min-counts` | `none` |
+| `--min-counts-mad` | `5.0` |
+| `--min-counts-quantile` | `none` |
+| `--min-counts-auto-activate-quantile` | `0.01` |
+| `--min-counts-auto-activate-below` | `1000` |
+| `--max-pct-mt` | `5.0` |
+| `--max-genes-mad` | `5.0` |
+| `--max-genes-quantile` | `0.999` |
+| `--max-counts-mad` | `5.0` |
+| `--max-counts-quantile` | `0.999` |
+| `--expected-doublet-rate` | `0.1` |
 
 See [Filtering Defaults And Rationale](load-and-filter/filtering.md) for the full table of defaults and tuning guidance.
 
