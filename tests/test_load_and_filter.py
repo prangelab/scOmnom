@@ -38,6 +38,34 @@ def synthetic_adata(n_cells=300, n_genes=50, seed=0):
     return adata
 
 
+def test_load_raw_data_uses_supplied_plot_dir(monkeypatch, tmp_path):
+    import scomnom.io_utils as io
+
+    raw_path = tmp_path / "sample.raw_feature_bc_matrix"
+    seen = {}
+
+    class Cfg:
+        raw_sample_dir = tmp_path
+        raw_pattern = "*.raw_feature_bc_matrix"
+        n_jobs = 1
+        make_figures = True
+
+    monkeypatch.setattr(io, "find_raw_dirs", lambda *_args, **_kwargs: [raw_path])
+    monkeypatch.setattr(io, "read_raw_10x", lambda _path: synthetic_adata(10, 5))
+
+    def fake_filter_raw_barcodes(adata, plot=False, plot_path=None):
+        seen["plot"] = plot
+        seen["plot_path"] = plot_path
+        return adata
+
+    monkeypatch.setattr(io, "filter_raw_barcodes", fake_filter_raw_barcodes)
+
+    io.load_raw_data(Cfg(), plot_dir=Path("QC_plots") / "cell_qc")
+
+    assert seen["plot"] is True
+    assert seen["plot_path"] == Path("QC_plots") / "cell_qc" / "sample_barcode_knee"
+
+
 # -------------------------------------------------------------------------
 # Fixtures: full mock of IO + plotting + scrublet
 # -------------------------------------------------------------------------

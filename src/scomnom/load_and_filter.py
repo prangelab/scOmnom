@@ -1044,7 +1044,7 @@ def run_load_and_filter(
             with plot_utils.capture_plot_artifacts() as artifacts:
                 sample_map, read_counts, _ = io_utils.load_raw_data(
                     cfg,
-                    plot_dir=cfg.figdir / "cell_qc",
+                    plot_dir=Path("QC_plots") / "cell_qc",
                 )
             plot_utils.persist_plot_artifacts(artifacts)
 
