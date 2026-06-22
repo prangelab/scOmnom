@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 
 import anndata as ad
@@ -7,6 +8,8 @@ import numpy as np
 import pandas as pd
 import pytest
 import scomnom as om
+
+ao = importlib.import_module("scomnom.adata_ops")
 
 from scomnom.adata_ops import (
     _dataset_stem_for_outputs,
@@ -238,7 +241,7 @@ def test_subset_dataset_from_tsv_saves_outputs(tmp_path: Path, monkeypatch) -> N
     def _fake_save_dataset(in_adata, out_path, fmt="zarr"):
         calls.append((str(out_path), str(fmt)))
 
-    monkeypatch.setattr("scomnom.adata_ops.save_dataset", _fake_save_dataset)
+    monkeypatch.setattr(ao, "save_dataset", _fake_save_dataset)
 
     out_paths, summary = subset_dataset_from_tsv(
         adata,
@@ -268,8 +271,8 @@ def test_subset_dataset_from_tsv_uses_archive_stem_for_output_names(tmp_path: Pa
     def _fake_save_dataset(in_adata, out_path, fmt="zarr"):
         calls.append((str(out_path), str(fmt)))
 
-    monkeypatch.setattr("scomnom.adata_ops.load_dataset", _fake_load_dataset)
-    monkeypatch.setattr("scomnom.adata_ops.save_dataset", _fake_save_dataset)
+    monkeypatch.setattr(ao, "load_dataset", _fake_load_dataset)
+    monkeypatch.setattr(ao, "save_dataset", _fake_save_dataset)
 
     _ = subset_dataset_from_tsv(
         tmp_path / "input.zarr.tar.zst",
@@ -295,8 +298,8 @@ def test_rename_dataset_idents_creates_new_round_and_saves_output(tmp_path: Path
     def _fake_emit_rename_round_plots(in_adata, *, output_root, round_id):
         plotted.append(str(round_id))
 
-    monkeypatch.setattr("scomnom.adata_ops.save_dataset", _fake_save_dataset)
-    monkeypatch.setattr("scomnom.adata_ops._emit_rename_round_plots", _fake_emit_rename_round_plots)
+    monkeypatch.setattr(ao, "save_dataset", _fake_save_dataset)
+    monkeypatch.setattr(ao, "_emit_rename_round_plots", _fake_emit_rename_round_plots)
 
     out_paths, summary = rename_dataset_idents(
         adata,
@@ -338,8 +341,8 @@ def test_rename_dataset_idents_can_collapse_same_labels(tmp_path: Path, monkeypa
     def _fake_emit_rename_round_plots(in_adata, *, output_root, round_id):
         return None
 
-    monkeypatch.setattr("scomnom.adata_ops.save_dataset", _fake_save_dataset)
-    monkeypatch.setattr("scomnom.adata_ops._emit_rename_round_plots", _fake_emit_rename_round_plots)
+    monkeypatch.setattr(ao, "save_dataset", _fake_save_dataset)
+    monkeypatch.setattr(ao, "_emit_rename_round_plots", _fake_emit_rename_round_plots)
 
     out_paths, summary = rename_dataset_idents(
         adata,
@@ -361,7 +364,7 @@ def test_rename_dataset_idents_can_collapse_same_labels(tmp_path: Path, monkeypa
     assert labels_obs_key == f"leiden__{new_round_id}"
     assert bool(round_info["manual_rename"]["collapse_same_labels"]) is True
     assert set(adata.obs[labels_obs_key].astype(str).unique()) == {"0", "1"}
-    assert list(adata.obs[pretty_key].astype(str).cat.categories) == [
+    assert list(adata.obs[pretty_key].cat.categories) == [
         "C00: Immune archetype",
         "C01: Stromal archetype",
     ]
@@ -383,8 +386,8 @@ def test_rename_dataset_idents_can_leave_active_round_unchanged(tmp_path: Path, 
     def _fake_emit_rename_round_plots(in_adata, *, output_root, round_id):
         return None
 
-    monkeypatch.setattr("scomnom.adata_ops.save_dataset", _fake_save_dataset)
-    monkeypatch.setattr("scomnom.adata_ops._emit_rename_round_plots", _fake_emit_rename_round_plots)
+    monkeypatch.setattr(ao, "save_dataset", _fake_save_dataset)
+    monkeypatch.setattr(ao, "_emit_rename_round_plots", _fake_emit_rename_round_plots)
 
     _, summary = rename_dataset_idents(
         adata,
@@ -414,8 +417,8 @@ def test_rename_dataset_idents_can_update_existing_round(tmp_path: Path, monkeyp
     def _fake_emit_rename_round_plots(in_adata, *, output_root, round_id):
         return None
 
-    monkeypatch.setattr("scomnom.adata_ops.save_dataset", _fake_save_dataset)
-    monkeypatch.setattr("scomnom.adata_ops._emit_rename_round_plots", _fake_emit_rename_round_plots)
+    monkeypatch.setattr(ao, "save_dataset", _fake_save_dataset)
+    monkeypatch.setattr(ao, "_emit_rename_round_plots", _fake_emit_rename_round_plots)
 
     _, initial_summary = rename_dataset_idents(
         adata,
@@ -455,7 +458,7 @@ def test_rename_dataset_idents_can_update_existing_round(tmp_path: Path, monkeyp
         "0": "C00: Myeloid",
         "1": "C01: Structural",
     }
-    assert list(adata.obs[pretty_key].astype(str).cat.categories) == [
+    assert list(adata.obs[pretty_key].cat.categories) == [
         "C00: Myeloid",
         "C01: Structural",
     ]
@@ -486,8 +489,8 @@ def test_annotation_merge_creates_new_subset_annotation_round(tmp_path: Path, mo
     def _fake_save_dataset(in_adata, out_path, fmt="zarr"):
         calls.append((str(out_path), str(fmt)))
 
-    monkeypatch.setattr("scomnom.adata_ops.load_dataset", _fake_load_dataset)
-    monkeypatch.setattr("scomnom.adata_ops.save_dataset", _fake_save_dataset)
+    monkeypatch.setattr(ao, "load_dataset", _fake_load_dataset)
+    monkeypatch.setattr(ao, "save_dataset", _fake_save_dataset)
 
     out_paths, summary = annotation_merge_datasets(
         tmp_path / "parent.zarr",
@@ -508,9 +511,9 @@ def test_annotation_merge_creates_new_subset_annotation_round(tmp_path: Path, mo
     assert round_info["annotation"]["pretty_cluster_key"] == f"cluster_label__{new_round_id}"
 
     merged_labels = parent.obs[f"cluster_label__{new_round_id}"].astype(str).to_dict()
-    assert merged_labels["cell2"] == "C00: Stromal"
-    assert merged_labels["cell1"] == "C01: B cell"
-    assert merged_labels["cell0"] == "C02: T cell"
+    assert merged_labels["cell2"] == "C01: Stromal"
+    assert merged_labels["cell1"] == "C02: B cell"
+    assert merged_labels["cell0"] == "C03: T cell"
 
 
 def test_annotation_merge_updates_existing_subset_annotation_round(tmp_path: Path, monkeypatch) -> None:
@@ -541,8 +544,8 @@ def test_annotation_merge_updates_existing_subset_annotation_round(tmp_path: Pat
     def _fake_load_dataset(path):
         return datasets[Path(path).name]
 
-    monkeypatch.setattr("scomnom.adata_ops.load_dataset", _fake_load_dataset)
-    monkeypatch.setattr("scomnom.adata_ops.save_dataset", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ao, "load_dataset", _fake_load_dataset)
+    monkeypatch.setattr(ao, "save_dataset", lambda *args, **kwargs: None)
 
     annotation_merge_datasets(
         tmp_path / "parent.zarr",
@@ -593,7 +596,7 @@ def test_annotation_merge_rejects_overlapping_children(tmp_path: Path, monkeypat
             "child2.zarr": child2,
         }[Path(path).name]
 
-    monkeypatch.setattr("scomnom.adata_ops.load_dataset", _fake_load_dataset)
+    monkeypatch.setattr(ao, "load_dataset", _fake_load_dataset)
 
     with pytest.raises(ValueError, match="overlap"):
         annotation_merge_datasets(
@@ -624,34 +627,39 @@ def test_annotation_merge_emits_plots_in_merge_annotation_subfolder(tmp_path: Pa
     def _fake_load_dataset(path):
         return {"parent.zarr": parent, "child1.zarr": child}[Path(path).name]
 
-    monkeypatch.setattr("scomnom.adata_ops.load_dataset", _fake_load_dataset)
-    monkeypatch.setattr("scomnom.adata_ops.save_dataset", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ao, "load_dataset", _fake_load_dataset)
+    monkeypatch.setattr(ao, "save_dataset", lambda *args, **kwargs: None)
 
     setup_calls: list[Path] = []
     persisted: list[object] = []
     plot_calls: list[tuple[str, str]] = []
 
     monkeypatch.setattr(
-        "scomnom.adata_ops.plot_utils.setup_scanpy_figs",
+        ao.plot_utils,
+        "setup_scanpy_figs",
         lambda figdir, formats=None: setup_calls.append(Path(figdir)),
     )
     monkeypatch.setattr(
-        "scomnom.adata_ops.plot_utils.persist_plot_artifacts",
+        ao.plot_utils,
+        "persist_plot_artifacts",
         lambda artifacts: persisted.extend(list(artifacts)),
     )
 
     def _record(name):
         def _inner(*args, **kwargs):
-            plot_calls.append((name, str(kwargs.get("figdir", args[-1]))))
+            figdir = kwargs.get("figdir")
+            if figdir is None and args:
+                figdir = args[-1]
+            plot_calls.append((name, str(figdir)))
             return [name]
         return _inner
 
-    monkeypatch.setattr("scomnom.adata_ops.plot_utils.plot_cluster_umaps", _record("umap"))
-    monkeypatch.setattr("scomnom.adata_ops.plot_utils.umap_by_two_legend_styles", _record("pretty_umap"))
-    monkeypatch.setattr("scomnom.adata_ops.plot_utils.plot_cluster_sizes", _record("sizes"))
-    monkeypatch.setattr("scomnom.adata_ops.plot_utils.plot_cluster_qc_summary", _record("qc"))
-    monkeypatch.setattr("scomnom.adata_ops.plot_utils.plot_cluster_silhouette_by_cluster", _record("silhouette"))
-    monkeypatch.setattr("scomnom.adata_ops.plot_utils.plot_cluster_batch_composition", _record("batch"))
+    monkeypatch.setattr(ao.plot_utils, "plot_cluster_umaps", _record("umap"))
+    monkeypatch.setattr(ao.plot_utils, "umap_by_two_legend_styles", _record("pretty_umap"))
+    monkeypatch.setattr(ao.plot_utils, "plot_cluster_sizes", _record("sizes"))
+    monkeypatch.setattr(ao.plot_utils, "plot_cluster_qc_summary", _record("qc"))
+    monkeypatch.setattr(ao.plot_utils, "plot_cluster_silhouette_by_cluster", _record("silhouette"))
+    monkeypatch.setattr(ao.plot_utils, "plot_cluster_batch_composition", _record("batch"))
 
     annotation_merge_datasets(
         tmp_path / "parent.zarr",
