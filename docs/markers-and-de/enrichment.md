@@ -2,131 +2,285 @@
 
 The enrichment submodule has three entry points:
 
-* `scomnom markers-and-de enrichment cluster`: run decoupler directly on an existing clustering round
-* `scomnom markers-and-de enrichment de`: run decoupler from exported DE result tables without loading AnnData
-* `scomnom markers-and-de enrichment module-score`: score user-defined gene programs per cell and summarize them by cluster or cluster-condition
+| Entry point | Input | Main use |
+| --- | --- | --- |
+| `scomnom markers-and-de enrichment cluster` | AnnData with a clustering round | Run MSigDB, PROGENy, and DoRothEA on round-native pseudobulk expression. |
+| `scomnom markers-and-de enrichment de` | Exported DE result tables | Run the same pathway/TF activity backends from DE statistics, without loading AnnData. |
+| `scomnom markers-and-de enrichment module-score` | AnnData plus user gene modules | Score custom gene programs per cell, then summarize by cluster or cluster-condition. |
 
-The first two modes support MSigDB, custom `.gmt` files, PROGENy, and DoRothEA. The third mode uses user-defined module definitions with per-cell module scoring.
+For decoupler-based enrichment, the default resource set is MSigDB HALLMARK + REACTOME, PROGENy, and DoRothEA. MSigDB can also use custom `.gmt` files.
 
-#### Enrichment cluster (round-native pathway / TF activity)
+## Cluster Enrichment
 
-This mode uses round-native pseudobulk expression built from the selected round labels, then computes pathway / TF activity using MSigDB, PROGENy, and DoRothEA.
+`enrichment cluster` recomputes round-native pseudobulk expression for the selected clustering round, then runs decoupler resources on that expression matrix.
 
-**Round selection**
+```bash
+scomnom markers-and-de enrichment cluster \
+  --input-path adata.clustered.annotated.zarr.tar.zst \
+  --round-id r5_broad_cell_types
+```
 
-* `--round-id` selects which round to score.
-* If omitted, the active round is used.
-* Enrichment is stored back into that round; it does not create a new round.
+Add `--condition-key` when you want enrichment profiles for `cluster x condition` groups instead of one profile per cluster:
 
-**Supported resources**
+```bash
+scomnom markers-and-de enrichment cluster \
+  --input-path adata.clustered.annotated.zarr.tar.zst \
+  --round-id r5_broad_cell_types \
+  --condition-key treatment
+```
 
-* `MSigDB` from built-in keywords or custom `.gmt` files via `--msigdb-gene-sets`
-* `PROGENy`
-* `DoRothEA`
+### Cluster Inputs And Defaults
 
-These use the same decoupler method settings as the clustering and DE workflows.
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--input-path`, `-i` | required | AnnData object loaded through scOmnom IO. |
+| `--output-dir`, `-o` | inferred `results/` location | Output root. If omitted, scOmnom uses the standard results-location logic. |
+| `--output-name` | inferred from input, module, and round | Saved AnnData name. |
+| `--save-h5ad` / `--no-save-h5ad` | `--no-save-h5ad` | Also write h5ad output. |
+| `--n-jobs` | `1` | Reserved for consistency with other markers-and-de commands. |
+| `--round-id` | active clustering round | Selects which clustering round supplies the population labels. |
+| `--condition-key` | none | Optional condition key for cluster-by-condition pseudobulk. |
+| `--gene-filter` | none | Repeatable pandas-query expressions against `adata.var`; applied before enrichment. |
 
-**Condition key syntax (enrichment cluster)**
+Round-native enrichment stores results back into the selected round. It does not create a new clustering round.
 
-Enrichment supports either cluster-only pseudobulk or cluster-by-condition pseudobulk:
+### Condition Groups
 
 | Syntax | Meaning | Resulting behavior |
 | --- | --- | --- |
-| omitted | Round only | One enrichment profile per cluster |
-| `A` | Single obs key | One enrichment profile per `cluster × A level` |
-| `A:B` | Composite key | One enrichment profile per `cluster × all combinations of A and B` |
+| omitted | Round only | One enrichment profile per cluster. |
+| `A` | Single `adata.obs` key | One enrichment profile per `cluster x A level`. |
+| `A:B` | Composite key | One enrichment profile per `cluster x all combinations of A and B`. |
 
 Examples:
 
-* `--round-id r5_archetypes`  
-  Enrichment per archetype cluster.
-* `--round-id r5_archetypes --condition-key sex`  
-  Enrichment per `cluster × sex`.
-* `--round-id r5_archetypes --condition-key sex:masld_status`  
-  Enrichment per `cluster × sex × masld_status` combination.
+```bash
+scomnom markers-and-de enrichment cluster ... --round-id r5_broad_cell_types
+scomnom markers-and-de enrichment cluster ... --round-id r5_broad_cell_types --condition-key treatment
+scomnom markers-and-de enrichment cluster ... --round-id r5_broad_cell_types --condition-key treatment:genotype
+```
 
-**Gene filtering**
+### Pseudobulk Source
 
-* `--gene-filter` filters genes before enrichment is computed, using pandas-query expressions against `adata.var`.
-* Filters are combined with logical AND.
-* If required gene metadata such as `gene_type` or `gene_chrom` is missing, scOmnom will try to annotate `adata.var` before filtering. If annotation lookup or filter evaluation fails, the run aborts instead of continuing unfiltered.
-* This changes the enrichment input universe, unlike `--plot-gene-filter`, which is plot-only in DE.
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--decoupler-pseudobulk-agg` | `mean` | Aggregation used for round-native pseudobulk expression. |
+| `--decoupler-use-raw` / `--no-decoupler-use-raw` | `--decoupler-use-raw` | Prefer raw-like count sources when available. |
+| Preferred count layers | `counts_cb`, then `counts_raw` | Internal order when raw-like layers are available. |
 
-Example:
+The pseudobulk input is genes by cluster, or genes by cluster-condition group when `--condition-key` is set.
 
-* `--gene-filter "not gene.str.startswith('MT-')"`
-* `--gene-filter "not gene.str.startswith('RPL')"`
-* `--gene-filter "not gene.str.startswith('RPS')"`
+### Shared Decoupler Settings
 
-**Outputs**
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--decoupler-method` | `consensus` | Fallback method for resources that do not have a resource-specific method set. |
+| `--decoupler-consensus-methods` | `ulm`, `mlm`, `wsum` | Constituent methods used by consensus. Repeat the option to override. |
+| `--decoupler-min-n-targets` | `5` | Fallback minimum target count for resources without a resource-specific value. |
+| `--decoupler-bar-split-signed` / `--no-decoupler-bar-split-signed` | split signed bars | Plot positive and negative activities separately. |
+| `--decoupler-bar-top-n-up` | none | Optional cap on positive barplot entries. |
+| `--decoupler-bar-top-n-down` | none | Optional cap on negative barplot entries. |
 
-* Figures: `figures/<fmt>/enrichment_<round>_roundN/`
-* Report: `figures/<fmt>/enrichment_<round>_roundN/enrichment_report.html`
-* Default AnnData output name: `adata.enrichment_<round>.zarr.tar.zst`
-* Stored round payload includes the selected condition key, applied gene filters, and retained gene counts for provenance
+### MSigDB
 
-#### Enrichment de (from exported DE tables)
+MSigDB runs by default with HALLMARK and REACTOME gene sets.
 
-This mode reads exported DE CSV tables from a DE results folder and runs the same MSigDB / PROGENy / DoRothEA decoupler backends on the DE statistics. For MSigDB it can also run a Python preranked GSEA pass and build a joint concordance summary between decoupler activity direction and GSEA direction. It reuses the signed up/down barplot layout from the existing DE decoupler workflow.
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--msigdb-gene-sets` | `HALLMARK,REACTOME` | Comma-separated MSigDB keywords or paths to `.gmt` files. |
+| `--msigdb-method` | `consensus` | Decoupler method for MSigDB activity. |
+| `--msigdb-min-n-targets` | `5` | Minimum overlap between the expression universe and a gene set. |
 
-**Inputs**
+Example with a custom GMT:
 
-* `--input-dir` should point at a DE tables folder such as `results/tables/de_r5_archetypes_round1`
-* No AnnData input is required
+```bash
+scomnom markers-and-de enrichment cluster ... \
+  --msigdb-gene-sets HALLMARK,REACTOME,/path/to/custom_programs.gmt
+```
 
-**Supported DE sources**
+### PROGENy
 
-* `--de-decoupler-source auto` uses any available pseudobulk and cell-level DE tables
-* `--de-decoupler-source pseudobulk` limits enrichment to exported pseudobulk DE tables
-* `--de-decoupler-source cell` limits enrichment to exported cell-level DE tables
+PROGENy runs by default. Disable it with `--no-run-progeny`.
 
-**Gene filtering**
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--run-progeny` / `--no-run-progeny` | `--run-progeny` | Toggle PROGENy. |
+| `--progeny-method` | `consensus` | Decoupler method. |
+| `--progeny-min-n-targets` | `5` | Minimum target overlap. |
+| `--progeny-top-n` | `100` | Top weighted genes per pathway from the PROGENy resource. |
+| `--progeny-organism` | `human` | Organism passed to the decoupler resource loader. |
 
-* `--gene-filter` is applied before enrichment on the DE-derived gene statistics
-* Filters are evaluated against the gene metadata present in the exported DE tables, including `gene` and exported columns such as `gene_type`
+### DoRothEA
 
-**Outputs**
+DoRothEA runs by default. Disable it with `--no-run-dorothea`.
 
-* Figures: `figures/<fmt>/enrichment_de_<inputdir>_roundN/`
-* Tables: `tables/enrichment_de_<inputdir>_roundN/`
-* Report: `figures/<fmt>/enrichment_de_<inputdir>_roundN/enrichment_de_report.html`
-* MSigDB outputs can include decoupler activity plots, compact GSEA summaries, and concordance-only joint summaries when `run_gsea` is enabled
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--run-dorothea` / `--no-run-dorothea` | `--run-dorothea` | Toggle DoRothEA. |
+| `--dorothea-method` | `consensus` | Decoupler method. |
+| `--dorothea-min-n-targets` | `5` | Minimum TF-target overlap. |
+| `--dorothea-confidence` | `A,B,C` | DoRothEA confidence levels to keep. |
+| `--dorothea-organism` | `human` | Organism passed to the decoupler resource loader. |
 
-#### Enrichment module-score (user-defined signatures)
+### Cluster Gene Filtering
 
-This mode scores custom gene modules per cell, then summarizes those scores by cluster or by `cluster × condition`.
+`--gene-filter` filters genes before decoupler activity inference. Filters are evaluated as pandas-query expressions against `adata.var`, and repeated filters are combined with logical AND.
 
-**Backend**
+```bash
+scomnom markers-and-de enrichment cluster ... \
+  --gene-filter "not gene.str.startswith('MT-')" \
+  --gene-filter "not gene.str.startswith('RPL')" \
+  --gene-filter "not gene.str.startswith('RPS')"
+```
 
-* `--module-score-method scanpy` uses `scanpy.tl.score_genes`
-* `--module-score-method aucell` uses `decoupler.mt.aucell` for rank-based AUCell scoring
+If required metadata such as `gene_type` or `gene_chrom` is missing, scOmnom tries to annotate `adata.var` before filtering. If annotation lookup or filter evaluation fails, the run aborts instead of silently continuing unfiltered.
 
-**Module inputs**
+### Cluster Plotting And Outputs
 
-* `--module-file` is repeatable
-* supported formats:
-  * `.gmt`: one or more modules per file
-  * `.tsv` / `.csv`: either `module,gene` style two-column tables or a single-column gene list
-  * `.txt`: one gene per line, interpreted as a single module named after the file stem
-* `--module-set-name` gives a stable name to the scored module collection and is used in output naming
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--make-figures` / `--no-make-figures` | `--make-figures` | Create enrichment plots and reports. |
+| `--regenerate-figures` | off | Rebuild figures from stored round payloads without recomputation. |
+| `--figdir-name` | `figures` | Figure root directory name. |
+| `--figure-formats`, `-F` | `png`, `pdf` | Repeatable output formats. |
 
-**Condition key syntax**
+Cluster enrichment writes:
 
-Module scoring uses the same grouped-state syntax as `enrichment cluster`:
+* figures: `figures/<fmt>/enrichment_<round>_roundN/`;
+* report: `figures/<fmt>/enrichment_<round>_roundN/enrichment_report.html`;
+* saved AnnData: `adata.enrichment_<round>.zarr.tar.zst` by default;
+* round payloads under `adata.uns["cluster_rounds"][round_id]["decoupler"]`.
+
+## DE-Table Enrichment
+
+`enrichment de` reads exported DE tables and computes pathway/TF activity from the DE statistic column. It does not load or modify AnnData.
+
+```bash
+scomnom markers-and-de enrichment de \
+  --input-dir results/tables/de_r5_broad_cell_types_round1 \
+  --de-decoupler-source pseudobulk
+```
+
+### DE Inputs And Defaults
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--input-dir`, `-i` | required | DE table directory, for example `results/tables/de_<round>_roundN`. |
+| `--output-dir`, `-o` | inferred `results/` location | Output root. |
+| `--output-name` | `enrichment_de_<input_dir_name>` | Used for output folder naming. |
+| `--n-jobs` | `1` | Parallelism setting for the command. |
+| `--gene-filter` | none | Repeatable pandas-query expressions against columns available in exported DE tables. |
+| `--de-decoupler-source` | `auto` | Which DE tables to use: `auto`, `all`, `pseudobulk`, `cell`, or `none`. |
+| `--de-decoupler-stat-col` | `stat` | Statistic column used as the signed ranking/activity input. |
+
+Source behavior:
+
+| Source | Meaning |
+| --- | --- |
+| `auto` | Use available DE sources with the normal preference logic. |
+| `all` | Use both pseudobulk and cell-level DE tables when present. |
+| `pseudobulk` | Restrict to pseudobulk DE tables. |
+| `cell` | Restrict to cell-level DE tables. |
+| `none` | Skip DE-derived decoupler. |
+
+### DE Resource Settings
+
+The DE-table mode uses the same decoupler resources and resource-specific defaults as cluster enrichment:
+
+| Resource | Default | Disable/change |
+| --- | --- | --- |
+| MSigDB | `HALLMARK,REACTOME`; method `consensus`; min targets `5` | Change with `--msigdb-gene-sets`, `--msigdb-method`, `--msigdb-min-n-targets`. |
+| PROGENy | enabled; method `consensus`; min targets `5`; top genes `100`; organism `human` | Disable with `--no-run-progeny`; change with `--progeny-*` options. |
+| DoRothEA | enabled; method `consensus`; min targets `5`; confidence `A,B,C`; organism `human` | Disable with `--no-run-dorothea`; change with `--dorothea-*` options. |
+
+MSigDB DE enrichment can also run GSEA and joint decoupler/GSEA summaries through the DE-enrichment engine. The command currently exposes the decoupler resource knobs directly; the GSEA/joint defaults follow the enrichment configuration.
+
+### DE Plotting And Outputs
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--make-figures` / `--no-make-figures` | `--make-figures` | Create enrichment plots and reports. |
+| `--figdir-name` | `figures` | Figure root directory name. |
+| `--figure-formats`, `-F` | `png`, `pdf` | Repeatable output formats. |
+| `--decoupler-bar-split-signed` / `--no-decoupler-bar-split-signed` | split signed bars | Plot positive and negative activities separately. |
+| `--decoupler-bar-top-n-up` | none | Optional cap on positive barplot entries. |
+| `--decoupler-bar-top-n-down` | none | Optional cap on negative barplot entries. |
+
+DE-table enrichment writes:
+
+* figures: `figures/<fmt>/enrichment_de_<inputdir>_roundN/`;
+* tables: `tables/enrichment_de_<inputdir>_roundN/`;
+* report: `figures/<fmt>/enrichment_de_<inputdir>_roundN/enrichment_de_report.html`.
+
+## Module Score
+
+`enrichment module-score` scores custom gene modules per cell, then summarizes those scores by cluster or by cluster-condition group.
+
+```bash
+scomnom markers-and-de enrichment module-score \
+  --input-path adata.clustered.annotated.zarr.tar.zst \
+  --round-id r5_broad_cell_types \
+  --module-file gene_programs.tsv \
+  --module-set-name immune_programs
+```
+
+### Module Inputs
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--module-file` | required | Repeatable. Supports `.gmt`, `.tsv`, `.csv`, `.txt`, and `.list`. |
+| `--module-set-name` | first module file stem | Stable name used in output names and stored score keys. |
+
+Supported module file formats:
+
+| Format | Expected structure |
+| --- | --- |
+| `.gmt` | Standard GMT: module name, description, then genes. |
+| `.tsv` / `.csv` | Prefer columns named `module` and `gene`; also accepts `set`/`signature` and `genes`/`symbol`. If no known names exist, the first two columns are interpreted as module and gene. |
+| `.txt` / `.list` | One gene per line; the file stem becomes the module name. |
+
+### Module Grouping
+
+Module scoring uses the same grouped-state syntax as `enrichment cluster`.
 
 | Syntax | Meaning | Resulting behavior |
 | --- | --- | --- |
-| omitted | Round only | One summary profile per cluster |
-| `A` | Single obs key | One summary profile per `cluster × A level` |
-| `A:B` | Composite key | One summary profile per `cluster × all combinations of A and B` |
+| omitted | Round only | One summary profile per cluster. |
+| `A` | Single `adata.obs` key | One summary profile per `cluster x A level`. |
+| `A:B` | Composite key | One summary profile per `cluster x all combinations of A and B`. |
 
-**Outputs**
+### Module Score Knobs
 
-* Figures: `figures/<fmt>/module_score_<set>_<round>_roundN/`
-* Tables: `tables/module_score_<set>_<round>_roundN/`
-* Report: `figures/<fmt>/module_score_<set>_<round>_roundN/module_score_report.html`
-* Default AnnData output name: `adata.module_score_<set>_<round>.zarr.tar.zst`
-* The selected round stores summary tables and score metadata under `adata.uns["cluster_rounds"][round_id]["module_scores"]`
-* Per-cell score columns are written to round-specific `adata.obs` columns as `module_score__<round>__<set>__<module>`
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--module-score-method` | `scanpy` | Backend: `scanpy` or `aucell`. |
+| `--module-score-use-raw` / `--no-module-score-use-raw` | `--no-module-score-use-raw` | Use `adata.raw`; cannot be combined with `--module-score-layer`. |
+| `--module-score-layer` | none | Use a named `adata.layers` matrix; cannot be combined with `--module-score-use-raw`. |
+| `--module-score-ctrl-size` | `50` | Scanpy control-gene pool size. Used only by `scanpy`. |
+| `--module-score-n-bins` | `25` | Scanpy expression bin count. Used only by `scanpy`. |
+| `--module-score-random-state` | `0` | Scanpy random seed. |
+| `--module-score-max-umaps` | `12` | Maximum module score columns to plot on UMAP. |
+
+`scanpy` uses `scanpy.tl.score_genes`. `aucell` uses `decoupler.mt.aucell` with `tmin=1`.
+
+### Module Score Outputs
+
+Module-score writes:
+
+* figures: `figures/<fmt>/module_score_<set>_<round>_roundN/`;
+* tables: `tables/module_score_<set>_<round>_roundN/`;
+* report: `figures/<fmt>/module_score_<set>_<round>_roundN/module_score_report.html`;
+* saved AnnData: `adata.module_score_<set>_<round>.zarr.tar.zst` by default;
+* per-cell score columns in `adata.obs` named `module_score__<round>__<set>__<module>`;
+* round-level payloads under `adata.uns["cluster_rounds"][round_id]["module_scores"]`.
+
+Key tables:
+
+* `module_meta.tsv`;
+* `module_score_summary_mean.tsv`;
+* `module_score_summary_median.tsv`;
+* `module_score_summary_mean_z.tsv`;
+* `module_score_group_sizes.tsv`;
+* `__settings.txt`.
 
 ---

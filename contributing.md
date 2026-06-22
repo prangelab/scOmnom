@@ -1,88 +1,31 @@
-# Contributing to scOmnom
+# Contributing
 
-Thank you for contributing to **scOmnom**. This project is developed collaboratively within the Prange Lab, with an emphasis on code quality, reproducibility, and maintainability.
+Thank you for your interest in **scOmnom**.
 
-The guidelines below are intentionally lightweight.
+scOmnom is developed and maintained by a small research lab. At the moment, we do not have the capacity to review, validate, support, or maintain external pull requests. For that reason, we are not accepting unsolicited code contributions or feature PRs.
 
----
+This is mainly a practical constraint. Changes to the pipeline often need to be checked against lab datasets, HPC behavior, AnnData serialization details, and downstream analysis conventions. We would rather be clear about that upfront than let external contributors spend time on work we cannot responsibly review.
 
-## General workflow
+## What Is Welcome
 
-1. **Create a feature branch** from `main`
-   ```bash
-   git checkout -b my-feature
-   ```
+If you use scOmnom and run into a problem, you are welcome to open an issue or contact the maintainers with:
 
-2. **Make your changes**
-   - Keep commits focused and readable
-   - Prefer small, logically grouped commits over large ones
+* a concise bug report;
+* the command you ran;
+* the relevant error message or log excerpt;
+* the scOmnom version or commit;
+* enough context to understand the input format and pipeline stage.
 
-3. **Open a pull request (PR)** into `main`
-   - Describe *what* you changed and *why*
-   - Reference relevant issues or discussions if applicable
+We may not be able to provide general support, but clear reproducible reports are helpful.
 
-4. **Wait for review**
-   - At least one approval is required before merging
-   - Address comments and requested changes
+## Pull Requests
 
-Direct pushes to `main` are intentionally restricted.
+We are not currently reviewing unsolicited pull requests for new features, refactors, style changes, dependency updates, or broad documentation rewrites.
 
----
+If a maintainer has explicitly discussed a specific change with you, a targeted PR may be appropriate. In that case, keep it narrow and include the context requested by the maintainer.
 
-## Coding guidelines
+## Forks
 
-- Follow **PEP8** style conventions
-- Use **type hints** for public functions and configuration objects
-- Prefer **explicit, readable code** over clever abstractions
-- Keep module responsibilities narrow
-
-Where applicable:
-- Use `AnnData` / Scanpy conventions
-- Avoid loading full matrices into memory unless explicitly intended
+You are free to fork the repository under the project license. If you adapt scOmnom for your own environment or analysis needs, please treat that fork as independently maintained unless we have agreed otherwise.
 
 ---
-
-## Configuration and interfaces
-
-- Public CLI options should remain **stable** whenever possible
-- Changes to defaults or interfaces should be clearly documented in the PR
-- Prefer extending existing config objects over introducing ad-hoc parameters
-
----
-
-## Testing
-
-- New features should include **basic tests** where feasible
-- Tests should be lightweight and runnable on CPU
-- Use small synthetic datasets for validation when possible
-
-CI coverage is intentionally minimal at this stage, but tests help prevent regressions.
-
----
-
-## Documentation
-
-- Update `README.md` if user-facing behavior changes
-- Keep documentation concise and factual
-- Avoid documenting experimental or unstable features as part of the main workflow
-
----
-
-## Scope and stability
-
-Parts of the pipeline (e.g. clustering and annotation) are under active development.
-
-If you are contributing to experimental modules:
-- expect interfaces to change
-- clearly mark assumptions and limitations in code or PR descriptions
-
----
-
-## Questions
-
-If you are unsure about design decisions, scope, or implementation details:
-- open a draft PR
-- or discuss informally before investing significant effort
-
-Thanks for helping improve **scOmnom**.
-

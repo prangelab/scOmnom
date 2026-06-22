@@ -5,6 +5,8 @@ The manual is split into focused sections so the left navigation can be used as 
 - [Installation](installation.md)
 - [Usage](usage.md)
 - [Pipeline overview](pipeline-overview.md)
+- [Output organization](output-organization.md)
+- [Reporting](reporting.md)
 - [scOmnom AnnData structure](adata-structure.md)
 - [Load and filter](load-and-filter.md)
 - [Integrate](integrate.md)

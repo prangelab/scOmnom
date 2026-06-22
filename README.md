@@ -1,6 +1,6 @@
 # scOmnom
 
-`scOmnom` is a CLI-first, reproducible single-cell RNA-seq workflow for large datasets. It is built on the scVerse ecosystem and is designed for robust execution on local macOS workstations and HPC systems.
+`scOmnom` is a CLI-first, reproducible single-cell RNA-seq workflow for large datasets. It is built on the scVerse ecosystem and is designed for robust execution on local Linux or macOS systems and HPC systems.
 
 The pipeline combines established single-cell packages with scOmnom-specific workflow machinery, including:
 
@@ -56,13 +56,13 @@ scomnom load-and-filter \
 # 2) Integrate batches
 scomnom integrate \
   --input-path results/adata.filtered.zarr \
-  --output-dir results/
+  --output-dir results/ \
+  --celltypist-model Immune_All_Low.pkl
 
 # 3) Cluster and annotate
 scomnom cluster-and-annotate \
   --input-path results/adata.integrated.zarr \
-  --output-dir results/ \
-  --celltypist-model Immune_All_Low.pkl
+  --output-dir results/
 
 # 4) Marker discovery
 scomnom markers-and-de markers \
@@ -137,7 +137,6 @@ Clustering state is stored as rounds in `adata.uns["cluster_rounds"]`, with the 
 
 * [Manual](https://prangelab.org/scOmnom/)
 * [API reference](API_REFERENCE.md)
-* [Design goals](https://prangelab.org/scOmnom/design-goals/)
 * [Contributing](contributing.md)
 * [Changelog](changelog.md)
 

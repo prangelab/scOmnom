@@ -19,7 +19,7 @@ slurm/
 └── scomnom_9_enrichment_cluster.job
 ```
 
-These scripts are configured for **SURF’s Snellius** compute cluster. Users on other systems must adapt module names, CUDA/driver versions, and conda initialization paths.
+These scripts are configured for our local HPC ([SURF's Snellius](https://www.surf.nl/diensten/rekenen/snellius-de-nationale-supercomputer)). Users on other systems must adapt module names, CUDA/driver versions, and conda initialization paths.
 
 For large datasets, running on a **GPU partition is strongly recommended**, particularly for:
 

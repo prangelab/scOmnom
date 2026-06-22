@@ -1,130 +1,185 @@
 # LIANA CCC
 
-`scomnom markers-and-de ccc liana` runs LIANA-based ligand-receptor analysis on an annotated AnnData object and writes tables, figures, and an `adata.uns["markers_and_de"]["ccc"]["liana"]` payload.
+`scomnom markers-and-de ccc liana` runs LIANA ligand-receptor analysis on cluster labels from a selected scOmnom clustering round. It writes method tables, summary tables, figures, and an `adata.uns["markers_and_de"]["ccc"]["liana"]` payload.
 
-If `--dataset-key` is omitted, scOmnom runs the normal within-object LIANA workflow. Cross-tissue / cross-dataset filtering is only activated when `--dataset-key` is provided together with `--source-level` and `--target-level`.
+```bash
+scomnom markers-and-de ccc liana \
+  --input-path results/adata.clustered.annotated.zarr.tar.zst \
+  --round-id r5_broad_cell_types
+```
 
-**Assay selection**
+Use condition keys when you want separate LIANA runs per condition level:
 
-For count-based CCC input, scOmnom prefers assays in this order:
+```bash
+scomnom markers-and-de ccc liana \
+  --input-path results/adata.clustered.annotated.zarr.tar.zst \
+  --round-id r5_broad_cell_types \
+  --condition-key treatment
+```
 
-* `counts_cb`
-* `counts_raw`
-* `adata.X` as a final fallback
+## Pooled LIANA Defaults
 
-Use `--use-raw` only when you explicitly want `adata.raw`.
-
-Use `--input-mode lognorm` when you want LIANA to build and reuse a cached log-normalized layer from `counts_cb` or `counts_raw` instead of running directly on raw counts. This creates `adata.layers["lognorm_counts_cb"]` or `adata.layers["lognorm_counts_raw"]` on demand and then uses that layer for LIANA.
-
-**Condition key syntax**
-
-LIANA CCC supports the same round-aware condition syntax used elsewhere in the pipeline:
-
-| Syntax | Meaning | Resulting behavior |
+| Option | Default | Notes |
 | --- | --- | --- |
-| omitted | No condition split | One LIANA run on the full object |
-| `A` | Single obs key | One LIANA run per level of `A` |
-| `A:B` | Composite key | One LIANA run per joint level of `A` and `B` |
-| `A@B` | A within B | One LIANA run per level of `B`, with `A` treated as the condition label inside each subset |
+| `--input-path`, `-i` | required | AnnData object loaded through scOmnom IO. |
+| `--output-dir`, `-o` | inferred `results/` location | Output root. |
+| `--output-name` | inferred from input, `ccc_liana`, and round | Saved AnnData name. |
+| `--save-h5ad` / `--no-save-h5ad` | `--no-save-h5ad` | Also write h5ad output. |
+| `--n-jobs` | `1` | Passed to LIANA methods. |
+| `--make-figures` / `--no-make-figures` | `--make-figures` | Create summary plots. |
+| `--round-id` | active clustering round | Selects the sender/receiver labels. |
+| `--group-key` | resolved from round | Override the group column directly. |
+| `--label-source` | `pretty` | Use pretty labels where available. |
 
-**Cross-tissue mode**
+## Conditions
 
-For merged multi-tissue objects, LIANA CCC can be restricted to cross-dataset signaling candidates by specifying:
+| Syntax | Behavior |
+| --- | --- |
+| omitted | One LIANA run on the full object. |
+| `A` | One LIANA run per level of `A`. |
+| `A:B` | One LIANA run per joint level of `A` and `B`. |
+| `A@B` | Run `A` within each level of `B`. |
 
-* `--dataset-key`: obs column defining tissue / dataset origin
-* `--source-level`: allowed sender tissue / dataset level(s)
-* `--target-level`: allowed receiver tissue / dataset level(s)
-* `--signal-scope`: `all` or `secreted`
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--condition-key` | none | Repeatable/comma-separated. Supports `A`, `A:B`, and `A@B`. |
+| `--condition-value` | none | Restrict selected condition levels. For `A@B`, filters the `B` context levels. |
+| `--compare-level` | none | Restrict levels of the comparison variable. For `A@B`, filters the `A` levels. |
 
-In this mode, scOmnom still runs LIANA on the merged AnnData object, but filters the returned interactions to the requested source and target tissue levels. With `--signal-scope secreted`, scOmnom further restricts the retained interactions to CellChatDB routes annotated as `Secreted Signaling`.
+## Cross-tissue Filtering
 
-**CellChatDB-backed pathway families**
+Cross-tissue mode is activated only when `--dataset-key` is supplied. In that mode, LIANA is still run on the object/subset, but returned interactions are filtered to the requested sender and receiver dataset levels.
 
-The LIANA family / route plots use a vendored CellChatDB annotation table at [`src/scomnom/resources/cellchatdb_interaction_annotations.tsv`](https://github.com/prangelab/scOmnom/blob/main/src/scomnom/resources/cellchatdb_interaction_annotations.tsv). This table was exported one time from the official `jinworks/CellChat` package source at version `2.2.0.9001`.
-
-scOmnom first tries to map each LIANA `ligand_complex` / `receptor_complex` pair onto CellChatDB and uses CellChat `pathway_name` values such as `BMP`, `TGFb`, `NOTCH`, or `CXCL` as the route family. If no exact CellChatDB match is found, scOmnom falls back to its internal heuristic family classifier.
-
-The vendored export preserves CellChat's own row-level `version` field, which currently contains both:
-
-* `CellChatDB v1`
-* `CellChatDB v2`
-
-**Example**
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--dataset-key` | none | `adata.obs` column defining tissue/dataset origin. |
+| `--source-level` | none | Allowed sender dataset levels. Required with `--dataset-key`. |
+| `--target-level` | none | Allowed receiver dataset levels. Required with `--dataset-key`. |
+| `--signal-scope` | `all` | `all` or `secreted`. `secreted` keeps CellChatDB routes annotated as secreted signaling. |
 
 ```bash
 scomnom markers-and-de ccc liana \
-  --input-path results/adata.clustered.annotated.projected.markers.de.zarr.tar.zst \
-  --condition-key masld_status@timepoint
-```
-
-```bash
-scomnom markers-and-de ccc liana \
-  --input-path results/adata.merged_liver_fat.clustered.annotated.zarr.tar.zst \
-  --dataset-key tissue \
-  --source-level liver \
-  --target-level fat \
-  --signal-scope secreted
-```
-
-**Outputs**
-
-* Figures: `figures/<fmt>/ccc_liana_<round>_roundN/`
-* Tables: `tables/ccc_liana_<round>_roundN/`
-* Route-family summary: `route_family_summary.tsv`
-
-**Focused donor-level rescoring**
-
-`scomnom markers-and-de ccc liana-paired` rescales a focused LIANA candidate table at donor or sample level instead of rerunning pooled LIANA discovery. It is meant for downstream paired analyses once pooled LIANA has already identified candidate ligand-receptor edges.
-
-**Current scope**
-
-* reads a candidate LR table such as `liana_rank_aggregate.tsv`
-* supports the same `A` and `A@B` condition-subset syntax as pooled LIANA
-* supports cross-tissue sender/receiver restriction via `--dataset-key`, `--source-level`, and `--target-level`
-* supports the same LIANA expression input modes as pooled LIANA:
-  * `--input-mode counts`
-  * `--input-mode lognorm`
-* recomputes donor/sample-level ligand-receptor scores from cluster-level ligand and receptor complex expression using:
-  * `sqrt(ligand_expr * receptor_expr)`
-* aggregates those donor-level edge scores to route-family summaries and within-condition group-effect tables
-* paired rescoring defaults to a donor-sparser threshold set than pooled discovery:
-  * `--min-sender-cells 5`
-  * `--min-receiver-cells 5`
-  * `--min-scored-donors-per-group 3`
-* always writes missingness summary tables so donor-level sparsity is visible before interpreting empty effect tables
-* optional focused figures for:
-  * paired route-family effect dotplots
-  * paired ligand-receptor edge effect strip plots
-* writes focused donor-level tables and stores them under `adata.uns["markers_and_de"]["ccc"]["liana_paired_rescore"]`
-
-**Example**
-
-```bash
-scomnom markers-and-de ccc liana-paired \
-  --input-path results/adata.merged_liver_fat.clustered.annotated.zarr.tar.zst \
-  --candidate-events results/tables/ccc_liana_r5_round1/condition__sex_at_MASLD/MASLD=yes/female/liana_rank_aggregate.tsv \
-  --dataset-key tissue \
-  --source-level vfat \
-  --target-level liv \
-  --pairing-key sample_id \
-  --condition-key sex@MASLD \
-  --condition-value yes \
-  --compare-level female \
-  --compare-level male \
+  --input-path results/adata.merged_dataset_A_dataset_B.zarr.tar.zst \
+  --dataset-key dataset \
+  --source-level dataset_A \
+  --target-level dataset_B \
+  --signal-scope secreted \
   --input-mode lognorm
 ```
 
-**Outputs**
+## LIANA Methods
 
-* Figures: `figures/<fmt>/ccc_liana_<round>_roundN/paired_rescore/<condition>/`
-* Tables: `tables/ccc_liana_<round>_roundN/paired_rescore/<condition>/`
-* Key tables:
-  * `liana_paired_lr_edge_scores.tsv`
-  * `liana_paired_route_scores.tsv`
-  * `liana_paired_lr_edge_missingness.tsv`
-  * `liana_paired_route_missingness.tsv`
-  * `liana_paired_lr_edge_effects.tsv`
-  * `liana_paired_route_effects.tsv`
-  * `liana_paired_settings.tsv`
+By default, scOmnom runs LIANA `rank_aggregate`. The aggregate uses a sparse-safer constituent set when no extra LIANA methods are requested: `cellphonedb`, `natmi`, `sca`, and `logfc`.
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--liana-method` | `rank_aggregate` | Repeatable. Add individual LIANA methods or use only a specific method. |
+| `--resource` | `consensus` | LIANA ligand-receptor resource. |
+| `--expr-prop` | `0.1` | Minimum expression proportion passed to LIANA. |
+| `--n-perms` | `1000` | Permutations for permutation-based methods. Use `0` to disable. |
+| `--seed` | `42` | Random seed. |
+| `--return-all-lrs` / `--no-return-all-lrs` | `--no-return-all-lrs` | Whether LIANA returns all ligand-receptor pairs. |
+| `--top-n` | `250` | Rows retained for top summaries. |
+| `--plot-top-n` | `60` | Rows used in plots. |
+
+Examples:
+
+```bash
+scomnom markers-and-de ccc liana ... --liana-method rank_aggregate
+scomnom markers-and-de ccc liana ... --liana-method cellphonedb --liana-method natmi
+```
+
+## Expression Input
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--input-mode` | `counts` | `counts` uses count-like input; `lognorm` builds/reuses a log-normalized layer. |
+| `--lognorm-target-sum` | `10000` | Target sum for `--input-mode lognorm`. |
+| `--use-raw` / `--no-use-raw` | `--no-use-raw` | Use `adata.raw` explicitly; only valid with `--input-mode counts`. |
+| `--layer` | none | Explicit layer override. Cannot be combined with `--use-raw`. |
+
+For count input, scOmnom prefers `adata.layers["counts_cb"]`, then `adata.layers["counts_raw"]`, then `adata.X`. `--input-mode lognorm` builds `lognorm_counts_cb` or `lognorm_counts_raw` on demand and reuses it.
+
+## CellChatDB Route Families
+
+Route-family plots use the vendored CellChatDB annotation table at `src/scomnom/resources/cellchatdb_interaction_annotations.tsv`. scOmnom first maps each LIANA ligand-receptor pair to CellChatDB route families such as `BMP`, `TGFb`, `NOTCH`, or `CXCL`; unmatched pairs fall back to an internal heuristic classifier.
+
+## Pooled Outputs
+
+Pooled LIANA writes:
+
+* figures: `figures/<fmt>/ccc_liana_<round>_roundN/`;
+* tables: `tables/ccc_liana_<round>_roundN/`;
+* saved AnnData: `adata.ccc_liana_<round>.zarr.tar.zst` by default;
+* payloads under `adata.uns["markers_and_de"]["ccc"]["liana"]["runs"]`.
+
+Key tables:
+
+* `liana_<method>.tsv`;
+* `liana_<primary_method>_top.tsv`;
+* `source_target_summary.tsv`;
+* `route_family_summary.tsv`;
+* `liana_settings.tsv`.
+
+Key figures include source-target heatmaps, send/receive summaries, circos plots, top interaction plots, route-family plots, target-cluster plots, and condition-split comparison plots when multiple comparable condition runs are present.
+
+## Focused Donor-level Rescoring
+
+`scomnom markers-and-de ccc liana-paired` rescales a focused LIANA candidate table at donor or sample level. Use it after pooled LIANA has identified candidate ligand-receptor edges and you want donor/sample-level effect summaries.
+
+```bash
+scomnom markers-and-de ccc liana-paired \
+  --input-path results/adata.merged_dataset_A_dataset_B.zarr.tar.zst \
+  --candidate-events results/tables/ccc_liana_r5_round1/liana_rank_aggregate.tsv \
+  --dataset-key dataset \
+  --source-level dataset_A \
+  --target-level dataset_B \
+  --pairing-key sample_id \
+  --condition-key treatment \
+  --compare-level treated \
+  --compare-level vehicle \
+  --input-mode lognorm
+```
+
+### Paired Rescoring Knobs
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--candidate-events` | required | Candidate LIANA table, usually `liana_rank_aggregate.tsv` or a filtered derivative. |
+| `--pairing-key` | `sample_id` | Donor/sample key for paired scoring. |
+| `--condition-key` | none | Repeatable/comma-separated. Supports `A` and `A@B`. |
+| `--condition-value` | none | Restrict context levels for `A@B`. |
+| `--compare-level` | none | Optional levels of the primary condition variable to keep. |
+| `--input-mode` | `counts` | `counts` or `lognorm`. |
+| `--lognorm-target-sum` | `10000` | Target sum for log-normalized layer creation. |
+| `--source-filter` | none | Filter candidate sender labels. |
+| `--target-filter` | none | Filter candidate receiver labels. |
+| `--ligand-filter` | none | Filter candidate ligand complexes. |
+| `--receptor-filter` | none | Filter candidate receptor complexes. |
+| `--route-family-filter` | none | Filter candidate route families. |
+| `--max-edges` | `200` | Maximum candidate edges retained for scoring. |
+| `--min-sender-cells` | `5` | Minimum sender cells per donor/sample. |
+| `--min-receiver-cells` | `5` | Minimum receiver cells per donor/sample. |
+| `--min-scored-donors-per-group` | `3` | Minimum scored donors per group for effect summaries. |
+
+Paired LIANA scores each candidate edge as `sqrt(ligand_expr * receptor_expr)` per donor/sample, then summarizes edge scores into route-family scores and group-effect tables.
+
+### Paired Outputs
+
+Paired LIANA writes:
+
+* figures: `figures/<fmt>/ccc_liana_paired_<round>_roundN/`;
+* tables: `tables/ccc_liana_paired_<round>_roundN/`;
+* payloads under `adata.uns["markers_and_de"]["ccc"]["liana_paired_rescore"]`.
+
+Key tables:
+
+* `liana_paired_lr_edge_scores.tsv`;
+* `liana_paired_route_scores.tsv`;
+* `liana_paired_lr_edge_missingness.tsv`;
+* `liana_paired_route_missingness.tsv`;
+* `liana_paired_lr_edge_effects.tsv`;
+* `liana_paired_route_effects.tsv`;
+* `liana_paired_settings.tsv`.
 
 ---

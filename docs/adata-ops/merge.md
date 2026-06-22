@@ -3,6 +3,13 @@
 Use `adata-ops merge` when you want to concatenate two or more full datasets into one new AnnData object
 (not just overlay subset labels back into a parent).
 
+There are two merge modes:
+
+* **Full merge:** include every cell from every input dataset.
+* **Selected-population merge:** provide a `--subset-merge` TSV to keep only selected clusters or labels from each dataset before concatenation.
+
+The selected-population mode is useful when you want to build a focused combined object from comparable populations across studies, tissues, or analysis branches without carrying all unrelated cells into the merged dataset.
+
 Minimal example (merge complete inputs):
 
 ```bash
@@ -10,11 +17,11 @@ scomnom adata-ops merge \
   -i results/dataset_A.zarr.tar.zst \
   -i results/dataset_B.zarr.tar.zst \
   -o results \
-  --dataset-short-label reset \
-  --dataset-short-label anchor
+  --dataset-short-label dataset_A \
+  --dataset-short-label dataset_B
 ```
 
-Subset merge example (only explicit cluster selections are kept):
+Selected-population merge example (only explicit cluster selections are kept):
 
 ```bash
 scomnom adata-ops merge \
@@ -22,7 +29,7 @@ scomnom adata-ops merge \
   -i results/dataset_B.zarr.tar.zst \
   -o results \
   --subset-merge merge.tsv \
-  --round-id r5_archetypes
+  --round-id r5_broad_cell_types
 ```
 
 `merge.tsv` format (two columns, tab-delimited, one selection per row):

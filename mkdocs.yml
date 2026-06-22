@@ -21,6 +21,8 @@ nav:
       - Installation: installation.md
       - Usage: usage.md
       - Pipeline Overview: pipeline-overview.md
+      - Output Organization: output-organization.md
+      - Reporting: reporting.md
       - scOmnom AnnData Structure: adata-structure.md
       - Load And Filter:
           - Overview: load-and-filter.md
@@ -34,7 +36,6 @@ nav:
           - scIB Benchmarking: integrate/benchmarking.md
           - Annotated Refinement: integrate/annotated-run.md
           - Outputs: integrate/outputs.md
-          - Cluster Relationship: integrate/cluster-relationship.md
       - Cluster And Annotate:
           - Overview: cluster-and-annotate.md
           - CellTypist Models: cluster-and-annotate/celltypist.md
@@ -44,9 +45,9 @@ nav:
           - Compaction: cluster-and-annotate/compaction.md
           - Decoupler Configuration: cluster-and-annotate/decoupler.md
           - Outputs: cluster-and-annotate/outputs.md
-          - Reporting: cluster-and-annotate/reporting.md
       - AnnData Operations:
           - Overview: adata-ops.md
+          - Import External AnnData: adata-ops/import.md
           - Subset: adata-ops/subset.md
           - Annotation Merge: adata-ops/annotation-merge.md
           - Manual Renaming: adata-ops/rename.md
@@ -58,11 +59,12 @@ nav:
           - Cell-level vs Pseudobulk: markers-and-de/cell-vs-pseudobulk.md
           - Differential Abundance: markers-and-de/da.md
           - Enrichment: markers-and-de/enrichment.md
-          - LIANA CCC: markers-and-de/liana.md
-          - NicheNet CCC: markers-and-de/nichenet.md
-          - MEBOCOST CCC: markers-and-de/mebocost.md
+          - Cell-cell Communication:
+              - Overview: markers-and-de/ccc.md
+              - LIANA: markers-and-de/liana.md
+              - NicheNet: markers-and-de/nichenet.md
+              - MEBOCOST: markers-and-de/mebocost.md
       - SLURM And HPC: hpc-slurm.md
-  - Design Goals: design-goals.md
   - API Reference: api-reference.md
   - Changelog: changelog.md
   - Contributing: contributing.md
