@@ -1073,6 +1073,80 @@ def adata_ops_merge(
 
 
 @adata_ops_app.command(
+    "import",
+    help="Import a generic external AnnData into a scOmnom-compatible dataset scaffold.",
+)
+def adata_ops_import(
+    input_path: Path = typer.Option(
+        ...,
+        "--input-path",
+        "-i",
+        help="[I/O] Input external dataset (.zarr, .zarr.tar.zst, or .h5ad).",
+    ),
+    output_dir: Optional[Path] = typer.Option(
+        None,
+        "--output-dir",
+        "-o",
+        help="[I/O] Output directory (default: sibling results/ directory, or input parent if already inside results/).",
+    ),
+    output_name: Optional[str] = typer.Option(
+        None,
+        "--output-name",
+        help="[I/O] Base name for imported output dataset.",
+    ),
+    output_format: Optional[Literal["zarr", "h5ad"]] = typer.Option(
+        None,
+        "--output-format",
+        help="[I/O] Output format for imported dataset. Default: .h5ad for .h5ad inputs, otherwise compressed .zarr.tar.zst.",
+    ),
+    source_count_layer: Optional[str] = typer.Option(
+        None,
+        "--source-count-layer",
+        help="[Import] Source layer containing retained-cell counts. Use 'X' to import from adata.X. Default: auto-detect.",
+    ),
+    cluster_key: Optional[str] = typer.Option(
+        None,
+        "--cluster-key",
+        help="[Import] obs column to use for imported clustering scaffold. Default: auto-detect.",
+    ),
+    batch_key: Optional[str] = typer.Option(
+        None,
+        "--batch-key",
+        help="[Import] obs column to store as adata.uns['batch_key']. Default: auto-detect.",
+    ),
+    embedding_key: Optional[str] = typer.Option(
+        None,
+        "--embedding-key",
+        help="[Import] obsm embedding key to register as the imported best embedding. Default: auto-detect integration-like embedding.",
+    ),
+    round_name: str = typer.Option(
+        "imported",
+        "--round-name",
+        help="[Import] Suffix for the created imported cluster round.",
+    ),
+):
+    cfg = AdataOpsConfig(
+        input_path=input_path,
+        output_dir=output_dir,
+        operation="import",
+        output_name=output_name,
+        output_format=output_format,
+        source_count_layer=source_count_layer,
+        import_cluster_key=cluster_key,
+        import_batch_key=batch_key,
+        import_embedding_key=embedding_key,
+        import_round_name=round_name,
+    )
+
+    log_dir = cfg.resolved_output_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    logfile = log_dir / "adata-ops.log"
+    init_logging(logfile)
+    cfg.logfile = logfile
+    run_adata_ops(cfg)
+
+
+@adata_ops_app.command(
     "metadata-import",
     help="Import or replace one or more obs metadata columns from an external table using strict key alignment.",
 )

@@ -381,7 +381,7 @@ class AdataOpsConfig(BaseModel):
     input_paths: Tuple[Path, ...] = ()
     dataset_short_labels: Tuple[str, ...] = ()
     output_dir: Optional[Path] = None
-    operation: Literal["subset", "rename", "annotation_merge", "merge", "metadata_import"] = "subset"
+    operation: Literal["subset", "rename", "annotation_merge", "merge", "metadata_import", "import"] = "subset"
     output_name: Optional[str] = None
     subset_mapping_tsv: Optional[Path] = None
     subset_merge_tsv: Optional[Path] = None
@@ -404,6 +404,11 @@ class AdataOpsConfig(BaseModel):
     metadata_key: Optional[str] = None
     obs_key: Optional[str] = None
     metadata_columns: Tuple[str, ...] = ()
+    source_count_layer: Optional[str] = None
+    import_cluster_key: Optional[str] = None
+    import_batch_key: Optional[str] = None
+    import_embedding_key: Optional[str] = None
+    import_round_name: str = "imported"
     logfile: Optional[Path] = None
 
     @property
@@ -411,7 +416,7 @@ class AdataOpsConfig(BaseModel):
         if self.output_dir is not None:
             return self.output_dir.resolve()
         base = self.input_path.parent
-        if self.operation == "metadata_import" and base.name != "results":
+        if self.operation in {"metadata_import", "import"} and base.name != "results":
             return (base / "results").resolve()
         return base.resolve()
 
