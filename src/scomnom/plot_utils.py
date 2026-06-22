@@ -1160,12 +1160,24 @@ def save_multi(stem: str, figdir: Path, fig=None, *, savefig_kwargs: dict | None
     if ROOT_FIGDIR is None:
         raise RuntimeError("ROOT_FIGDIR is not set. Call setup_scanpy_figs() first.")
 
+    rel_figdir = figdir
+    if figdir.is_absolute():
+        try:
+            rel_figdir = figdir.resolve().relative_to(ROOT_FIGDIR)
+        except ValueError:
+            rel_figdir = Path(*figdir.parts[1:]) if len(figdir.parts) > 1 else Path(".")
+            LOGGER.warning(
+                "save_multi received an absolute figdir outside ROOT_FIGDIR: %s; saving under %s",
+                figdir,
+                rel_figdir,
+            )
+
     # --------------------------------------------------
     # Save in all configured formats
     # --------------------------------------------------
     # Lazily infer run folder from the first save call
     if RUN_FIG_SUBDIR is None:
-        RUN_KEY = _infer_run_key(figdir)
+        RUN_KEY = _infer_run_key(rel_figdir)
         RUN_FIG_SUBDIR = _next_round_subdir(
             root_figdir=ROOT_FIGDIR,
             formats=FIGURE_FORMATS,
@@ -1182,7 +1194,6 @@ def save_multi(stem: str, figdir: Path, fig=None, *, savefig_kwargs: dict | None
             (ROOT_FIGDIR / ext / RUN_FIG_SUBDIR).mkdir(parents=True, exist_ok=True)
 
     # Always compute rel_figdir (avoid duplicate integration/integration)
-    rel_figdir = figdir
     if RUN_KEY and rel_figdir.parts and rel_figdir.parts[0] == RUN_KEY:
         rel_figdir = Path(*rel_figdir.parts[1:])  # may become "."
 

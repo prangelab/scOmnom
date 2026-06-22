@@ -80,6 +80,18 @@ def test_setup_scanpy_figs_and_save_multi(tmp_path, reset_root_figdir):
     assert out.exists()
 
 
+def test_save_multi_relativizes_absolute_figdir_under_root(tmp_path, reset_root_figdir):
+    figdir = tmp_path / "figs"
+    pu.setup_scanpy_figs(figdir, formats=["png"])
+
+    fig = plt.figure()
+    pu.save_multi("barcode_knee", figdir / "cell_qc", fig=fig)
+
+    out = tmp_path / "figs" / "png" / "cell_qc_round1" / "barcode_knee.png"
+    assert out.exists()
+    assert not (tmp_path / "figs" / "png" / "_round1").exists()
+
+
 def test_save_multi_without_setup_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(pu, "ROOT_FIGDIR", None, raising=False)
     fig = plt.figure()
