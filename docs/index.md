@@ -68,6 +68,9 @@ Use `scomnom --help` and `scomnom <command> --help` for command-specific options
 | `--max-counts-mad` | `5.0` |
 | `--max-counts-quantile` | `0.999` |
 | `--expected-doublet-rate` | `0.1` |
+| `--doublet-score-mode` | `auto` |
+| `--solo-sparse-nnz-limit` | `1500000000` |
+| `--solo-max-cells-per-block` | `none` |
 
 See [Filtering Defaults And Rationale](load-and-filter/filtering.md) for the full table of defaults and tuning guidance.
 

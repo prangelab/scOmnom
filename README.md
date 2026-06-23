@@ -96,6 +96,9 @@ Default `load-and-filter` thresholds:
 | `--max-counts-mad` | `5.0` |
 | `--max-counts-quantile` | `0.999` |
 | `--expected-doublet-rate` | `0.1` |
+| `--doublet-score-mode` | `auto` |
+| `--solo-sparse-nnz-limit` | `1500000000` |
+| `--solo-max-cells-per-block` | `none` |
 
 See the [filtering defaults and rationale](https://prangelab.org/scOmnom/load-and-filter/filtering/) section for details.
 

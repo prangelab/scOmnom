@@ -26,6 +26,8 @@ For large datasets, running on a **GPU partition is strongly recommended**, part
 * `load-and-filter` doublet detection (scVI-SOLO)
 * `integrate` (scVI/scANVI)
 
+For large `load-and-filter` runs, SOLO scoring defaults to `--doublet-score-mode auto`. This mode keeps global scoring for smaller objects and switches to blocked scoring when the estimated sparse operation size exceeds `--solo-sparse-nnz-limit` (`1500000000` by default). If memory pressure remains high, set `--solo-max-cells-per-block` to cap blocked prediction chunks explicitly.
+
 #### Performance reference (Snellius)
 
 Benchmarks obtained using **1× NVIDIA A100 GPU** and **18 CPU cores**.

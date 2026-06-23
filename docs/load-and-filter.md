@@ -11,7 +11,7 @@ Its scope is:
 - doublet detection
 - merge into one scOmnom AnnData object
 
-Recommended compute: use a **GPU node** when possible. Most of this module is CPU-friendly, but SOLO doublet detection trains scVI/SOLO models and is much faster on GPU. CPU runs are possible but can be slow for large datasets.
+Recommended compute: use a **GPU node** when possible. Most of this module is CPU-friendly, but SOLO doublet detection trains scVI/SOLO models and is much faster on GPU. For large datasets, `--doublet-score-mode auto` can switch SOLO scoring from global prediction to blocked prediction to reduce memory pressure.
 
 ## Quick Entry Point
 

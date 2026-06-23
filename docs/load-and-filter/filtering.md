@@ -102,18 +102,35 @@ Doublet detection is part of the load-and-filter stage after basic QC. scOmnom u
 
 The scoring and calling are separated:
 
-1. scOmnom trains scVI/SOLO on the merged post-QC object and stores `adata.obs["doublet_score"]`.
-2. scOmnom thresholds those scores **per sample** using `--expected-doublet-rate`.
-3. Cells above the per-sample score threshold are marked in `adata.obs["predicted_doublet"]` and removed.
+1. scOmnom trains one scVI model on the merged post-QC object.
+2. SOLO scores are generated either globally or in planned blocks, depending on `--doublet-score-mode`.
+3. scOmnom stores `adata.obs["doublet_score"]`.
+4. scOmnom thresholds those scores **per sample** using `--expected-doublet-rate`.
+5. Cells above the per-sample score threshold are marked in `adata.obs["predicted_doublet"]` and removed.
 
 The default expected doublet rate is `--expected-doublet-rate 0.1`, meaning the highest-scoring 10% of cells in each sample are called as doublets. The inferred per-sample thresholds and observed rates are written to `doublets_per_sample.tsv` and stored in `adata.uns["doublet_calling"]`.
+
+By default, `--doublet-score-mode auto` estimates the sparse operation size required for global SOLO scoring. If the estimate is at or below `--solo-sparse-nnz-limit`, scoring runs globally. If the estimate is larger, scOmnom switches to blocked SOLO scoring to reduce memory pressure. Blocks are planned from the preferred count matrix (`counts_cb`, then `counts_raw`, then `adata.X`) and respect sample boundaries where possible.
 
 Tuning options:
 
 | Option | Default | What it changes |
 | --- | --- | --- |
 | `--expected-doublet-rate` | `0.1` | Fraction of cells called as doublets per sample after SOLO scoring. Lower values are less aggressive; higher values remove more cells. |
+| `--doublet-score-mode` | `auto` | SOLO scoring mode: `global`, `blocked`, or `auto`. In `auto`, large estimated sparse operations switch to blocked scoring. |
+| `--solo-sparse-nnz-limit` | `1500000000` | Sparse operation estimate used by `auto` mode and by the block planner. Lower values make blocked scoring activate earlier and produce smaller blocks. |
+| `--solo-max-cells-per-block` | `none` | Optional cap on cells per blocked SOLO scoring chunk. Use when memory pressure remains high despite the sparse operation limit. |
 | `--apply-doublet-score` | off | Reuse an existing pre-doublet AnnData object with `doublet_score` and only reapply doublet thresholding. |
 | `--apply-doublet-score-path` | `<out>/adata.merged.zarr` | Input object for `--apply-doublet-score`. |
+
+Example forcing blocked scoring:
+
+```bash
+scomnom load-and-filter ... \
+  --doublet-score-mode blocked \
+  --solo-max-cells-per-block 50000
+```
+
+SOLO scoring metadata is stored in `adata.uns["solo_scoring"]`, including the requested mode, effective mode, count layer, global sparse estimate, fallback reason, and block summaries.
 
 Recommended compute: run this module on a **GPU node** when possible because SOLO trains scVI/SOLO models. The rest of the filtering is mostly CPU-bound, but doublet scoring is the part that benefits strongly from GPU acceleration.
