@@ -141,6 +141,35 @@ def test_loadandfilter_accepts_disabling_auto_min_counts(tmp_path):
     assert cfg.min_counts_auto_activate_below is None
 
 
+def test_loadandfilter_solo_scoring_defaults(tmp_path):
+    cfg = LoadAndFilterConfig(
+        raw_sample_dir="raw",
+        metadata_tsv=tmpfile(tmp_path, "meta.tsv"),
+        output_dir=tmp_path,
+    )
+    assert cfg.doublet_score_mode == "auto"
+    assert cfg.solo_sparse_nnz_limit == 1_500_000_000
+    assert cfg.solo_max_cells_per_block is None
+
+
+def test_loadandfilter_rejects_invalid_solo_block_limits(tmp_path):
+    with pytest.raises(ValueError):
+        LoadAndFilterConfig(
+            raw_sample_dir="raw",
+            metadata_tsv=tmpfile(tmp_path, "meta.tsv"),
+            output_dir=tmp_path,
+            solo_sparse_nnz_limit=0,
+        )
+
+    with pytest.raises(ValueError):
+        LoadAndFilterConfig(
+            raw_sample_dir="raw",
+            metadata_tsv=tmpfile(tmp_path, "meta.tsv"),
+            output_dir=tmp_path,
+            solo_max_cells_per_block=0,
+        )
+
+
 # -------------------------------------------------------------------------
 # IntegrateConfig
 # -------------------------------------------------------------------------

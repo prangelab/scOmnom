@@ -366,6 +366,21 @@ def load_and_filter(
         "--expected-doublet-rate",
         help="Used when --doublet-mode rate",
     ),
+    doublet_score_mode: Literal["auto", "global", "blocked"] = typer.Option(
+        "auto",
+        "--doublet-score-mode",
+        help="[SOLO] Score doublets globally, in blocks, or choose automatically.",
+    ),
+    solo_sparse_nnz_limit: int = typer.Option(
+        1_500_000_000,
+        "--solo-sparse-nnz-limit",
+        help="[SOLO] Sparse operation size limit used to switch from global to blocked scoring.",
+    ),
+    solo_max_cells_per_block: Optional[int] = typer.Option(
+        None,
+        "--solo-max-cells-per-block",
+        help="[SOLO] Optional maximum cells per blocked SOLO scoring chunk.",
+    ),
     apply_doublet_score: bool = typer.Option(
         False,
         "--apply-doublet-score",
@@ -465,6 +480,9 @@ def load_and_filter(
         max_counts_mad=max_counts_mad,
         max_counts_quantile=max_counts_quantile,
         expected_doublet_rate=expected_doublet_rate,
+        doublet_score_mode=doublet_score_mode,
+        solo_sparse_nnz_limit=solo_sparse_nnz_limit,
+        solo_max_cells_per_block=solo_max_cells_per_block,
         apply_doublet_score=apply_doublet_score,
         apply_doublet_score_path=apply_doublet_score_path,
         make_figures=make_figures,

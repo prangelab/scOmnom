@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import warnings
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
 import torch
@@ -643,33 +644,256 @@ def sparse_filter_cells_and_genes(
 
 
 # ---------------------------------------------------------------------
-# SOLO (always global)
+# SOLO score generation
 # ---------------------------------------------------------------------
-def run_solo_with_scvi(
+_SOLO_DOUBLET_RATIO = 2
+
+
+@dataclass(frozen=True)
+class SoloScoreBlock:
+    name: str
+    indices: object
+    n_cells: int
+    nnz: int
+    estimate: int
+    batches: tuple[str, ...]
+    split: bool = False
+
+
+def _get_solo_layer(adata: ad.AnnData) -> str | None:
+    if "counts_cb" in adata.layers:
+        return "counts_cb"
+    if "counts_raw" in adata.layers:
+        return "counts_raw"
+    return None
+
+
+def _get_solo_matrix(adata: ad.AnnData):
+    layer = _get_solo_layer(adata)
+    if layer is not None:
+        return adata.layers[layer]
+    return adata.X
+
+
+def _solo_row_nnz(adata: ad.AnnData):
+    import numpy as np
+    from scipy import sparse
+
+    X = _get_solo_matrix(adata)
+    if sparse.isspmatrix_csr(X):
+        return np.asarray(np.diff(X.indptr), dtype=np.int64)
+    if sparse.issparse(X):
+        return np.asarray(X.getnnz(axis=1), dtype=np.int64).ravel()
+    return np.full(adata.n_obs, adata.n_vars, dtype=np.int64)
+
+
+def _estimate_solo_sparse_operation_nnz_from_nnz(
+    nnz: int,
+    *,
+    doublet_ratio: int = _SOLO_DOUBLET_RATIO,
+) -> int:
+    return int(2 * int(doublet_ratio) * int(nnz))
+
+
+def estimate_solo_sparse_operation_nnz(
     adata: ad.AnnData,
     *,
-    batch_key: Optional[str],
-) -> ad.AnnData:
-    from scvi.external import SOLO
-
-    LOGGER.info("Running SOLO doublet detection (global)")
-
-    layer = None
-    if "counts_cb" in adata.layers:
-        layer = "counts_cb"
-    elif "counts_raw" in adata.layers:
-        layer = "counts_raw"
-
-    scvi_model = _train_scvi(
-        adata,
-        batch_key=batch_key,
-        layer=layer,
-        purpose="solo",
+    doublet_ratio: int = _SOLO_DOUBLET_RATIO,
+) -> int:
+    matrix = _get_solo_matrix(adata)
+    nnz = int(getattr(matrix, "nnz", adata.n_obs * adata.n_vars))
+    return _estimate_solo_sparse_operation_nnz_from_nnz(
+        nnz,
+        doublet_ratio=doublet_ratio,
     )
+
+
+def _split_indices_for_solo_block(
+    indices,
+    row_nnz,
+    *,
+    sparse_nnz_limit: int,
+    max_cells_per_block: int | None,
+    doublet_ratio: int,
+) -> list:
+    import numpy as np
+
+    out = []
+    current = []
+    current_nnz = 0
+    max_cells = max_cells_per_block or len(indices)
+
+    for raw_idx in indices:
+        idx = int(raw_idx)
+        row_count = int(row_nnz[idx])
+        row_estimate = _estimate_solo_sparse_operation_nnz_from_nnz(
+            row_count,
+            doublet_ratio=doublet_ratio,
+        )
+        if row_estimate > sparse_nnz_limit:
+            raise RuntimeError(
+                "A single cell is too large for SOLO blocked scoring under "
+                f"solo_sparse_nnz_limit={sparse_nnz_limit}."
+            )
+
+        next_nnz = current_nnz + row_count
+        next_estimate = _estimate_solo_sparse_operation_nnz_from_nnz(
+            next_nnz,
+            doublet_ratio=doublet_ratio,
+        )
+        next_too_large = next_estimate > sparse_nnz_limit
+        next_too_many_cells = len(current) >= max_cells
+        if current and (next_too_large or next_too_many_cells):
+            out.append(np.asarray(current, dtype=np.int64))
+            current = []
+            current_nnz = 0
+
+        current.append(idx)
+        current_nnz += row_count
+
+    if current:
+        out.append(np.asarray(current, dtype=np.int64))
+
+    return out
+
+
+def plan_solo_score_blocks(
+    adata: ad.AnnData,
+    *,
+    batch_key: str | None,
+    sparse_nnz_limit: int,
+    max_cells_per_block: int | None = None,
+    doublet_ratio: int = _SOLO_DOUBLET_RATIO,
+) -> list[SoloScoreBlock]:
+    import numpy as np
+
+    row_nnz = _solo_row_nnz(adata)
+
+    if batch_key is not None and batch_key in adata.obs:
+        grouped = adata.obs.groupby(batch_key, observed=True, sort=False).groups
+        sample_chunks = []
+        for batch, labels in grouped.items():
+            positions = adata.obs_names.get_indexer(labels)
+            parts = _split_indices_for_solo_block(
+                positions,
+                row_nnz,
+                sparse_nnz_limit=sparse_nnz_limit,
+                max_cells_per_block=max_cells_per_block,
+                doublet_ratio=doublet_ratio,
+            )
+            was_split = len(parts) > 1
+            for i, part in enumerate(parts, 1):
+                sample_chunks.append((str(batch), i, was_split, part))
+    else:
+        parts = _split_indices_for_solo_block(
+            np.arange(adata.n_obs, dtype=np.int64),
+            row_nnz,
+            sparse_nnz_limit=sparse_nnz_limit,
+            max_cells_per_block=max_cells_per_block,
+            doublet_ratio=doublet_ratio,
+        )
+        sample_chunks = [("ALL", i, len(parts) > 1, part) for i, part in enumerate(parts, 1)]
+
+    blocks: list[SoloScoreBlock] = []
+    current_parts = []
+    current_nnz = 0
+    current_batches: list[str] = []
+    current_split = False
+    max_cells = max_cells_per_block
+
+    def _flush() -> None:
+        nonlocal current_parts, current_nnz, current_batches, current_split
+        if not current_parts:
+            return
+        indices = np.concatenate(current_parts)
+        name = f"block_{len(blocks) + 1:04d}"
+        blocks.append(
+            SoloScoreBlock(
+                name=name,
+                indices=indices,
+                n_cells=int(indices.size),
+                nnz=int(current_nnz),
+                estimate=_estimate_solo_sparse_operation_nnz_from_nnz(
+                    current_nnz,
+                    doublet_ratio=doublet_ratio,
+                ),
+                batches=tuple(dict.fromkeys(current_batches)),
+                split=bool(current_split),
+            )
+        )
+        current_parts = []
+        current_nnz = 0
+        current_batches = []
+        current_split = False
+
+    for batch, _part_idx, was_split, indices in sample_chunks:
+        chunk_nnz = int(row_nnz[indices].sum())
+        chunk_estimate = _estimate_solo_sparse_operation_nnz_from_nnz(
+            chunk_nnz,
+            doublet_ratio=doublet_ratio,
+        )
+        if chunk_estimate > sparse_nnz_limit:
+            raise RuntimeError(
+                "SOLO block planner produced an unsafe block estimate "
+                f"({chunk_estimate} > {sparse_nnz_limit})."
+            )
+
+        next_nnz = current_nnz + chunk_nnz
+        next_estimate = _estimate_solo_sparse_operation_nnz_from_nnz(
+            next_nnz,
+            doublet_ratio=doublet_ratio,
+        )
+        next_cells = sum(int(x.size) for x in current_parts) + int(indices.size)
+        if current_parts and (
+            next_estimate > sparse_nnz_limit
+            or (max_cells is not None and next_cells > max_cells)
+        ):
+            _flush()
+
+        current_parts.append(indices)
+        current_nnz += chunk_nnz
+        current_batches.append(batch)
+        current_split = current_split or was_split
+
+    _flush()
+
+    if not blocks:
+        raise RuntimeError("SOLO block planner produced no blocks.")
+
+    return blocks
+
+
+def _solo_block_summary(blocks: list[SoloScoreBlock]) -> list[dict]:
+    return [
+        {
+            "name": block.name,
+            "n_cells": block.n_cells,
+            "nnz": block.nnz,
+            "estimate": block.estimate,
+            "batches": list(block.batches),
+            "split": block.split,
+        }
+        for block in blocks
+    ]
+
+
+def _score_solo_with_scvi_model(
+    scvi_model,
+    adata: ad.AnnData,
+    *,
+    restrict_to_batch: str | None = None,
+    doublet_ratio: int = _SOLO_DOUBLET_RATIO,
+):
+    from scvi.external import SOLO
 
     accelerator, devices = _select_device()
 
-    solo = SOLO.from_scvi_model(scvi_model)
+    solo = SOLO.from_scvi_model(
+        scvi_model,
+        adata=adata,
+        restrict_to_batch=restrict_to_batch,
+        doublet_ratio=doublet_ratio,
+    )
     solo.train(
         max_epochs=10,
         accelerator=accelerator,
@@ -678,13 +902,125 @@ def run_solo_with_scvi(
     )
 
     probs = solo.predict(soft=True)
-    scores = probs["doublet"].to_numpy()
+    return probs["doublet"].to_numpy()
 
-    adata.obs["doublet_score"] = scores
 
-    del scvi_model
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+def run_solo_with_scvi(
+    adata: ad.AnnData,
+    *,
+    batch_key: Optional[str],
+    doublet_score_mode: str = "auto",
+    solo_sparse_nnz_limit: int = 1_500_000_000,
+    solo_max_cells_per_block: int | None = None,
+) -> ad.AnnData:
+    import numpy as np
+
+    if doublet_score_mode not in {"auto", "global", "blocked"}:
+        raise ValueError("doublet_score_mode must be one of: auto, global, blocked")
+
+    layer = _get_solo_layer(adata)
+    global_estimate = estimate_solo_sparse_operation_nnz(adata)
+    global_is_safe = global_estimate <= int(solo_sparse_nnz_limit)
+
+    if doublet_score_mode == "global" and not global_is_safe:
+        raise RuntimeError(
+            "Global SOLO scoring is estimated to exceed the configured sparse "
+            f"operation limit ({global_estimate} > {solo_sparse_nnz_limit}). "
+            "Use --doublet-score-mode auto or --doublet-score-mode blocked."
+        )
+
+    effective_mode = "global"
+    fallback_reason = None
+    if doublet_score_mode == "blocked":
+        effective_mode = "blocked"
+        fallback_reason = "forced"
+    elif doublet_score_mode == "auto" and not global_is_safe:
+        effective_mode = "blocked"
+        fallback_reason = "estimated_sparse_operation_exceeds_limit"
+
+    LOGGER.info(
+        "Running SOLO doublet detection (mode=%s, layer=%s, global_estimate=%d, limit=%d)",
+        effective_mode,
+        layer or "X",
+        global_estimate,
+        solo_sparse_nnz_limit,
+    )
+
+    scvi_model = _train_scvi(
+        adata,
+        batch_key=batch_key,
+        layer=layer,
+        purpose="solo",
+    )
+
+    try:
+        if effective_mode == "global":
+            scores = _score_solo_with_scvi_model(
+                scvi_model,
+                adata,
+                doublet_ratio=_SOLO_DOUBLET_RATIO,
+            )
+            adata.obs["doublet_score"] = scores
+            blocks: list[SoloScoreBlock] = [
+                SoloScoreBlock(
+                    name="global",
+                    indices=np.arange(adata.n_obs, dtype=np.int64),
+                    n_cells=int(adata.n_obs),
+                    nnz=int(getattr(_get_solo_matrix(adata), "nnz", adata.n_obs * adata.n_vars)),
+                    estimate=int(global_estimate),
+                    batches=tuple(),
+                    split=False,
+                )
+            ]
+        else:
+            blocks = plan_solo_score_blocks(
+                adata,
+                batch_key=batch_key,
+                sparse_nnz_limit=int(solo_sparse_nnz_limit),
+                max_cells_per_block=solo_max_cells_per_block,
+                doublet_ratio=_SOLO_DOUBLET_RATIO,
+            )
+            LOGGER.info("SOLO blocked scoring will use %d blocks", len(blocks))
+            adata.obs["doublet_score"] = np.nan
+            for i, block in enumerate(blocks, 1):
+                block_adata = adata[block.indices].copy()
+                restrict_to_batch = block.batches[0] if len(block.batches) == 1 else None
+                LOGGER.info(
+                    "SOLO block %d/%d: %s (%d cells, estimate=%d, batches=%s)",
+                    i,
+                    len(blocks),
+                    block.name,
+                    block.n_cells,
+                    block.estimate,
+                    ",".join(block.batches),
+                )
+                scores = _score_solo_with_scvi_model(
+                    scvi_model,
+                    block_adata,
+                    restrict_to_batch=restrict_to_batch,
+                    doublet_ratio=_SOLO_DOUBLET_RATIO,
+                )
+                adata.obs.loc[block_adata.obs_names, "doublet_score"] = scores
+
+            if adata.obs["doublet_score"].isna().any():
+                n_missing = int(adata.obs["doublet_score"].isna().sum())
+                raise RuntimeError(f"SOLO blocked scoring left {n_missing} cells without scores.")
+    finally:
+        del scvi_model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    adata.uns["solo_scoring"] = {
+        "requested_mode": str(doublet_score_mode),
+        "mode": effective_mode,
+        "layer": layer or "X",
+        "doublet_ratio": int(_SOLO_DOUBLET_RATIO),
+        "sparse_nnz_limit": int(solo_sparse_nnz_limit),
+        "global_nnz_estimate": int(global_estimate),
+        "fallback_reason": fallback_reason,
+        "blocks": _solo_block_summary(blocks),
+    }
+
 
     return adata
 
@@ -1117,11 +1453,14 @@ def run_load_and_filter(
             adata.uns["qc_filter_stats"] = pd.DataFrame(qc_filter_rows)
 
         # ---------------------------------------------------------
-        # SOLO doublet detection (GLOBAL, RAW COUNTS)
+        # SOLO doublet score generation
         # ---------------------------------------------------------
         adata = run_solo_with_scvi(
             adata,
             batch_key=cfg.batch_key,
+            doublet_score_mode=cfg.doublet_score_mode,
+            solo_sparse_nnz_limit=cfg.solo_sparse_nnz_limit,
+            solo_max_cells_per_block=cfg.solo_max_cells_per_block,
         )
 
         LOGGER.info("Saving Anndata with doublet scores...")

@@ -65,6 +65,9 @@ def test_load_and_filter_dispatch(mock_run, tmp_path):
             "--out", str(out),
             "--output-name", "adata.pbmc3k.filtered",
             "--figdir-name", "figures",
+            "--doublet-score-mode", "blocked",
+            "--solo-sparse-nnz-limit", "123456",
+            "--solo-max-cells-per-block", "5000",
         ]
     )
     assert result.exit_code == 0
@@ -74,6 +77,9 @@ def test_load_and_filter_dispatch(mock_run, tmp_path):
     assert cfg.metadata_tsv == meta
     assert cfg.output_name == "adata.pbmc3k.filtered"
     assert cfg.figdir_name == "figures"
+    assert cfg.doublet_score_mode == "blocked"
+    assert cfg.solo_sparse_nnz_limit == 123456
+    assert cfg.solo_max_cells_per_block == 5000
 
 
 # ---------------------------------------------------------

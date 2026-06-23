@@ -115,6 +115,9 @@ class LoadAndFilterConfig(BaseModel):
 
     # ---- Doublets (SOLO) ----
     expected_doublet_rate: float = 0.1
+    doublet_score_mode: Literal["auto", "global", "blocked"] = "auto"
+    solo_sparse_nnz_limit: int = 1_500_000_000
+    solo_max_cells_per_block: Optional[int] = None
     apply_doublet_score: Optional[bool] = None
     apply_doublet_score_path: Optional[Path] = "results/adata.merged.zarr"
 
@@ -205,6 +208,22 @@ class LoadAndFilterConfig(BaseModel):
             return None
         if value < 0:
             raise ValueError("min_counts_auto_activate_below must be >= 0 or None")
+        return value
+
+    @field_validator("solo_sparse_nnz_limit")
+    @classmethod
+    def validate_solo_sparse_nnz_limit(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("solo_sparse_nnz_limit must be > 0")
+        return value
+
+    @field_validator("solo_max_cells_per_block")
+    @classmethod
+    def validate_solo_max_cells_per_block(cls, value: Optional[int]) -> Optional[int]:
+        if value is None:
+            return None
+        if value <= 0:
+            raise ValueError("solo_max_cells_per_block must be > 0 or None")
         return value
 
 

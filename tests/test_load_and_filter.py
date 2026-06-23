@@ -12,9 +12,12 @@ from scomnom.load_and_filter import (
     compute_qc_metrics,
     call_doublets,
     cleanup_after_solo,
+    estimate_solo_sparse_operation_nnz,
     normalize_and_hvg,
     pca_neighbors_umap,
+    plan_solo_score_blocks,
     run_load_and_filter,
+    run_solo_with_scvi,
     sparse_filter_cells_and_genes,
 )
 from scomnom.config import LoadAndFilterConfig
@@ -487,6 +490,75 @@ def test_sparse_filter_cells_and_genes_can_disable_auto_min_counts():
     )
 
     assert list(out.obs_names) == ["c0", "c1"]
+
+
+# -------------------------------------------------------------------------
+# SOLO scoring scalability helpers
+# -------------------------------------------------------------------------
+def test_estimate_solo_sparse_operation_nnz_prefers_count_layers():
+    adata = sc.AnnData(sparse.csr_matrix(np.array([[1, 0], [0, 0]], dtype=np.int64)))
+    adata.var_names = ["g0", "g1"]
+    adata.obs_names = ["c0", "c1"]
+    adata.layers["counts_raw"] = sparse.csr_matrix(
+        np.array([[1, 1], [0, 1]], dtype=np.int64)
+    )
+    adata.layers["counts_cb"] = sparse.csr_matrix(
+        np.array([[1, 1], [1, 1]], dtype=np.int64)
+    )
+
+    assert estimate_solo_sparse_operation_nnz(adata) == 16
+
+
+def test_plan_solo_score_blocks_packs_and_splits_by_limits():
+    X = sparse.csr_matrix(np.ones((6, 4), dtype=np.int64))
+    adata = sc.AnnData(X)
+    adata.var_names = [f"g{i}" for i in range(4)]
+    adata.obs_names = [f"c{i}" for i in range(6)]
+    adata.obs["sample"] = pd.Categorical(["A", "A", "A", "B", "B", "B"])
+
+    blocks = plan_solo_score_blocks(
+        adata,
+        batch_key="sample",
+        sparse_nnz_limit=32,
+        max_cells_per_block=2,
+    )
+
+    assert len(blocks) == 4
+    assert all(block.estimate <= 32 for block in blocks)
+    assert sum(block.n_cells for block in blocks) == adata.n_obs
+    assert any(block.split for block in blocks)
+
+
+def test_run_solo_with_scvi_forced_blocked_scores_all_cells(monkeypatch):
+    X = sparse.csr_matrix(np.ones((6, 4), dtype=np.int64))
+    adata = sc.AnnData(X)
+    adata.var_names = [f"g{i}" for i in range(4)]
+    adata.obs_names = [f"c{i}" for i in range(6)]
+    adata.obs["sample"] = pd.Categorical(["A", "A", "A", "B", "B", "B"])
+    adata.layers["counts_raw"] = adata.X.copy()
+
+    monkeypatch.setattr("scomnom.load_and_filter._train_scvi", lambda *a, **k: object())
+
+    calls = []
+
+    def fake_score(_model, block_adata, **kwargs):
+        calls.append((tuple(block_adata.obs_names), kwargs.get("restrict_to_batch")))
+        return np.full(block_adata.n_obs, float(len(calls)))
+
+    monkeypatch.setattr("scomnom.load_and_filter._score_solo_with_scvi_model", fake_score)
+
+    out = run_solo_with_scvi(
+        adata,
+        batch_key="sample",
+        doublet_score_mode="blocked",
+        solo_sparse_nnz_limit=32,
+        solo_max_cells_per_block=2,
+    )
+
+    assert out.obs["doublet_score"].notna().all()
+    assert out.uns["solo_scoring"]["mode"] == "blocked"
+    assert out.uns["solo_scoring"]["fallback_reason"] == "forced"
+    assert len(out.uns["solo_scoring"]["blocks"]) == len(calls)
 
 
 # -------------------------------------------------------------------------
