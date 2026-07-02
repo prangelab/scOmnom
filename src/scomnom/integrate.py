@@ -49,9 +49,9 @@ def _resolve_scib_truth(
     requested_l = requested.lower()
 
     if requested_l in ("leiden", "default"):
-        key = "leiden"
+        key = str(getattr(cfg, "label_key", "leiden") or "leiden")
         _ensure_label_key(adata, key)
-        return key, "truth-leiden", None
+        return key, f"truth-{_sanitize_tag(key)}", None
 
     if requested_l in ("final", "annotated", "annotated_labels", "final_labels"):
         rid = round_id
@@ -1060,6 +1060,37 @@ def _select_best_embedding(
             "No valid embeddings available for scIB benchmarking. "
             "Expected at least one embedding in adata.obsm among created keys or known existing keys."
         )
+
+    if batch_key not in adata.obs:
+        raise KeyError(f"batch_key '{batch_key}' not found in adata.obs; cannot run integration benchmark.")
+    n_batches = int(adata.obs[batch_key].dropna().astype(str).nunique())
+    if n_batches < 2:
+        selected = "Unintegrated" if "Unintegrated" in benchmark_embeddings else benchmark_embeddings[0]
+        LOGGER.warning(
+            "Skipping scIB batch benchmarking because batch_key=%r has %d non-null level(s); "
+            "selecting %s for single-batch data.",
+            batch_key,
+            n_batches,
+            selected,
+        )
+        tag = str(run_tag).strip() if run_tag else ""
+        tag_part = f"_{tag}" if tag else ""
+        metrics_dir = Path(output_dir) / "integration_metrics"
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+        selection_path = metrics_dir / f"integration_single_batch_selection{tag_part}.tsv"
+        pd.DataFrame(
+            [
+                {
+                    "selected_embedding": selected,
+                    "batch_key": batch_key,
+                    "n_batches": n_batches,
+                    "reason": "scIB batch metrics require at least two batch levels",
+                    "available_embeddings": ",".join(benchmark_embeddings),
+                }
+            ]
+        ).to_csv(selection_path, sep="\t", index=False)
+        LOGGER.info("Wrote single-batch integration selection table: %s", selection_path.name)
+        return selected
 
     n_total_full = int(adata.n_obs)
 

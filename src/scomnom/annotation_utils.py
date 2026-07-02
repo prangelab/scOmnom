@@ -20,6 +20,8 @@ _MSIGDB_CACHE_LOCK = threading.Lock()
 _MSIGDB_RESOLUTION_CACHE: dict[tuple[str, ...], tuple[list[str], list[str], str | None]] = {}
 _MSIGDB_GENE_SET_CACHE: dict[tuple[str, ...], dict[str, list[str]]] = {}
 _MSIGDB_DECOUPLER_NET_CACHE: dict[tuple[str, ...], pd.DataFrame | None] = {}
+_HCOP_CACHE_LOCK = threading.Lock()
+_HCOP_MAP_CACHE: dict[tuple[str, int, int], dict[str, list[str]]] = {}
 
 # Canonical pretty cluster label column name (your module uses this)
 CLUSTER_LABEL_KEY = "cluster_label"
@@ -90,6 +92,129 @@ def _load_msigdb_decoupler_net_cached(gmt_files: Sequence[str | Path]) -> pd.Dat
     with _MSIGDB_CACHE_LOCK:
         _MSIGDB_DECOUPLER_NET_CACHE[cache_key] = None if net is None else net.copy()
     return None if net is None else net.copy()
+
+
+def _hcop_target_symbol_column(target_organism: str) -> str:
+    target = str(target_organism).strip().lower()
+    if target == "anole_lizard":
+        return "anole lizard_symbol"
+    if target == "fruitfly":
+        return "fruit fly_symbol"
+    return f"{target}_symbol"
+
+
+def _load_hcop_map_cached(
+    target_organism: str,
+    *,
+    min_evidence: int = 3,
+    one_to_many: int = 5,
+) -> dict[str, list[str]]:
+    target = str(target_organism).strip().lower()
+    cache_key = (target, int(min_evidence), int(one_to_many))
+    with _HCOP_CACHE_LOCK:
+        cached = _HCOP_MAP_CACHE.get(cache_key)
+    if cached is not None:
+        return {str(k): list(v) for k, v in cached.items()}
+
+    target_col = _hcop_target_symbol_column(target)
+    url = f"https://storage.googleapis.com/public-download-files/hcop/human_{target}_hcop_fifteen_column.txt.gz"
+    LOGGER.info("HCOP: loading human-to-%s orthology map from %s", target, url)
+    map_df = pd.read_csv(url, sep="\t", low_memory=False, compression="gzip")
+    required = {"human_symbol", target_col, "support"}
+    missing = required.difference(map_df.columns)
+    if missing:
+        raise KeyError(f"HCOP map missing required columns: {sorted(missing)}")
+
+    map_df = map_df.loc[:, ["human_symbol", target_col, "support"]].dropna()
+    map_df["evidence"] = map_df["support"].astype(str).map(lambda x: len([p for p in x.split(",") if p]))
+    map_df = map_df[map_df["evidence"] >= int(min_evidence)]
+    map_df["human_symbol"] = map_df["human_symbol"].astype(str)
+    map_df[target_col] = map_df[target_col].astype(str)
+
+    counts = map_df.groupby("human_symbol")[target_col].nunique()
+    keep = counts[counts <= int(one_to_many)].index
+    map_df = map_df[map_df["human_symbol"].isin(keep)]
+    map_dict = map_df.groupby("human_symbol")[target_col].apply(lambda s: sorted(set(map(str, s)))).to_dict()
+
+    with _HCOP_CACHE_LOCK:
+        _HCOP_MAP_CACHE[cache_key] = {str(k): list(v) for k, v in map_dict.items()}
+    return {str(k): list(v) for k, v in map_dict.items()}
+
+
+def _translate_decoupler_net_hcop(
+    net: pd.DataFrame,
+    *,
+    columns: Sequence[str],
+    target_organism: str,
+    min_evidence: int = 3,
+    one_to_many: int = 5,
+) -> pd.DataFrame:
+    if str(target_organism).strip().lower() == "human":
+        return net
+    if net is None or not isinstance(net, pd.DataFrame) or net.empty:
+        return net
+
+    map_dict = _load_hcop_map_cached(
+        target_organism,
+        min_evidence=int(min_evidence),
+        one_to_many=int(one_to_many),
+    )
+    out = net.copy()
+    for col in columns:
+        if col not in out.columns:
+            continue
+        before = int(out.shape[0])
+        unique_before = out[col].astype(str).nunique()
+        out[col] = out[col].astype(str).map(map_dict)
+        out = out.dropna(subset=[col]).explode(col, ignore_index=True)
+        out[col] = out[col].astype(str)
+        translated = out[col].nunique()
+        LOGGER.info(
+            "HCOP: translated decoupler column %r to %s (%d rows -> %d rows; %d unique output symbols).",
+            str(col),
+            str(target_organism),
+            before,
+            int(out.shape[0]),
+            translated,
+        )
+        if unique_before == 0 or out.empty:
+            break
+    return out.reset_index(drop=True)
+
+
+def _load_progeny_net(dc, *, organism: str, top_n: int) -> pd.DataFrame:
+    organism = str(organism or "human")
+    try:
+        return dc.op.progeny(organism=organism, top=int(top_n))
+    except Exception as e:
+        if organism.lower() == "human":
+            raise
+        LOGGER.warning(
+            "PROGENy: dc.op.progeny(organism=%r) failed; retrying via human resource + HCOP translation. (%s)",
+            organism,
+            e,
+        )
+        net = dc.op.progeny(organism="human", top=int(top_n))
+        net = _translate_decoupler_net_hcop(net, columns=["target"], target_organism=organism)
+        return net.drop_duplicates(["source", "target"]).reset_index(drop=True)
+
+
+def _load_dorothea_net(dc, *, organism: str, confidence: Sequence[str]) -> pd.DataFrame:
+    organism = str(organism or "human")
+    conf = [str(x).upper() for x in confidence]
+    try:
+        return dc.op.dorothea(organism=organism, levels=conf)
+    except Exception as e:
+        if organism.lower() == "human":
+            raise
+        LOGGER.warning(
+            "DoRothEA: dc.op.dorothea(organism=%r) failed; retrying via human resource + HCOP translation. (%s)",
+            organism,
+            e,
+        )
+        net = dc.op.dorothea(organism="human", levels=conf)
+        net = _translate_decoupler_net_hcop(net, columns=["source", "target"], target_organism=organism)
+        return net.drop_duplicates(["source", "target"]).reset_index(drop=True)
 
 # -------------------------------------------------------------------------
 # Pseudobulk store (round-scoped)
@@ -1694,7 +1819,7 @@ def _run_progeny(
     organism = getattr(cfg, "progeny_organism", "human") or "human"
 
     try:
-        net = dc.op.progeny(organism=str(organism), top=top_n)
+        net = _load_progeny_net(dc, organism=str(organism), top_n=top_n)
     except Exception as e:
         LOGGER.warning("PROGENy: failed to load resource via dc.op.progeny: %s", e)
         return
@@ -1802,7 +1927,7 @@ def _run_dorothea(
     organism = getattr(cfg, "dorothea_organism", "human") or "human"
 
     try:
-        net = dc.op.dorothea(organism=str(organism), levels=conf)
+        net = _load_dorothea_net(dc, organism=str(organism), confidence=conf)
     except Exception as e:
         LOGGER.warning("DoRothEA: failed to load resource via dc.op.dorothea: %s", e)
         return
@@ -1964,7 +2089,7 @@ def _run_progeny_from_stats(
     organism = getattr(cfg, "progeny_organism", "human") or "human"
 
     try:
-        net = dc.op.progeny(organism=str(organism), top=top_n)
+        net = _load_progeny_net(dc, organism=str(organism), top_n=top_n)
     except Exception as e:
         LOGGER.warning("PROGENy: failed to load resource via dc.op.progeny: %s", e)
         return None
@@ -2035,7 +2160,7 @@ def _run_dorothea_from_stats(
     organism = getattr(cfg, "dorothea_organism", "human") or "human"
 
     try:
-        net = dc.op.dorothea(organism=str(organism), levels=conf)
+        net = _load_dorothea_net(dc, organism=str(organism), confidence=conf)
     except Exception as e:
         LOGGER.warning("DoRothEA: failed to load resource via dc.op.dorothea: %s", e)
         return None
