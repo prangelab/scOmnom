@@ -7192,11 +7192,19 @@ def run_composition(cfg) -> ad.AnnData:
                     m["cluster"] = "NA"
                 tested = pd.to_numeric(m.get("tested", False), errors="coerce").fillna(0.0).astype(bool)
                 m["tested"] = tested
+                for col in ("min_nonzero_per_level", "n_nonzero_total", "neighborhood_size"):
+                    if col in m.columns:
+                        m[col] = pd.to_numeric(m[col], errors="coerce")
+                    else:
+                        m[col] = np.nan
                 m_agg = (
                     m.groupby("cluster", observed=False)
                     .agg(
                         n_total_neighborhoods=("cluster", "size"),
                         n_tested_neighborhoods=("tested", "sum"),
+                        median_min_nonzero_per_level=("min_nonzero_per_level", "median"),
+                        median_n_nonzero_total=("n_nonzero_total", "median"),
+                        median_neighborhood_size=("neighborhood_size", "median"),
                     )
                     .reset_index()
                 )
@@ -7212,9 +7220,45 @@ def run_composition(cfg) -> ad.AnnData:
                 denom = agg["n_total_neighborhoods"].replace(0, np.nan)
                 agg["frac_tested_neighborhoods"] = (agg["n_tested_neighborhoods"] / denom).fillna(0.0)
 
+            def _recommend(row: pd.Series) -> str:
+                n_total = int(row.get("n_total_neighborhoods", 0) or 0)
+                n_test = int(row.get("n_test_rows", 0) or 0)
+                n_sig = int(row.get("n_sig_fdr", 0) or 0)
+                frac_tested = float(row.get("frac_tested_neighborhoods", 0.0) or 0.0)
+                min_p = pd.to_numeric(pd.Series([row.get("min_pval", np.nan)]), errors="coerce").iloc[0]
+                min_fdr = pd.to_numeric(pd.Series([row.get("min_fdr", np.nan)]), errors="coerce").iloc[0]
+                med_effect = float(row.get("median_abs_effect", 0.0) or 0.0)
+                if n_total == 0:
+                    return "no_graph_neighborhoods"
+                if frac_tested < 0.25:
+                    return "increase_neighborhood_size_or_reduce_min_nonzero_support"
+                if n_sig == 0 and np.isfinite(min_p) and min_p <= float(alpha) and (
+                    not np.isfinite(min_fdr) or min_fdr > float(alpha)
+                ):
+                    if n_test >= 1000:
+                        return "raw_signal_but_high_test_burden_try_broad_scale_or_fewer_seeds"
+                    return "raw_signal_but_not_fdr_significant_try_broad_scale"
+                if n_sig == 0 and med_effect >= 1.0:
+                    return "large_effect_without_significance_check_sample_support_or_broader_scale"
+                if n_sig > 0:
+                    return "ok_significant_neighborhoods_detected"
+                return "ok_no_strong_graphda_signal"
+
+            agg["graphda_recommendation"] = agg.apply(_recommend, axis=1)
+
             return agg.sort_values("cluster").reset_index(drop=True)
 
         graph_diag_df = _build_graphda_diagnostics_df()
+        if not graph_diag_df.empty and "graphda_recommendation" in graph_diag_df.columns:
+            flagged = graph_diag_df[
+                ~graph_diag_df["graphda_recommendation"].astype(str).str.startswith("ok_")
+            ]
+            if not flagged.empty:
+                LOGGER.warning(
+                    "composition: GraphDA diagnostics suggest tuning for %d cluster(s): %s",
+                    int(flagged.shape[0]),
+                    flagged[["cluster", "graphda_recommendation"]].to_dict(orient="records"),
+                )
 
         if write_tables:
             for method, df in results_by_method.items():
@@ -7302,6 +7346,7 @@ def run_composition(cfg) -> ad.AnnData:
                     f"graph_k_ref={getattr(cfg, 'composition_graph_k_ref', None)}",
                     f"graph_max_k={getattr(cfg, 'composition_graph_max_k', None)}",
                     f"graph_min_size={getattr(cfg, 'composition_graph_min_size', None)}",
+                    f"graph_scale={getattr(cfg, 'composition_graph_scale', None)}",
                     f"graph_random_state={getattr(cfg, 'composition_graph_random_state', None)}",
                     f"graph_min_nonzero_samples_per_level={getattr(cfg, 'composition_graph_min_nonzero_samples_per_level', None)}",
                     f"graph_n_permutations_deprecated={getattr(cfg, 'composition_graph_n_permutations', None)}",

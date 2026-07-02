@@ -39,6 +39,12 @@ from .logging_utils import init_logging
 ALLOWED_METHODS = {"scVI", "scANVI", "Harmony", "Scanorama", "BBKNN"}
 ALLOWED_DECOUPLER_METHODS = {"ulm", "mlm", "wsum", "aucell"}
 ALLOWED_COMP_METHODS = {"sccoda", "glm", "clr", "graph"}
+GRAPH_SCALE_PRESETS = {
+    "custom": None,
+    "local": {"graph_n_seeds": 2000, "graph_k_ref": 30, "graph_max_k": 200, "graph_min_size": 20},
+    "balanced": {"graph_n_seeds": 1000, "graph_k_ref": 75, "graph_max_k": 300, "graph_min_size": 50},
+    "broad": {"graph_n_seeds": 300, "graph_k_ref": 150, "graph_max_k": 500, "graph_min_size": 100},
+}
 ALLOWED_LIANA_METHODS = {"rank_aggregate", "cellphonedb", "connectome", "natmi", "sca", "logfc"}
 app = typer.Typer(help="scOmnom CLI — high-throughput scRNA-seq preprocessing and analysis pipeline.")
 
@@ -2012,6 +2018,7 @@ def _build_cfg_composition(
     graph_k_ref: int,
     graph_max_k: int,
     graph_min_size: int,
+    graph_scale: str,
     graph_random_state: int,
     graph_min_nonzero_samples_per_level: int,
     graph_n_permutations: int,
@@ -2031,6 +2038,17 @@ def _build_cfg_composition(
         raise typer.BadParameter(
             f"Invalid --method value(s): {bad}. Allowed: {sorted(ALLOWED_COMP_METHODS)}"
         )
+    graph_scale = str(graph_scale).strip().lower()
+    if graph_scale not in GRAPH_SCALE_PRESETS:
+        raise typer.BadParameter(
+            f"Invalid --graph-scale value={graph_scale!r}. Allowed: {sorted(GRAPH_SCALE_PRESETS)}"
+        )
+    preset = GRAPH_SCALE_PRESETS[graph_scale]
+    if preset is not None:
+        graph_n_seeds = int(preset["graph_n_seeds"])
+        graph_k_ref = int(preset["graph_k_ref"])
+        graph_max_k = int(preset["graph_max_k"])
+        graph_min_size = int(preset["graph_min_size"])
 
     return MarkersAndDEConfig(
         input_path=input_path,
@@ -2062,6 +2080,7 @@ def _build_cfg_composition(
         composition_graph_k_ref=int(graph_k_ref),
         composition_graph_max_k=int(graph_max_k),
         composition_graph_min_size=int(graph_min_size),
+        composition_graph_scale=str(graph_scale),
         composition_graph_random_state=int(graph_random_state),
         composition_graph_min_nonzero_samples_per_level=int(graph_min_nonzero_samples_per_level),
         composition_graph_n_permutations=int(graph_n_permutations),
@@ -3956,6 +3975,14 @@ def composition(
     graph_k_ref: int = typer.Option(30, "--graph-k-ref"),
     graph_max_k: int = typer.Option(200, "--graph-max-k"),
     graph_min_size: int = typer.Option(20, "--graph-min-size"),
+    graph_scale: str = typer.Option(
+        "custom",
+        "--graph-scale",
+        help=(
+            "Named GraphDA scale preset. Use custom to keep explicit graph parameters; "
+            "local=30-cell neighborhoods/2000 seeds, balanced=75/1000, broad=150/300."
+        ),
+    ),
     graph_random_state: int = typer.Option(42, "--graph-random-state"),
     graph_min_nonzero_samples_per_level: int = typer.Option(3, "--graph-min-nonzero-samples-per-level"),
     graph_n_permutations: int = typer.Option(
@@ -3993,6 +4020,7 @@ def composition(
         graph_k_ref=graph_k_ref,
         graph_max_k=graph_max_k,
         graph_min_size=graph_min_size,
+        graph_scale=graph_scale,
         graph_random_state=graph_random_state,
         graph_min_nonzero_samples_per_level=graph_min_nonzero_samples_per_level,
         graph_n_permutations=graph_n_permutations,

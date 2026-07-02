@@ -250,6 +250,38 @@ def test_markers_and_de_help_includes_enrichment():
     assert "ccc" in result.output
 
 
+def test_markers_and_de_da_graph_scale_broad_dispatches_preset(tmp_path):
+    with patch("scomnom.cli.run_composition") as mock_run:
+        result = runner.invoke(
+            app,
+            [
+                "markers-and-de",
+                "da",
+                "--input-path",
+                "clustered.h5ad",
+                "--output-dir",
+                str(tmp_path),
+                "--condition-keys",
+                "condition",
+                "--replicate-key",
+                "sample_id",
+                "--method",
+                "graph",
+                "--graph-scale",
+                "broad",
+            ],
+        )
+
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.composition_graph_scale == "broad"
+    assert cfg.composition_graph_k_ref == 150
+    assert cfg.composition_graph_min_size == 100
+    assert cfg.composition_graph_n_seeds == 300
+    assert cfg.composition_graph_max_k == 500
+
+
 def test_markers_and_de_ccc_help_includes_backends():
     result = runner.invoke(app, ["markers-and-de", "ccc", "--help"])
     assert result.exit_code == 0

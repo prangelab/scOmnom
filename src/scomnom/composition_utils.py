@@ -206,7 +206,7 @@ def run_glm_composition(
     if counts.empty or meta.empty:
         return pd.DataFrame()
 
-    design = pd.get_dummies(meta[[cond] + covar_cols], drop_first=True)
+    design = pd.get_dummies(meta[[cond] + covar_cols], drop_first=True, dtype=float)
     if design.empty:
         return pd.DataFrame()
     design = sm.add_constant(design, has_constant="add")
@@ -483,7 +483,10 @@ def run_graph_da(
     )
     neighborhoods_df["radius"] = float(radius)
     neighborhoods_df["k_ref"] = int(k_ref)
+    neighborhoods_df["max_k"] = int(max_k)
+    neighborhoods_df["min_size"] = int(min_size)
     neighborhoods_df["n_seeds"] = int(n_seeds)
+    neighborhoods_df["min_nonzero_samples_per_level_required"] = int(min_nonzero_samples_per_level)
     neighborhoods_df["embedding_key"] = emb_key
     neighborhoods_df = neighborhoods_df.set_index("neighborhood")
     if not support.empty:
