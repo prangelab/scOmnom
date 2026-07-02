@@ -605,7 +605,7 @@ def _run_harmony(
 
     LOGGER.info("Running Harmony integration")
 
-    Z = np.asarray(adata.obsm[use_rep])
+    Z = np.ascontiguousarray(adata.obsm[use_rep])
     meta = adata.obs[[batch_key]].copy()
 
     ho = hm.run_harmony(
@@ -1264,10 +1264,22 @@ def _select_best_embedding(
 
     candidates = numeric.index != "Unintegrated"
     if not np.any(candidates):
-        raise RuntimeError(
+        audit_path = Path(plot_utils.figdir).parent / f"integration_no_candidate_selection{tag_part}.tsv"
+        pd.DataFrame(
+            [
+                {
+                    "selected_embedding": "Unintegrated",
+                    "reason": "no_candidate_embeddings_beyond_unintegrated",
+                    "n_embeddings_scored": int(numeric.shape[0]),
+                }
+            ]
+        ).to_csv(audit_path, sep="\t", index=False)
+        LOGGER.warning(
             "scIB results table contains no candidate embeddings beyond Unintegrated; "
-            "cannot select best embedding."
+            "selecting Unintegrated and writing audit table to %s.",
+            audit_path,
         )
+        return "Unintegrated"
 
     tier1 = numeric.loc[candidates & bio_ok & batch_ok]
     tier2 = numeric.loc[candidates & bio_ok]
