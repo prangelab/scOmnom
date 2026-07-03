@@ -53,6 +53,7 @@ from .composition_utils import (
     _standardize_composition_results,
     _build_composition_consensus_summary,
     _MIN_GLM_SAMPLES_PER_LEVEL,
+    _MIN_GLM_LEVELS,
 )
 from .annotation_utils import (
     run_decoupler_for_round,
@@ -7352,7 +7353,7 @@ def run_composition(cfg) -> ad.AnnData:
                     f"graph_n_permutations_deprecated={getattr(cfg, 'composition_graph_n_permutations', None)}",
                     f"graph_effect_shrink_k={getattr(cfg, 'composition_graph_effect_shrink_k', None)}",
                     f"glm_min_samples_per_level={_MIN_GLM_SAMPLES_PER_LEVEL}",
-                    f"glm_min_levels=3",
+                    f"glm_min_levels={_MIN_GLM_LEVELS}",
                 ],
             )
 

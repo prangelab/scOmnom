@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import warnings
 import numpy as np
 import pandas as pd
 import anndata as ad
@@ -8,6 +9,7 @@ from typing import Optional, Sequence
 
 LOGGER = logging.getLogger(__name__)
 _MIN_GLM_SAMPLES_PER_LEVEL = 2
+_MIN_GLM_LEVELS = 2
 
 
 def _resolve_active_cluster_key(adata: ad.AnnData, *, round_id: Optional[str]) -> str:
@@ -177,8 +179,8 @@ def run_glm_composition(
     if meta.empty:
         return pd.DataFrame()
     levels = meta[cond].dropna().unique().tolist()
-    if len(levels) <= 2:
-        LOGGER.info("composition: GLM skipped for %s (n_levels=%d; use CLR instead)", cond, len(levels))
+    if len(levels) < _MIN_GLM_LEVELS:
+        LOGGER.info("composition: GLM skipped for %s (n_levels=%d)", cond, len(levels))
         return pd.DataFrame()
     vc = meta[cond].value_counts(dropna=False)
     if (vc < _MIN_GLM_SAMPLES_PER_LEVEL).any():
@@ -213,17 +215,25 @@ def run_glm_composition(
     results = []
     for cl in counts.columns:
         y = counts[cl].astype(float)
+        failures = totals.astype(float) - y
+        if (failures < 0).any():
+            LOGGER.warning("composition: GLM skipped cluster %s because counts exceed sample totals", cl)
+            continue
         if (totals == 0).all():
             continue
         try:
+            endog = np.column_stack([y.to_numpy(dtype=float), failures.to_numpy(dtype=float)])
             model = sm.GLM(
-                y,
+                endog,
                 design,
                 family=sm.families.Binomial(),
-                offset=np.log(totals.replace(0, np.nan)),
             )
-            fit = model.fit()
-        except Exception:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                fit = model.fit()
+            fit_warnings = sorted({f"{w.category.__name__}: {w.message}" for w in caught})
+        except Exception as e:
+            LOGGER.warning("composition: GLM skipped cluster %s because fitting failed: %s", cl, e)
             continue
 
         for term in design.columns:
@@ -248,6 +258,8 @@ def run_glm_composition(
                     "z": float(z) if np.isfinite(z) else np.nan,
                     "pval": float(pval) if np.isfinite(pval) else np.nan,
                     "effect": float(effect) if np.isfinite(effect) else np.nan,
+                    "fit_warning": "; ".join(fit_warnings),
+                    "n_fit_warnings": int(len(fit_warnings)),
                 }
             )
 
