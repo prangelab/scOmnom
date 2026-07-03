@@ -50,6 +50,8 @@ The default resources are:
 | `--dorothea-confidence` | `dorothea_confidence` | `A,B,C` | DoRothEA regulon confidence levels to include. |
 | `--dorothea-organism` | `dorothea_organism` | `human` | Organism used when loading DoRothEA resources. |
 
+For non-human PROGENy and DoRothEA runs, scOmnom first asks decoupler for the requested organism. If that resource is unavailable, it retries with the human resource and translates targets through HCOP orthology before scoring. That fallback requires access to the public HCOP map at runtime.
+
 Compaction has additional decoupler-derived similarity thresholds such as `--thr-progeny`, `--thr-dorothea`, and `--thr-msigdb-default`; those are documented on the [Compaction](compaction.md) page because they control merge decisions rather than activity inference itself.
 
 For details on decoupler methods and resources, see:

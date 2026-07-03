@@ -36,4 +36,10 @@ Valid options include:
 
 This choice affects **benchmarking only** and does not influence integration itself.
 
+## Edge Cases
+
+scIB batch-correction metrics require at least two non-empty batch levels. If the selected `--batch-key` has only one level, scOmnom skips scIB batch benchmarking, selects `Unintegrated` when available (otherwise the first valid embedding), and writes an audit table under `integration_metrics/integration_single_batch_selection*.tsv`.
+
+If benchmarking runs but the only scored representation is `Unintegrated`, scOmnom selects `Unintegrated` and writes `integration_no_candidate_selection*.tsv` instead of failing the run. This can happen when every requested integration method fails or no candidate embedding is available beyond the PCA baseline.
+
 ---

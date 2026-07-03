@@ -110,6 +110,8 @@ PROGENy runs by default. Disable it with `--no-run-progeny`.
 | `--progeny-top-n` | `100` | Top weighted genes per pathway from the PROGENy resource. |
 | `--progeny-organism` | `human` | Organism passed to the decoupler resource loader. |
 
+For non-human organisms, scOmnom first tries the requested decoupler PROGENy resource. If unavailable, it falls back to the human resource and translates targets through HCOP orthology before scoring.
+
 ### DoRothEA
 
 DoRothEA runs by default. Disable it with `--no-run-dorothea`.
@@ -121,6 +123,8 @@ DoRothEA runs by default. Disable it with `--no-run-dorothea`.
 | `--dorothea-min-n-targets` | `5` | Minimum TF-target overlap. |
 | `--dorothea-confidence` | `A,B,C` | DoRothEA confidence levels to keep. |
 | `--dorothea-organism` | `human` | Organism passed to the decoupler resource loader. |
+
+For non-human organisms, scOmnom first tries the requested decoupler DoRothEA resource. If unavailable, it falls back to the human resource and translates TFs/targets through HCOP orthology before scoring.
 
 ### Cluster Gene Filtering
 
@@ -192,6 +196,8 @@ The DE-table mode uses the same decoupler resources and resource-specific defaul
 | MSigDB | `HALLMARK,REACTOME`; method `consensus`; min targets `5` | Change with `--msigdb-gene-sets`, `--msigdb-method`, `--msigdb-min-n-targets`. |
 | PROGENy | enabled; method `consensus`; min targets `5`; top genes `100`; organism `human` | Disable with `--no-run-progeny`; change with `--progeny-*` options. |
 | DoRothEA | enabled; method `consensus`; min targets `5`; confidence `A,B,C`; organism `human` | Disable with `--no-run-dorothea`; change with `--dorothea-*` options. |
+
+The same non-human PROGENy/DoRothEA HCOP fallback applies in DE-table enrichment mode.
 
 MSigDB DE enrichment can also run GSEA and joint decoupler/GSEA summaries through the DE-enrichment engine. The command currently exposes the decoupler resource knobs directly; the GSEA/joint defaults follow the enrichment configuration.
 

@@ -23,7 +23,7 @@ scomnom markers-and-de da ... --condition-keys treatment --method graph,clr
 | Method | Runs by default | Use for | Main evidence |
 | --- | --- | --- | --- |
 | `sccoda` | yes | Global compositional shifts across annotated populations | Bayesian inclusion probabilities and FDR-controlled effects |
-| `glm` | yes, but skipped for 2-level conditions | Multi-level conditions and covariate-adjusted global effects | Per-cluster binomial GLM coefficients and BH FDR |
+| `glm` | yes | Global per-cluster composition effects with optional covariate adjustment | Per-cluster binomial GLM coefficients and BH FDR |
 | `clr` | yes | Simple pairwise screening across condition levels | CLR-transformed proportions, Mann-Whitney tests, pairwise FDR |
 | `graph` | yes | Local abundance shifts in the integrated embedding | Neighborhood NB-GLM, spatial weighted BH FDR, GraphDA diagnostics |
 
@@ -97,17 +97,17 @@ The output table is `composition_global_sccoda.tsv`.
 
 ## GLM
 
-`glm` fits a per-cluster binomial GLM on sample-level counts with a log-total offset. It is useful when there are more than two condition levels or when covariates are important.
+`glm` fits a per-cluster binomial GLM on sample-level composition. For each cluster, the response is modeled as successes versus failures (`cluster_count` and `sample_total - cluster_count`), so coefficients describe changes in cluster abundance relative to the rest of the sample. It works for two-level and multi-level condition designs, and is especially useful when covariates are important.
 
 | Setting | Default | Notes |
 | --- | --- | --- |
 | Method selector | included in default `--method` | Disable by selecting methods that omit `glm`. |
-| Condition levels | skipped for 2-level conditions | For 2-level conditions, use CLR for the simple pairwise comparison. |
+| Condition levels | at least `2` | GLM is skipped only when fewer than 2 condition levels remain after dropping missing values. |
 | Minimum samples per level | `2` | GLM is skipped when any condition level has fewer than 2 samples. |
 | Covariates | `--covariates` none | Included in the GLM design matrix. |
 | Multiple testing | BH FDR | Applied across GLM rows. |
 
-The output table is `composition_global_glm.tsv` when the method is eligible and returns results.
+The output table is `composition_global_glm.tsv` when the method is eligible and returns results. It includes `fit_warning` and `n_fit_warnings` columns so model-fit warnings are visible in downstream review.
 
 ## CLR
 
@@ -128,6 +128,7 @@ The output table is `composition_global_clr.tsv`.
 
 | Option | Default | Notes |
 | --- | --- | --- |
+| `--graph-scale` | `custom` | Named preset for GraphDA neighborhood scale. `custom` keeps the explicit graph parameters below; `local`, `balanced`, and `broad` override them. |
 | `--graph-n-seeds` | `2000` | Number of seed neighborhoods to sample, capped by cell count. |
 | `--graph-k-ref` | `30` | Reference neighbor rank used for neighborhood radius and initial neighborhood size. |
 | `--graph-max-k` | `200` | Maximum neighbors available to the nearest-neighbor search; internally at least `k_ref + 1`. |
@@ -136,6 +137,15 @@ The output table is `composition_global_clr.tsv`.
 | `--graph-min-nonzero-samples-per-level` | `3` | Minimum nonzero sample support per condition level for a neighborhood to be tested. |
 | `--graph-effect-shrink-k` | `10.0` | Shrinks neighborhood effects toward zero when total nonzero sample support is low. |
 | `--graph-n-permutations` | `0` | Deprecated and ignored; GraphDA now uses NB-GLM plus spatial weighted BH FDR. |
+
+GraphDA scale presets:
+
+| `--graph-scale` | Seeds | `k_ref` | `max_k` | Minimum size | Use when |
+| --- | --- | --- | --- | --- | --- |
+| `custom` | explicit options | explicit options | explicit options | explicit options | You want direct control over all GraphDA parameters. |
+| `local` | `2000` | `30` | `200` | `20` | Fine local neighborhoods and higher spatial detail. |
+| `balanced` | `1000` | `75` | `300` | `50` | Middle ground for routine DA runs. |
+| `broad` | `300` | `150` | `500` | `100` | Broader neighborhoods, fewer tests, or diagnostics suggesting high test burden. |
 
 GraphDA uses `adata.obsm["X_integrated"]` when present. If it is missing, it falls back to `adata.uns["integration"]["best_embedding"]` when that embedding exists.
 
@@ -154,6 +164,8 @@ GraphDA reports both raw and adjusted evidence:
 | `effect` | Primary effect column, currently set to the shrunk effect. |
 
 Many GraphDA neighborhoods overlap, so `fdr_spatial` is the primary call metric. It is normal to see directional raw effects without FDR-significant neighborhoods when the test burden is high or raw p-values are moderate.
+
+`graphda_diagnostics.tsv` summarizes GraphDA behavior per cluster. In addition to tested/significant neighborhood counts, it reports neighborhood support summaries and a `graphda_recommendation` field. Recommendations that do not start with `ok_` point to likely tuning actions, such as using broader neighborhoods, fewer seeds, or lower nonzero-sample support requirements.
 
 The main output tables are `composition_global_graph.tsv`, `composition_graph_neighborhoods.tsv`, and `graphda_diagnostics.tsv`.
 
