@@ -18,7 +18,7 @@
 | `--max-genes-quantile` | `0.999` | Candidate upper-tail `n_genes_by_counts` quantile cutoff. |
 | `--max-counts-mad` | `5.0` | Candidate upper-tail `total_counts` cutoff: median plus `k * MAD`. |
 | `--max-counts-quantile` | `0.999` | Candidate upper-tail `total_counts` quantile cutoff. |
-| `--expected-doublet-rate` | `0.1` | Per-sample doublet fraction used to threshold SOLO scores. |
+| `--expected-doublet-rate` | `0.1` | Expected per-sample doublet fraction used to threshold SOLO scores; a conservative high-throughput 10x fallback when an experiment-specific rate is unavailable. |
 
 ## Lower-Tail Filtering
 
@@ -108,7 +108,9 @@ The scoring and calling are separated:
 4. scOmnom thresholds those scores **per sample** using `--expected-doublet-rate`.
 5. Cells above the per-sample score threshold are marked in `adata.obs["predicted_doublet"]` and removed.
 
-The default expected doublet rate is `--expected-doublet-rate 0.1`, meaning the highest-scoring 10% of cells in each sample are called as doublets. The inferred per-sample thresholds and observed rates are written to `doublets_per_sample.tsv` and stored in `adata.uns["doublet_calling"]`.
+SOLO supplies the ranking evidence, but the expression-derived score does not independently establish the experimental multiplet prevalence. scOmnom therefore separates scoring from calling and applies a configurable expected fraction within each sample. The default `--expected-doublet-rate 0.1` is a conservative fallback for high-throughput 10x experiments, not an inferred or universally correct rate. When loading, chemistry, or multiplexing information supports an experiment-specific expectation, supply that value explicitly. The default means that the highest-scoring 10% of cells in each sample are called as doublets. Per-sample thresholds and observed rates are written to `doublets_per_sample.tsv` and stored in `adata.uns["doublet_calling"]`.
+
+Continuous scores remain in `adata.obs["doublet_score"]`. To revise the expected fraction after inspecting the scores or experimental loading information, use `--apply-doublet-score` with `--expected-doublet-rate`; this reapplies per-sample calling without retraining scVI or SOLO.
 
 By default, `--doublet-score-mode auto` estimates the sparse operation size required for global SOLO scoring. If the estimate is at or below `--solo-sparse-nnz-limit`, scoring runs globally. If the estimate is larger, scOmnom switches to blocked SOLO scoring to reduce memory pressure. Blocks are planned from the preferred count matrix (`counts_cb`, then `counts_raw`, then `adata.X`) and respect sample boundaries where possible.
 
@@ -116,7 +118,7 @@ Tuning options:
 
 | Option | Default | What it changes |
 | --- | --- | --- |
-| `--expected-doublet-rate` | `0.1` | Fraction of cells called as doublets per sample after SOLO scoring. Lower values are less aggressive; higher values remove more cells. |
+| `--expected-doublet-rate` | `0.1` | Expected fraction called as doublets per sample after SOLO scoring. Lower values are less aggressive; higher values remove more cells. Prefer an experiment-specific value when known. |
 | `--doublet-score-mode` | `auto` | SOLO scoring mode: `global`, `blocked`, or `auto`. In `auto`, large estimated sparse operations switch to blocked scoring. |
 | `--solo-sparse-nnz-limit` | `1500000000` | Sparse operation estimate used by `auto` mode and by the block planner. Lower values make blocked scoring activate earlier and produce smaller blocks. |
 | `--solo-max-cells-per-block` | `none` | Optional cap on cells per blocked SOLO scoring chunk. Use when memory pressure remains high despite the sparse operation limit. |

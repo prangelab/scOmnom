@@ -370,7 +370,11 @@ def load_and_filter(
     expected_doublet_rate: float = typer.Option(
         0.1,
         "--expected-doublet-rate",
-        help="Used when --doublet-mode rate",
+        help=(
+            "[SOLO] Expected fraction called as doublets within each sample. "
+            "Default 0.10 is a conservative high-throughput 10x fallback; "
+            "set the experiment-specific rate when known."
+        ),
     ),
     doublet_score_mode: Literal["auto", "global", "blocked"] = typer.Option(
         "auto",

@@ -114,7 +114,16 @@ class LoadAndFilterConfig(BaseModel):
     )
 
     # ---- Doublets (SOLO) ----
-    expected_doublet_rate: float = 0.1
+    expected_doublet_rate: float = Field(
+        0.1,
+        gt=0.0,
+        lt=1.0,
+        description=(
+            "Expected per-sample doublet fraction used to threshold SOLO scores. "
+            "The 0.10 default is a conservative high-throughput 10x fallback; "
+            "use an experiment-specific rate when available."
+        ),
+    )
     doublet_score_mode: Literal["auto", "global", "blocked"] = "auto"
     solo_sparse_nnz_limit: int = 1_500_000_000
     solo_max_cells_per_block: Optional[int] = None

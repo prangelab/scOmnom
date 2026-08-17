@@ -12,7 +12,7 @@ Key outputs:
 
 Relevant AnnData metadata:
 
-- `adata.uns["doublet_calling"]`: expected rate, inferred per-sample thresholds, and observed doublet fractions
+- `adata.uns["doublet_calling"]`: configured expected rate, derived per-sample score thresholds, and observed doublet fractions
 - `adata.uns["solo_scoring"]`: requested/effective SOLO scoring mode, sparse operation estimate, fallback reason, and block summaries
 
 The resulting AnnData object is the normal input for [`integrate`](../integrate.md).

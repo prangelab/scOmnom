@@ -147,9 +147,21 @@ def test_loadandfilter_solo_scoring_defaults(tmp_path):
         metadata_tsv=tmpfile(tmp_path, "meta.tsv"),
         output_dir=tmp_path,
     )
+    assert cfg.expected_doublet_rate == 0.1
     assert cfg.doublet_score_mode == "auto"
     assert cfg.solo_sparse_nnz_limit == 1_500_000_000
     assert cfg.solo_max_cells_per_block is None
+
+
+@pytest.mark.parametrize("rate", [0.0, 1.0, -0.1, 1.1])
+def test_loadandfilter_rejects_invalid_expected_doublet_rate(tmp_path, rate):
+    with pytest.raises(ValueError):
+        LoadAndFilterConfig(
+            raw_sample_dir="raw",
+            metadata_tsv=tmpfile(tmp_path, "meta.tsv"),
+            output_dir=tmp_path,
+            expected_doublet_rate=rate,
+        )
 
 
 def test_loadandfilter_rejects_invalid_solo_block_limits(tmp_path):

@@ -72,6 +72,8 @@ Use `scomnom --help` and `scomnom <command> --help` for command-specific options
 | `--solo-sparse-nnz-limit` | `1500000000` |
 | `--solo-max-cells-per-block` | `none` |
 
+The `0.1` expected doublet rate is a conservative high-throughput 10x fallback. Use an experiment-specific value when available; scOmnom stores continuous SOLO scores so calling can be reapplied without retraining.
+
 See [Filtering Defaults And Rationale](load-and-filter/filtering.md) for the full table of defaults and tuning guidance.
 
 ## SLURM Scripts

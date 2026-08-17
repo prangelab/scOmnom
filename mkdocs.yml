@@ -16,6 +16,10 @@ theme:
 
 nav:
   - Home: index.md
+  - Tutorials:
+      - Overview: tutorials.md
+      - PBMC10k Data Processing: tutorials/data-processing-pbmc10k.md
+      - Kang IFN-beta PBMC DE: tutorials/kang-ifnb-de.md
   - Manual:
       - Overview: manual.md
       - Installation: installation.md

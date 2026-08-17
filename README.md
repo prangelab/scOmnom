@@ -100,6 +100,8 @@ Default `load-and-filter` thresholds:
 | `--solo-sparse-nnz-limit` | `1500000000` |
 | `--solo-max-cells-per-block` | `none` |
 
+The `0.1` expected doublet rate is a conservative high-throughput 10x fallback used to threshold SOLO scores separately within each sample. Supply an experiment-specific rate when loading or chemistry information supports one; stored scores can be re-thresholded without retraining SOLO.
+
 See the [filtering defaults and rationale](https://prangelab.org/scOmnom/load-and-filter/filtering/) section for details.
 
 Use `scomnom --help` and `scomnom <command> --help` for command-specific options.
