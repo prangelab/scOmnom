@@ -615,9 +615,8 @@ def load_raw_data(
         adata = read_raw_10x(raw_path)
         cnt_raw = float(adata.X.sum())
 
-        # Determine plot_path using your existing routing logic
         if getattr(cfg, "make_figures", False):
-            base = Path(cfg.output_dir) / cfg.figdir_name / "cell_qc"
+            base = Path(plot_dir) if plot_dir is not None else Path("QC_plots") / "cell_qc"
             plot_path = base / f"{sample}_barcode_knee"
         else:
             plot_path = None

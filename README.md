@@ -1,6 +1,6 @@
 # scOmnom
 
-`scOmnom` is a CLI-first, reproducible single-cell RNA-seq workflow for large datasets. It is built on the scVerse ecosystem and is designed for robust execution on local macOS workstations and HPC systems.
+`scOmnom` is a CLI-first, reproducible single-cell RNA-seq workflow for large datasets. It is built on the scVerse ecosystem and is designed for robust execution on local Linux or macOS systems and HPC systems.
 
 The pipeline combines established single-cell packages with scOmnom-specific workflow machinery, including:
 
@@ -56,13 +56,13 @@ scomnom load-and-filter \
 # 2) Integrate batches
 scomnom integrate \
   --input-path results/adata.filtered.zarr \
-  --output-dir results/
+  --output-dir results/ \
+  --celltypist-model Immune_All_Low.pkl
 
 # 3) Cluster and annotate
 scomnom cluster-and-annotate \
   --input-path results/adata.integrated.zarr \
-  --output-dir results/ \
-  --celltypist-model Immune_All_Low.pkl
+  --output-dir results/
 
 # 4) Marker discovery
 scomnom markers-and-de markers \
@@ -96,6 +96,11 @@ Default `load-and-filter` thresholds:
 | `--max-counts-mad` | `5.0` |
 | `--max-counts-quantile` | `0.999` |
 | `--expected-doublet-rate` | `0.1` |
+| `--doublet-score-mode` | `auto` |
+| `--solo-sparse-nnz-limit` | `1500000000` |
+| `--solo-max-cells-per-block` | `none` |
+
+The `0.1` expected doublet rate is a conservative high-throughput 10x fallback used to threshold SOLO scores separately within each sample. Supply an experiment-specific rate when loading or chemistry information supports one; stored scores can be re-thresholded without retraining SOLO.
 
 See the [filtering defaults and rationale](https://prangelab.org/scOmnom/load-and-filter/filtering/) section for details.
 
@@ -137,7 +142,6 @@ Clustering state is stored as rounds in `adata.uns["cluster_rounds"]`, with the 
 
 * [Manual](https://prangelab.org/scOmnom/)
 * [API reference](API_REFERENCE.md)
-* [Design goals](https://prangelab.org/scOmnom/design-goals/)
 * [Contributing](contributing.md)
 * [Changelog](changelog.md)
 

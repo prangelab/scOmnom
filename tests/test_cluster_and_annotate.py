@@ -1,259 +1,141 @@
-# tests/test_cluster_and_annotate.py
 import numpy as np
 import pandas as pd
 import scanpy as sc
-import pytest
 from unittest.mock import Mock
 
-from scomnom.cluster_and_annotate import run_clustering, _compute_resolutions
+from scomnom.cluster_and_annotate import run_clustering
+from scomnom.clustering_utils import _compute_resolutions
 from scomnom.config import ClusterAnnotateConfig
 
 
-# ----------------------------------------------------------------------
-# Synthetic data generator
-# ----------------------------------------------------------------------
-def synthetic_adata(n_cells=400, n_genes=50, n_batches=3, seed=0):
+def synthetic_adata(n_cells=48, n_genes=20, seed=0):
     rng = np.random.default_rng(seed)
-    X = rng.normal(0, 1, size=(n_cells, n_genes))
-
-    batch = rng.integers(0, n_batches, size=n_cells).astype(str)
-
-    adata = sc.AnnData(X=X)
-    adata.obs["batch"] = pd.Categorical(batch)
-
-    # simple fake PCA + neighbors + UMAP embedding
-    adata.obsm["X_pca"] = rng.normal(0, 1, size=(n_cells, 10))
-    adata.obsm["X_umap"] = rng.normal(0, 1, size=(n_cells, 2))
-
+    adata = sc.AnnData(X=rng.normal(size=(n_cells, n_genes)))
+    adata.obs["batch"] = pd.Categorical(np.repeat(["b1", "b2"], repeats=n_cells // 2))
+    adata.obs["celltypist_label"] = pd.Categorical(np.tile(["T cell", "B cell"], reps=n_cells // 2))
+    adata.obsm["X_pca"] = rng.normal(size=(n_cells, 6))
     return adata
 
 
-# ----------------------------------------------------------------------
-# Mock CellTypist helper for biological mode
-# ----------------------------------------------------------------------
-@pytest.fixture
-def mock_celltypist(monkeypatch):
-    class DummyPreds:
-        def __init__(self, n):
-            self.predicted_labels = pd.Series(["Tcell"] * (n // 2) + ["Other"] * (n - n // 2))
-            # probability matrix with two classes
-            self.probability_matrix = pd.DataFrame(
-                {
-                    "Tcell": np.random.uniform(0.6, 1.0, n),
-                    "Other": np.random.uniform(0.0, 0.4, n),
-                },
-                index=[f"cell{i}" for i in range(n)]
-            )
+def test_compute_resolutions_basic(tmp_path):
+    cfg = ClusterAnnotateConfig(
+        input_path=tmp_path / "integrated.zarr",
+        res_min=0.2,
+        res_max=1.0,
+        n_resolutions=5,
+    )
 
-    def dummy_annotate(adata, model, majority_voting=False):
-        return DummyPreds(adata.n_obs)
+    out = _compute_resolutions(cfg)
 
-    # patch the function used inside _precompute_celltypist
-    import scomnom.cluster_and_annotate as ca
-    monkeypatch.setattr("celltypist.annotate", dummy_annotate)
-    # also bypass model load
-    monkeypatch.setattr("celltypist.models.Model.load", lambda _: None)
-
-    return True
-
-
-# ----------------------------------------------------------------------
-# Mock IO – avoid writing h5ad to disk
-# ----------------------------------------------------------------------
-@pytest.fixture
-def fake_io(monkeypatch):
-    import scomnom.io_utils as io
-
-    monkeypatch.setattr(io, "save_adata", lambda *args, **kwargs: None)
-    monkeypatch.setattr(io, "export_cluster_annotations", lambda *args, **kwargs: None)
-    monkeypatch.setattr(io, "get_celltypist_model", lambda m: "dummy/path")
-
-    return True
-
-
-# ----------------------------------------------------------------------
-# Test 1 — resolution sweep endpoints
-# ----------------------------------------------------------------------
-def test_compute_resolutions_basic():
-    class DummyCfg:
-        res_min = 0.2
-        res_max = 1.0
-        n_resolutions = 5
-
-    out = _compute_resolutions(DummyCfg)
     assert len(out) == 5
     assert np.isclose(out[0], 0.2)
     assert np.isclose(out[-1], 1.0)
 
 
-# ----------------------------------------------------------------------
-# Test 2 — structural-only clustering
-# ----------------------------------------------------------------------
-def test_run_clustering_structural_only(tmp_path, fake_io):
+def test_run_clustering_uses_current_round_pipeline(tmp_path, monkeypatch):
+    import scomnom.cluster_and_annotate as ca
+
     adata = synthetic_adata()
-    in_path = tmp_path / "in.h5ad"
-    adata.write_h5ad(in_path)
+    save_mock = Mock()
+    ensure_mock = Mock(return_value=(adata.obs["celltypist_label"], None, {}))
+    run_bisc_mock = Mock()
+
+    def fake_run_bisc(adata_in, cfg, **kwargs):
+        adata_in.obs[cfg.label_key] = pd.Categorical(np.tile(["0", "1"], reps=adata_in.n_obs // 2))
+        adata_in.uns["active_cluster_round"] = "r1"
+        adata_in.uns["cluster_rounds"] = {
+            "r1": {
+                "cluster_key": cfg.label_key,
+                "best_resolution": 0.5,
+                "diagnostics": {"tested_resolutions": [0.2, 0.5]},
+            }
+        }
+        run_bisc_mock(adata_in, cfg, **kwargs)
+
+    monkeypatch.setattr(ca.io_utils, "load_dataset", lambda path: adata)
+    monkeypatch.setattr(ca.io_utils, "save_dataset", save_mock)
+    monkeypatch.setattr(ca.io_utils, "infer_batch_key", lambda adata, key: key or "batch")
+    monkeypatch.setattr(ca.plot_utils, "setup_scanpy_figs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ca.plot_utils, "capture_plot_artifacts", ca.plot_utils.capture_plot_artifacts)
+    monkeypatch.setattr(ca.plot_utils, "persist_plot_artifacts", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ca, "_recompute_hvg_and_pca", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ca, "_ensure_embedding", lambda adata, embedding_key: embedding_key)
+    monkeypatch.setattr(ca.sc.pp, "neighbors", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ca.sc.tl, "umap", lambda adata: adata.obsm.__setitem__("X_umap", np.zeros((adata.n_obs, 2))))
+    monkeypatch.setattr(ca.ct_utils, "ensure_celltypist", ensure_mock)
+    monkeypatch.setattr(ca, "run_BISC", fake_run_bisc)
+    monkeypatch.setattr(ca, "_plot_round_clustering_diagnostics", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        ca,
+        "_run_celltypist_annotation",
+        lambda *args, **kwargs: {
+            "round_id": "r1",
+            "celltypist_cell_key": "celltypist_label",
+            "celltypist_cluster_key": "celltypist_cluster_label",
+            "pretty_cluster_key": "cluster_label__r1",
+        },
+    )
+    monkeypatch.setattr(ca, "_export_round_annotations_csv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ca, "clear_top_level_decoupler_state", lambda *args, **kwargs: None)
 
     cfg = ClusterAnnotateConfig(
-        input_path=in_path,
-        output_path=tmp_path / "out.h5ad",
+        input_path=tmp_path / "integrated.zarr",
+        output_dir=tmp_path / "results",
         make_figures=False,
-        bio_guided_clustering=False,
-        celltypist_model=None,
+        run_decoupler=False,
+        enable_compacting=False,
         embedding_key="X_pca",
         label_key="leiden",
     )
 
     out = run_clustering(cfg)
 
-    # must have final clustering
+    assert out is adata
+    assert out.uns["active_cluster_round"] == "r1"
     assert "leiden" in out.obs
-    assert "cluster_and_annotate" in out.uns
-
-    info = out.uns["cluster_and_annotate"]
-
-    # structural metadata present
-    assert "clustering" in info
-    cl = info["clustering"]
-
-    for key in ["silhouette_centroid", "cluster_counts", "composite_scores"]:
-        assert key in cl
-        assert len(cl[key]) > 0
-
-    # no biological metrics stored
-    assert "bio_homogeneity" not in cl
-    assert "bio_ari" not in cl
-    assert "bio_fragmentation" not in cl
-
-
-# ----------------------------------------------------------------------
-# Test 3 — biological mode with mocked CellTypist
-# ----------------------------------------------------------------------
-def test_run_clustering_bio_mode(tmp_path, fake_io, mock_celltypist):
-    adata = synthetic_adata()
-    adata.obs_names = [f"cell{i}" for i in range(adata.n_obs)]  # needed for index alignment
-
-    in_path = tmp_path / "in.h5ad"
-    adata.write_h5ad(in_path)
-
-    cfg = ClusterAnnotateConfig(
-        input_path=in_path,
-        output_path=tmp_path / "out.h5ad",
-        make_figures=False,
-        bio_guided_clustering=True,
-        celltypist_model="dummy_model",
-        embedding_key="X_pca",
-        label_key="leiden",
-    )
-
-    out = run_clustering(cfg)
-    info = out.uns["cluster_and_annotate"]
-    cl = info["clustering"]
-
-    # Biological metrics must exist
-    assert "bio_homogeneity" in cl
-    assert "bio_fragmentation" in cl
-    assert "bio_ari" in cl
-    assert "bio_composite" in cl
-
-    # arrays must have the same resolution count
-    n_res = len(cl["tested_resolutions"])
-    assert len(cl["bio_homogeneity"]) == n_res
-    assert len(cl["bio_ari"]) == n_res
-
-
-# ----------------------------------------------------------------------
-# Test 4 — majority vote annotation in structural mode
-# ----------------------------------------------------------------------
-def test_annotation_majority_vote(tmp_path, fake_io, mock_celltypist):
-    # biological mode disabled → celltypist precompute happens but metrics ignored
-    adata = synthetic_adata()
-    adata.obs_names = [f"cell{i}" for i in range(adata.n_obs)]
-
-    in_path = tmp_path / "in.h5ad"
-    adata.write_h5ad(in_path)
-
-    cfg = ClusterAnnotateConfig(
-        input_path=in_path,
-        output_path=tmp_path / "out.h5ad",
-        make_figures=False,
-        bio_guided_clustering=False,
-        celltypist_model="dummy_model",
-        embedding_key="X_pca",
-        label_key="leiden",
-    )
-
-    out = run_clustering(cfg)
-
-    # final labels must exist (cluster-collapsed)
-    assert cfg.final_label_key in out.obs
-    assert cfg.celltypist_cluster_label_key in out.obs
-
-    # cluster-level labels consistent with majority voting
-    clust = out.obs[cfg.label_key]
-    final = out.obs[cfg.final_label_key]
-
-    for c in clust.cat.categories:
-        sub = final[clust == c]
-        mode = sub.mode()[0]
-        # all values in that cluster must equal the mode
-        assert (sub == mode).all()
-
-
-# ----------------------------------------------------------------------
-# Test 5 — quality: silhouette QC stored
-# ----------------------------------------------------------------------
-def test_final_silhouette_qc(tmp_path, fake_io):
-    adata = synthetic_adata()
-    in_path = tmp_path / "in.h5ad"
-    adata.write_h5ad(in_path)
-
-    cfg = ClusterAnnotateConfig(
-        input_path=in_path,
-        output_path=tmp_path / "out.h5ad",
-        make_figures=False,
-        label_key="leiden",
-        embedding_key="X_pca",
-    )
-
-    out = run_clustering(cfg)
-
-    qc = out.uns["cluster_and_annotate"].get("real_silhouette_summary")
-    assert qc is not None
-    for k in ["mean", "median", "p10", "p90"]:
-        assert k in qc
+    assert run_bisc_mock.call_args.kwargs["embedding_key"] == "X_pca"
+    assert ensure_mock.call_args.kwargs["reuse"] is True
+    save_mock.assert_called_once()
 
 
 def test_force_celltypist_recompute_disables_reuse(tmp_path, monkeypatch):
-    adata = synthetic_adata()
-    adata.obs_names = [f"cell{i}" for i in range(adata.n_obs)]
-    in_path = tmp_path / "in.h5ad"
-    adata.write_h5ad(in_path)
-
-    cfg = ClusterAnnotateConfig(
-        input_path=in_path,
-        make_figures=False,
-        bio_guided_clustering=False,
-        celltypist_model="dummy_model",
-        force_celltypist_recompute=True,
-        embedding_key="X_pca",
-        label_key="leiden",
-    )
-
     import scomnom.cluster_and_annotate as ca
 
+    adata = synthetic_adata()
     ensure_mock = Mock(return_value=(None, None, {}))
-    monkeypatch.setattr(ca.ct_utils, "ensure_celltypist", ensure_mock)
+
+    monkeypatch.setattr(ca.io_utils, "load_dataset", lambda path: adata)
+    monkeypatch.setattr(ca.io_utils, "save_dataset", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ca.io_utils, "infer_batch_key", lambda adata, key: key or "batch")
+    monkeypatch.setattr(ca.plot_utils, "setup_scanpy_figs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ca.plot_utils, "persist_plot_artifacts", lambda *args, **kwargs: None)
     monkeypatch.setattr(ca, "_recompute_hvg_and_pca", lambda *args, **kwargs: None)
     monkeypatch.setattr(ca, "_ensure_embedding", lambda adata, embedding_key: embedding_key)
     monkeypatch.setattr(ca.sc.pp, "neighbors", lambda *args, **kwargs: None)
     monkeypatch.setattr(ca.sc.tl, "umap", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ca.ct_utils, "ensure_celltypist", ensure_mock)
+    monkeypatch.setattr(
+        ca,
+        "run_BISC",
+        lambda adata, cfg, **kwargs: (
+            adata.uns.update({"active_cluster_round": "r1", "cluster_rounds": {"r1": {"cluster_key": cfg.label_key}}}),
+            adata.obs.__setitem__(cfg.label_key, pd.Categorical(["0"] * adata.n_obs)),
+        ),
+    )
     monkeypatch.setattr(ca, "_plot_round_clustering_diagnostics", lambda *args, **kwargs: None)
-    monkeypatch.setattr(ca, "_export_round_annotations_csv", lambda *args, **kwargs: None)
-    monkeypatch.setattr(ca.io_utils, "save_dataset", lambda *args, **kwargs: None)
-    monkeypatch.setattr(ca.reporting, "generate_cluster_and_annotate_report", lambda *args, **kwargs: None)
-    monkeypatch.setattr(ca, "run_BISC", lambda adata, cfg, **kwargs: adata.uns.update({"active_cluster_round": "r1", "cluster_rounds": {"r1": {"cluster_key": cfg.label_key}}}) or adata.obs.__setitem__(cfg.label_key, pd.Categorical(["0"] * adata.n_obs)))
     monkeypatch.setattr(ca, "_run_celltypist_annotation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ca, "_export_round_annotations_csv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ca, "clear_top_level_decoupler_state", lambda *args, **kwargs: None)
+
+    cfg = ClusterAnnotateConfig(
+        input_path=tmp_path / "integrated.zarr",
+        make_figures=False,
+        run_decoupler=False,
+        enable_compacting=False,
+        force_celltypist_recompute=True,
+        embedding_key="X_pca",
+        label_key="leiden",
+    )
 
     run_clustering(cfg)
 

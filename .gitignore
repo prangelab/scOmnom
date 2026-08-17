@@ -13,6 +13,7 @@ dist/
 # Test/cache tooling
 .pytest_cache/
 .mypy_cache/
+cache/
 
 # Documentation build output
 site/
@@ -23,8 +24,18 @@ site/
 # Local private design notes
 DESIGNGOALS.md
 
+# Local IDE project state
+.idea/
+
 # Local manuscript drafting workspace
 MANUSCRIPT/
+
+# Local datasets and run outputs
+data/
+figures/
+out/
+outdir/
+results/
 
 # Local R runtime libraries
 .r-libs/

@@ -1,16 +1,17 @@
 # Cluster And Annotate
 
-The `cluster-and-annotate` module turns an integrated embedding into a round-aware biological annotation state. It covers BISC-guided Leiden resolution selection, CellTypist-backed annotation, optional enrichment activities, and compaction of redundant clusters.
+The `cluster-and-annotate` module turns an integrated embedding into a round-aware biological annotation state. It covers BISC-guided Leiden resolution selection, cluster-level labels from CellTypist predictions, optional enrichment activities, and compaction of redundant clusters.
 
 This module is where scOmnom's cluster-round structure becomes central: each run creates or updates round metadata in `adata.uns["cluster_rounds"]`, while active labels and pretty labels are referenced from the selected round.
+
+CellTypist predictions are usually generated or refreshed during `integrate` for benchmarking. `cluster-and-annotate` reuses those stored predictions for BISC biological metrics and cluster-level labels, recomputing only when no compatible predictions are present or when `--force-celltypist-recompute` is used.
 
 ## Quick Entry Point
 
 ```bash
 scomnom cluster-and-annotate \
   --input-path results/integrate/adata.integrated.zarr \
-  --output-dir results/cluster_and_annotate/ \
-  --celltypist-model Immune_All_Low.pkl
+  --output-dir results/cluster_and_annotate/
 ```
 
 ## Subsections
@@ -22,6 +23,5 @@ scomnom cluster-and-annotate \
 - [Compaction](cluster-and-annotate/compaction.md)
 - [Decoupler configuration](cluster-and-annotate/decoupler.md)
 - [Outputs](cluster-and-annotate/outputs.md)
-- [Reporting](cluster-and-annotate/reporting.md)
 
 For subsetting, annotation merge, manual renaming, and multi-dataset merge workflows, see [AnnData Operations](adata-ops.md).

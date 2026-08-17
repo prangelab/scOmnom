@@ -21,9 +21,10 @@ scomnom adata-ops rename \
 
 Example mapping file (`rename.tsv`):
 
-```
+```tsv
 C03	SOX10+ PMP22+ Schwann cells
 C07	TREM1hi PLIN2hi iLAMs
+C12	PECAM1+ endothelial cells
 ```
 
 You can control the new manual label round name with:
@@ -34,14 +35,26 @@ You can control the new manual label round name with:
 
 This will create a new round id like `r5_refined_idents`. Default suffix is `manual_rename`
 
-To build a coarser layer such as archetypes, merge identical renamed labels into one new cluster state:
+To build a coarser layer such as broad cell types, merge identical renamed labels into one new cluster state:
+
+Example broad-cell-type mapping:
+
+```tsv
+C00	T cells
+C03	T cells
+C05	Myeloid cells
+C07	Myeloid cells
+C12	Stromal cells
+```
+
+With `--collapse-same-labels`, the two T-cell rows become one new T-cell cluster state, the two myeloid rows become one new myeloid cluster state, and the resulting clusters are renumbered by size.
 
 ```bash
 scomnom adata-ops rename \
   --input-path results/adata.clustered.annotated.projected.markers.renamed__annotation_merge_r4_subset_annotation.zarr.tar.zst \
   --output-dir results \
-  --rename-idents-file archetypes_rename.tsv \
-  --rename-round-name archetypes \
+  --rename-idents-file broad_cell_types.tsv \
+  --rename-round-name broad_cell_types \
   --collapse-same-labels \
   --no-set-active
 ```
@@ -56,8 +69,8 @@ scomnom adata-ops rename \
   --input-path results/adata.clustered.annotated.projected.markers.renamed__annotation_merge_r4_subset_annotation.zarr.tar.zst \
   --output-dir results \
   --output-name adata.clustered.annotated.projected.markers.renamed__annotation_merge_r4_subset_annotation \
-  --rename-idents-file archetypes_rename.tsv \
-  --target-round-id r5_archetypes \
+  --rename-idents-file broad_cell_types.tsv \
+  --target-round-id r5_broad_cell_types \
   --update-existing-round \
   --collapse-same-labels \
   --no-set-active

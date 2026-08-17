@@ -1,86 +1,118 @@
 # NicheNet CCC
 
-`scomnom markers-and-de ccc nichenet` runs a sender-focused NicheNet analysis for one receiver cluster or, by default, all receiver clusters in batch mode. It is intended to complement LIANA rather than replace it: LIANA gives candidate sender-receiver structure, whereas NicheNet prioritizes ligands that best explain a receiver transcriptional program.
-
-**Current scope**
-
-The first `scOmnom` NicheNet implementation is intentionally narrow:
-
-* receiver selection via `--receiver-cluster`
-  * `--receiver-cluster all` is the default and batches over every cluster
-  * any specific raw cluster id or pretty label runs only that receiver
-* receiver gene set from either:
-  * `--gene-list-file`, or
-  * receiver-cluster DE between exactly two `--compare-level` values
-* optional cross-tissue sender/receiver restriction via:
-  * `--dataset-key`
-  * `--source-level`
-  * `--target-level`
-* optional expression input mode for sender/receiver expressed-gene filtering:
-  * `--input-mode counts`
-  * `--input-mode lognorm`
-
-If `--dataset-key` is omitted, scOmnom runs the normal within-object sender-focused NicheNet workflow.
-
-Use `--input-mode lognorm` when you want NicheNet to build and reuse a cached log-normalized layer from `counts_cb` or `counts_raw` before computing sender and receiver expressed-gene sets. This follows the same normalization convention used by LIANA and MEBOCOST.
-
-**Condition key syntax**
-
-NicheNet currently supports:
-
-* `A`: compare two levels of `A` within the full object
-* `A@B`: compare two levels of `A` separately within each level of `B`
-
-**Runtime requirements**
-
-This backend shells out to `Rscript` and expects the R package `nichenetr` to be installed. In the current `v1` implementation, scOmnom uses the official human NicheNet model files downloaded from the NicheNet Zenodo-hosted URLs at runtime, so internet access is required the first time the analysis is run.
-
-The environment YAML files include the required R runtime and helper packages, but `nichenetr` itself is currently not pinned there as a Conda package because the available Conda builds are stale and not consistently cross-platform.
-
-scOmnom now expects `nichenetr` in a local non-synced cache library. On macOS the default is `~/Library/Caches/scOmnom/r-libs/nichenet/`; on Linux it is `~/.cache/scOmnom/r-libs/nichenet/`. If it is missing, `ccc nichenet` errors with an explicit hint and suggests `--install-missing-r-deps`. If you want scOmnom to bootstrap that library automatically, run:
+`scomnom markers-and-de ccc nichenet` runs sender-focused NicheNet ligand activity analysis for one receiver cluster or, by default, every receiver cluster. It complements LIANA: LIANA proposes sender-receiver ligand-receptor structure, while NicheNet prioritizes ligands that best explain a receiver transcriptional program.
 
 ```bash
 scomnom markers-and-de ccc nichenet \
-  ... \
-  --install-missing-r-deps
+  --input-path results/adata.clustered.annotated.zarr.tar.zst \
+  --condition-key treatment \
+  --compare-level treated \
+  --compare-level vehicle
 ```
 
-To install it manually into the same cache library, run:
+## Inputs And Defaults
 
-```bash
-tmpdir=$(mktemp -d) && \
-R_LIBS_USER="$HOME/Library/Caches/scOmnom/r-libs/nichenet" \
-R_LIBS="$HOME/Library/Caches/scOmnom/r-libs/nichenet" \
-Rscript -e 'dir.create(Sys.getenv("R_LIBS_USER"), recursive=TRUE, showWarnings=FALSE); .libPaths(c(Sys.getenv("R_LIBS_USER"), .Library, .Library.site)); pkgs <- c("DiceKriging", "emoa", "fdrtool", "mlrMBO"); missing_pkgs <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly=TRUE)]; if (length(missing_pkgs)) install.packages(missing_pkgs, repos="https://cloud.r-project.org", lib=Sys.getenv("R_LIBS_USER"))' && \
-git clone --depth 1 https://github.com/saeyslab/nichenetr.git "$tmpdir/nichenetr" && \
-mkdir -p "$HOME/Library/Caches/scOmnom/r-libs/nichenet" && \
-R_LIBS_USER="$HOME/Library/Caches/scOmnom/r-libs/nichenet" \
-R_LIBS="$HOME/Library/Caches/scOmnom/r-libs/nichenet" \
-R CMD INSTALL --no-test-load -l "$HOME/Library/Caches/scOmnom/r-libs/nichenet" "$tmpdir/nichenetr"
-```
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--input-path`, `-i` | required | AnnData object loaded through scOmnom IO. |
+| `--output-dir`, `-o` | inferred `results/` location | Output root. |
+| `--output-name` | inferred from input, `ccc_nichenet`, and round | Saved AnnData name. |
+| `--save-h5ad` / `--no-save-h5ad` | `--no-save-h5ad` | Also write h5ad output. |
+| `--n-jobs` | `1` | General command parallelism setting. |
+| `--make-figures` / `--no-make-figures` | `--make-figures` | Create ligand and ligand-target plots. |
+| `--round-id` | active clustering round | Selects receiver/sender labels. |
+| `--group-key` | resolved from round | Override the group column directly. |
+| `--label-source` | `pretty` | Use pretty labels where available. |
 
-**Example**
+## Receiver And Sender Selection
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--receiver-cluster` | `all` | Receiver cluster to explain. Accepts raw ids or pretty labels. `all` batches over every cluster. |
+| `--sender-cluster` | none | Optional sender cluster restriction. Repeatable/comma-separated. |
+| `--dataset-key` | none | Enables cross-tissue sender/receiver restriction. |
+| `--source-level` | none | Allowed sender dataset levels. Required with `--dataset-key`. |
+| `--target-level` | none | Allowed receiver dataset levels. Required with `--dataset-key`. |
+| `--signal-scope` | `all` | `all` or `secreted` for downstream ligand-receptor interpretation. |
 
 ```bash
 scomnom markers-and-de ccc nichenet \
-  --input-path results/adata.merged_liver_fat.clustered.annotated.zarr.tar.zst \
-  --dataset-key tissue \
-  --source-level liver \
-  --target-level fat \
-  --condition-key masld_status@timepoint \
-  --condition-value 5_years_post \
-  --compare-level better \
-  --compare-level worse
+  --input-path results/adata.merged_dataset_A_dataset_B.zarr.tar.zst \
+  --dataset-key dataset \
+  --source-level dataset_A \
+  --target-level dataset_B \
+  --receiver-cluster macrophages \
+  --condition-key treatment \
+  --compare-level treated \
+  --compare-level vehicle
 ```
 
-**Outputs**
+## Receiver Gene Set
 
-* Figures: `figures/<fmt>/ccc_nichenet_<round>_roundN/`
-* Tables: `tables/ccc_nichenet_<round>_roundN/`
-* Key tables:
-  * `nichenet_ligand_activity.tsv`
-  * `nichenet_ligand_target_links.tsv`
-  * `nichenet_ligand_receptor_links.tsv`
-  * `nichenet_receiver_de.tsv`
+NicheNet needs a receiver gene set. scOmnom can get it in two ways:
+
+| Mode | Required options | Notes |
+| --- | --- | --- |
+| Receiver DE | `--condition-key` and exactly two `--compare-level` values | Runs receiver-cluster DE and uses significant/upregulated genes after filtering. |
+| Explicit gene list | `--gene-list-file` | One gene per line. Allows NicheNet without a condition contrast. |
+
+Condition syntax:
+
+| Syntax | Behavior |
+| --- | --- |
+| `A` | Compare two levels of `A` in each receiver cluster. |
+| `A@B` | Compare two levels of `A` separately within each level of `B`. |
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--condition-key` | none | Repeatable/comma-separated. Supports `A` and `A@B`. |
+| `--condition-value` | none | Restrict context levels for `A@B`. |
+| `--compare-level` | required for receiver-DE mode | Exactly two levels of the primary condition variable. |
+| `--gene-list-file` | none | One-gene-per-line receiver gene set. |
+| `--min-logfc` | `0.25` | Minimum receiver-DE log fold-change for gene-set construction. |
+| `--padj-threshold` | `0.05` | Adjusted p-value cutoff for receiver-DE gene-set construction. |
+
+## Expression And Model Knobs
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--expression-pct` | `0.10` | Minimum fraction of cells expressing a gene in sender/receiver expressed-gene filters. |
+| `--input-mode` | `counts` | `counts` uses count-like input; `lognorm` builds/reuses a log-normalized layer. |
+| `--lognorm-target-sum` | `10000` | Target sum for `--input-mode lognorm`. |
+| `--top-n-ligands` | `30` | Number of ligands retained in the NicheNet output/plots. |
+| `--top-n-targets` | `200` | Number of ligand-target links retained. |
+| `--organism` | `human` | Current scOmnom NicheNet support expects `human`. |
+
+For count input, scOmnom uses the same count preference as LIANA: `counts_cb`, then `counts_raw`, then `adata.X`. `--input-mode lognorm` builds a cached log-normalized layer from `counts_cb` or `counts_raw`.
+
+## Runtime Requirements
+
+This backend shells out to `Rscript` and expects the R package `nichenetr` in a local cache library. On macOS the default cache is `~/Library/Caches/scOmnom/r-libs/nichenet/`; on Linux it is `~/.cache/scOmnom/r-libs/nichenet/`.
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--install-missing-r-deps` / `--no-install-missing-r-deps` | `--no-install-missing-r-deps` | Let scOmnom bootstrap missing NicheNet R dependencies into the cache library. |
+
+The environment YAML files include the R runtime and helper packages, but `nichenetr` itself is not pinned there because available Conda builds are stale and not consistently cross-platform. The first NicheNet run may also need internet access to fetch official human model files.
+
+## Outputs
+
+NicheNet writes:
+
+* figures: `figures/<fmt>/ccc_nichenet_<round>_roundN/`;
+* tables: `tables/ccc_nichenet_<round>_roundN/`;
+* saved AnnData: `adata.ccc_nichenet_<round>.zarr.tar.zst` by default;
+* payloads under `adata.uns["markers_and_de"]["ccc"]["nichenet"]["runs"]`.
+
+Each receiver run writes tables under a `receiver__<cluster>` folder:
+
+* `nichenet_ligand_activity.tsv`;
+* `nichenet_ligand_target_links.tsv`;
+* `nichenet_ligand_receptor_links.tsv`;
+* `nichenet_potential_ligands.tsv`;
+* `nichenet_receiver_de.tsv`;
+* `nichenet_settings.tsv`.
+
+Key figures include top ligand plots and ligand-target heatmaps for each receiver cluster.
 
 ---

@@ -14,6 +14,8 @@ import scanpy as sc
 from .clustering_utils import CLUSTER_LABEL_KEY
 from .clustering_utils import (
     _cluster_order_by_size,
+    _ensure_cluster_rounds,
+    _register_round,
     _create_shallow_round_from_parent,
     _make_round_id,
     _next_round_index,
@@ -37,7 +39,45 @@ __all__ = [
     "run_adata_ops",
     "merge_datasets",
     "import_dataset_obs_metadata",
+    "import_external_adata",
 ]
+
+_DEFAULT_IMPORTED_COUNT_LAYER_CANDIDATES: tuple[str, ...] = (
+    "raw",
+    "counts",
+    "counts_raw",
+    "counts_filtered",
+    "counts_cb",
+)
+_DEFAULT_IMPORTED_CLUSTER_KEY_CANDIDATES: tuple[str, ...] = (
+    "full_clustering",
+    "initial_clustering",
+    "cluster_label",
+    "leiden",
+    "louvain",
+    "seurat_clusters",
+    "clusters",
+    "cluster",
+    "cell_type",
+    "celltype",
+)
+_DEFAULT_IMPORTED_BATCH_KEY_CANDIDATES: tuple[str, ...] = (
+    "sample_id",
+    "sample",
+    "patient_id",
+    "batch",
+    "donor_id",
+    "donor",
+    "orig.ident",
+)
+_DEFAULT_IMPORTED_INTEGRATION_EMBEDDINGS: tuple[str, ...] = (
+    "X_integrated",
+    "X_pca_harmony",
+    "X_scANVI",
+    "X_scVI",
+    "X_scanorama",
+    "X_bbknn",
+)
 
 
 def _dataset_stem_for_outputs(path: Path) -> str:
@@ -58,6 +98,238 @@ def _read_metadata_table(metadata_file: Path | str) -> pd.DataFrame:
     if suffix == ".csv":
         return pd.read_csv(path)
     return pd.read_csv(path, sep="\t")
+
+
+def _matrix_looks_count_like(X: Any) -> bool:
+    data = getattr(X, "data", None)
+    if data is None:
+        arr = np.asarray(X)
+        if arr.size == 0:
+            return False
+        sample = arr.ravel()
+    else:
+        sample = np.asarray(data)
+        if sample.size == 0:
+            return False
+    if not np.issubdtype(sample.dtype, np.number):
+        return False
+    if np.any(sample < 0):
+        return False
+    return bool(np.allclose(sample, np.round(sample), rtol=0.0, atol=1e-8))
+
+
+def _detect_import_count_source(adata: ad.AnnData, requested: str | None) -> str:
+    if requested is not None:
+        key = str(requested).strip()
+        if not key:
+            raise ValueError("source_count_layer cannot be empty.")
+        if key == "X":
+            if not _matrix_looks_count_like(adata.X):
+                raise ValueError("Requested source_count_layer='X' but adata.X does not look count-like.")
+            return "X"
+        if key not in adata.layers:
+            raise KeyError(
+                f"Requested source_count_layer {key!r} not found in adata.layers. "
+                f"Available: {list(adata.layers.keys())}"
+            )
+        return key
+
+    for key in _DEFAULT_IMPORTED_COUNT_LAYER_CANDIDATES:
+        if key in adata.layers:
+            return key
+
+    if _matrix_looks_count_like(adata.X):
+        return "X"
+
+    raise ValueError(
+        "Could not auto-detect a retained-cell count matrix for import. "
+        "Pass --source-count-layer explicitly."
+    )
+
+
+def _detect_import_obs_key(adata: ad.AnnData, requested: str | None, candidates: tuple[str, ...]) -> str | None:
+    if requested is not None:
+        key = str(requested).strip()
+        if not key:
+            return None
+        if key not in adata.obs:
+            raise KeyError(f"Requested obs key {key!r} not found in adata.obs.")
+        return key
+
+    for key in candidates:
+        if key in adata.obs:
+            return key
+    return None
+
+
+def _detect_import_embedding_key(adata: ad.AnnData, requested: str | None) -> str | None:
+    if requested is not None:
+        key = str(requested).strip()
+        if not key:
+            return None
+        if key not in adata.obsm:
+            raise KeyError(f"Requested embedding key {key!r} not found in adata.obsm.")
+        return key
+
+    for key in _DEFAULT_IMPORTED_INTEGRATION_EMBEDDINGS:
+        if key in adata.obsm:
+            return key
+    return None
+
+
+def _set_import_counts_raw(adata: ad.AnnData, source_key: str) -> None:
+    source = adata.X if source_key == "X" else adata.layers[source_key]
+    adata.layers["counts_raw"] = source.copy()
+
+
+def _register_imported_round(
+    adata: ad.AnnData,
+    *,
+    source_cluster_key: str,
+    round_name: str,
+) -> str:
+    idx = _next_round_index(adata)
+    round_id = _make_round_id(idx, round_name)
+    imported_cluster_key = f"imported_cluster__{round_id}"
+    _register_round(
+        adata,
+        round_id=round_id,
+        cluster_key=imported_cluster_key,
+        labels_obs_key=imported_cluster_key,
+        kind="import",
+        best_resolution=None,
+        sweep=None,
+        cfg_snapshot={"source_cluster_key": str(source_cluster_key)},
+        notes=f"Imported clustering scaffold derived from adata.obs[{source_cluster_key!r}].",
+    )
+    rebuild_round_from_label_parts(
+        adata,
+        round_id=round_id,
+        label_parts=adata.obs[source_cluster_key].astype(str),
+        round_type="import",
+        metadata_key="inputs",
+        metadata_value={"source_cluster_key": str(source_cluster_key)},
+        annotation_updates={"source_cluster_key": str(source_cluster_key)},
+        set_active=True,
+    )
+    return round_id
+
+
+def import_external_adata(
+    adata_or_path: ad.AnnData | Path | str,
+    *,
+    output_root: Path | str,
+    output_name: str | None = None,
+    output_format: str | None = None,
+    source_count_layer: str | None = None,
+    cluster_key: str | None = None,
+    batch_key: str | None = None,
+    embedding_key: str | None = None,
+    round_name: str = "imported",
+) -> tuple[dict[str, Path], pd.DataFrame]:
+    source_path: Path | None = None
+    source_name = ""
+    if isinstance(adata_or_path, ad.AnnData):
+        adata = adata_or_path.copy()
+        dataset_stem = "adata"
+    else:
+        source_path = Path(adata_or_path)
+        source_name = source_path.name.lower()
+        adata = load_dataset(source_path)
+        dataset_stem = _dataset_stem_for_outputs(source_path)
+
+    count_source = _detect_import_count_source(adata, source_count_layer)
+    detected_cluster_key = _detect_import_obs_key(adata, cluster_key, _DEFAULT_IMPORTED_CLUSTER_KEY_CANDIDATES)
+    detected_batch_key = _detect_import_obs_key(adata, batch_key, _DEFAULT_IMPORTED_BATCH_KEY_CANDIDATES)
+    detected_embedding_key = _detect_import_embedding_key(adata, embedding_key)
+
+    _set_import_counts_raw(adata, count_source)
+    if detected_batch_key is not None:
+        adata.uns["batch_key"] = str(detected_batch_key)
+
+    round_id: str | None = None
+    if detected_cluster_key is not None:
+        round_id = _register_imported_round(
+            adata,
+            source_cluster_key=detected_cluster_key,
+            round_name=str(round_name).strip() or "imported",
+        )
+    else:
+        _ensure_cluster_rounds(adata)
+
+    if detected_embedding_key is not None:
+        adata.uns.setdefault("integration", {})
+        available = list(adata.uns["integration"].get("available_embeddings", []))
+        if detected_embedding_key not in available:
+            available.append(detected_embedding_key)
+        adata.uns["integration"].update(
+            {
+                "best_embedding": str(detected_embedding_key),
+                "available_embeddings": available,
+                "imported_external_adata": True,
+            }
+        )
+
+    adata.uns.setdefault("import_provenance", {})
+    adata.uns["import_provenance"].update(
+        {
+            "imported_external_adata": True,
+            "source_path": str(source_path) if source_path is not None else None,
+            "source_count_layer": str(count_source),
+            "stored_count_layer": "counts_raw",
+            "source_cluster_key": str(detected_cluster_key) if detected_cluster_key is not None else None,
+            "source_batch_key": str(detected_batch_key) if detected_batch_key is not None else None,
+            "source_embedding_key": str(detected_embedding_key) if detected_embedding_key is not None else None,
+            "created_round_id": str(round_id) if round_id is not None else None,
+        }
+    )
+
+    fmt = str(output_format).lower().strip() if output_format else None
+    if fmt is None:
+        if source_name.endswith(".h5ad"):
+            fmt = "h5ad"
+        else:
+            fmt = "zarr"
+    if fmt not in {"zarr", "h5ad"}:
+        raise ValueError("output_format must be 'zarr' or 'h5ad'.")
+
+    output_root = Path(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    stem = str(output_name).strip() if output_name else f"{dataset_stem}.imported"
+    if fmt == "h5ad":
+        out_path = output_root / f"{stem}.h5ad"
+        save_dataset(adata, out_path, fmt=fmt, archive=False)
+    else:
+        out_path = output_root / f"{stem}.zarr.tar.zst"
+        save_dataset(adata, out_path, fmt=fmt, archive=True)
+
+    summary = pd.DataFrame(
+        [
+            {
+                "n_obs": int(adata.n_obs),
+                "n_vars": int(adata.n_vars),
+                "source_count_layer": str(count_source),
+                "stored_count_layer": "counts_raw",
+                "cluster_key": str(detected_cluster_key) if detected_cluster_key is not None else None,
+                "batch_key": str(detected_batch_key) if detected_batch_key is not None else None,
+                "embedding_key": str(detected_embedding_key) if detected_embedding_key is not None else None,
+                "round_id": str(round_id) if round_id is not None else None,
+                "output_path": str(out_path),
+            }
+        ]
+    )
+
+    LOGGER.info(
+        "adata import: source_count_layer=%s stored_as=counts_raw cluster_key=%s batch_key=%s embedding_key=%s round_id=%s",
+        count_source,
+        detected_cluster_key,
+        detected_batch_key,
+        detected_embedding_key,
+        round_id,
+    )
+
+    return {"imported": out_path}, summary
 
 
 def _canonical_obs_key_name(key: str | None) -> str:
@@ -1512,5 +1784,17 @@ def run_adata_ops(cfg: AdataOpsConfig) -> tuple[dict[str, Path], pd.DataFrame]:
             metadata_key=cfg.metadata_key,
             obs_key=cfg.obs_key,
             columns=cfg.metadata_columns,
+        )
+    if op == "import":
+        return import_external_adata(
+            cfg.input_path,
+            output_root=cfg.resolved_output_dir,
+            output_name=cfg.output_name,
+            output_format=cfg.output_format,
+            source_count_layer=cfg.source_count_layer,
+            cluster_key=cfg.import_cluster_key,
+            batch_key=cfg.import_batch_key,
+            embedding_key=cfg.import_embedding_key,
+            round_name=cfg.import_round_name,
         )
     raise ValueError(f"Unsupported adata-ops operation: {cfg.operation!r}")

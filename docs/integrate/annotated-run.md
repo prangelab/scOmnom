@@ -2,7 +2,9 @@
 
 After clustering and annotation, `integrate` can be run a **second time** in a supervised refinement mode.
 
-This mode is **optional** and intended for producing cleaner embeddings and UMAPs after final biological labels are known.
+This mode is **optional** and intended for producing cleaner label-aware embeddings and UMAPs after final biological labels are known. It is deliberately secondary because it uses labels derived from the first integration and clustering pass.
+
+Do not treat the annotated scANVI embedding as a fresh unbiased basis for reclustering from scratch. The supervision labels come from the current annotation state, so reclustering the same cells on the supervised embedding would be circular: the labels help shape the embedding, and the embedding would then be used to rediscover labels related to the same labels. Use it for projection, visualization, label-aware refinement, and downstream interpretation, while keeping the original unsupervised clustering round available as the primary clustering evidence.
 
 #### Key properties
 
@@ -10,6 +12,7 @@ This mode is **optional** and intended for producing cleaner embeddings and UMAP
 * **Requires manual input and output naming**
 * **Runs scANVI only**
 * **Does not overwrite previous results**
+* **Should not replace the first-pass clustering evidence**
 
 #### What it does
 

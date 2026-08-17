@@ -20,6 +20,11 @@ scomnom markers-and-de de \
 scomnom markers-and-de da \
   --input-path results/adata.clustered.annotated.markers.de.zarr \
   --condition-key condition
+
+# Cell-cell communication
+scomnom markers-and-de ccc liana \
+  --input-path results/adata.clustered.annotated.markers.de.zarr \
+  --condition-key condition
 ```
 
 ## Subsections
@@ -29,6 +34,7 @@ scomnom markers-and-de da \
 - [Cell-level vs pseudobulk](markers-and-de/cell-vs-pseudobulk.md)
 - [Differential abundance](markers-and-de/da.md)
 - [Enrichment](markers-and-de/enrichment.md)
+- [Cell-cell communication](markers-and-de/ccc.md)
 - [LIANA CCC](markers-and-de/liana.md)
 - [NicheNet CCC](markers-and-de/nichenet.md)
 - [MEBOCOST CCC](markers-and-de/mebocost.md)

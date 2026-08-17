@@ -49,9 +49,9 @@ def _resolve_scib_truth(
     requested_l = requested.lower()
 
     if requested_l in ("leiden", "default"):
-        key = "leiden"
+        key = str(getattr(cfg, "label_key", "leiden") or "leiden")
         _ensure_label_key(adata, key)
-        return key, "truth-leiden", None
+        return key, f"truth-{_sanitize_tag(key)}", None
 
     if requested_l in ("final", "annotated", "annotated_labels", "final_labels"):
         rid = round_id
@@ -605,7 +605,7 @@ def _run_harmony(
 
     LOGGER.info("Running Harmony integration")
 
-    Z = np.asarray(adata.obsm[use_rep])
+    Z = np.ascontiguousarray(adata.obsm[use_rep])
     meta = adata.obs[[batch_key]].copy()
 
     ho = hm.run_harmony(
@@ -1061,6 +1061,37 @@ def _select_best_embedding(
             "Expected at least one embedding in adata.obsm among created keys or known existing keys."
         )
 
+    if batch_key not in adata.obs:
+        raise KeyError(f"batch_key '{batch_key}' not found in adata.obs; cannot run integration benchmark.")
+    n_batches = int(adata.obs[batch_key].dropna().astype(str).nunique())
+    if n_batches < 2:
+        selected = "Unintegrated" if "Unintegrated" in benchmark_embeddings else benchmark_embeddings[0]
+        LOGGER.warning(
+            "Skipping scIB batch benchmarking because batch_key=%r has %d non-null level(s); "
+            "selecting %s for single-batch data.",
+            batch_key,
+            n_batches,
+            selected,
+        )
+        tag = str(run_tag).strip() if run_tag else ""
+        tag_part = f"_{tag}" if tag else ""
+        metrics_dir = Path(output_dir) / "integration_metrics"
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+        selection_path = metrics_dir / f"integration_single_batch_selection{tag_part}.tsv"
+        pd.DataFrame(
+            [
+                {
+                    "selected_embedding": selected,
+                    "batch_key": batch_key,
+                    "n_batches": n_batches,
+                    "reason": "scIB batch metrics require at least two batch levels",
+                    "available_embeddings": ",".join(benchmark_embeddings),
+                }
+            ]
+        ).to_csv(selection_path, sep="\t", index=False)
+        LOGGER.info("Wrote single-batch integration selection table: %s", selection_path.name)
+        return selected
+
     n_total_full = int(adata.n_obs)
 
     if truth_mask is not None:
@@ -1233,10 +1264,22 @@ def _select_best_embedding(
 
     candidates = numeric.index != "Unintegrated"
     if not np.any(candidates):
-        raise RuntimeError(
+        audit_path = Path(plot_utils.figdir).parent / f"integration_no_candidate_selection{tag_part}.tsv"
+        pd.DataFrame(
+            [
+                {
+                    "selected_embedding": "Unintegrated",
+                    "reason": "no_candidate_embeddings_beyond_unintegrated",
+                    "n_embeddings_scored": int(numeric.shape[0]),
+                }
+            ]
+        ).to_csv(audit_path, sep="\t", index=False)
+        LOGGER.warning(
             "scIB results table contains no candidate embeddings beyond Unintegrated; "
-            "cannot select best embedding."
+            "selecting Unintegrated and writing audit table to %s.",
+            audit_path,
         )
+        return "Unintegrated"
 
     tier1 = numeric.loc[candidates & bio_ok & batch_ok]
     tier2 = numeric.loc[candidates & bio_ok]

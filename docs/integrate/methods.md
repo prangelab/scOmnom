@@ -2,10 +2,10 @@
 
 Supported methods include:
 
-* **scVI / scANVI** — variational autoencoders (recommended for large or complex datasets)
-* **Harmony** — fast linear batch correction
-* **Scanorama** — panoramic batch integration
-* **BBKNN** — graph-based batch correction (baseline)
+* **[scVI / scANVI](https://docs.scvi-tools.org/en/stable/)** — variational autoencoders via `scvi-tools` (recommended for large or complex datasets)
+* **[Harmony](https://github.com/slowkow/harmonypy)** — fast linear batch correction via `harmonypy`
+* **[Scanorama](https://github.com/brianhie/scanorama)** — panoramic batch integration
+* **[BBKNN](https://bbknn.readthedocs.io/en/latest/)** — graph-based batch correction (baseline)
 
 **Default methods:** all of the above.
 

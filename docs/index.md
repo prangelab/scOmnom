@@ -1,12 +1,12 @@
 # scOmnom
 
-`scOmnom` is a CLI-first, reproducible single-cell RNA-seq workflow for large datasets. It is built on the scVerse ecosystem and is designed for robust execution on local macOS workstations and HPC systems.
+`scOmnom` is a CLI-first, reproducible single-cell RNA-seq workflow for large datasets. It is built on the scVerse ecosystem and is designed for robust execution on local Linux or macOS systems and HPC systems.
 
 The manual covers the complete workflow:
 
 1. `load-and-filter` for droplet selection, QC, HVG selection, and doublet detection
-2. `integrate` for batch correction and benchmarking
-3. `cluster-and-annotate` for BISC-guided clustering, CellTypist labels, and decoupler activities
+2. `integrate` for batch correction, CellTypist-backed benchmarking, and shared CellTypist predictions
+3. `cluster-and-annotate` for BISC-guided clustering, cluster-level labels, and decoupler activities
 4. optional annotated integration for scANVI refinement
 5. `markers-and-de` for markers, DE, DA, enrichment, and cell-cell communication analyses
 
@@ -24,13 +24,13 @@ scomnom load-and-filter \
 # 2) Integrate batches
 scomnom integrate \
   --input-path results/adata.filtered.zarr \
-  --output-dir results/
+  --output-dir results/ \
+  --celltypist-model Immune_All_Low.pkl
 
 # 3) Cluster and annotate
 scomnom cluster-and-annotate \
   --input-path results/adata.integrated.zarr \
-  --output-dir results/ \
-  --celltypist-model Immune_All_Low.pkl
+  --output-dir results/
 
 # 4) Marker discovery
 scomnom markers-and-de markers \
@@ -68,12 +68,17 @@ Use `scomnom --help` and `scomnom <command> --help` for command-specific options
 | `--max-counts-mad` | `5.0` |
 | `--max-counts-quantile` | `0.999` |
 | `--expected-doublet-rate` | `0.1` |
+| `--doublet-score-mode` | `auto` |
+| `--solo-sparse-nnz-limit` | `1500000000` |
+| `--solo-max-cells-per-block` | `none` |
+
+The `0.1` expected doublet rate is a conservative high-throughput 10x fallback. Use an experiment-specific value when available; scOmnom stores continuous SOLO scores so calling can be reapplied without retraining.
 
 See [Filtering Defaults And Rationale](load-and-filter/filtering.md) for the full table of defaults and tuning guidance.
 
 ## SLURM Scripts
 
-Example SLURM job scripts are included under [`slurm/`](https://github.com/prangelab/scOmnom/tree/main/slurm). They are configured as starting points for SURF's Snellius cluster and should be adapted for local module names, CUDA/driver versions, wall time, CPU allocation, memory policy, and GPU resources.
+Example SLURM job scripts are included under [`slurm/`](https://github.com/prangelab/scOmnom/tree/main/slurm). They are configured as starting points for our local HPC ([SURF's Snellius](https://www.surf.nl/diensten/rekenen/snellius-de-nationale-supercomputer)) and should be adapted to your own HPC's module names, CUDA/driver versions, wall time, CPU allocation, memory policy, and GPU resources.
 
 See [SLURM and HPC](hpc-slurm.md) for the manual section.
 
@@ -81,7 +86,6 @@ See [SLURM and HPC](hpc-slurm.md) for the manual section.
 
 - [Manual](manual.md): full workflow reference, examples, expected outputs, AnnData conventions, and HPC notes.
 - [Data conventions](adata-structure.md): scOmnom AnnData structure, count layers, clustering rounds, annotations, and notebook IO guidance.
-- [Design goals](design-goals.md): placeholder for the project design principles.
 - [API Reference](api-reference.md): public Python API exposed through `scomnom`, `scomnom.adata_ops`, `scomnom.markers_and_de`, and `scomnom.plotting`.
 - [Changelog](changelog.md): release notes and user-facing behavior changes.
 - [Contributing](contributing.md): project contribution guidelines.

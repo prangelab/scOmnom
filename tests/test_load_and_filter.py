@@ -12,9 +12,12 @@ from scomnom.load_and_filter import (
     compute_qc_metrics,
     call_doublets,
     cleanup_after_solo,
+    estimate_solo_sparse_operation_nnz,
     normalize_and_hvg,
     pca_neighbors_umap,
+    plan_solo_score_blocks,
     run_load_and_filter,
+    run_solo_with_scvi,
     sparse_filter_cells_and_genes,
 )
 from scomnom.config import LoadAndFilterConfig
@@ -38,6 +41,34 @@ def synthetic_adata(n_cells=300, n_genes=50, seed=0):
     return adata
 
 
+def test_load_raw_data_uses_supplied_plot_dir(monkeypatch, tmp_path):
+    import scomnom.io_utils as io
+
+    raw_path = tmp_path / "sample.raw_feature_bc_matrix"
+    seen = {}
+
+    class Cfg:
+        raw_sample_dir = tmp_path
+        raw_pattern = "*.raw_feature_bc_matrix"
+        n_jobs = 1
+        make_figures = True
+
+    monkeypatch.setattr(io, "find_raw_dirs", lambda *_args, **_kwargs: [raw_path])
+    monkeypatch.setattr(io, "read_raw_10x", lambda _path: synthetic_adata(10, 5))
+
+    def fake_filter_raw_barcodes(adata, plot=False, plot_path=None):
+        seen["plot"] = plot
+        seen["plot_path"] = plot_path
+        return adata
+
+    monkeypatch.setattr(io, "filter_raw_barcodes", fake_filter_raw_barcodes)
+
+    io.load_raw_data(Cfg(), plot_dir=Path("QC_plots") / "cell_qc")
+
+    assert seen["plot"] is True
+    assert seen["plot_path"] == Path("QC_plots") / "cell_qc" / "sample_barcode_knee"
+
+
 # -------------------------------------------------------------------------
 # Fixtures: full mock of IO + plotting + scrublet
 # -------------------------------------------------------------------------
@@ -54,6 +85,8 @@ def mock_scrublet(monkeypatch):
 @pytest.fixture
 def mock_io(monkeypatch):
     import scomnom.io_utils as io
+
+    save_calls = []
 
     # Simulate minimal raw loading: return simple sample_map & read_counts
     monkeypatch.setattr(
@@ -89,7 +122,7 @@ def mock_io(monkeypatch):
     monkeypatch.setattr(
         io,
         "save_dataset",
-        lambda *args, **kw: None,
+        lambda *args, **kw: save_calls.append((args, kw)),
     )
     monkeypatch.setattr(
         io,
@@ -97,7 +130,7 @@ def mock_io(monkeypatch):
         lambda cfg, adata: adata,
     )
 
-    return True
+    return save_calls
 
 
 @pytest.fixture
@@ -230,6 +263,37 @@ def test_sparse_filter_cells_and_genes_applies_min_counts():
 
     assert list(out.obs_names) == ["c1", "c2"]
     assert any(row["filter"] == "min_counts" for row in qc_rows)
+
+
+def test_sparse_filter_cells_and_genes_accepts_csc_matrix():
+    X = sparse.csc_matrix(
+        np.array(
+            [
+                [1, 0, 0],
+                [2, 2, 1],
+                [5, 1, 0],
+            ],
+            dtype=np.int64,
+        )
+    )
+    adata = sc.AnnData(X)
+    adata.var_names = ["g0", "g1", "g2"]
+    adata.obs_names = ["c0", "c1", "c2"]
+    adata.obs["sample"] = pd.Categorical(["A", "A", "A"])
+    adata.obs["pct_counts_mt"] = 0.0
+
+    out = sparse_filter_cells_and_genes(
+        adata,
+        min_genes=1,
+        min_cells=1,
+        min_counts=4,
+        max_pct_mt=100,
+        batch_key="sample",
+        qc_rows=[],
+    )
+
+    assert list(out.obs_names) == ["c1", "c2"]
+    assert sparse.isspmatrix_csr(out.X)
 
 
 def test_sparse_filter_cells_and_genes_applies_auto_min_counts():
@@ -429,6 +493,75 @@ def test_sparse_filter_cells_and_genes_can_disable_auto_min_counts():
 
 
 # -------------------------------------------------------------------------
+# SOLO scoring scalability helpers
+# -------------------------------------------------------------------------
+def test_estimate_solo_sparse_operation_nnz_prefers_count_layers():
+    adata = sc.AnnData(sparse.csr_matrix(np.array([[1, 0], [0, 0]], dtype=np.int64)))
+    adata.var_names = ["g0", "g1"]
+    adata.obs_names = ["c0", "c1"]
+    adata.layers["counts_raw"] = sparse.csr_matrix(
+        np.array([[1, 1], [0, 1]], dtype=np.int64)
+    )
+    adata.layers["counts_cb"] = sparse.csr_matrix(
+        np.array([[1, 1], [1, 1]], dtype=np.int64)
+    )
+
+    assert estimate_solo_sparse_operation_nnz(adata) == 16
+
+
+def test_plan_solo_score_blocks_packs_and_splits_by_limits():
+    X = sparse.csr_matrix(np.ones((6, 4), dtype=np.int64))
+    adata = sc.AnnData(X)
+    adata.var_names = [f"g{i}" for i in range(4)]
+    adata.obs_names = [f"c{i}" for i in range(6)]
+    adata.obs["sample"] = pd.Categorical(["A", "A", "A", "B", "B", "B"])
+
+    blocks = plan_solo_score_blocks(
+        adata,
+        batch_key="sample",
+        sparse_nnz_limit=32,
+        max_cells_per_block=2,
+    )
+
+    assert len(blocks) == 4
+    assert all(block.estimate <= 32 for block in blocks)
+    assert sum(block.n_cells for block in blocks) == adata.n_obs
+    assert any(block.split for block in blocks)
+
+
+def test_run_solo_with_scvi_forced_blocked_scores_all_cells(monkeypatch):
+    X = sparse.csr_matrix(np.ones((6, 4), dtype=np.int64))
+    adata = sc.AnnData(X)
+    adata.var_names = [f"g{i}" for i in range(4)]
+    adata.obs_names = [f"c{i}" for i in range(6)]
+    adata.obs["sample"] = pd.Categorical(["A", "A", "A", "B", "B", "B"])
+    adata.layers["counts_raw"] = adata.X.copy()
+
+    monkeypatch.setattr("scomnom.load_and_filter._train_scvi", lambda *a, **k: object())
+
+    calls = []
+
+    def fake_score(_model, block_adata, **kwargs):
+        calls.append((tuple(block_adata.obs_names), kwargs.get("restrict_to_batch")))
+        return np.full(block_adata.n_obs, float(len(calls)))
+
+    monkeypatch.setattr("scomnom.load_and_filter._score_solo_with_scvi_model", fake_score)
+
+    out = run_solo_with_scvi(
+        adata,
+        batch_key="sample",
+        doublet_score_mode="blocked",
+        solo_sparse_nnz_limit=32,
+        solo_max_cells_per_block=2,
+    )
+
+    assert out.obs["doublet_score"].notna().all()
+    assert out.uns["solo_scoring"]["mode"] == "blocked"
+    assert out.uns["solo_scoring"]["fallback_reason"] == "forced"
+    assert len(out.uns["solo_scoring"]["blocks"]) == len(calls)
+
+
+# -------------------------------------------------------------------------
 # call_doublets / cleanup_after_solo
 # -------------------------------------------------------------------------
 def test_call_doublets_and_cleanup_after_solo():
@@ -513,3 +646,5 @@ def test_run_load_and_filter(
     assert "leiden" in out.obs
     assert "X_umap" in out.obsm
     assert "batch_key" in out.uns
+    assert mock_io[-1][0][1] == tmp_path / "out.zarr"
+    assert mock_io[-1][1]["fmt"] == "zarr"

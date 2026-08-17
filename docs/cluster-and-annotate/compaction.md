@@ -96,7 +96,7 @@ Default in the config:
 
 Compaction produces:
 
-* a new clustering stored as a new, non-destructive result
+* a new clustering stored as a new, non-destructive AnnData clustering round
 * a full **pairwise audit table** of edges with per-view similarities, adaptive thresholds (and which scope was effectively used), and MSigDB majority statistics
 * a **decision log** listing multi-cluster merge groups and their rationale
 * a mapping from original cluster ids to compacted ids (e.g. `C00`, `C01`, …), sorted by total component size

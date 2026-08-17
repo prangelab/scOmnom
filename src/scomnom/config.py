@@ -114,7 +114,19 @@ class LoadAndFilterConfig(BaseModel):
     )
 
     # ---- Doublets (SOLO) ----
-    expected_doublet_rate: float = 0.1
+    expected_doublet_rate: float = Field(
+        0.1,
+        gt=0.0,
+        lt=1.0,
+        description=(
+            "Expected per-sample doublet fraction used to threshold SOLO scores. "
+            "The 0.10 default is a conservative high-throughput 10x fallback; "
+            "use an experiment-specific rate when available."
+        ),
+    )
+    doublet_score_mode: Literal["auto", "global", "blocked"] = "auto"
+    solo_sparse_nnz_limit: int = 1_500_000_000
+    solo_max_cells_per_block: Optional[int] = None
     apply_doublet_score: Optional[bool] = None
     apply_doublet_score_path: Optional[Path] = "results/adata.merged.zarr"
 
@@ -150,7 +162,7 @@ class LoadAndFilterConfig(BaseModel):
     @model_validator(mode="after")
     def check_inputs(self):
         # --apply-doublet-score mode
-        if self.apply_doublet_score is not None:
+        if self.apply_doublet_score is True:
             # metadata not required
             return self
 
@@ -205,6 +217,22 @@ class LoadAndFilterConfig(BaseModel):
             return None
         if value < 0:
             raise ValueError("min_counts_auto_activate_below must be >= 0 or None")
+        return value
+
+    @field_validator("solo_sparse_nnz_limit")
+    @classmethod
+    def validate_solo_sparse_nnz_limit(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("solo_sparse_nnz_limit must be > 0")
+        return value
+
+    @field_validator("solo_max_cells_per_block")
+    @classmethod
+    def validate_solo_max_cells_per_block(cls, value: Optional[int]) -> Optional[int]:
+        if value is None:
+            return None
+        if value <= 0:
+            raise ValueError("solo_max_cells_per_block must be > 0 or None")
         return value
 
 
@@ -350,7 +378,7 @@ class IntegrateConfig(BaseModel):
     def normalize_methods(cls, v):
         if v is None:
             return None
-        return [m.lower() for m in v]
+        return [str(m).strip().lower() for m in v]
 
     @field_validator("figure_formats", mode="before")
     @classmethod
@@ -381,7 +409,7 @@ class AdataOpsConfig(BaseModel):
     input_paths: Tuple[Path, ...] = ()
     dataset_short_labels: Tuple[str, ...] = ()
     output_dir: Optional[Path] = None
-    operation: Literal["subset", "rename", "annotation_merge", "merge", "metadata_import"] = "subset"
+    operation: Literal["subset", "rename", "annotation_merge", "merge", "metadata_import", "import"] = "subset"
     output_name: Optional[str] = None
     subset_mapping_tsv: Optional[Path] = None
     subset_merge_tsv: Optional[Path] = None
@@ -404,6 +432,11 @@ class AdataOpsConfig(BaseModel):
     metadata_key: Optional[str] = None
     obs_key: Optional[str] = None
     metadata_columns: Tuple[str, ...] = ()
+    source_count_layer: Optional[str] = None
+    import_cluster_key: Optional[str] = None
+    import_batch_key: Optional[str] = None
+    import_embedding_key: Optional[str] = None
+    import_round_name: str = "imported"
     logfile: Optional[Path] = None
 
     @property
@@ -411,7 +444,7 @@ class AdataOpsConfig(BaseModel):
         if self.output_dir is not None:
             return self.output_dir.resolve()
         base = self.input_path.parent
-        if self.operation == "metadata_import" and base.name != "results":
+        if self.operation in {"metadata_import", "import"} and base.name != "results":
             return (base / "results").resolve()
         return base.resolve()
 
@@ -895,6 +928,7 @@ class MarkersAndDEConfig(BaseModel):
     composition_graph_k_ref: int = 30
     composition_graph_max_k: int = 200
     composition_graph_min_size: int = 20
+    composition_graph_scale: str = "custom"
     composition_graph_random_state: int = 42
     composition_graph_min_nonzero_samples_per_level: int = 3
     composition_graph_n_permutations: int = 0

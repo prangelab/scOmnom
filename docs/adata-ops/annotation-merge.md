@@ -2,11 +2,13 @@
 
 Use `adata-ops annotation-merge` to project refined labels from one or more subset datasets back into the parent dataset.
 
+Only labels are transferred. The child object's expression matrix, embeddings, neighbor graph, DE tables, decoupler payloads, and other analysis outputs are not copied into the parent. For each child cell, scOmnom reads the selected child label column, strips the `Cnn:` prefix down to the biological label part, and overlays that label onto the matching parent cells.
+
 Typical use case:
 
 * subset a parent object to a lineage of interest
 * re-cluster and re-annotate the subset
-* merge those refined subset labels back into the original parent round as a new `subset_annotation` layer
+* merge those refined subset labels back into the parent object as a new `subset_annotation` clustering round
 
 By default this creates a new subset-annotation round (for example `r4_subset_annotation`) and keeps earlier rounds intact.
 
@@ -37,9 +39,9 @@ Key controls:
 * `--child-round-id`: round to read from each child (default: active child round)
 * `--child-source-field`: explicit child `obs` column to merge (default: child round pretty labels)
 * `--annotation-merge-round-name`: suffix for newly created merge round
-* `--update-existing-round` with `--target-round-id`: update an existing subset-annotation round in place instead of creating a new numbered round
+* `--update-existing-round` with `--target-round-id`: update an existing subset-annotation clustering round instead of creating a new numbered round
 
-In-place update example:
+Update an existing clustering round:
 
 ```bash
 scomnom adata-ops annotation-merge \
@@ -49,5 +51,7 @@ scomnom adata-ops annotation-merge \
   --target-round-id r4_subset_annotation \
   --update-existing-round
 ```
+
+This updates the selected `subset_annotation` round inside the output object. It does not mean the input AnnData file is modified in place: scOmnom still writes a new output dataset under `--output-dir`.
 
 ---

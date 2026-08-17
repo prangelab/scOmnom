@@ -1160,12 +1160,24 @@ def save_multi(stem: str, figdir: Path, fig=None, *, savefig_kwargs: dict | None
     if ROOT_FIGDIR is None:
         raise RuntimeError("ROOT_FIGDIR is not set. Call setup_scanpy_figs() first.")
 
+    rel_figdir = figdir
+    if figdir.is_absolute():
+        try:
+            rel_figdir = figdir.resolve().relative_to(ROOT_FIGDIR)
+        except ValueError:
+            rel_figdir = Path(*figdir.parts[1:]) if len(figdir.parts) > 1 else Path(".")
+            LOGGER.warning(
+                "save_multi received an absolute figdir outside ROOT_FIGDIR: %s; saving under %s",
+                figdir,
+                rel_figdir,
+            )
+
     # --------------------------------------------------
     # Save in all configured formats
     # --------------------------------------------------
     # Lazily infer run folder from the first save call
     if RUN_FIG_SUBDIR is None:
-        RUN_KEY = _infer_run_key(figdir)
+        RUN_KEY = _infer_run_key(rel_figdir)
         RUN_FIG_SUBDIR = _next_round_subdir(
             root_figdir=ROOT_FIGDIR,
             formats=FIGURE_FORMATS,
@@ -1182,7 +1194,6 @@ def save_multi(stem: str, figdir: Path, fig=None, *, savefig_kwargs: dict | None
             (ROOT_FIGDIR / ext / RUN_FIG_SUBDIR).mkdir(parents=True, exist_ok=True)
 
     # Always compute rel_figdir (avoid duplicate integration/integration)
-    rel_figdir = figdir
     if RUN_KEY and rel_figdir.parts and rel_figdir.parts[0] == RUN_KEY:
         rel_figdir = Path(*rel_figdir.parts[1:])  # may become "."
 
@@ -2581,13 +2592,35 @@ def plot_qc_filter_stack(
     # --------------------------------------------------
     # Keep only per-sample cell filters
     # --------------------------------------------------
-    df = df[
+    per_sample_df = df[
         (df["scope"] == "cell")
         & (df["batch"] != "ALL")
     ]
 
-    if df.empty:
-        raise ValueError("No per-sample QC filter stats available")
+    if per_sample_df.empty:
+        df = df[(df["scope"] == "cell") & (df["batch"] == "ALL")].copy()
+        if df.empty:
+            LOGGER.warning("No cell-level QC filter stats available; skipping QC filter stack plot.")
+            return
+        if batch_key in adata.obs and adata.obs[batch_key].nunique(dropna=True) == 1:
+            df["batch"] = str(adata.obs[batch_key].dropna().astype(str).iloc[0])
+        else:
+            df["batch"] = "ALL"
+    else:
+        df = per_sample_df
+
+    if df.duplicated(subset=["batch", "filter"]).any():
+        df = (
+            df
+            .groupby(["batch", "filter"], as_index=False, sort=False)
+            .agg(
+                scope=("scope", "first"),
+                n_before=("n_before", "sum"),
+                n_after=("n_after", "sum"),
+                n_removed=("n_removed", "sum"),
+                frac_removed=("frac_removed", "mean"),
+            )
+        )
 
     # --------------------------------------------------
     # Determine filter order (as applied)

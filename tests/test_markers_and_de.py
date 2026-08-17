@@ -13,7 +13,7 @@ import scomnom.annotation_utils as au
 
 md_mod = importlib.import_module("scomnom.markers_and_de")
 
-from scomnom.composition_utils import _resolve_active_cluster_key
+from scomnom.composition_utils import _resolve_active_cluster_key, run_glm_composition
 from scomnom.markers_and_de import (
     _run_namespace_for_round,
     _collect_pseudobulk_de_tables_from_dir,
@@ -396,6 +396,73 @@ def test_resolve_active_cluster_key_prefers_round_labels_obs_key() -> None:
 
     got = _resolve_active_cluster_key(adata, round_id="r5_archetypes")
     assert got == "leiden__r5_archetypes"
+
+
+def test_run_glm_composition_uses_binomial_success_failure_response() -> None:
+    samples = []
+    rows = []
+    conditions = []
+    for condition, c03, c04 in [
+        ("A_ctrl", 100, 50),
+        ("B_mild", 80, 90),
+        ("C_stim", 50, 150),
+    ]:
+        for idx in range(5):
+            samples.append(f"{condition}_{idx}")
+            rows.append({"C00": 200, "C03": c03 + idx % 2, "C04": c04, "C05": 100})
+            conditions.append(condition)
+
+    counts = pd.DataFrame(rows, index=samples)
+    metadata = pd.DataFrame({"condition": conditions}, index=samples)
+
+    got = run_glm_composition(
+        counts,
+        metadata,
+        condition_key="condition",
+        covariates=[],
+        reference_level="A_ctrl",
+    )
+
+    assert not got.empty
+    assert {"fit_warning", "n_fit_warnings"}.issubset(got.columns)
+    assert np.isfinite(got["coef"]).all()
+    assert got["coef"].abs().max() < 10
+    effects = got.set_index(["cluster", "term"])["coef"]
+    assert effects.loc[("C03", "condition_B_mild")] < 0
+    assert effects.loc[("C03", "condition_C_stim")] < 0
+    assert effects.loc[("C04", "condition_B_mild")] > 0
+    assert effects.loc[("C04", "condition_C_stim")] > 0
+
+
+def test_run_glm_composition_allows_two_level_condition_design() -> None:
+    samples = []
+    rows = []
+    conditions = []
+    for condition, c03, c04 in [
+        ("A_ctrl", 100, 50),
+        ("C_stim", 55, 145),
+    ]:
+        for idx in range(6):
+            samples.append(f"{condition}_{idx}")
+            rows.append({"C00": 200 + idx % 2, "C03": c03 + idx % 3, "C04": c04, "C05": 100})
+            conditions.append(condition)
+
+    counts = pd.DataFrame(rows, index=samples)
+    metadata = pd.DataFrame({"condition": conditions}, index=samples)
+
+    got = run_glm_composition(
+        counts,
+        metadata,
+        condition_key="condition",
+        covariates=[],
+        reference_level="A_ctrl",
+    )
+
+    assert not got.empty
+    assert {"fit_warning", "n_fit_warnings"}.issubset(got.columns)
+    effects = got.set_index(["cluster", "term"])["coef"]
+    assert effects.loc[("C03", "condition_C_stim")] < 0
+    assert effects.loc[("C04", "condition_C_stim")] > 0
 
 
 @patch("scomnom.markers_and_de.io_utils.save_dataset")

@@ -39,6 +39,12 @@ from .logging_utils import init_logging
 ALLOWED_METHODS = {"scVI", "scANVI", "Harmony", "Scanorama", "BBKNN"}
 ALLOWED_DECOUPLER_METHODS = {"ulm", "mlm", "wsum", "aucell"}
 ALLOWED_COMP_METHODS = {"sccoda", "glm", "clr", "graph"}
+GRAPH_SCALE_PRESETS = {
+    "custom": None,
+    "local": {"graph_n_seeds": 2000, "graph_k_ref": 30, "graph_max_k": 200, "graph_min_size": 20},
+    "balanced": {"graph_n_seeds": 1000, "graph_k_ref": 75, "graph_max_k": 300, "graph_min_size": 50},
+    "broad": {"graph_n_seeds": 300, "graph_k_ref": 150, "graph_max_k": 500, "graph_min_size": 100},
+}
 ALLOWED_LIANA_METHODS = {"rank_aggregate", "cellphonedb", "connectome", "natmi", "sca", "logfc"}
 app = typer.Typer(help="scOmnom CLI — high-throughput scRNA-seq preprocessing and analysis pipeline.")
 
@@ -68,7 +74,7 @@ def _normalize_methods(methods):
 
     invalid = [m for m in expanded if m not in ALLOWED_METHODS]
     if invalid:
-        raise ValueError(
+        raise typer.BadParameter(
             f"Invalid method(s): {', '.join(invalid)}. "
             f"Allowed: {', '.join(sorted(ALLOWED_METHODS))}"
         )
@@ -280,6 +286,11 @@ def load_and_filter(
         ..., "--out", "-o",
         help="[I/O] Output directory for anndata and figures/",
     ),
+    output_name: str = typer.Option(
+        "adata.filtered",
+        "--output-name",
+        help="[I/O] Base name for filtered output dataset.",
+    ),
     metadata_tsv: Optional[Path] = typer.Option(
         None, "--metadata-tsv", "-m", exists=True,
         help="[I/O] TSV with sample metadata (not required with --apply-doublet-score).",
@@ -359,7 +370,26 @@ def load_and_filter(
     expected_doublet_rate: float = typer.Option(
         0.1,
         "--expected-doublet-rate",
-        help="Used when --doublet-mode rate",
+        help=(
+            "[SOLO] Expected fraction called as doublets within each sample. "
+            "Default 0.10 is a conservative high-throughput 10x fallback; "
+            "set the experiment-specific rate when known."
+        ),
+    ),
+    doublet_score_mode: Literal["auto", "global", "blocked"] = typer.Option(
+        "auto",
+        "--doublet-score-mode",
+        help="[SOLO] Score doublets globally, in blocks, or choose automatically.",
+    ),
+    solo_sparse_nnz_limit: int = typer.Option(
+        1_500_000_000,
+        "--solo-sparse-nnz-limit",
+        help="[SOLO] Sparse operation size limit used to switch from global to blocked scoring.",
+    ),
+    solo_max_cells_per_block: Optional[int] = typer.Option(
+        None,
+        "--solo-max-cells-per-block",
+        help="[SOLO] Optional maximum cells per blocked SOLO scoring chunk.",
     ),
     apply_doublet_score: bool = typer.Option(
         False,
@@ -376,6 +406,11 @@ def load_and_filter(
     # Figures
     # -------------------------------------------------------------
     make_figures: bool = typer.Option(True, help="[Figures] Whether to create QC plots."),
+    figdir_name: str = typer.Option(
+        "figures",
+        "--figdir-name",
+        help="[Figures] Name of figure directory.",
+    ),
     figure_formats: List[str] = typer.Option(
         ["png", "pdf"], "--figure-formats", "-F",
         help="[Figures] Formats to save."
@@ -437,6 +472,7 @@ def load_and_filter(
         cellbender_dir=cellbender_dir,
         metadata_tsv=metadata_tsv,
         output_dir=output_dir,
+        output_name=output_name,
         save_h5ad=save_h5ad,
         n_jobs=n_jobs or 4,
         min_cells=min_cells,
@@ -454,9 +490,13 @@ def load_and_filter(
         max_counts_mad=max_counts_mad,
         max_counts_quantile=max_counts_quantile,
         expected_doublet_rate=expected_doublet_rate,
+        doublet_score_mode=doublet_score_mode,
+        solo_sparse_nnz_limit=solo_sparse_nnz_limit,
+        solo_max_cells_per_block=solo_max_cells_per_block,
         apply_doublet_score=apply_doublet_score,
         apply_doublet_score_path=apply_doublet_score_path,
         make_figures=make_figures,
+        figdir_name=figdir_name,
         figure_formats=figure_formats,
         batch_key=batch_key,
         raw_pattern=raw_pattern,
@@ -680,6 +720,8 @@ def integrate(
              "(final_label where confident, else 'Unknown').",
     ),
 ):
+    methods = _normalize_methods(methods)
+
     outdir = output_dir or input_path.parent
     log_dir = outdir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -1055,6 +1097,80 @@ def adata_ops_merge(
         recompute_embedding=recompute_embedding,
         logfile=logfile,
     )
+    run_adata_ops(cfg)
+
+
+@adata_ops_app.command(
+    "import",
+    help="Import a generic external AnnData into a scOmnom-compatible dataset scaffold.",
+)
+def adata_ops_import(
+    input_path: Path = typer.Option(
+        ...,
+        "--input-path",
+        "-i",
+        help="[I/O] Input external dataset (.zarr, .zarr.tar.zst, or .h5ad).",
+    ),
+    output_dir: Optional[Path] = typer.Option(
+        None,
+        "--output-dir",
+        "-o",
+        help="[I/O] Output directory (default: sibling results/ directory, or input parent if already inside results/).",
+    ),
+    output_name: Optional[str] = typer.Option(
+        None,
+        "--output-name",
+        help="[I/O] Base name for imported output dataset.",
+    ),
+    output_format: Optional[Literal["zarr", "h5ad"]] = typer.Option(
+        None,
+        "--output-format",
+        help="[I/O] Output format for imported dataset. Default: .h5ad for .h5ad inputs, otherwise compressed .zarr.tar.zst.",
+    ),
+    source_count_layer: Optional[str] = typer.Option(
+        None,
+        "--source-count-layer",
+        help="[Import] Source layer containing retained-cell counts. Use 'X' to import from adata.X. Default: auto-detect.",
+    ),
+    cluster_key: Optional[str] = typer.Option(
+        None,
+        "--cluster-key",
+        help="[Import] obs column to use for imported clustering scaffold. Default: auto-detect.",
+    ),
+    batch_key: Optional[str] = typer.Option(
+        None,
+        "--batch-key",
+        help="[Import] obs column to store as adata.uns['batch_key']. Default: auto-detect.",
+    ),
+    embedding_key: Optional[str] = typer.Option(
+        None,
+        "--embedding-key",
+        help="[Import] obsm embedding key to register as the imported best embedding. Default: auto-detect integration-like embedding.",
+    ),
+    round_name: str = typer.Option(
+        "imported",
+        "--round-name",
+        help="[Import] Suffix for the created imported cluster round.",
+    ),
+):
+    cfg = AdataOpsConfig(
+        input_path=input_path,
+        output_dir=output_dir,
+        operation="import",
+        output_name=output_name,
+        output_format=output_format,
+        source_count_layer=source_count_layer,
+        import_cluster_key=cluster_key,
+        import_batch_key=batch_key,
+        import_embedding_key=embedding_key,
+        import_round_name=round_name,
+    )
+
+    log_dir = cfg.resolved_output_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    logfile = log_dir / "adata-ops.log"
+    init_logging(logfile)
+    cfg.logfile = logfile
     run_adata_ops(cfg)
 
 
@@ -1906,6 +2022,7 @@ def _build_cfg_composition(
     graph_k_ref: int,
     graph_max_k: int,
     graph_min_size: int,
+    graph_scale: str,
     graph_random_state: int,
     graph_min_nonzero_samples_per_level: int,
     graph_n_permutations: int,
@@ -1925,6 +2042,17 @@ def _build_cfg_composition(
         raise typer.BadParameter(
             f"Invalid --method value(s): {bad}. Allowed: {sorted(ALLOWED_COMP_METHODS)}"
         )
+    graph_scale = str(graph_scale).strip().lower()
+    if graph_scale not in GRAPH_SCALE_PRESETS:
+        raise typer.BadParameter(
+            f"Invalid --graph-scale value={graph_scale!r}. Allowed: {sorted(GRAPH_SCALE_PRESETS)}"
+        )
+    preset = GRAPH_SCALE_PRESETS[graph_scale]
+    if preset is not None:
+        graph_n_seeds = int(preset["graph_n_seeds"])
+        graph_k_ref = int(preset["graph_k_ref"])
+        graph_max_k = int(preset["graph_max_k"])
+        graph_min_size = int(preset["graph_min_size"])
 
     return MarkersAndDEConfig(
         input_path=input_path,
@@ -1956,6 +2084,7 @@ def _build_cfg_composition(
         composition_graph_k_ref=int(graph_k_ref),
         composition_graph_max_k=int(graph_max_k),
         composition_graph_min_size=int(graph_min_size),
+        composition_graph_scale=str(graph_scale),
         composition_graph_random_state=int(graph_random_state),
         composition_graph_min_nonzero_samples_per_level=int(graph_min_nonzero_samples_per_level),
         composition_graph_n_permutations=int(graph_n_permutations),
@@ -3850,6 +3979,14 @@ def composition(
     graph_k_ref: int = typer.Option(30, "--graph-k-ref"),
     graph_max_k: int = typer.Option(200, "--graph-max-k"),
     graph_min_size: int = typer.Option(20, "--graph-min-size"),
+    graph_scale: str = typer.Option(
+        "custom",
+        "--graph-scale",
+        help=(
+            "Named GraphDA scale preset. Use custom to keep explicit graph parameters; "
+            "local=30-cell neighborhoods/2000 seeds, balanced=75/1000, broad=150/300."
+        ),
+    ),
     graph_random_state: int = typer.Option(42, "--graph-random-state"),
     graph_min_nonzero_samples_per_level: int = typer.Option(3, "--graph-min-nonzero-samples-per-level"),
     graph_n_permutations: int = typer.Option(
@@ -3887,6 +4024,7 @@ def composition(
         graph_k_ref=graph_k_ref,
         graph_max_k=graph_max_k,
         graph_min_size=graph_min_size,
+        graph_scale=graph_scale,
         graph_random_state=graph_random_state,
         graph_min_nonzero_samples_per_level=graph_min_nonzero_samples_per_level,
         graph_n_permutations=graph_n_permutations,
