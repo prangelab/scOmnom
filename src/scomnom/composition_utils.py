@@ -846,7 +846,6 @@ def run_milo_da(
             )
             continue
 
-        pair_samples = sample_metadata.index[ref_mask | test_mask].astype(str).tolist()
         pair_mdata = MuData(
             {
                 "rna": mdata["rna"],
@@ -859,7 +858,6 @@ def run_milo_da(
                 pair_mdata,
                 design=design,
                 model_contrasts=contrast,
-                subset_samples=pair_samples,
                 solver=solver,
             )
         except Exception as e:

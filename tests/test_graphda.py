@@ -154,6 +154,7 @@ def test_milo_runs_all_pairwise_contrasts(monkeypatch) -> None:
 
     assert len(calls) == 3
     assert {call["solver"] for call in calls} == {"edger"}
+    assert {call["samples"] for call in calls} == {()}
     assert set(results["pair"]) == {
         "control_vs_mild",
         "control_vs_strong",
@@ -161,6 +162,35 @@ def test_milo_runs_all_pairwise_contrasts(monkeypatch) -> None:
     }
     assert neighborhoods["n_pairs_total"].eq(3).all()
     assert neighborhoods.loc[neighborhoods["passes_min_size"], "tested_pair_count"].le(3).all()
+    assert set(coverage["pair"]) == set(results["pair"])
+
+
+def test_milo_real_pydeseq2_handles_three_level_design() -> None:
+    adata = _make_milo_adata(levels=("control", "mild", "strong"))
+
+    results, neighborhoods, regions, region_samples, coverage = run_milo_da(
+        adata,
+        cluster_key="cluster",
+        sample_key="sample_id",
+        condition_key="condition",
+        covariates=[],
+        n_seeds=12,
+        k_ref=10,
+        min_size=4,
+        min_nonzero_samples_per_level=1,
+        random_state=5,
+        solver="pydeseq2",
+        group_regions=False,
+    )
+
+    assert set(results["pair"]) == {
+        "control_vs_mild",
+        "control_vs_strong",
+        "mild_vs_strong",
+    }
+    assert neighborhoods["tested_pair_count"].max() == 3
+    assert regions.empty
+    assert region_samples.empty
     assert set(coverage["pair"]) == set(results["pair"])
 
 
