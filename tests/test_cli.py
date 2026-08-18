@@ -294,6 +294,39 @@ def test_markers_and_de_da_milo_scale_broad_dispatches_preset(tmp_path):
     assert cfg.composition_milo_broad_coverage_fraction == 0.5
 
 
+def test_markers_and_de_da_defaults_to_milo_m05_values(tmp_path):
+    with patch("scomnom.cli.run_composition") as mock_run:
+        result = runner.invoke(
+            app,
+            [
+                "markers-and-de",
+                "da",
+                "--input-path",
+                "clustered.h5ad",
+                "--output-dir",
+                str(tmp_path),
+                "--condition-keys",
+                "condition",
+                "--replicate-key",
+                "sample_id",
+                "--method",
+                "milo",
+            ],
+        )
+
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.composition_milo_scale == "custom"
+    assert cfg.composition_milo_n_seeds == 1000
+    assert cfg.composition_milo_k_ref == 75
+    assert cfg.composition_milo_min_size == 50
+    assert cfg.composition_milo_min_nonzero_samples_per_level == 3
+    assert cfg.composition_milo_group_regions is True
+    assert cfg.composition_milo_group_min_overlap == 1
+    assert cfg.composition_milo_group_max_lfc_delta is None
+
+
 def test_markers_and_de_da_dispatches_custom_milo_grouping(tmp_path):
     with patch("scomnom.cli.run_composition") as mock_run:
         result = runner.invoke(

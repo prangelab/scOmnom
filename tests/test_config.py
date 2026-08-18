@@ -5,6 +5,7 @@ from scomnom.config import (
     LoadAndFilterConfig,
     IntegrateConfig,
     ClusterAnnotateConfig,
+    MarkersAndDEConfig,
 )
 
 
@@ -263,3 +264,19 @@ def test_clusterannotate_requires_three_resolution_points(tmp_path):
         n_resolutions=3,
     )
     assert cfg.n_resolutions == 3
+
+
+def test_markers_and_de_defaults_to_milo_m05_values(tmp_path):
+    cfg = MarkersAndDEConfig(
+        input_path=tmp_path / "clustered.h5ad",
+        output_dir=tmp_path,
+    )
+
+    assert cfg.composition_milo_scale == "custom"
+    assert cfg.composition_milo_n_seeds == 1000
+    assert cfg.composition_milo_k_ref == 75
+    assert cfg.composition_milo_min_size == 50
+    assert cfg.composition_milo_min_nonzero_samples_per_level == 3
+    assert cfg.composition_milo_group_regions is True
+    assert cfg.composition_milo_group_min_overlap == 1
+    assert cfg.composition_milo_group_max_lfc_delta is None

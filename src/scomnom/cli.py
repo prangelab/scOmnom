@@ -4024,19 +4024,20 @@ def composition(
     min_cells_per_sample_cluster: int = typer.Option(20, "--min-cells-per-sample-cluster"),
     alpha: float = typer.Option(0.05, "--alpha"),
 
-    milo_n_seeds: int = typer.Option(2000, "--milo-n-seeds"),
-    milo_k_ref: int = typer.Option(30, "--milo-k-ref"),
+    milo_n_seeds: int = typer.Option(1000, "--milo-n-seeds"),
+    milo_k_ref: int = typer.Option(75, "--milo-k-ref"),
     legacy_graph_max_k: int = typer.Option(
         200,
         "--graph-max-k",
         help="[Deprecated, ignored] Retained temporarily for command compatibility.",
     ),
-    milo_min_size: int = typer.Option(20, "--milo-min-size"),
+    milo_min_size: int = typer.Option(50, "--milo-min-size"),
     milo_scale: str = typer.Option(
         "custom",
         "--milo-scale",
         help=(
-            "Named Milo scale preset. Use custom to keep explicit neighbourhood parameters; "
+            "Named Milo scale preset. Custom defaults to the balanced M05 values and keeps "
+            "explicit neighbourhood parameters; "
             "local=30-cell neighborhoods/2000 seeds, balanced=75/1000, broad=150/300."
         ),
     ),

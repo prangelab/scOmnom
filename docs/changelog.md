@@ -201,3 +201,9 @@ Load-and-filter QC refinement release:
   - per-sample cutoff overlays on the `total_counts` violins
   - per-sample summary of the fraction of cells below the lower-count cutoff
 - expanded README/manual documentation for the new lower-count QC parameters, defaults, disable patterns, and intended policy
+
+## Unreleased
+Milo differential-abundance calibration:
+- changed the effective routine Milo neighbourhood defaults to the validated balanced M05 setting: 1,000 initial vertices, 75 graph neighbours, and minimum neighbourhood size 50
+- retained `custom` as the default scale label so direct numeric overrides remain backward-compatible; the named `local`, `balanced`, and `broad` presets remain available
+- retained minimum nonzero sample support of three and the existing default region-grouping rule

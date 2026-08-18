@@ -128,10 +128,10 @@ The output table is `composition_global_clr.tsv`.
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `--milo-scale` | `custom` | Named neighbourhood-scale preset. `custom` keeps the active scale parameters below; `local`, `balanced`, and `broad` override them. |
-| `--milo-n-seeds` | `2000` | Target number of initially sampled graph vertices, capped by cell count. Representative refinement and duplicate collapse may reduce the final count. |
-| `--milo-k-ref` | `30` | Number of neighbours used to construct the Scanpy graph. It is bounded to `n_cells - 1` on small data. |
-| `--milo-min-size` | `20` | Minimum membership of a refined neighbourhood. Smaller neighbourhoods are recorded but not tested. |
+| `--milo-scale` | `custom` | Named neighbourhood-scale preset. The default custom values equal balanced M05, while preserving direct numeric overrides; `local`, `balanced`, and `broad` replace all three scale parameters. |
+| `--milo-n-seeds` | `1000` | Target number of initially sampled graph vertices, capped by cell count. Representative refinement and duplicate collapse may reduce the final count. |
+| `--milo-k-ref` | `75` | Number of neighbours used to construct the Scanpy graph. It is bounded to `n_cells - 1` on small data. |
+| `--milo-min-size` | `50` | Minimum membership of a refined neighbourhood. Smaller neighbourhoods are recorded but not tested. |
 | `--milo-random-state` | `42` | Seed for Milo's initial graph-vertex sampling. |
 | `--milo-min-nonzero-samples-per-level` | `3` | Minimum nonzero sample support in both levels of each pairwise contrast. The filter and correction family are contrast-specific. |
 | `--milo-solver` | `pydeseq2` | Negative-binomial solver used through pertpy. `edger` is the closest to original Milo but requires R, rpy2, edgeR, limma, and statmod. |
@@ -148,7 +148,7 @@ The former active `--graph-*` names remain deprecated aliases for their `--milo-
 
 | `--milo-scale` | Initial vertices | Graph neighbours | Minimum size | Use when |
 | --- | --- | --- | --- | --- |
-| `custom` | explicit option | explicit option | explicit option | You want direct control over all active Milo scale parameters. |
+| `custom` | `1000` | `75` | `50` | Routine M05 defaults, with direct control through the three numeric options. |
 | `local` | `2000` | `30` | `20` | Fine local neighbourhoods and higher spatial detail. |
 | `balanced` | `1000` | `75` | `50` | Middle ground for routine DA runs. |
 | `broad` | `300` | `150` | `100` | Broader neighbourhoods and fewer tests. |

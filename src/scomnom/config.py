@@ -925,9 +925,9 @@ class MarkersAndDEConfig(BaseModel):
     composition_stratify: bool = False
     composition_stratify_key: Optional[str] = None
     composition_stratify_levels: Tuple[str, ...] = ()
-    composition_milo_n_seeds: int = 2000
-    composition_milo_k_ref: int = 30
-    composition_milo_min_size: int = 20
+    composition_milo_n_seeds: int = 1000
+    composition_milo_k_ref: int = 75
+    composition_milo_min_size: int = 50
     composition_milo_scale: str = "custom"
     composition_milo_random_state: int = 42
     composition_milo_min_nonzero_samples_per_level: int = 3
