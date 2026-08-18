@@ -7,7 +7,7 @@ The Kang tutorial covers:
 * load/filter, integration, cluster/annotate, and markers;
 * donor-aware `ctrl` versus `stim` DE;
 * MSigDB enrichment, DoRothEA, and PROGENy activity layers;
-* differential abundance with CLR, GLM, and GraphDA;
+* differential abundance with CLR, GLM, and Milo;
 * condition-split LIANA CCC.
 
 Use processed count matrices only for this tutorial. Do not download or stage FASTQ, BAM, FASTA, GTF, GFF, SRA, or other raw/reference sequence files.
@@ -141,12 +141,11 @@ Validated DA interpretation:
 
 * GLM: 17 condition rows, 13 FDR-significant stim-versus-ctrl cluster effects, 0 nonfinite coefficients, and 3 warning-flagged rows.
 * CLR: 16 of 17 clusters significant at FDR <= 0.05, consistent with broad IFN-beta composition shifts.
-* GraphDA: 2,000 neighborhoods generated, 71 tested, and 12 significant neighborhood rows mapped to parent clusters `C03`, `C04`, `C06`, `C08`, and `C11`.
-* Treat GraphDA as conservative local-neighborhood evidence, not as a replacement for broad cluster-level composition tests.
+* Milo: revalidation is pending after replacement of the former experimental GraphDA engine with pertpy Milo. Legacy GraphDA counts are intentionally not reported as Milo evidence.
+* scOmnom groups significant overlapping, direction-concordant Milo neighbourhoods into DA regions by default. Interpret `composition_milo_regions.tsv`, `composition_milo_region_sample_counts.tsv`, and `milo_coverage.tsv` before using raw neighbourhood effects.
+* Treat Milo regions as local evidence alongside, rather than as a replacement for, broad cluster-level composition tests. Extreme raw neighbourhood effects are retained but flagged for review.
 
-![Differential abundance interpretation](panels/de_figure2_da_draft.png)
-
-Layered differential abundance interpretation for the Kang IFN-beta PBMC tutorial. CLR and GLM support broad cluster-composition evidence, while GraphDA provides conservative local-neighborhood evidence. Warning diagnostics should remain visible in the tables and interpretation.
+The differential-abundance panel will be regenerated after the Milo defaults are calibrated and the Kang validation is rerun. The existing GraphDA panel is not valid evidence for the repaired method.
 
 ## Run CCC With LIANA
 
@@ -182,7 +181,7 @@ The validated DE tutorial evidence supports:
 * active compacted round `r1_scANVI_compacted`;
 * IFN-beta biology recovered through DE genes, MSigDB GSEA, PROGENy, and DoRothEA;
 * broad composition shifts identified with CLR and GLM;
-* local-neighborhood shifts identified with GraphDA;
+* Milo local-neighbourhood testing integrated into the same DA command, with Kang biological results pending revalidation;
 * condition-split LIANA summaries for `ctrl` and `stim`.
 
 ## Troubleshooting
@@ -191,7 +190,8 @@ The validated DE tutorial evidence supports:
 | --- | --- | --- |
 | Most per-cluster DE contrasts are skipped | Cluster is dominated by one condition or has too few cells per level | Treat the skip as a valid statistical guard; inspect condition balance and use estimable clusters for DE interpretation. |
 | GLM reports fit warnings | Perfect separation or sparse sample-by-cluster counts | Keep warning-flagged rows visible and avoid over-interpreting non-significant extreme coefficients. |
-| GraphDA has few significant rows | Local neighborhoods are underpowered or scale is too narrow | Inspect `graphda_diagnostics.tsv`; consider a broader graph scale in a follow-up run. |
+| Milo has few significant rows | Local neighbourhoods are underpowered or scale is too narrow | Inspect `milo_diagnostics.tsv`; consider a broader Milo scale in a follow-up run. |
+| Milo covers a large fraction of cells or shows extreme effects | Overlapping neighbourhoods, broad compositional imbalance, or sparse counts can exaggerate the apparent scope | Inspect grouped regions, `milo_coverage.tsv`, review flags, and zero-inclusive sample-level region counts; compare with CLR/scCODA before making a broad claim. |
 | DoRothEA or PROGENy loading fails | Network/resource access blocked | Rerun in an environment with resource access or pre-cache resources. |
 | CCC outputs look sparse | Some source-target routes are absent after condition split | Check cell counts per condition and cluster before interpreting route differences. |
 

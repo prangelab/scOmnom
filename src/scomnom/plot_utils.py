@@ -218,25 +218,25 @@ def _add_outside_legend(
 
 
 @collect_plot_artifacts
-def plot_graphda_summaries(
-    graph_df: pd.DataFrame,
-    graph_meta: pd.DataFrame | None,
+def plot_milo_summaries(
+    milo_df: pd.DataFrame,
+    milo_meta: pd.DataFrame | None,
     figdir: Path,
     *,
     alpha: float = 0.05,
     all_clusters: Sequence[str] | None = None,
 ) -> None:
     """
-    Plot GraphDA summary panels and save via record_plot_artifact().
+    Plot Milo summary panels and save via record_plot_artifact().
     """
-    if graph_df is None or graph_df.empty or "effect" not in graph_df.columns:
+    if milo_df is None or milo_df.empty or "effect" not in milo_df.columns:
         return
 
-    gdf = graph_df.copy()
-    if graph_meta is not None and not graph_meta.empty:
-        if "cluster_label" not in gdf.columns and "cluster_label" in graph_meta.columns:
-            graph_meta_indexed = graph_meta.set_index("neighborhood")
-            gdf = gdf.merge(graph_meta_indexed[["cluster_label"]], left_on="cluster", right_index=True, how="left")
+    gdf = milo_df.copy()
+    if milo_meta is not None and not milo_meta.empty:
+        if "cluster_label" not in gdf.columns and "cluster_label" in milo_meta.columns:
+            milo_meta_indexed = milo_meta.set_index("neighborhood")
+            gdf = gdf.merge(milo_meta_indexed[["cluster_label"]], left_on="cluster", right_index=True, how="left")
     if "cluster_label" not in gdf.columns:
         gdf["cluster_label"] = "NA"
     if "fdr" in gdf.columns:
@@ -262,7 +262,7 @@ def plot_graphda_summaries(
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=45, ha="right")
     ax.set_ylabel("Effect")
-    ax.set_title("GraphDA top neighborhoods")
+    ax.set_title("Milo top neighborhoods")
     ax.tick_params(axis="x", labelrotation=45)
     if "level_ref" in top.columns and "level_test" in top.columns:
         ref_label = str(top["level_ref"].iloc[0])
@@ -289,7 +289,7 @@ def plot_graphda_summaries(
             va = "bottom" if yi >= 0 else "top"
             yoff = 0.04 if yi >= 0 else -0.04
             ax.text(xi, yi + yoff, "*", ha="center", va=va, fontsize=10, color="#d62728")
-    record_plot_artifact("graphda_top_neighborhoods", figdir, fig=fig)
+    record_plot_artifact("milo_top_neighborhoods", figdir, fig=fig)
     close_plot(fig)
 
     cluster_universe: list[str] = []
@@ -322,7 +322,7 @@ def plot_graphda_summaries(
         ax.set_xticks(x)
         ax.set_xticklabels(labels, rotation=45, ha="right")
         ax.set_ylabel("Effect")
-        ax.set_title("GraphDA top neighborhood per cluster")
+        ax.set_title("Milo top neighborhood per cluster")
         if "level_ref" in top_by_cluster.columns and "level_test" in top_by_cluster.columns:
             ref_label = str(top_by_cluster["level_ref"].iloc[0])
             test_label = str(top_by_cluster["level_test"].iloc[0])
@@ -355,7 +355,7 @@ def plot_graphda_summaries(
         ]
         ax.legend(handles=legend_handles, loc="upper right", frameon=True, fontsize=8)
         plt.tight_layout()
-        record_plot_artifact("graphda_top_by_cluster", figdir, fig=fig)
+        record_plot_artifact("milo_top_by_cluster", figdir, fig=fig)
         close_plot(fig)
 
     labels = gdf["cluster_label"].astype(str)
@@ -420,27 +420,82 @@ def plot_graphda_summaries(
     ax.set_yticklabels(list(y_pos.keys()))
     ax.set_xlabel("Effect (log2 fold-change)")
     ax.set_ylabel("Cluster")
-    ax.set_title("GraphDA effects by cluster")
+    ax.set_title("Milo effects by cluster")
     ax.grid(False)
-    record_plot_artifact("graphda_effects_by_cluster", figdir, fig=fig)
+    record_plot_artifact("milo_effects_by_cluster", figdir, fig=fig)
     close_plot(fig)
 
 
 @collect_plot_artifacts
-def plot_graphda_diagnostics(
-    graph_df: pd.DataFrame,
+def plot_milo_regions(regions_df: pd.DataFrame, figdir: Path, *, max_regions: int = 40) -> None:
+    """Plot grouped, direction-concordant Milo regions."""
+    if regions_df is None or regions_df.empty:
+        return
+    required = {"region_id", "region_effect_median", "region_cluster_label", "pair"}
+    if not required.issubset(regions_df.columns):
+        return
+
+    data = regions_df.copy()
+    data["region_effect_median"] = pd.to_numeric(data["region_effect_median"], errors="coerce")
+    data = data[np.isfinite(data["region_effect_median"])].copy()
+    if data.empty:
+        return
+    data["_abs_effect"] = data["region_effect_median"].abs()
+    data = data.nlargest(int(max_regions), "_abs_effect").sort_values("region_effect_median")
+    labels = (
+        data["region_cluster_label"].astype(str)
+        + " | "
+        + data["region_id"].astype(str).str.rsplit("_", n=1).str[-1]
+        + " | "
+        + data["pair"].astype(str)
+    )
+    effects = data["region_effect_median"].to_numpy(dtype=float)
+    colors = np.where(effects >= 0, "#c95a3d", "#3977a8")
+
+    fig, ax = plt.subplots(figsize=(9, max(4, 0.28 * len(data))))
+    y = np.arange(len(data))
+    ax.barh(y, effects, color=colors, alpha=0.9)
+    if {"region_effect_q25", "region_effect_q75"}.issubset(data.columns):
+        q25 = pd.to_numeric(data["region_effect_q25"], errors="coerce").to_numpy(dtype=float)
+        q75 = pd.to_numeric(data["region_effect_q75"], errors="coerce").to_numpy(dtype=float)
+        valid = np.isfinite(q25) & np.isfinite(q75)
+        if valid.any():
+            ax.errorbar(
+                effects[valid],
+                y[valid],
+                xerr=np.vstack([effects[valid] - q25[valid], q75[valid] - effects[valid]]),
+                fmt="none",
+                ecolor="#303030",
+                elinewidth=0.8,
+                capsize=2,
+            )
+    ax.axvline(0, color="#303030", linewidth=0.8)
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels.tolist())
+    ax.set_xlabel("Median neighborhood effect (log2 fold change)")
+    ax.set_ylabel("Dominant cluster | region | contrast")
+    ax.set_title("Milo grouped differential-abundance regions")
+    ax.grid(False)
+    fig.tight_layout()
+    record_plot_artifact("milo_da_regions", figdir, fig=fig)
+    close_plot(fig)
+
+
+@collect_plot_artifacts
+def plot_milo_diagnostics(
+    milo_df: pd.DataFrame,
     diag_df: pd.DataFrame,
     figdir: Path,
     *,
     alpha: float = 0.05,
 ) -> None:
     """
-    Plot GraphDA diagnostics and save via record_plot_artifact().
+    Plot Milo diagnostics and save via record_plot_artifact().
     """
-    if graph_df is None or graph_df.empty:
+    if milo_df is None or milo_df.empty:
         return
 
-    gdf = graph_df.copy()
+    gdf = milo_df.copy()
     p = pd.to_numeric(gdf.get("pval", np.nan), errors="coerce")
     q = pd.to_numeric(gdf.get("fdr", np.nan), errors="coerce")
     sig = (q <= float(alpha)) if np.isfinite(q).any() else (p <= float(alpha))
@@ -464,7 +519,7 @@ def plot_graphda_diagnostics(
         ax.axhline(thr, color="#d62728", linestyle=":", linewidth=1.0)
         ax.set_xlabel("-log10(p-value)")
         ax.set_ylabel("-log10(FDR)")
-        ax.set_title("GraphDA QC: p-value vs FDR")
+        ax.set_title("Milo QC: p-value vs FDR")
         handles = [
             mpl.lines.Line2D([], [], marker="o", linestyle="None", color="#d62728", label="Significant", markersize=5),
             mpl.lines.Line2D([], [], marker="o", linestyle="None", color="#9e9e9e", label="Not significant", markersize=5),
@@ -472,7 +527,7 @@ def plot_graphda_diagnostics(
         ]
         ax.legend(handles=handles, loc="lower right", frameon=True, fontsize=8)
         ax.grid(False)
-        record_plot_artifact("graphda_qc_pval_vs_fdr", figdir, fig=fig)
+        record_plot_artifact("milo_qc_pval_vs_fdr", figdir, fig=fig)
         close_plot(fig)
 
     # QC 2: per-cluster tested vs significant counts.
@@ -490,10 +545,10 @@ def plot_graphda_diagnostics(
         ax.set_yticklabels(d["cluster"].tolist())
         ax.invert_yaxis()
         ax.set_xlabel("Count")
-        ax.set_title("GraphDA QC: tested vs significant by cluster")
+        ax.set_title("Milo QC: tested vs significant by cluster")
         ax.legend(loc="lower right", frameon=True, fontsize=8)
         ax.grid(False)
-        record_plot_artifact("graphda_qc_cluster_power", figdir, fig=fig)
+        record_plot_artifact("milo_qc_cluster_power", figdir, fig=fig)
         close_plot(fig)
 
 
@@ -3291,25 +3346,24 @@ def plot_scib_results_table(scaled: pd.DataFrame, *, stem: str = "scIB_results_t
 
 
 # -------------------------------------------------------------------------
-# CLUSTERING RESOLUTION / STABILITY PLOTS
+# CLUSTERING RESOLUTION / REPRODUCIBILITY PLOTS
 # -------------------------------------------------------------------------
 @collect_plot_artifacts
 def plot_clustering_resolution_sweep(
         resolutions: np.ndarray,
         silhouette_scores: List[float],
         n_clusters: List[int],
-        penalized_scores: List[float],
         figdir: Path,
 ) -> None:
-    """Plot silhouette, #clusters, and penalized score across resolutions."""
+    """Plot centroid separation and cluster count across resolutions."""
     resolutions = np.array([float(r) for r in resolutions], dtype=float)
 
-    fig, axs = plt.subplots(1, 3, figsize=(14, 4))
+    fig, axs = plt.subplots(1, 2, figsize=(9, 4))
 
     ax = axs[0]
     _clean_axes(ax)
     ax.plot(resolutions, silhouette_scores, marker="o")
-    ax.set_title("Silhouette score")
+    ax.set_title("Centroid separation")
     ax.set_xlabel("Resolution")
     ax.set_ylabel("Score")
 
@@ -3320,13 +3374,6 @@ def plot_clustering_resolution_sweep(
     ax.set_xlabel("Resolution")
     ax.set_ylabel("Clusters")
 
-    ax = axs[2]
-    _clean_axes(ax)
-    ax.plot(resolutions, penalized_scores, marker="o")
-    ax.set_title("Penalized score\n(silhouette - α·N)")
-    ax.set_xlabel("Resolution")
-    ax.set_ylabel("Score")
-
     fig.tight_layout()
     record_plot_artifact("clustering_resolution_sweep", figdir)
 
@@ -3336,7 +3383,7 @@ def plot_clustering_stability_ari(
         stability_aris: List[float],
         figdir: Path,
 ) -> None:
-    """Line plot of ARI vs repetition for subsampling stability."""
+    """Plot post-selection subsampling reproducibility across repeats."""
     if not stability_aris:
         return
 
@@ -3345,11 +3392,11 @@ def plot_clustering_stability_ari(
 
     fig, ax = plt.subplots(figsize=(5, 4))
     _clean_axes(ax)
-    ax.plot(repeats, stability_aris, marker="o", label="ARI")
+    ax.plot(repeats, stability_aris, marker="o", label="Repeat ARI")
     ax.axhline(mean_ari, color="red", linestyle="--", label=f"Mean ARI = {mean_ari:.3f}")
-    ax.set_title("Subsampling stability (ARI)")
+    ax.set_title("Post-selection subsampling reproducibility")
     ax.set_xlabel("Repeat")
-    ax.set_ylabel("ARI with full data")
+    ax.set_ylabel("ARI vs full-data partition")
     ax.legend(frameon=False)
 
     fig.tight_layout()
@@ -4351,7 +4398,7 @@ def plot_compaction_flow(
 
 
 # ----------------------------------------------------------------------
-# Stability curves (silhouette, stability, composite, tiny penalty)
+# Selection curves (silhouette, adjacent stability, composite, tiny penalty)
 # ----------------------------------------------------------------------
 @collect_plot_artifacts
 def plot_stability_curves(
@@ -4370,7 +4417,7 @@ def plot_stability_curves(
 
     Structural components:
       - silhouette (centroid-based)
-      - stability (smoothed ARI)
+      - adjacent-resolution stability (smoothed ARI)
       - composite score (actual one used for selection)
       - tiny-cluster penalty
     """
@@ -4389,7 +4436,12 @@ def plot_stability_curves(
 
     # structural curves
     ax.plot(res_sorted, sil, label="Centroid silhouette", color="tab:blue")
-    ax.plot(res_sorted, stab, label="Stability (smoothed ARI)", color="tab:green")
+    ax.plot(
+        res_sorted,
+        stab,
+        label="Adjacent-resolution stability (smoothed ARI)",
+        color="tab:green",
+    )
     ax.plot(res_sorted, tiny, label="Tiny-cluster penalty", color="tab:orange")
     ax.plot(res_sorted, comp, label="Composite (used for selection)", color="tab:red")
 
@@ -4589,7 +4641,7 @@ def plot_plateau_highlights(
     ax = axes[1]
     _shade(ax)
     ax.plot(res_sorted, stab, marker="o", color="tab:green")
-    ax.set_ylabel("Smoothed stability (ARI)")
+    ax.set_ylabel("Adjacent-resolution stability (ARI)")
     ax.grid(True, alpha=0.2)
 
     ax = axes[2]

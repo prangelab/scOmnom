@@ -115,6 +115,28 @@ def test_persist_plot_artifacts_clears_figure_reference(monkeypatch):
     assert artifact.fig is None
 
 
+def test_plot_milo_regions_emits_grouped_region_artifact():
+    regions = pd.DataFrame(
+        {
+            "region_id": [
+                "milo_region_control_vs_treated_001",
+                "milo_region_control_vs_treated_002",
+            ],
+            "pair": ["control_vs_treated", "control_vs_treated"],
+            "region_cluster_label": ["C01", "C02"],
+            "region_effect_median": [1.2, -0.8],
+            "region_effect_q25": [1.0, -1.0],
+            "region_effect_q75": [1.4, -0.6],
+        }
+    )
+
+    with pu.capture_plot_artifacts() as artifacts:
+        pu.plot_milo_regions(regions, Path("da"))
+
+    assert [artifact.stem for artifact in artifacts] == ["milo_da_regions"]
+    assert artifacts[0].fig.axes[0].get_title() == "Milo grouped differential-abundance regions"
+
+
 def test_use_system_tar_zstd_prefers_python_path_on_macos(monkeypatch):
     monkeypatch.setattr(iu.sys, "platform", "darwin", raising=False)
     monkeypatch.setenv("SCOMNOM_FORCE_SYSTEM_TAR_ZSTD", "")
@@ -591,11 +613,15 @@ def test_plot_clustering_resolution_sweep(tmp_path, reset_root_figdir, mock_save
     res = np.array([0.2, 0.4, 0.6])
     sil = [0.1, 0.3, 0.2]
     ncl = [5, 8, 10]
-    pen = [0.05, 0.15, 0.1]
 
     with pu.capture_plot_artifacts() as artifacts:
-        pu.plot_clustering_resolution_sweep(res, sil, ncl, pen, figdir)
+        pu.plot_clustering_resolution_sweep(res, sil, ncl, figdir)
     assert [a.stem for a in artifacts] == ["clustering_resolution_sweep"]
+    assert len(artifacts[0].fig.axes) == 2
+    assert [ax.get_title() for ax in artifacts[0].fig.axes] == [
+        "Centroid separation",
+        "Number of clusters",
+    ]
 
 
 def test_plot_clustering_stability_ari(tmp_path, reset_root_figdir, mock_save_multi):
@@ -605,6 +631,9 @@ def test_plot_clustering_stability_ari(tmp_path, reset_root_figdir, mock_save_mu
     with pu.capture_plot_artifacts() as artifacts:
         pu.plot_clustering_stability_ari([0.8, 0.9, 0.85], figdir)
     assert [a.stem for a in artifacts] == ["clustering_stability_ari"]
+    ax = artifacts[0].fig.axes[0]
+    assert ax.get_title() == "Post-selection subsampling reproducibility"
+    assert ax.get_ylabel() == "ARI vs full-data partition"
 
 
 def test_plot_cluster_umaps(tmp_path, reset_root_figdir, mock_scanpy_plots, mock_save_multi):
@@ -788,6 +817,8 @@ def test_plot_stability_curves_structural_only(tmp_path, reset_root_figdir, mock
         )
 
     assert [a.stem for a in artifacts] == ["cluster_selection_stability"]
+    labels = [line.get_label() for line in artifacts[0].fig.axes[0].lines]
+    assert "Adjacent-resolution stability (smoothed ARI)" in labels
 
 
 def test_plot_stability_curves_with_bio(tmp_path, reset_root_figdir, mock_save_multi):
@@ -865,3 +896,4 @@ def test_plot_plateau_highlights(tmp_path, reset_root_figdir, mock_save_multi):
         )
 
     assert [a.stem for a in artifacts] == ["plateau_highlights"]
+    assert artifacts[0].fig.axes[1].get_ylabel() == "Adjacent-resolution stability (ARI)"

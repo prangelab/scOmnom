@@ -225,11 +225,11 @@ def _describe_plot(rel_path: Path) -> str:
     if "cluster_tree" in stem:
         return "How clusters split/merge across the resolution sweep."
     if "resolution_sweep" in stem:
-        return "Resolution sweep diagnostics: silhouette, number of clusters, and penalized score."
+        return "Resolution sweep diagnostics: centroid separation and number of clusters."
     if "stability" in stem and "ari" in stem:
-        return "Subsampling stability across repeats (ARI vs full-data clustering)."
+        return "Post-selection subsampling reproducibility (ARI vs full-data partition)."
     if "cluster_selection" in stem or "stability_curves" in stem:
-        return "Metrics used for resolution selection (structural and penalty terms)."
+        return "Resolution selection metrics, including adjacent-resolution stability."
     if "biological_metrics" in stem:
         return "Bio-guided clustering metrics across the resolution sweep."
     if "cluster_sizes" in stem:

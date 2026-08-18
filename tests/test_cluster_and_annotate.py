@@ -1,8 +1,10 @@
 import numpy as np
 import pandas as pd
 import scanpy as sc
+from pathlib import Path
 from unittest.mock import Mock
 
+import scomnom.clustering_utils as cu
 from scomnom.cluster_and_annotate import run_clustering
 from scomnom.clustering_utils import _compute_resolutions
 from scomnom.config import ClusterAnnotateConfig
@@ -30,6 +32,77 @@ def test_compute_resolutions_basic(tmp_path):
     assert len(out) == 5
     assert np.isclose(out[0], 0.2)
     assert np.isclose(out[-1], 1.0)
+
+
+def test_resolution_sweep_stores_fixed_selector_rules(tmp_path, monkeypatch):
+    adata = synthetic_adata()
+    cfg = ClusterAnnotateConfig(
+        input_path=tmp_path / "integrated.zarr",
+        res_min=0.1,
+        res_max=0.3,
+        n_resolutions=3,
+        bio_guided_clustering=False,
+    )
+
+    def fake_leiden(adata_in, *, key_added, **kwargs):
+        adata_in.obs[key_added] = pd.Categorical(
+            np.tile(["0", "1"], reps=adata_in.n_obs // 2)
+        )
+
+    monkeypatch.setattr(cu.sc.tl, "leiden", fake_leiden)
+    monkeypatch.setattr(cu, "_centroid_silhouette", lambda *args, **kwargs: 0.5)
+
+    _, sweep, _ = cu._resolution_sweep(
+        adata,
+        cfg,
+        "X_pca",
+        celltypist_labels=None,
+    )
+
+    assert sweep["selection_rules"] == cu._bisc_fixed_rule_snapshot()
+
+
+def test_clustering_report_captions_distinguish_stability_concepts():
+    from scomnom.reporting import _describe_plot
+
+    assert _describe_plot(Path("clustering_stability_ari.png")) == (
+        "Post-selection subsampling reproducibility (ARI vs full-data partition)."
+    )
+    assert _describe_plot(Path("cluster_selection_stability.png")) == (
+        "Resolution selection metrics, including adjacent-resolution stability."
+    )
+
+
+def test_round_diagnostics_ignore_legacy_penalized_scores(tmp_path, monkeypatch):
+    import scomnom.cluster_and_annotate as ca
+
+    adata = synthetic_adata()
+    legacy_scores = {"0.200": 0.1, "0.500": 0.05}
+    adata.uns["active_cluster_round"] = "r0"
+    adata.uns["cluster_rounds"] = {
+        "r0": {
+            "best_resolution": 0.5,
+            "sweep": {"resolutions": [0.2, 0.5]},
+            "diagnostics": {
+                "tested_resolutions": [0.2, 0.5],
+                "silhouette_centroid": {"0.200": 0.2, "0.500": 0.3},
+                "cluster_counts": {"0.200": 5, "0.500": 8},
+                "penalized_scores": legacy_scores.copy(),
+            },
+        }
+    }
+
+    sweep_plot = Mock(return_value=[])
+    monkeypatch.setattr(ca.plot_utils, "plot_clustering_resolution_sweep", sweep_plot)
+    monkeypatch.setattr(ca.plot_utils, "plot_cluster_umaps", Mock(return_value=[]))
+    monkeypatch.setattr(ca.plot_utils, "plot_clustering_stability_ari", Mock(return_value=[]))
+    monkeypatch.setattr(ca.plot_utils, "persist_plot_artifacts", Mock())
+
+    cfg = ClusterAnnotateConfig(input_path=tmp_path / "legacy.zarr", label_key="leiden")
+    ca._plot_round_clustering_diagnostics(adata, cfg, embedding_key="X_pca", batch_key="batch")
+
+    assert "penalized_scores" not in sweep_plot.call_args.kwargs
+    assert adata.uns["cluster_rounds"]["r0"]["diagnostics"]["penalized_scores"] == legacy_scores
 
 
 def test_run_clustering_uses_current_round_pipeline(tmp_path, monkeypatch):

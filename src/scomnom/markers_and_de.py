@@ -49,8 +49,9 @@ from .composition_utils import (
     run_sccoda_model,
     run_glm_composition,
     run_clr_mannwhitney,
-    run_graph_da,
+    run_milo_da,
     _standardize_composition_results,
+    _annotate_sccoda_contrasts,
     _build_composition_consensus_summary,
     _MIN_GLM_SAMPLES_PER_LEVEL,
     _MIN_GLM_LEVELS,
@@ -6935,7 +6936,10 @@ def run_composition(cfg) -> ad.AnnData:
 
     methods = [str(m).lower() for m in (getattr(cfg, "composition_methods", ()) or ())]
     if not methods:
-        methods = ["sccoda", "glm", "clr", "graph"]
+        methods = ["sccoda", "glm", "clr", "milo"]
+    if "graph" in methods:
+        LOGGER.warning("composition: method='graph' is deprecated; using method='milo'.")
+    methods = list(dict.fromkeys("milo" if method == "graph" else method for method in methods))
     primary_method = methods[0]
     alpha = float(getattr(cfg, "composition_alpha", 0.05))
 
@@ -6960,6 +6964,13 @@ def run_composition(cfg) -> ad.AnnData:
         int(total_cpus),
     )
     _set_blas_threads(1, force=True)
+
+    def _milo_setting(canonical: str, legacy: str, default):
+        legacy_value = getattr(cfg, legacy, None)
+        if legacy_value is not None:
+            LOGGER.warning("composition: config field %s is deprecated; use %s.", legacy, canonical)
+            return legacy_value
+        return getattr(cfg, canonical, default)
 
     def _run_condition(condition_key: str, restrict_mask: Optional[np.ndarray], condition_label: str) -> dict:
         try:
@@ -6989,8 +7000,13 @@ def run_composition(cfg) -> ad.AnnData:
             if reference.lower() == "most_stable":
                 reference = _choose_reference_most_stable(counts, min_mean_prop=min_mean_prop)
 
-            def _run_method(tag: str) -> tuple[pd.DataFrame, Optional[pd.DataFrame]]:
-                graph_meta = None
+            def _run_method(
+                tag: str,
+            ) -> tuple[pd.DataFrame, Optional[pd.DataFrame], pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+                milo_meta = None
+                milo_regions = pd.DataFrame()
+                milo_region_samples = pd.DataFrame()
+                milo_coverage = pd.DataFrame()
                 adata_sub = adata
                 if restrict_mask is not None:
                     adata_sub = adata[restrict_mask].copy()
@@ -7023,29 +7039,54 @@ def run_composition(cfg) -> ad.AnnData:
                     )
                     if not res.empty:
                         res = res.assign(effect=res["log2fc_test_vs_ref"])
-                elif tag == "graph":
-                    res, graph_meta = run_graph_da(
+                elif tag == "milo":
+                    res, milo_meta, milo_regions, milo_region_samples, milo_coverage = run_milo_da(
                         adata_sub,
                         cluster_key=cluster_key,
                         sample_key=str(sample_key),
                         condition_key=str(condition_key),
                         covariates=covariates,
                         embedding_key="X_integrated",
-                        n_seeds=int(getattr(cfg, "composition_graph_n_seeds", 2000)),
-                        k_ref=int(getattr(cfg, "composition_graph_k_ref", 30)),
-                        max_k=int(getattr(cfg, "composition_graph_max_k", 200)),
-                        min_size=int(getattr(cfg, "composition_graph_min_size", 20)),
-                        random_state=int(getattr(cfg, "composition_graph_random_state", 42)),
-                        min_nonzero_samples_per_level=int(
-                            getattr(cfg, "composition_graph_min_nonzero_samples_per_level", 3)
+                        n_seeds=int(_milo_setting("composition_milo_n_seeds", "composition_graph_n_seeds", 2000)),
+                        k_ref=int(_milo_setting("composition_milo_k_ref", "composition_graph_k_ref", 30)),
+                        max_k=int(getattr(cfg, "composition_graph_max_k", None) or 200),
+                        min_size=int(_milo_setting("composition_milo_min_size", "composition_graph_min_size", 20)),
+                        random_state=int(
+                            _milo_setting("composition_milo_random_state", "composition_graph_random_state", 42)
                         ),
-                        n_permutations=int(getattr(cfg, "composition_graph_n_permutations", 0)),
-                        effect_shrink_k=float(getattr(cfg, "composition_graph_effect_shrink_k", 10.0)),
+                        min_nonzero_samples_per_level=int(
+                            _milo_setting(
+                                "composition_milo_min_nonzero_samples_per_level",
+                                "composition_graph_min_nonzero_samples_per_level",
+                                3,
+                            )
+                        ),
+                        alpha=float(alpha),
+                        group_regions=bool(getattr(cfg, "composition_milo_group_regions", True)),
+                        group_min_overlap=int(getattr(cfg, "composition_milo_group_min_overlap", 1)),
+                        group_max_lfc_delta=getattr(cfg, "composition_milo_group_max_lfc_delta", None),
+                        extreme_log2fc=float(getattr(cfg, "composition_milo_extreme_log2fc", 3.0)),
+                        broad_coverage_fraction=float(
+                            getattr(cfg, "composition_milo_broad_coverage_fraction", 0.5)
+                        ),
+                        n_permutations=int(getattr(cfg, "composition_graph_n_permutations", None) or 0),
+                        effect_shrink_k=float(getattr(cfg, "composition_graph_effect_shrink_k", None) or 10.0),
+                        solver=str(
+                            _milo_setting("composition_milo_solver", "composition_graph_solver", "pydeseq2")
+                        ),
                     )
-                    if graph_meta is not None and not graph_meta.empty and isinstance(res, pd.DataFrame) and not res.empty:
+                    if milo_meta is not None and not milo_meta.empty and isinstance(res, pd.DataFrame) and not res.empty:
                         if "cluster" in res.columns:
-                            graph_meta = graph_meta.set_index("neighborhood")
-                            res = res.merge(graph_meta, left_on="cluster", right_index=True, how="left")
+                            milo_meta_indexed = milo_meta.set_index("neighborhood")
+                            metadata_columns = [
+                                column for column in milo_meta_indexed.columns if column not in res.columns
+                            ]
+                            res = res.merge(
+                                milo_meta_indexed.loc[:, metadata_columns],
+                                left_on="cluster",
+                                right_index=True,
+                                how="left",
+                            )
                 else:
                     raise RuntimeError(f"composition: unsupported method={tag!r}")
 
@@ -7054,15 +7095,33 @@ def run_composition(cfg) -> ad.AnnData:
                     backend=tag,
                     condition_key=str(condition_key),
                 )
-                return res, graph_meta
+                if tag == "sccoda" and isinstance(res, pd.DataFrame) and not res.empty:
+                    condition_values = metadata[str(condition_key)]
+                    if isinstance(condition_values.dtype, pd.CategoricalDtype):
+                        observed = set(condition_values.astype(str))
+                        condition_levels = [
+                            str(level)
+                            for level in condition_values.cat.categories
+                            if str(level) in observed
+                        ]
+                    else:
+                        condition_levels = sorted(condition_values.astype(str).unique().tolist())
+                    res = _annotate_sccoda_contrasts(res, condition_levels=condition_levels)
+                return res, milo_meta, milo_regions, milo_region_samples, milo_coverage
 
             results_by_method: dict[str, pd.DataFrame] = {}
-            graph_meta_global: Optional[pd.DataFrame] = None
+            milo_meta_global: Optional[pd.DataFrame] = None
+            milo_regions_global = pd.DataFrame()
+            milo_region_samples_global = pd.DataFrame()
+            milo_coverage_global = pd.DataFrame()
             for method in methods:
-                res_df, meta_df = _run_method(method)
+                res_df, meta_df, region_df, region_sample_df, coverage_df = _run_method(method)
                 results_by_method[method] = res_df
-                if method == "graph" and meta_df is not None and not meta_df.empty:
-                    graph_meta_global = meta_df
+                if method == "milo" and meta_df is not None and not meta_df.empty:
+                    milo_meta_global = meta_df
+                    milo_regions_global = region_df
+                    milo_region_samples_global = region_sample_df
+                    milo_coverage_global = coverage_df
 
             consensus = _build_composition_consensus_summary(
                 results_by_method,
@@ -7077,7 +7136,10 @@ def run_composition(cfg) -> ad.AnnData:
                 "metadata": metadata,
                 "results_by_method": results_by_method,
                 "consensus": consensus,
-                "graph_meta_global": graph_meta_global,
+                "milo_meta_global": milo_meta_global,
+                "milo_regions": milo_regions_global,
+                "milo_region_samples": milo_region_samples_global,
+                "milo_coverage": milo_coverage_global,
                 "reference": reference,
             }
         except Exception as e:
@@ -7102,8 +7164,12 @@ def run_composition(cfg) -> ad.AnnData:
         counts = payload["counts"]
         metadata = payload["metadata"]
         results_by_method = payload["results_by_method"]
+        milo_results = results_by_method.get("milo", results_by_method.get("graph", pd.DataFrame()))
         consensus = payload["consensus"]
-        graph_meta_global = payload.get("graph_meta_global")
+        milo_meta_global = payload.get("milo_meta_global", payload.get("graph_meta_global"))
+        milo_regions = payload.get("milo_regions", pd.DataFrame())
+        milo_region_samples = payload.get("milo_region_samples", pd.DataFrame())
+        milo_coverage = payload.get("milo_coverage", pd.DataFrame())
         reference = str(payload["reference"])
 
         adata.uns.setdefault("markers_and_de", {})
@@ -7128,7 +7194,10 @@ def run_composition(cfg) -> ad.AnnData:
             "n_clusters": int(counts.shape[1]),
             "results_by_method": results_by_method,
             "consensus": consensus,
-            "graph_meta_global": graph_meta_global,
+            "milo_meta_global": milo_meta_global,
+            "milo_regions": milo_regions,
+            "milo_region_samples": milo_region_samples,
+            "milo_coverage": milo_coverage,
             "counts": counts,
             "metadata": metadata,
         }
@@ -7142,10 +7211,11 @@ def run_composition(cfg) -> ad.AnnData:
             if df is None or getattr(df, "empty", False):
                 return df
             df2 = df.copy()
-            if "cluster" in df2.columns:
-                df2["cluster"] = df2["cluster"].astype(str).map(
-                    lambda x: io_utils._cnn_label_for_group(x, None)
-                )
+            for label_column in ("cluster", "cluster_label", "region_cluster_label"):
+                if label_column in df2.columns:
+                    df2[label_column] = df2[label_column].astype(str).map(
+                        lambda x: io_utils._cnn_label_for_group(x, None)
+                    )
             if df2.index.name == "cluster":
                 df2.index = pd.Index(
                     [io_utils._cnn_label_for_group(str(x), None) for x in df2.index],
@@ -7153,11 +7223,11 @@ def run_composition(cfg) -> ad.AnnData:
                 )
             return df2
 
-        def _build_graphda_diagnostics_df() -> pd.DataFrame:
-            gdf = results_by_method.get("graph", pd.DataFrame())
-            if gdf is None or gdf.empty:
+        def _build_milo_diagnostics_df() -> pd.DataFrame:
+            mdf = milo_results
+            if mdf is None or mdf.empty:
                 return pd.DataFrame()
-            d = gdf.copy()
+            d = mdf.copy()
             cluster_col = "cluster_label" if "cluster_label" in d.columns else "cluster"
             if cluster_col not in d.columns:
                 return pd.DataFrame()
@@ -7183,8 +7253,8 @@ def run_composition(cfg) -> ad.AnnData:
                 .rename(columns={cluster_col: "cluster"})
             )
 
-            if graph_meta_global is not None and not graph_meta_global.empty:
-                m = graph_meta_global.copy()
+            if milo_meta_global is not None and not milo_meta_global.empty:
+                m = milo_meta_global.copy()
                 if "cluster_label" in m.columns:
                     m["cluster"] = m["cluster_label"].astype(str)
                 elif "cluster" in m.columns:
@@ -7230,7 +7300,7 @@ def run_composition(cfg) -> ad.AnnData:
                 min_fdr = pd.to_numeric(pd.Series([row.get("min_fdr", np.nan)]), errors="coerce").iloc[0]
                 med_effect = float(row.get("median_abs_effect", 0.0) or 0.0)
                 if n_total == 0:
-                    return "no_graph_neighborhoods"
+                    return "no_milo_neighborhoods"
                 if frac_tested < 0.25:
                     return "increase_neighborhood_size_or_reduce_min_nonzero_support"
                 if n_sig == 0 and np.isfinite(min_p) and min_p <= float(alpha) and (
@@ -7243,22 +7313,41 @@ def run_composition(cfg) -> ad.AnnData:
                     return "large_effect_without_significance_check_sample_support_or_broader_scale"
                 if n_sig > 0:
                     return "ok_significant_neighborhoods_detected"
-                return "ok_no_strong_graphda_signal"
+                return "ok_no_strong_milo_signal"
 
-            agg["graphda_recommendation"] = agg.apply(_recommend, axis=1)
+            agg["milo_recommendation"] = agg.apply(_recommend, axis=1)
 
             return agg.sort_values("cluster").reset_index(drop=True)
 
-        graph_diag_df = _build_graphda_diagnostics_df()
-        if not graph_diag_df.empty and "graphda_recommendation" in graph_diag_df.columns:
-            flagged = graph_diag_df[
-                ~graph_diag_df["graphda_recommendation"].astype(str).str.startswith("ok_")
+        milo_diag_df = _build_milo_diagnostics_df()
+        if not milo_diag_df.empty and "milo_recommendation" in milo_diag_df.columns:
+            flagged = milo_diag_df[
+                ~milo_diag_df["milo_recommendation"].astype(str).str.startswith("ok_")
             ]
             if not flagged.empty:
                 LOGGER.warning(
-                    "composition: GraphDA diagnostics suggest tuning for %d cluster(s): %s",
+                    "composition: Milo diagnostics suggest tuning for %d cluster(s): %s",
                     int(flagged.shape[0]),
-                    flagged[["cluster", "graphda_recommendation"]].to_dict(orient="records"),
+                    flagged[["cluster", "milo_recommendation"]].to_dict(orient="records"),
+                )
+        if isinstance(milo_coverage, pd.DataFrame) and not milo_coverage.empty:
+            coverage_flagged = milo_coverage[
+                pd.array(
+                    milo_coverage.get(
+                        "coverage_requires_review",
+                        pd.Series(False, index=milo_coverage.index),
+                    ),
+                    dtype="boolean",
+                )
+                .fillna(False)
+                .to_numpy(dtype=bool)
+            ]
+            if not coverage_flagged.empty:
+                LOGGER.warning(
+                    "composition: Milo significant regions have broad unique-cell coverage: %s",
+                    coverage_flagged[
+                        ["pair", "fraction_unique_significant_cells", "coverage_review_reason"]
+                    ].to_dict(orient="records"),
                 )
 
         if write_tables:
@@ -7269,38 +7358,50 @@ def run_composition(cfg) -> ad.AnnData:
             if isinstance(consensus, pd.DataFrame) and not consensus.empty:
                 consensus_out = _cnnize_df(consensus)
                 consensus_out.to_csv(results_dir / "composition_consensus.tsv", sep="	", index=False)
-            if graph_meta_global is not None and not graph_meta_global.empty:
-                graph_out = _cnnize_df(graph_meta_global)
-                graph_out.to_csv(results_dir / "composition_graph_neighborhoods.tsv", sep="\t", index=False)
-            if not graph_diag_df.empty:
-                graph_diag_out = _cnnize_df(graph_diag_df)
-                graph_diag_out.to_csv(results_dir / "graphda_diagnostics.tsv", sep="\t", index=False)
+            if milo_meta_global is not None and not milo_meta_global.empty:
+                milo_out = _cnnize_df(milo_meta_global)
+                milo_out.to_csv(results_dir / "composition_milo_neighborhoods.tsv", sep="\t", index=False)
+            if isinstance(milo_regions, pd.DataFrame) and not milo_regions.empty:
+                _cnnize_df(milo_regions).to_csv(
+                    results_dir / "composition_milo_regions.tsv", sep="\t", index=False
+                )
+            if isinstance(milo_region_samples, pd.DataFrame) and not milo_region_samples.empty:
+                milo_region_samples.to_csv(
+                    results_dir / "composition_milo_region_sample_counts.tsv", sep="\t", index=False
+                )
+            if isinstance(milo_coverage, pd.DataFrame) and not milo_coverage.empty:
+                milo_coverage.to_csv(results_dir / "milo_coverage.tsv", sep="\t", index=False)
+            if not milo_diag_df.empty:
+                milo_diag_out = _cnnize_df(milo_diag_df)
+                milo_diag_out.to_csv(results_dir / "milo_diagnostics.tsv", sep="\t", index=False)
 
         if write_figures and bool(getattr(cfg, "make_figures", True)):
-            if graph_meta_global is not None and not graph_meta_global.empty:
+            if milo_meta_global is not None and not milo_meta_global.empty:
                 try:
                     artifacts = []
                     artifacts.extend(
-                        plot_utils.plot_graphda_summaries(
-                            results_by_method.get("graph", pd.DataFrame()),
-                            graph_meta_global,
+                        plot_utils.plot_milo_summaries(
+                            milo_results,
+                            milo_meta_global,
                             fig_subdir,
                             alpha=alpha,
                             all_clusters=counts.columns.astype(str).tolist(),
                         )
                     )
-                    if not graph_diag_df.empty:
+                    if isinstance(milo_regions, pd.DataFrame) and not milo_regions.empty:
+                        artifacts.extend(plot_utils.plot_milo_regions(milo_regions, fig_subdir))
+                    if not milo_diag_df.empty:
                         artifacts.extend(
-                            plot_utils.plot_graphda_diagnostics(
-                                results_by_method.get("graph", pd.DataFrame()),
-                                graph_diag_df,
+                            plot_utils.plot_milo_diagnostics(
+                                milo_results,
+                                milo_diag_df,
                                 fig_subdir,
                                 alpha=alpha,
                             )
                         )
                     plot_utils.persist_plot_artifacts(artifacts)
                 except Exception:
-                    LOGGER.exception("composition: failed to plot GraphDA summary")
+                    LOGGER.exception("composition: failed to plot Milo summary")
 
         if write_figures and bool(getattr(cfg, "make_figures", True)):
             for method in methods:
@@ -7343,15 +7444,21 @@ def run_composition(cfg) -> ad.AnnData:
                     f"covariates={list(covariates)}",
                     f"alpha={alpha}",
                     f"min_mean_prop={min_mean_prop}",
-                    f"graph_n_seeds={getattr(cfg, 'composition_graph_n_seeds', None)}",
-                    f"graph_k_ref={getattr(cfg, 'composition_graph_k_ref', None)}",
-                    f"graph_max_k={getattr(cfg, 'composition_graph_max_k', None)}",
-                    f"graph_min_size={getattr(cfg, 'composition_graph_min_size', None)}",
-                    f"graph_scale={getattr(cfg, 'composition_graph_scale', None)}",
-                    f"graph_random_state={getattr(cfg, 'composition_graph_random_state', None)}",
-                    f"graph_min_nonzero_samples_per_level={getattr(cfg, 'composition_graph_min_nonzero_samples_per_level', None)}",
-                    f"graph_n_permutations_deprecated={getattr(cfg, 'composition_graph_n_permutations', None)}",
-                    f"graph_effect_shrink_k={getattr(cfg, 'composition_graph_effect_shrink_k', None)}",
+                    f"milo_n_seeds={_milo_setting('composition_milo_n_seeds', 'composition_graph_n_seeds', 2000)}",
+                    f"milo_k_ref={_milo_setting('composition_milo_k_ref', 'composition_graph_k_ref', 30)}",
+                    f"milo_min_size={_milo_setting('composition_milo_min_size', 'composition_graph_min_size', 20)}",
+                    f"milo_scale={_milo_setting('composition_milo_scale', 'composition_graph_scale', 'custom')}",
+                    f"milo_random_state={_milo_setting('composition_milo_random_state', 'composition_graph_random_state', 42)}",
+                    f"milo_min_nonzero_samples_per_level={_milo_setting('composition_milo_min_nonzero_samples_per_level', 'composition_graph_min_nonzero_samples_per_level', 3)}",
+                    f"milo_solver={_milo_setting('composition_milo_solver', 'composition_graph_solver', 'pydeseq2')}",
+                    f"milo_group_regions={getattr(cfg, 'composition_milo_group_regions', True)}",
+                    f"milo_group_min_overlap={getattr(cfg, 'composition_milo_group_min_overlap', 1)}",
+                    f"milo_group_max_lfc_delta={getattr(cfg, 'composition_milo_group_max_lfc_delta', None)}",
+                    f"milo_extreme_log2fc={getattr(cfg, 'composition_milo_extreme_log2fc', 3.0)}",
+                    f"milo_broad_coverage_fraction={getattr(cfg, 'composition_milo_broad_coverage_fraction', 0.5)}",
+                    f"legacy_graph_max_k_ignored={getattr(cfg, 'composition_graph_max_k', None)}",
+                    f"legacy_graph_n_permutations_ignored={getattr(cfg, 'composition_graph_n_permutations', None)}",
+                    f"legacy_graph_effect_shrink_k_ignored={getattr(cfg, 'composition_graph_effect_shrink_k', None)}",
                     f"glm_min_samples_per_level={_MIN_GLM_SAMPLES_PER_LEVEL}",
                     f"glm_min_levels={_MIN_GLM_LEVELS}",
                 ],
@@ -7558,7 +7665,10 @@ def run_composition(cfg) -> ad.AnnData:
             "metadata": payload.get("metadata"),
             "results_by_method": payload.get("results_by_method", {}),
             "consensus": payload.get("consensus"),
-            "graph_meta_global": payload.get("graph_meta_global"),
+            "milo_meta_global": payload.get("milo_meta_global", payload.get("graph_meta_global")),
+            "milo_regions": payload.get("milo_regions", pd.DataFrame()),
+            "milo_region_samples": payload.get("milo_region_samples", pd.DataFrame()),
+            "milo_coverage": payload.get("milo_coverage", pd.DataFrame()),
             "reference": payload.get("reference", ""),
         }
 

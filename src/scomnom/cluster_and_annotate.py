@@ -93,26 +93,18 @@ def _plot_round_clustering_diagnostics(
 
     sil_dict = diag.get("silhouette_centroid", {}) or {}
     n_dict = diag.get("cluster_counts", {}) or {}
-    stab_dict = diag.get("resolution_stability", {}) or {}
+    adjacent_stability = diag.get("resolution_stability", {}) or {}
     comp_dict = diag.get("composite_scores", {}) or {}
     tiny_dict = diag.get("tiny_cluster_penalty", {}) or {}
 
     sil_arr = _extract_series(res_sorted, sil_dict)
     n_arr = _extract_series(res_sorted, n_dict)
 
-    pen_dict = diag.get("penalized_scores", None)
-    if isinstance(pen_dict, dict) and pen_dict:
-        pen_arr = _extract_series(res_sorted, pen_dict)
-    else:
-        alpha = float(getattr(cfg, "penalty_alpha", 0.0))
-        pen_arr = np.array([float(s) - alpha * float(n) for s, n in zip(sil_arr, n_arr)], dtype=float)
-
     artifacts = []
     artifacts.extend(plot_utils.plot_clustering_resolution_sweep(
             resolutions=np.array(res_sorted, dtype=float),
             silhouette_scores=[float(x) for x in sil_arr],
             n_clusters=[int(round(x)) if np.isfinite(x) else 0 for x in n_arr],
-            penalized_scores=[float(x) for x in pen_arr],
             figdir=figdir_cluster,
         ))
 
@@ -138,14 +130,14 @@ def _plot_round_clustering_diagnostics(
         figdir=figdir_cluster,
     ))
 
-    stability = rinfo.get("stability", {}) if isinstance(rinfo.get("stability", {}), dict) else {}
-    stability_aris = stability.get("subsampling_ari", []) or []
+    reproducibility = rinfo.get("stability", {}) if isinstance(rinfo.get("stability", {}), dict) else {}
+    reproducibility_aris = reproducibility.get("subsampling_ari", []) or []
     artifacts.extend(plot_utils.plot_clustering_stability_ari(
-        stability_aris=[float(x) for x in stability_aris],
+        stability_aris=[float(x) for x in reproducibility_aris],
         figdir=figdir_cluster,
     ))
 
-    if best_res is not None and res_sorted and stab_dict and comp_dict and tiny_dict:
+    if best_res is not None and res_sorted and adjacent_stability and comp_dict and tiny_dict:
         plateaus = sweep.get("plateaus", None)
         if isinstance(plateaus, str):
             try:
@@ -156,7 +148,7 @@ def _plot_round_clustering_diagnostics(
         artifacts.extend(plot_utils.plot_stability_curves(
             resolutions=res_sorted,
             silhouette=sil_dict,
-            stability=stab_dict,
+            stability=adjacent_stability,
             composite=comp_dict,
             tiny_cluster_penalty=tiny_dict,
             best_resolution=float(best_res),

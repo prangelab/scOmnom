@@ -9,7 +9,7 @@ The pipeline combines established single-cell packages with scOmnom-specific wor
 * round-aware clustering, annotation, enrichment, renaming, subsetting, and merge operations
 * CellBender-aware count layer conventions
 * robust marker discovery, within-cluster DE, cell-cell communication, enrichment, and differential abundance
-* GraphDA, a graph-local differential abundance implementation using neighborhood counts and spatial weighted FDR
+* Milo differential abundance with sample-support guards, grouped local regions, coverage diagnostics, and cross-scale composition summaries
 
 For the workflow manual, see [prangelab.org/scOmnom](https://prangelab.org/scOmnom/). For the public Python API, see [API_REFERENCE.md](API_REFERENCE.md).
 

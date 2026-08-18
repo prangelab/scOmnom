@@ -895,6 +895,7 @@ class ResolutionMetrics:
     cluster_sizes: Dict[float, np.ndarray]
     labels_per_resolution: Dict[float, np.ndarray]
     ari_adjacent: Optional[Dict[Tuple[float, float], float]] = None
+    # Archive-only carrier for legacy benchmark reconstruction; the selector ignores it.
     penalized: Optional[Dict[float, float]] = None
     bio_homogeneity: Optional[Dict[float, float]] = None
     bio_fragmentation: Optional[Dict[float, float]] = None
@@ -916,6 +917,21 @@ class ResolutionSelectionConfig:
     w_frag: float = 0.0
     w_bioari: float = 0.0
     use_bio: bool = False
+
+
+_BISC_MIN_FEASIBLE_STABILITY = 0.60
+_BISC_PARSIMONY_TOLERANCE = 0.03
+_BISC_MAX_CLUSTERS_PER_BIOLOGICAL_LABEL = 2.5
+_BISC_ABSOLUTE_MINIMUM_CLUSTER_SIZE = 5
+
+
+def _bisc_fixed_rule_snapshot() -> Dict[str, float | int]:
+    return {
+        "minimum_feasible_stability": _BISC_MIN_FEASIBLE_STABILITY,
+        "parsimony_tolerance": _BISC_PARSIMONY_TOLERANCE,
+        "max_clusters_per_biological_label": _BISC_MAX_CLUSTERS_PER_BIOLOGICAL_LABEL,
+        "absolute_minimum_cluster_size": _BISC_ABSOLUTE_MINIMUM_CLUSTER_SIZE,
+    }
 
 
 @dataclass
@@ -992,7 +1008,7 @@ def _detect_plateaus(
         sizes = metrics.cluster_sizes[r]
         median_size = float(np.median(sizes)) if sizes.size > 0 else 0.0
         size_ok = median_size >= config.min_cluster_size
-        min_ok = (sizes.size == 0) or (sizes.min() >= 5)
+        min_ok = (sizes.size == 0) or (sizes.min() >= _BISC_ABSOLUTE_MINIMUM_CLUSTER_SIZE)
 
         if stab_ok and jump_ok and size_ok and min_ok:
             current_segment.append(r)
@@ -1088,17 +1104,25 @@ def select_best_resolution(
 
     sorted_res = sorted(float(r) for r in metrics.resolutions)
     interior = sorted_res[1:-1]
+    if not interior:
+        raise ValueError(
+            "BISC resolution selection requires at least one interior candidate; "
+            "provide at least three tested resolutions."
+        )
 
-    min_stab_ok = 0.60
-    feasible = [r for r in interior if stability.get(r, 0.0) >= min_stab_ok]
+    feasible = [
+        r
+        for r in interior
+        if stability.get(r, 0.0) >= _BISC_MIN_FEASIBLE_STABILITY
+    ]
 
     if use_bio and metrics.n_bio_labels:
-        max_clusters = 2.5 * metrics.n_bio_labels
+        max_clusters = _BISC_MAX_CLUSTERS_PER_BIOLOGICAL_LABEL * metrics.n_bio_labels
         feasible = [r for r in feasible if metrics.cluster_counts.get(r, 0) <= max_clusters]
 
     SearchSet = feasible if feasible else interior
 
-    def pick_parsimonious(cands, eps=0.03):
+    def pick_parsimonious(cands, eps=_BISC_PARSIMONY_TOLERANCE):
         if not cands:
             return None
         best = max(cands, key=lambda r: all_scores.get(r, -np.inf))
@@ -1107,21 +1131,23 @@ def select_best_resolution(
         return min(near) if near else best
 
     plateaus = _detect_plateaus(metrics, config, stability)
-    if plateaus:
-        best_plateau = max(plateaus, key=lambda p: (p.mean_stability, len(p.resolutions)))
-        plateau_res = [float(r) for r in best_plateau.resolutions]
-        plateau_res = [r for r in plateau_res if r in SearchSet]
+    search_set = set(SearchSet)
+    feasible_plateaus = [
+        (
+            plateau,
+            [float(r) for r in plateau.resolutions if float(r) in search_set],
+        )
+        for plateau in plateaus
+    ]
+    feasible_plateaus = [item for item in feasible_plateaus if item[1]]
 
-        bio_plateau = None
-        if use_bio and plateau_res:
-            bioari_vals = [bioari_norm.get(r, np.nan) for r in plateau_res]
-            if np.isfinite(bioari_vals).all():
-                spread = max(bioari_vals) - min(bioari_vals)
-                if spread < 0.05:
-                    bio_plateau = plateau_res
+    if feasible_plateaus:
+        _, plateau_res = max(
+            feasible_plateaus,
+            key=lambda item: (item[0].mean_stability, len(item[0].resolutions)),
+        )
 
-        cands = bio_plateau if bio_plateau else plateau_res
-        best = pick_parsimonious(cands)
+        best = pick_parsimonious(plateau_res)
         return ResolutionSelectionResult(
             best_resolution=float(best),
             scores=all_scores,
@@ -1160,7 +1186,7 @@ def select_best_resolution(
 
 
 # -------------------------------------------------------------------------
-# Resolution sweep and stability
+# Resolution sweep and adjacent-resolution stability
 # -------------------------------------------------------------------------
 def _resolution_sweep(
     adata: ad.AnnData,
@@ -1175,7 +1201,6 @@ def _resolution_sweep(
     clusterings_float: Dict[float, np.ndarray] = {}
     silhouette_scores: List[float] = []
     n_clusters_list: List[int] = []
-    penalized_scores: List[float] = []
     cluster_sizes: Dict[float, np.ndarray] = {}
 
     bio_hom: Dict[float, float] = {}
@@ -1227,19 +1252,15 @@ def _resolution_sweep(
         cluster_sizes[res_f] = sizes
 
         sil = _centroid_silhouette(X, labels)
-        pen = sil - cfg.penalty_alpha * n_clusters
-
         silhouette_scores.append(sil)
-        penalized_scores.append(pen)
 
         # -----------------------------
         # One-line quantitative summary
         # -----------------------------
         LOGGER.info(
-            "  → %d clusters | silhouette=%.3f | penalized=%.3f | min/med/max size=%d/%d/%d",
+            "  → %d clusters | centroid separation=%.3f | min/med/max size=%d/%d/%d",
             n_clusters,
             sil,
-            pen,
             int(sizes.min()),
             int(np.median(sizes)),
             int(sizes.max()),
@@ -1272,7 +1293,6 @@ def _resolution_sweep(
     metrics = ResolutionMetrics(
         resolutions=res_list,
         silhouette={r: s for r, s in zip(res_list, silhouette_scores)},
-        penalized={r: p for r, p in zip(res_list, penalized_scores)},
         cluster_counts={r: n for r, n in zip(res_list, n_clusters_list)},
         cluster_sizes=cluster_sizes,
         labels_per_resolution=clusterings_float,
@@ -1306,13 +1326,13 @@ def _resolution_sweep(
         "resolutions": np.array(res_list, dtype=float),
         "silhouette_scores": silhouette_scores,
         "n_clusters": n_clusters_list,
-        "penalized_scores": penalized_scores,
         "composite_scores": [selection.scores[r] for r in res_list],
         "stability_scores": [selection.stability[r] for r in res_list],
         "tiny_cluster_penalty": [selection.tiny_cluster_penalty[r] for r in res_list],
         "cluster_sizes": cluster_sizes,
         "plateaus": [{"resolutions": p.resolutions, "mean_stability": p.mean_stability} for p in selection.plateaus],
         "selection_config": asdict(sel_cfg),
+        "selection_rules": _bisc_fixed_rule_snapshot(),
     }
 
     if selection.bio_homogeneity is not None:
@@ -1336,7 +1356,11 @@ def _subsampling_stability(
     best_res: float,
 ) -> List[float]:
     ref_key = f"{cfg.label_key}_stab_ref"
-    LOGGER.info("Computing reference clustering for stability at resolution %.3f", best_res)
+    LOGGER.info(
+        "Computing reference clustering for post-selection subsampling reproducibility "
+        "at resolution %.3f",
+        best_res,
+    )
     sc.tl.leiden(
         adata,
         resolution=float(best_res),
@@ -1527,9 +1551,9 @@ def run_BISC(
             "resolutions": [float(r) for r in sweep.get("resolutions", [])],
             "silhouette_scores": [float(x) for x in sweep.get("silhouette_scores", [])],
             "n_clusters": [int(x) for x in sweep.get("n_clusters", [])],
-            "penalized_scores": [float(x) for x in sweep.get("penalized_scores", [])],
             "plateaus": sweep.get("plateaus", None),
             "selection_config": sweep.get("selection_config", {}),
+            "selection_rules": sweep.get("selection_rules", {}),
             "bio_mask_stats": sweep.get("bio_mask_stats", None),
             "bio_homogeneity": sweep.get("bio_homogeneity", None),
             "bio_fragmentation": sweep.get("bio_fragmentation", None),
@@ -1565,13 +1589,11 @@ def run_BISC(
     res_list = [float(r) for r in rinfo.get("sweep", {}).get("resolutions", [])]
     sil_list = rinfo.get("sweep", {}).get("silhouette_scores", []) or []
     n_list = rinfo.get("sweep", {}).get("n_clusters", []) or []
-    pen_list = rinfo.get("sweep", {}).get("penalized_scores", []) or []
 
     rinfo.setdefault("diagnostics", {})
     rinfo["diagnostics"]["tested_resolutions"] = res_list
     rinfo["diagnostics"]["silhouette_centroid"] = {_res_key(r): float(s) for r, s in zip(res_list, sil_list)}
     rinfo["diagnostics"]["cluster_counts"] = {_res_key(r): int(n) for r, n in zip(res_list, n_list)}
-    rinfo["diagnostics"]["penalized_scores"] = {_res_key(r): float(p) for r, p in zip(res_list, pen_list)}
 
     comp_list = sweep.get("composite_scores", None)
     stab_list = sweep.get("stability_scores", None)

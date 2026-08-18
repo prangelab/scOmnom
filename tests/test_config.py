@@ -248,3 +248,18 @@ def test_clusterannotate_defaults(tmp_path):
     assert cfg.w_tiny == 0.15
     assert cfg.bio_guided_clustering is True
     assert cfg.force_celltypist_recompute is False
+    assert not hasattr(cfg, "penalty_alpha")
+
+
+def test_clusterannotate_requires_three_resolution_points(tmp_path):
+    with pytest.raises(ValueError):
+        ClusterAnnotateConfig(
+            input_path=tmp_path / "a.h5ad",
+            n_resolutions=2,
+        )
+
+    cfg = ClusterAnnotateConfig(
+        input_path=tmp_path / "a.h5ad",
+        n_resolutions=3,
+    )
+    assert cfg.n_resolutions == 3

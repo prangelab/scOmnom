@@ -38,12 +38,13 @@ from .logging_utils import init_logging
 
 ALLOWED_METHODS = {"scVI", "scANVI", "Harmony", "Scanorama", "BBKNN"}
 ALLOWED_DECOUPLER_METHODS = {"ulm", "mlm", "wsum", "aucell"}
-ALLOWED_COMP_METHODS = {"sccoda", "glm", "clr", "graph"}
-GRAPH_SCALE_PRESETS = {
+ALLOWED_COMP_METHODS = {"sccoda", "glm", "clr", "milo", "graph"}
+ALLOWED_MILO_SOLVERS = {"pydeseq2", "edger"}
+MILO_SCALE_PRESETS = {
     "custom": None,
-    "local": {"graph_n_seeds": 2000, "graph_k_ref": 30, "graph_max_k": 200, "graph_min_size": 20},
-    "balanced": {"graph_n_seeds": 1000, "graph_k_ref": 75, "graph_max_k": 300, "graph_min_size": 50},
-    "broad": {"graph_n_seeds": 300, "graph_k_ref": 150, "graph_max_k": 500, "graph_min_size": 100},
+    "local": {"milo_n_seeds": 2000, "milo_k_ref": 30, "milo_min_size": 20},
+    "balanced": {"milo_n_seeds": 1000, "milo_k_ref": 75, "milo_min_size": 50},
+    "broad": {"milo_n_seeds": 300, "milo_k_ref": 150, "milo_min_size": 100},
 }
 ALLOWED_LIANA_METHODS = {"rank_aggregate", "cellphonedb", "connectome", "natmi", "sca", "logfc"}
 app = typer.Typer(help="scOmnom CLI — high-throughput scRNA-seq preprocessing and analysis pipeline.")
@@ -1248,7 +1249,11 @@ def adata_ops_metadata_import(
 # ======================================================================
 @app.command(
     "cluster-and-annotate",
-    help="Clustering (resolution sweep + stability) and optional CellTypist + decoupler annotation (MSigDB/DoRothEA/PROGENy).",
+    help=(
+        "Clustering (resolution sweep + adjacent-resolution stability + post-selection "
+        "subsampling reproducibility) and optional CellTypist + decoupler annotation "
+        "(MSigDB/DoRothEA/PROGENy)."
+    ),
 )
 def cluster_and_annotate(
     # -----------------------------
@@ -1336,20 +1341,35 @@ def cluster_and_annotate(
     res_min: float = typer.Option(0.1, "--res-min"),
     res_max: float = typer.Option(2.5, "--res-max"),
     n_resolutions: int = typer.Option(25, "--n-resolutions"),
-    penalty_alpha: float = typer.Option(0.02, "--penalty-alpha"),
 
     # -----------------------------
-    # Stability / selection
+    # Adjacent-resolution stability / post-selection reproducibility
     # -----------------------------
-    stability_repeats: int = typer.Option(5, "--stability-repeats"),
-    subsample_frac: float = typer.Option(0.8, "--subsample-frac"),
+    stability_repeats: int = typer.Option(
+        5,
+        "--stability-repeats",
+        help="[Post-selection reproducibility] Number of subsampling repeats after resolution selection.",
+    ),
+    subsample_frac: float = typer.Option(
+        0.8,
+        "--subsample-frac",
+        help="[Post-selection reproducibility] Fraction of cells retained per repeat.",
+    ),
     random_state: int = typer.Option(42, "--random-state"),
     tiny_cluster_size: int = typer.Option(20, "--tiny-cluster-size"),
     min_cluster_size: int = typer.Option(20, "--min-cluster-size"),
     min_plateau_len: int = typer.Option(3, "--min-plateau-len"),
     max_cluster_jump_frac: float = typer.Option(0.4, "--max-cluster-jump-frac"),
-    stability_threshold: float = typer.Option(0.85, "--stability-threshold"),
-    w_stab: float = typer.Option(0.50, "--w-stab"),
+    stability_threshold: float = typer.Option(
+        0.85,
+        "--stability-threshold",
+        help="[Adjacent-resolution stability] Minimum smoothed ARI for structural plateau membership.",
+    ),
+    w_stab: float = typer.Option(
+        0.50,
+        "--w-stab",
+        help="[Adjacent-resolution stability] Weight in the BISC composite score.",
+    ),
     w_sil: float = typer.Option(0.35, "--w-sil"),
     w_tiny: float = typer.Option(0.15, "--w-tiny"),
 
@@ -1655,7 +1675,6 @@ def cluster_and_annotate(
         res_min=res_min,
         res_max=res_max,
         n_resolutions=n_resolutions,
-        penalty_alpha=penalty_alpha,
 
         stability_repeats=stability_repeats,
         subsample_frac=subsample_frac,
@@ -2018,15 +2037,21 @@ def _build_cfg_composition(
     min_mean_prop: float,
     min_cells_per_sample_cluster: int,
     alpha: float,
-    graph_n_seeds: int,
-    graph_k_ref: int,
-    graph_max_k: int,
-    graph_min_size: int,
-    graph_scale: str,
-    graph_random_state: int,
-    graph_min_nonzero_samples_per_level: int,
-    graph_n_permutations: int,
-    graph_effect_shrink_k: float,
+    milo_n_seeds: int,
+    milo_k_ref: int,
+    milo_min_size: int,
+    milo_scale: str,
+    milo_random_state: int,
+    milo_min_nonzero_samples_per_level: int,
+    milo_solver: str,
+    milo_group_regions: bool,
+    milo_group_min_overlap: int,
+    milo_group_max_lfc_delta: Optional[float],
+    milo_extreme_log2fc: float,
+    milo_broad_coverage_fraction: float,
+    legacy_graph_max_k: int,
+    legacy_graph_n_permutations: int,
+    legacy_graph_effect_shrink_k: float,
 ) -> MarkersAndDEConfig:
     out_dir = output_dir or _default_results_dir_for_input(input_path)
     log_dir = out_dir / "logs"
@@ -2036,23 +2061,39 @@ def _build_cfg_composition(
 
     covars = tuple(_parse_csv_repeat(covariates) or ())
     cond_keys = tuple(_parse_csv_repeat(condition_keys) or ())
-    methods_list = _parse_csv_repeat(methods) or ["sccoda", "glm", "clr", "graph"]
+    methods_list = _parse_csv_repeat(methods) or ["sccoda", "glm", "clr", "milo"]
     bad = [m for m in methods_list if m not in ALLOWED_COMP_METHODS]
     if bad:
         raise typer.BadParameter(
             f"Invalid --method value(s): {bad}. Allowed: {sorted(ALLOWED_COMP_METHODS)}"
         )
-    graph_scale = str(graph_scale).strip().lower()
-    if graph_scale not in GRAPH_SCALE_PRESETS:
+    if "graph" in methods_list:
+        logging.getLogger(__name__).warning("--method graph is deprecated; using --method milo.")
+    methods_list = list(dict.fromkeys("milo" if method == "graph" else method for method in methods_list))
+
+    milo_scale = str(milo_scale).strip().lower()
+    if milo_scale not in MILO_SCALE_PRESETS:
         raise typer.BadParameter(
-            f"Invalid --graph-scale value={graph_scale!r}. Allowed: {sorted(GRAPH_SCALE_PRESETS)}"
+            f"Invalid --milo-scale value={milo_scale!r}. Allowed: {sorted(MILO_SCALE_PRESETS)}"
         )
-    preset = GRAPH_SCALE_PRESETS[graph_scale]
+    preset = MILO_SCALE_PRESETS[milo_scale]
     if preset is not None:
-        graph_n_seeds = int(preset["graph_n_seeds"])
-        graph_k_ref = int(preset["graph_k_ref"])
-        graph_max_k = int(preset["graph_max_k"])
-        graph_min_size = int(preset["graph_min_size"])
+        milo_n_seeds = int(preset["milo_n_seeds"])
+        milo_k_ref = int(preset["milo_k_ref"])
+        milo_min_size = int(preset["milo_min_size"])
+    milo_solver = str(milo_solver).strip().lower()
+    if milo_solver not in ALLOWED_MILO_SOLVERS:
+        raise typer.BadParameter(
+            f"Invalid --milo-solver value={milo_solver!r}. Allowed: {sorted(ALLOWED_MILO_SOLVERS)}"
+        )
+    if int(milo_group_min_overlap) < 1:
+        raise typer.BadParameter("--milo-group-min-overlap must be at least 1.")
+    if milo_group_max_lfc_delta is not None and float(milo_group_max_lfc_delta) < 0:
+        raise typer.BadParameter("--milo-group-max-lfc-delta must be non-negative.")
+    if float(milo_extreme_log2fc) <= 0:
+        raise typer.BadParameter("--milo-extreme-log2fc must be positive.")
+    if not 0 < float(milo_broad_coverage_fraction) <= 1:
+        raise typer.BadParameter("--milo-broad-coverage-fraction must be in (0, 1].")
 
     return MarkersAndDEConfig(
         input_path=input_path,
@@ -2080,15 +2121,23 @@ def _build_cfg_composition(
         composition_min_cells_per_sample_cluster=int(min_cells_per_sample_cluster),
         composition_alpha=float(alpha),
         composition_covariates=covars,
-        composition_graph_n_seeds=int(graph_n_seeds),
-        composition_graph_k_ref=int(graph_k_ref),
-        composition_graph_max_k=int(graph_max_k),
-        composition_graph_min_size=int(graph_min_size),
-        composition_graph_scale=str(graph_scale),
-        composition_graph_random_state=int(graph_random_state),
-        composition_graph_min_nonzero_samples_per_level=int(graph_min_nonzero_samples_per_level),
-        composition_graph_n_permutations=int(graph_n_permutations),
-        composition_graph_effect_shrink_k=float(graph_effect_shrink_k),
+        composition_milo_n_seeds=int(milo_n_seeds),
+        composition_milo_k_ref=int(milo_k_ref),
+        composition_milo_min_size=int(milo_min_size),
+        composition_milo_scale=str(milo_scale),
+        composition_milo_random_state=int(milo_random_state),
+        composition_milo_min_nonzero_samples_per_level=int(milo_min_nonzero_samples_per_level),
+        composition_milo_solver=milo_solver,
+        composition_milo_group_regions=bool(milo_group_regions),
+        composition_milo_group_min_overlap=int(milo_group_min_overlap),
+        composition_milo_group_max_lfc_delta=(
+            None if milo_group_max_lfc_delta is None else float(milo_group_max_lfc_delta)
+        ),
+        composition_milo_extreme_log2fc=float(milo_extreme_log2fc),
+        composition_milo_broad_coverage_fraction=float(milo_broad_coverage_fraction),
+        composition_graph_max_k=int(legacy_graph_max_k),
+        composition_graph_n_permutations=int(legacy_graph_n_permutations),
+        composition_graph_effect_shrink_k=float(legacy_graph_effect_shrink_k),
     )
 
 
@@ -3966,7 +4015,7 @@ def composition(
     ),
     covariates: List[str] = typer.Option([], "--covariates"),
     method: List[str] = typer.Option(
-        ["sccoda", "glm", "clr", "graph"],
+        ["sccoda", "glm", "clr", "milo"],
         "--method",
         help="Composition methods to run (default: all).",
     ),
@@ -3975,31 +4024,140 @@ def composition(
     min_cells_per_sample_cluster: int = typer.Option(20, "--min-cells-per-sample-cluster"),
     alpha: float = typer.Option(0.05, "--alpha"),
 
-    graph_n_seeds: int = typer.Option(2000, "--graph-n-seeds"),
-    graph_k_ref: int = typer.Option(30, "--graph-k-ref"),
-    graph_max_k: int = typer.Option(200, "--graph-max-k"),
-    graph_min_size: int = typer.Option(20, "--graph-min-size"),
-    graph_scale: str = typer.Option(
+    milo_n_seeds: int = typer.Option(2000, "--milo-n-seeds"),
+    milo_k_ref: int = typer.Option(30, "--milo-k-ref"),
+    legacy_graph_max_k: int = typer.Option(
+        200,
+        "--graph-max-k",
+        help="[Deprecated, ignored] Retained temporarily for command compatibility.",
+    ),
+    milo_min_size: int = typer.Option(20, "--milo-min-size"),
+    milo_scale: str = typer.Option(
         "custom",
-        "--graph-scale",
+        "--milo-scale",
         help=(
-            "Named GraphDA scale preset. Use custom to keep explicit graph parameters; "
+            "Named Milo scale preset. Use custom to keep explicit neighbourhood parameters; "
             "local=30-cell neighborhoods/2000 seeds, balanced=75/1000, broad=150/300."
         ),
     ),
-    graph_random_state: int = typer.Option(42, "--graph-random-state"),
-    graph_min_nonzero_samples_per_level: int = typer.Option(3, "--graph-min-nonzero-samples-per-level"),
-    graph_n_permutations: int = typer.Option(
+    milo_random_state: int = typer.Option(42, "--milo-random-state"),
+    milo_min_nonzero_samples_per_level: int = typer.Option(
+        3,
+        "--milo-min-nonzero-samples-per-level",
+    ),
+    legacy_graph_n_permutations: int = typer.Option(
         0,
         "--graph-n-permutations",
-        help="[Deprecated, ignored] GraphDA uses NB-GLM + spatial weighted-BH FDR.",
+        help="[Deprecated, ignored] Milo uses count-model inference.",
     ),
-    graph_effect_shrink_k: float = typer.Option(10.0, "--graph-effect-shrink-k"),
+    legacy_graph_effect_shrink_k: float = typer.Option(
+        10.0,
+        "--graph-effect-shrink-k",
+        help="[Deprecated, ignored] Milo log-fold changes are reported without post-hoc shrinkage.",
+    ),
+    milo_solver: str = typer.Option(
+        "pydeseq2",
+        "--milo-solver",
+        help="Milo count-model solver: pydeseq2 (portable default) or edger (requires R stack).",
+    ),
+    milo_group_regions: bool = typer.Option(
+        True,
+        "--milo-group-regions/--no-milo-group-regions",
+        help=(
+            "Group significant overlapping, direction-concordant Milo neighborhoods into "
+            "interpretable DA regions. Enabled by default."
+        ),
+    ),
+    milo_group_min_overlap: int = typer.Option(
+        1,
+        "--milo-group-min-overlap",
+        help="Minimum number of shared cells required to connect significant neighborhoods.",
+    ),
+    milo_group_max_lfc_delta: Optional[float] = typer.Option(
+        None,
+        "--milo-group-max-lfc-delta",
+        help="Optional maximum absolute log2-fold-change difference within a region edge.",
+    ),
+    milo_extreme_log2fc: float = typer.Option(
+        3.0,
+        "--milo-extreme-log2fc",
+        help="Absolute neighborhood log2 fold change flagged for review; values are not clipped.",
+    ),
+    milo_broad_coverage_fraction: float = typer.Option(
+        0.5,
+        "--milo-broad-coverage-fraction",
+        help="Unique-cell coverage fraction at which a Milo contrast is flagged as broad.",
+    ),
+    legacy_graph_n_seeds: Optional[int] = typer.Option(
+        None,
+        "--graph-n-seeds",
+        help="[Deprecated] Use --milo-n-seeds.",
+    ),
+    legacy_graph_k_ref: Optional[int] = typer.Option(
+        None,
+        "--graph-k-ref",
+        help="[Deprecated] Use --milo-k-ref.",
+    ),
+    legacy_graph_min_size: Optional[int] = typer.Option(
+        None,
+        "--graph-min-size",
+        help="[Deprecated] Use --milo-min-size.",
+    ),
+    legacy_graph_scale: Optional[str] = typer.Option(
+        None,
+        "--graph-scale",
+        help="[Deprecated] Use --milo-scale.",
+    ),
+    legacy_graph_random_state: Optional[int] = typer.Option(
+        None,
+        "--graph-random-state",
+        help="[Deprecated] Use --milo-random-state.",
+    ),
+    legacy_graph_min_nonzero_samples_per_level: Optional[int] = typer.Option(
+        None,
+        "--graph-min-nonzero-samples-per-level",
+        help="[Deprecated] Use --milo-min-nonzero-samples-per-level.",
+    ),
+    legacy_graph_solver: Optional[str] = typer.Option(
+        None,
+        "--graph-solver",
+        help="[Deprecated] Use --milo-solver.",
+    ),
 ):
     if output_name is None:
         output_name = _default_output_name(input_path, "da", round_id=round_id)
     if not condition_keys:
         raise typer.BadParameter("--condition-keys is required.")
+
+    legacy_milo_options = {
+        "--graph-n-seeds": legacy_graph_n_seeds,
+        "--graph-k-ref": legacy_graph_k_ref,
+        "--graph-min-size": legacy_graph_min_size,
+        "--graph-scale": legacy_graph_scale,
+        "--graph-random-state": legacy_graph_random_state,
+        "--graph-min-nonzero-samples-per-level": legacy_graph_min_nonzero_samples_per_level,
+        "--graph-solver": legacy_graph_solver,
+    }
+    used_legacy_options = [name for name, value in legacy_milo_options.items() if value is not None]
+    if used_legacy_options:
+        logging.getLogger(__name__).warning(
+            "Deprecated GraphDA option aliases used: %s. Use the corresponding --milo-* options.",
+            ", ".join(used_legacy_options),
+        )
+    if legacy_graph_n_seeds is not None:
+        milo_n_seeds = legacy_graph_n_seeds
+    if legacy_graph_k_ref is not None:
+        milo_k_ref = legacy_graph_k_ref
+    if legacy_graph_min_size is not None:
+        milo_min_size = legacy_graph_min_size
+    if legacy_graph_scale is not None:
+        milo_scale = legacy_graph_scale
+    if legacy_graph_random_state is not None:
+        milo_random_state = legacy_graph_random_state
+    if legacy_graph_min_nonzero_samples_per_level is not None:
+        milo_min_nonzero_samples_per_level = legacy_graph_min_nonzero_samples_per_level
+    if legacy_graph_solver is not None:
+        milo_solver = legacy_graph_solver
 
     cfg = _build_cfg_composition(
         input_path=input_path,
@@ -4020,15 +4178,21 @@ def composition(
         min_mean_prop=min_mean_prop,
         min_cells_per_sample_cluster=min_cells_per_sample_cluster,
         alpha=alpha,
-        graph_n_seeds=graph_n_seeds,
-        graph_k_ref=graph_k_ref,
-        graph_max_k=graph_max_k,
-        graph_min_size=graph_min_size,
-        graph_scale=graph_scale,
-        graph_random_state=graph_random_state,
-        graph_min_nonzero_samples_per_level=graph_min_nonzero_samples_per_level,
-        graph_n_permutations=graph_n_permutations,
-        graph_effect_shrink_k=graph_effect_shrink_k,
+        milo_n_seeds=milo_n_seeds,
+        milo_k_ref=milo_k_ref,
+        milo_min_size=milo_min_size,
+        milo_scale=milo_scale,
+        milo_random_state=milo_random_state,
+        milo_min_nonzero_samples_per_level=milo_min_nonzero_samples_per_level,
+        milo_solver=milo_solver,
+        milo_group_regions=milo_group_regions,
+        milo_group_min_overlap=milo_group_min_overlap,
+        milo_group_max_lfc_delta=milo_group_max_lfc_delta,
+        milo_extreme_log2fc=milo_extreme_log2fc,
+        milo_broad_coverage_fraction=milo_broad_coverage_fraction,
+        legacy_graph_max_k=legacy_graph_max_k,
+        legacy_graph_n_permutations=legacy_graph_n_permutations,
+        legacy_graph_effect_shrink_k=legacy_graph_effect_shrink_k,
     )
 
     run_composition(cfg)

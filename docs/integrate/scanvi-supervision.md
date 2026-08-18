@@ -24,7 +24,7 @@ The BISC supervision step uses the **scVI latent space** with a structural-only 
    A coarse, limited-bandwidth Leiden sweep is performed on the scVI latent space.
 
 2. **Structural selection**
-   Candidate resolutions are scored using stability, centroid-based silhouette, and tiny-cluster penalties.
+   Candidate resolutions are scored using adjacent-resolution stability, centroid-based silhouette separation, and the tiny-cluster term. No global cluster-count penalty is subtracted from the silhouette score.
 
 3. **Parsimony**
    The lowest resolution near the top score is selected.

@@ -510,17 +510,18 @@ class ClusterAnnotateConfig(BaseModel):
     )
 
     # ------------------------------------------------------------------
-    # Resolution sweep / stability
+    # Resolution sweep
     # ------------------------------------------------------------------
     res_min: float = Field(0.1, ge=0.0)
     res_max: float = Field(2.5, ge=0.0)
-    n_resolutions: int = Field(25, ge=2)
-    penalty_alpha: float = Field(0.02, ge=0.0)
+    n_resolutions: int = Field(25, ge=3)
 
+    # Post-selection subsampling reproducibility
     stability_repeats: int = Field(5, ge=1)
     subsample_frac: float = Field(0.8, gt=0.0, le=1.0)
     random_state: int = 42
 
+    # Adjacent-resolution stability and plateau selection
     tiny_cluster_size: int = 20
     min_cluster_size: int = 20
     min_plateau_len: int = 3
@@ -915,7 +916,7 @@ class MarkersAndDEConfig(BaseModel):
     # ------------------------------------------------------------------
     # Composition analysis (cluster abundance vs condition)
     # ------------------------------------------------------------------
-    composition_methods: Tuple[str, ...] = ("sccoda", "glm", "clr", "graph")
+    composition_methods: Tuple[str, ...] = ("sccoda", "glm", "clr", "milo")
     composition_reference: str = "most_stable"
     composition_min_mean_prop: float = 0.01
     composition_min_cells_per_sample_cluster: int = 20
@@ -924,15 +925,29 @@ class MarkersAndDEConfig(BaseModel):
     composition_stratify: bool = False
     composition_stratify_key: Optional[str] = None
     composition_stratify_levels: Tuple[str, ...] = ()
-    composition_graph_n_seeds: int = 2000
-    composition_graph_k_ref: int = 30
-    composition_graph_max_k: int = 200
-    composition_graph_min_size: int = 20
-    composition_graph_scale: str = "custom"
-    composition_graph_random_state: int = 42
-    composition_graph_min_nonzero_samples_per_level: int = 3
-    composition_graph_n_permutations: int = 0
-    composition_graph_effect_shrink_k: float = 10.0
+    composition_milo_n_seeds: int = 2000
+    composition_milo_k_ref: int = 30
+    composition_milo_min_size: int = 20
+    composition_milo_scale: str = "custom"
+    composition_milo_random_state: int = 42
+    composition_milo_min_nonzero_samples_per_level: int = 3
+    composition_milo_solver: str = "pydeseq2"
+    composition_milo_group_regions: bool = True
+    composition_milo_group_min_overlap: int = 1
+    composition_milo_group_max_lfc_delta: Optional[float] = None
+    composition_milo_extreme_log2fc: float = 3.0
+    composition_milo_broad_coverage_fraction: float = 0.5
+    # Deprecated configuration aliases retained for existing callers.
+    composition_graph_n_seeds: Optional[int] = None
+    composition_graph_k_ref: Optional[int] = None
+    composition_graph_max_k: Optional[int] = None
+    composition_graph_min_size: Optional[int] = None
+    composition_graph_scale: Optional[str] = None
+    composition_graph_random_state: Optional[int] = None
+    composition_graph_min_nonzero_samples_per_level: Optional[int] = None
+    composition_graph_n_permutations: Optional[int] = None
+    composition_graph_effect_shrink_k: Optional[float] = None
+    composition_graph_solver: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Round-native enrichment (cluster-level decoupler)

@@ -151,6 +151,11 @@ def test_cluster_help():
     result = runner.invoke(app, ["cluster-and-annotate", "--help"])
     assert result.exit_code == 0
     assert "Clustering" in result.output
+    assert "--penalty-alpha" not in result.output
+    normalized_help = " ".join(result.output.split())
+    assert "Post-selection" in normalized_help
+    assert "reproducibility" in normalized_help
+    assert "adjacent-resolution stability" in normalized_help.lower()
 
 
 def test_cluster_requires_input():
@@ -250,7 +255,84 @@ def test_markers_and_de_help_includes_enrichment():
     assert "ccc" in result.output
 
 
-def test_markers_and_de_da_graph_scale_broad_dispatches_preset(tmp_path):
+def test_markers_and_de_da_milo_scale_broad_dispatches_preset(tmp_path):
+    with patch("scomnom.cli.run_composition") as mock_run:
+        result = runner.invoke(
+            app,
+            [
+                "markers-and-de",
+                "da",
+                "--input-path",
+                "clustered.h5ad",
+                "--output-dir",
+                str(tmp_path),
+                "--condition-keys",
+                "condition",
+                "--replicate-key",
+                "sample_id",
+                "--method",
+                "milo",
+                "--milo-scale",
+                "broad",
+            ],
+        )
+
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    cfg = mock_run.call_args[0][0]
+    assert cfg.composition_methods == ("milo",)
+    assert cfg.composition_milo_scale == "broad"
+    assert cfg.composition_milo_k_ref == 150
+    assert cfg.composition_milo_min_size == 100
+    assert cfg.composition_milo_n_seeds == 300
+    assert cfg.composition_graph_max_k == 200
+    assert cfg.composition_milo_solver == "pydeseq2"
+    assert cfg.composition_milo_group_regions is True
+    assert cfg.composition_milo_group_min_overlap == 1
+    assert cfg.composition_milo_group_max_lfc_delta is None
+    assert cfg.composition_milo_extreme_log2fc == 3.0
+    assert cfg.composition_milo_broad_coverage_fraction == 0.5
+
+
+def test_markers_and_de_da_dispatches_custom_milo_grouping(tmp_path):
+    with patch("scomnom.cli.run_composition") as mock_run:
+        result = runner.invoke(
+            app,
+            [
+                "markers-and-de",
+                "da",
+                "--input-path",
+                "clustered.h5ad",
+                "--output-dir",
+                str(tmp_path),
+                "--condition-keys",
+                "condition",
+                "--replicate-key",
+                "sample_id",
+                "--method",
+                "milo",
+                "--no-milo-group-regions",
+                "--milo-group-min-overlap",
+                "4",
+                "--milo-group-max-lfc-delta",
+                "1.5",
+                "--milo-extreme-log2fc",
+                "4.0",
+                "--milo-broad-coverage-fraction",
+                "0.4",
+            ],
+        )
+
+    assert result.exit_code == 0
+    cfg = mock_run.call_args[0][0]
+    assert cfg.composition_milo_group_regions is False
+    assert cfg.composition_milo_group_min_overlap == 4
+    assert cfg.composition_milo_group_max_lfc_delta == 1.5
+    assert cfg.composition_milo_extreme_log2fc == 4.0
+    assert cfg.composition_milo_broad_coverage_fraction == 0.4
+
+
+def test_markers_and_de_da_normalizes_deprecated_graph_aliases(tmp_path):
     with patch("scomnom.cli.run_composition") as mock_run:
         result = runner.invoke(
             app,
@@ -267,19 +349,16 @@ def test_markers_and_de_da_graph_scale_broad_dispatches_preset(tmp_path):
                 "sample_id",
                 "--method",
                 "graph",
-                "--graph-scale",
-                "broad",
+                "--graph-solver",
+                "edger",
             ],
         )
 
     assert result.exit_code == 0
-    mock_run.assert_called_once()
+    assert "deprecated" in result.output.lower()
     cfg = mock_run.call_args[0][0]
-    assert cfg.composition_graph_scale == "broad"
-    assert cfg.composition_graph_k_ref == 150
-    assert cfg.composition_graph_min_size == 100
-    assert cfg.composition_graph_n_seeds == 300
-    assert cfg.composition_graph_max_k == 500
+    assert cfg.composition_methods == ("milo",)
+    assert cfg.composition_milo_solver == "edger"
 
 
 def test_markers_and_de_ccc_help_includes_backends():
