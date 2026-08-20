@@ -330,6 +330,39 @@ def test_composition_consensus_uses_canonical_milo_evidence() -> None:
     assert summary.loc[0, "da_evidence_tier"] == "cross_scale_supported"
 
 
+def test_composition_consensus_joins_glm_on_canonical_pair() -> None:
+    summary = _build_composition_consensus_summary(
+        {
+            "glm": pd.DataFrame(
+                {
+                    "cluster": ["C01"],
+                    "term": ["condition_treated"],
+                    "pair": ["control_vs_treated"],
+                    "effect": [0.7],
+                    "fdr": [0.01],
+                }
+            ),
+            "clr": pd.DataFrame(
+                {
+                    "cluster": ["C01"],
+                    "term": ["condition"],
+                    "pair": ["control_vs_treated"],
+                    "effect": [0.8],
+                    "fdr": [0.02],
+                }
+            ),
+        },
+        alpha=0.05,
+        condition_key="condition",
+    )
+
+    assert summary.shape[0] == 1
+    assert summary.loc[0, "contrast"] == "control_vs_treated"
+    assert summary.loc[0, "n_methods"] == 2
+    assert summary.loc[0, "method_sig_glm"]
+    assert summary.loc[0, "method_sig_clr"]
+
+
 def test_milo_region_grouping_can_be_disabled(monkeypatch) -> None:
     _install_fake_milo_fit(monkeypatch)
     adata = _make_milo_adata()

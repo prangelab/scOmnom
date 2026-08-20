@@ -207,3 +207,4 @@ Milo differential-abundance calibration:
 - changed the effective routine Milo neighbourhood defaults to the validated balanced M05 setting: 1,000 initial vertices, 75 graph neighbours, and minimum neighbourhood size 50
 - retained `custom` as the default scale label so direct numeric overrides remain backward-compatible; the named `local`, `balanced`, and `broad` presets remain available
 - retained minimum nonzero sample support of three and the existing default region-grouping rule
+- preserved canonical reference/test levels and pair identifiers in GLM composition outputs so GLM, CLR, Milo, and scCODA rows join correctly in consensus summaries

@@ -211,6 +211,12 @@ def run_glm_composition(
             [reference_level] + [c for c in meta[cond].cat.categories if c != reference_level],
             ordered=True,
         )
+    condition_levels = [str(level) for level in meta[cond].cat.categories]
+    reference_condition_level = condition_levels[0]
+    condition_contrasts = {
+        f"{cond}_{test_level}": (reference_condition_level, test_level)
+        for test_level in condition_levels[1:]
+    }
 
     counts = counts.loc[meta.index]
     totals = counts.sum(axis=1)
@@ -253,6 +259,7 @@ def run_glm_composition(
         for term in design.columns:
             if term == "const":
                 continue
+            contrast = condition_contrasts.get(str(term))
             coef = fit.params.get(term, np.nan)
             bse = getattr(fit, "bse", None)
             se = bse.get(term, np.nan) if hasattr(bse, "get") else np.nan
@@ -266,6 +273,13 @@ def run_glm_composition(
                 {
                     "cluster": str(cl),
                     "term": str(term),
+                    "level_ref": contrast[0] if contrast is not None else None,
+                    "level_test": contrast[1] if contrast is not None else None,
+                    "pair": (
+                        f"{contrast[0]}_vs_{contrast[1]}"
+                        if contrast is not None
+                        else None
+                    ),
                     "coef": float(coef),
                     "ci_low": float(ci_low),
                     "ci_high": float(ci_high),

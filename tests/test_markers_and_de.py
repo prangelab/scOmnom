@@ -432,6 +432,13 @@ def test_run_glm_composition_uses_binomial_success_failure_response() -> None:
     assert effects.loc[("C03", "condition_C_stim")] < 0
     assert effects.loc[("C04", "condition_B_mild")] > 0
     assert effects.loc[("C04", "condition_C_stim")] > 0
+    contrasts = got.dropna(subset=["pair"])
+    mild = contrasts.loc[contrasts["term"] == "condition_B_mild"]
+    stim = contrasts.loc[contrasts["term"] == "condition_C_stim"]
+    assert set(mild["level_ref"]) == {"A_ctrl"}
+    assert set(mild["level_test"]) == {"B_mild"}
+    assert set(mild["pair"]) == {"A_ctrl_vs_B_mild"}
+    assert set(stim["pair"]) == {"A_ctrl_vs_C_stim"}
 
 
 def test_run_glm_composition_allows_two_level_condition_design() -> None:
@@ -463,6 +470,9 @@ def test_run_glm_composition_allows_two_level_condition_design() -> None:
     effects = got.set_index(["cluster", "term"])["coef"]
     assert effects.loc[("C03", "condition_C_stim")] < 0
     assert effects.loc[("C04", "condition_C_stim")] > 0
+    assert set(got["level_ref"].dropna()) == {"A_ctrl"}
+    assert set(got["level_test"].dropna()) == {"C_stim"}
+    assert set(got["pair"].dropna()) == {"A_ctrl_vs_C_stim"}
 
 
 @patch("scomnom.markers_and_de.io_utils.save_dataset")
