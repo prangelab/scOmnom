@@ -153,7 +153,7 @@ def test_cluster_help():
     assert "Clustering" in result.output
     assert "--penalty-alpha" not in result.output
     normalized_help = " ".join(result.output.split())
-    assert "Post-selection" in normalized_help
+    assert "plateau-probe" in normalized_help
     assert "reproducibility" in normalized_help
     assert "adjacent-resolution stability" in normalized_help.lower()
 

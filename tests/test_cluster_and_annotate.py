@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 import scanpy as sc
 from pathlib import Path
 from unittest.mock import Mock
@@ -62,6 +63,101 @@ def test_resolution_sweep_stores_fixed_selector_rules(tmp_path, monkeypatch):
     assert sweep["selection_rules"] == cu._bisc_fixed_rule_snapshot()
 
 
+def test_plateau_probe_subsampling_reuses_one_neighbor_graph_per_repeat(
+    tmp_path, monkeypatch
+):
+    adata = synthetic_adata(n_cells=12)
+    cfg = ClusterAnnotateConfig(
+        input_path=tmp_path / "integrated.zarr",
+        stability_repeats=3,
+        subsample_frac=0.75,
+        random_state=7,
+    )
+    labels = {
+        0.2: np.tile(np.array(["0", "1"]), 6),
+        0.4: np.tile(np.array(["0", "1", "2"]), 4),
+    }
+    neighbor_calls = []
+
+    def fake_neighbors(adata_in, **kwargs):
+        neighbor_calls.append((adata_in.n_obs, kwargs["random_state"]))
+
+    def fake_leiden(adata_in, *, resolution, key_added, **kwargs):
+        n_clusters = 2 if np.isclose(resolution, 0.2) else 3
+        adata_in.obs[key_added] = pd.Categorical(
+            np.arange(adata_in.n_obs) % n_clusters
+        )
+
+    monkeypatch.setattr(cu.sc.pp, "neighbors", fake_neighbors)
+    monkeypatch.setattr(cu.sc.tl, "leiden", fake_leiden)
+
+    result = cu._subsampling_candidate_stability(
+        adata,
+        cfg,
+        "X_pca",
+        labels,
+        [0.2, 0.4],
+    )
+
+    assert neighbor_calls == [(9, 7), (9, 8), (9, 9)]
+    assert set(result) == {0.2, 0.4}
+    assert all(len(values) == 3 for values in result.values())
+
+
+def test_resolution_sweep_uses_probe_subsampling_to_choose_plateau(
+    tmp_path, monkeypatch
+):
+    adata = synthetic_adata()
+    cfg = ClusterAnnotateConfig(
+        input_path=tmp_path / "integrated.zarr",
+        res_min=0.1,
+        res_max=0.6,
+        n_resolutions=6,
+        bio_guided_clustering=False,
+    )
+
+    def fake_leiden(adata_in, *, key_added, **kwargs):
+        adata_in.obs[key_added] = pd.Categorical(
+            np.tile(["0", "1"], reps=adata_in.n_obs // 2)
+        )
+
+    monkeypatch.setattr(cu.sc.tl, "leiden", fake_leiden)
+    monkeypatch.setattr(cu, "_centroid_silhouette", lambda *args, **kwargs: 0.5)
+    monkeypatch.setattr(
+        cu,
+        "_detect_plateaus",
+        lambda *args, **kwargs: [
+            cu.Plateau([0.2, 0.3], mean_stability=0.95),
+            cu.Plateau([0.4, 0.5], mean_stability=0.90),
+        ],
+    )
+
+    def fake_probe_stability(
+        adata_in, cfg_in, embedding_key, labels_per_resolution, candidate_resolutions
+    ):
+        del adata_in, cfg_in, embedding_key, labels_per_resolution
+        assert candidate_resolutions == [0.2, 0.4]
+        return {0.2: [0.93, 0.93], 0.4: [0.95, 0.95]}
+
+    monkeypatch.setattr(cu, "_subsampling_candidate_stability", fake_probe_stability)
+
+    best, sweep, _ = cu._resolution_sweep(
+        adata,
+        cfg,
+        "X_pca",
+        celltypist_labels=None,
+    )
+
+    assert best == 0.4
+    assert sweep["selection"]["selected_plateau_index"] == 1
+    assert sweep["selection"]["alternative_plateau_index"] == 0
+    assert sweep["selection"]["mode"] == "plateau_probe_subsampling"
+    assert sweep["selection"]["confidence"] == "multiscale"
+    assert sweep["selection"]["probe_reproducibility_gap"] == pytest.approx(0.02)
+    assert sweep["selection"]["selected_probe_n_clusters"] == 2
+    assert sweep["selection"]["alternative_probe_n_clusters"] == 2
+
+
 def test_clustering_report_captions_distinguish_stability_concepts():
     from scomnom.reporting import _describe_plot
 
@@ -70,6 +166,9 @@ def test_clustering_report_captions_distinguish_stability_concepts():
     )
     assert _describe_plot(Path("cluster_selection_stability.png")) == (
         "Resolution selection metrics, including adjacent-resolution stability."
+    )
+    assert _describe_plot(Path("plateau_probe_reproducibility.png")) == (
+        "Fixed-resolution subsampling reproducibility used to select among BISC plateaus."
     )
 
 

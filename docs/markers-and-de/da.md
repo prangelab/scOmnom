@@ -225,6 +225,7 @@ Key DA figures include:
 * composition summaries: `composition_stacked_bar_100`, `composition_stacked_comparison`, `composition_flow`;
 * global effects: `composition_effects_global_sccoda`, `composition_effects_global_clr`, GLM/CLR volcanoes;
 * Milo summaries: `milo_da_regions`, `milo_effects_by_cluster`, `milo_top_neighborhoods`, `milo_top_by_cluster`;
-* Milo QC: `milo_qc_pval_vs_fdr`, `milo_qc_cluster_power`.
+* Milo QC: `milo_qc_pval_vs_fdr`, `milo_qc_cluster_power`,
+  `milo_qc_effect_review`.
 
 ---

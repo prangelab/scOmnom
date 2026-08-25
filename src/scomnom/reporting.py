@@ -226,6 +226,8 @@ def _describe_plot(rel_path: Path) -> str:
         return "How clusters split/merge across the resolution sweep."
     if "resolution_sweep" in stem:
         return "Resolution sweep diagnostics: centroid separation and number of clusters."
+    if "plateau_probe_reproducibility" in stem:
+        return "Fixed-resolution subsampling reproducibility used to select among BISC plateaus."
     if "stability" in stem and "ari" in stem:
         return "Post-selection subsampling reproducibility (ARI vs full-data partition)."
     if "cluster_selection" in stem or "stability_curves" in stem:

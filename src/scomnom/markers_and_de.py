@@ -7390,6 +7390,9 @@ def run_composition(cfg) -> ad.AnnData:
                     )
                     if isinstance(milo_regions, pd.DataFrame) and not milo_regions.empty:
                         artifacts.extend(plot_utils.plot_milo_regions(milo_regions, fig_subdir))
+                    artifacts.extend(
+                        plot_utils.plot_milo_effect_review_qc(milo_results, fig_subdir)
+                    )
                     if not milo_diag_df.empty:
                         artifacts.extend(
                             plot_utils.plot_milo_diagnostics(

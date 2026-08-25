@@ -481,6 +481,193 @@ def plot_milo_regions(regions_df: pd.DataFrame, figdir: Path, *, max_regions: in
     close_plot(fig)
 
 
+def _summarize_milo_effect_review(
+    milo_df: pd.DataFrame,
+    *,
+    max_regions: int = 40,
+) -> pd.DataFrame:
+    columns = [
+        "pair",
+        "row_type",
+        "region_id",
+        "region_cluster_label",
+        "display_label",
+        "n_total",
+        "n_no_review",
+        "n_extreme_log2fc",
+        "n_minimum_sample_support",
+        "n_both",
+    ]
+    if milo_df is None or milo_df.empty or "effect_review_reason" not in milo_df.columns:
+        return pd.DataFrame(columns=columns)
+
+    data = milo_df.copy()
+    if "tested" in data.columns:
+        tested = data["tested"].astype(str).str.lower().isin({"true", "1"})
+        data = data.loc[tested].copy()
+    if data.empty:
+        return pd.DataFrame(columns=columns)
+
+    reasons = data["effect_review_reason"].fillna("ok").astype(str)
+    has_extreme = reasons.str.contains("extreme_log2fc", regex=False)
+    has_support = reasons.str.contains("minimum_sample_support", regex=False)
+    data["_review_category"] = np.select(
+        [has_extreme & has_support, has_extreme, has_support],
+        ["both", "extreme_log2fc", "minimum_sample_support"],
+        default="no_review",
+    )
+    if "pair" not in data.columns:
+        data["pair"] = "all_contrasts"
+    data["pair"] = data["pair"].fillna("all_contrasts").astype(str)
+
+    def _count_row(
+        block: pd.DataFrame,
+        *,
+        pair: str,
+        row_type: str,
+        region_id: str,
+        region_cluster_label: str,
+        display_label: str,
+    ) -> dict[str, Any]:
+        counts = block["_review_category"].value_counts()
+        return {
+            "pair": pair,
+            "row_type": row_type,
+            "region_id": region_id,
+            "region_cluster_label": region_cluster_label,
+            "display_label": display_label,
+            "n_total": int(len(block)),
+            "n_no_review": int(counts.get("no_review", 0)),
+            "n_extreme_log2fc": int(counts.get("extreme_log2fc", 0)),
+            "n_minimum_sample_support": int(counts.get("minimum_sample_support", 0)),
+            "n_both": int(counts.get("both", 0)),
+        }
+
+    output_rows: list[dict[str, Any]] = []
+    for pair, pair_block in data.groupby("pair", sort=True, dropna=False):
+        output_rows.append(
+            _count_row(
+                pair_block,
+                pair=pair,
+                row_type="all_tested",
+                region_id="",
+                region_cluster_label="",
+                display_label=f"{pair.replace('_', ' ')} | all tested",
+            )
+        )
+        if "region_id" not in pair_block.columns:
+            continue
+        region_mask = pair_block["region_id"].notna() & pair_block["region_id"].astype(str).ne("")
+        region_block = pair_block.loc[region_mask].copy()
+        if region_block.empty:
+            continue
+        region_sizes = region_block.groupby("region_id", dropna=False).size().sort_values(ascending=False)
+        retained_ids = set(region_sizes.head(int(max_regions)).index.astype(str))
+        region_block = region_block[region_block["region_id"].astype(str).isin(retained_ids)]
+        for region_id, block in region_block.groupby("region_id", sort=True, dropna=False):
+            cluster = "NA"
+            if "region_cluster_label" in block.columns:
+                labels = block["region_cluster_label"].dropna().astype(str)
+                if not labels.empty:
+                    cluster = labels.iloc[0]
+            region_number = str(region_id).rsplit("_", 1)[-1]
+            output_rows.append(
+                _count_row(
+                    block,
+                    pair=pair,
+                    row_type="grouped_region",
+                    region_id=str(region_id),
+                    region_cluster_label=cluster,
+                    display_label=f"{cluster} | region {region_number}",
+                )
+            )
+    return pd.DataFrame(output_rows, columns=columns)
+
+
+@collect_plot_artifacts
+def plot_milo_effect_review_qc(
+    milo_df: pd.DataFrame,
+    figdir: Path,
+    *,
+    max_regions: int = 40,
+) -> None:
+    """Plot neighborhood effect-review triggers overall and by grouped region."""
+    summary = _summarize_milo_effect_review(milo_df, max_regions=max_regions)
+    if summary.empty:
+        return
+
+    stack_columns = [
+        "n_no_review",
+        "n_extreme_log2fc",
+        "n_minimum_sample_support",
+        "n_both",
+    ]
+    colors = ["#bdbdbd", "#d55e00", "#56b4e9", "#cc79a7"]
+    labels = [
+        "No review flag",
+        "Extreme effect",
+        "Minimum sample support",
+        "Both triggers",
+    ]
+    fig, ax = plt.subplots(figsize=(8, max(4, 0.34 * len(summary) + 1.7)))
+    y = np.arange(len(summary))
+    left = np.zeros(len(summary), dtype=float)
+    for column, color, label in zip(stack_columns, colors, labels):
+        values = pd.to_numeric(summary[column], errors="coerce").fillna(0).to_numpy(dtype=float)
+        ax.barh(y, values, left=left, color=color, label=label, height=0.72)
+        left += values
+    ax.set_yticks(y)
+    ax.set_yticklabels(summary["display_label"].tolist())
+    ax.invert_yaxis()
+    ax.set_xlabel("Tested neighborhoods")
+    ax.grid(False)
+    handles, legend_labels = ax.get_legend_handles_labels()
+    fig.suptitle(
+        "Milo QC: effect-review triggers",
+        x=0.12,
+        y=0.98,
+        ha="left",
+        fontsize=12,
+        fontweight="bold",
+    )
+    fig.legend(
+        handles,
+        legend_labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.91),
+        ncol=4,
+        frameon=False,
+        fontsize=8,
+    )
+
+    threshold = None
+    if "extreme_log2fc_threshold" in milo_df.columns:
+        values = pd.to_numeric(milo_df["extreme_log2fc_threshold"], errors="coerce").dropna()
+        if not values.empty:
+            threshold = float(values.iloc[0])
+    minimum_support = None
+    for column in (
+        "min_nonzero_samples_per_level_required",
+        "min_nonzero_per_level_required",
+    ):
+        if column not in milo_df.columns:
+            continue
+        values = pd.to_numeric(milo_df[column], errors="coerce").dropna()
+        if not values.empty:
+            minimum_support = int(values.iloc[0])
+            break
+    note_parts = []
+    if threshold is not None:
+        note_parts.append(f"extreme effect: |log2FC| >= {threshold:g}")
+    if minimum_support is not None:
+        note_parts.append(f"minimum support: {minimum_support} nonzero samples in the weaker level")
+    if note_parts:
+        fig.text(0.5, 0.01, "; ".join(note_parts), ha="center", va="bottom", fontsize=8, color="#444444")
+    fig.tight_layout(rect=(0, 0.04 if note_parts else 0, 1, 0.80))
+    record_plot_artifact("milo_qc_effect_review", figdir, fig=fig)
+    close_plot(fig)
+
+
 @collect_plot_artifacts
 def plot_milo_diagnostics(
     milo_df: pd.DataFrame,
@@ -4410,6 +4597,9 @@ def plot_stability_curves(
         best_resolution: float | str,
         plateaus: Sequence[Mapping[str, object]] | None,
         figdir: Path | str,
+        plateau_probes: Sequence[float | str] | None = None,
+        structural: Mapping[Any, Any] | None = None,
+        adjacent_ari: Sequence[float] | None = None,
         stem: str = "cluster_selection_stability",
 ) -> None:
     """
@@ -4426,13 +4616,25 @@ def plot_stability_curves(
     sil = _extract_series(res_sorted, silhouette)
     stab = _extract_series(res_sorted, stability)
     comp = _extract_series(res_sorted, composite)
+    structural_values = (
+        _extract_series(res_sorted, structural) if structural else comp.copy()
+    )
     tiny = _extract_series(res_sorted, tiny_cluster_penalty)
 
     fig, ax = plt.subplots(figsize=(8, 5))
 
     # plateau shading
-    for xmin, xmax in _plateau_spans(plateaus or []):
-        ax.axvspan(xmin, xmax, color="0.9", alpha=0.5)
+    for plateau in plateaus or []:
+        spans = _plateau_spans([plateau])
+        if not spans:
+            continue
+        xmin, xmax = spans[0]
+        ax.axvspan(
+            xmin,
+            xmax,
+            color="#DCECEE" if bool(plateau.get("selected", False)) else "0.9",
+            alpha=0.65 if bool(plateau.get("selected", False)) else 0.45,
+        )
 
     # structural curves
     ax.plot(res_sorted, sil, label="Centroid silhouette", color="tab:blue")
@@ -4442,8 +4644,45 @@ def plot_stability_curves(
         label="Adjacent-resolution stability (smoothed ARI)",
         color="tab:green",
     )
+    raw_edges = np.asarray(adjacent_ari if adjacent_ari is not None else [], dtype=float)
+    if raw_edges.size == len(res_sorted) - 1:
+        edge_positions = [
+            (left + right) / 2.0 for left, right in zip(res_sorted[:-1], res_sorted[1:])
+        ]
+        ax.plot(
+            edge_positions,
+            raw_edges,
+            label="Raw adjacent ARI (plateau edges)",
+            color="#35605A",
+            linestyle=":",
+            marker="o",
+            markersize=3,
+        )
     ax.plot(res_sorted, tiny, label="Tiny-cluster penalty", color="tab:orange")
-    ax.plot(res_sorted, comp, label="Composite (used for selection)", color="tab:red")
+    if not np.allclose(structural_values, comp, equal_nan=True):
+        ax.plot(
+            res_sorted,
+            structural_values,
+            label="Structural score (probe selection)",
+            color="#6B4C9A",
+        )
+    ax.plot(res_sorted, comp, label="Full composite (final selection)", color="tab:red")
+
+    probe_values = [float(value) for value in plateau_probes or []]
+    if probe_values:
+        structural_by_resolution = dict(zip(res_sorted, structural_values))
+        plotted = [value for value in probe_values if value in structural_by_resolution]
+        ax.scatter(
+            plotted,
+            [structural_by_resolution[value] for value in plotted],
+            marker="D",
+            s=42,
+            color="#24343B",
+            edgecolor="white",
+            linewidth=0.6,
+            label="Structural plateau probe",
+            zorder=4,
+        )
 
     ax.axvline(float(best_resolution), color="k", linestyle="--")
 
@@ -4454,6 +4693,41 @@ def plot_stability_curves(
     ax.grid(True, alpha=0.2)
 
     plt.tight_layout()
+    record_plot_artifact(stem, _ensure_path(figdir), fig)
+
+
+@collect_plot_artifacts
+def plot_plateau_probe_reproducibility(
+    plateaus: Sequence[Mapping[str, object]],
+    figdir: Path | str,
+    stem: str = "plateau_probe_reproducibility",
+) -> None:
+    rows = [
+        plateau
+        for plateau in plateaus
+        if plateau.get("representative_resolution") is not None
+        and plateau.get("reproducibility_mean") is not None
+    ]
+    if not rows:
+        return
+    rows = sorted(rows, key=lambda row: float(row["representative_resolution"]))
+    resolutions = [float(row["representative_resolution"]) for row in rows]
+    means = [float(row["reproducibility_mean"]) for row in rows]
+    minima = [float(row["reproducibility_min"]) for row in rows]
+    colors = ["#177E89" if bool(row.get("selected", False)) else "#8B979C" for row in rows]
+
+    fig, ax = plt.subplots(figsize=(7, 4.2))
+    for resolution, mean, minimum, color in zip(resolutions, means, minima, colors):
+        ax.vlines(resolution, minimum, mean, color=color, linewidth=2)
+    ax.scatter(resolutions, means, color=colors, marker="o", label="Mean ARI", zorder=3)
+    ax.scatter(resolutions, minima, color=colors, marker="_", s=80, label="Minimum ARI", zorder=3)
+    ax.set_xlabel("Structural plateau probe resolution")
+    ax.set_ylabel("Fixed-resolution subsampling ARI")
+    ax.set_ylim(0.0, 1.02)
+    ax.set_title("Cross-plateau reproducibility")
+    ax.grid(axis="y", alpha=0.2)
+    ax.legend(loc="best", fontsize=8)
+    fig.tight_layout()
     record_plot_artifact(stem, _ensure_path(figdir), fig)
 
 

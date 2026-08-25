@@ -95,6 +95,7 @@ def _plot_round_clustering_diagnostics(
     n_dict = diag.get("cluster_counts", {}) or {}
     adjacent_stability = diag.get("resolution_stability", {}) or {}
     comp_dict = diag.get("composite_scores", {}) or {}
+    structural_dict = diag.get("structural_scores", {}) or {}
     tiny_dict = diag.get("tiny_cluster_penalty", {}) or {}
 
     sil_arr = _extract_series(res_sorted, sil_dict)
@@ -150,11 +151,29 @@ def _plot_round_clustering_diagnostics(
             silhouette=sil_dict,
             stability=adjacent_stability,
             composite=comp_dict,
+            structural=structural_dict,
+            adjacent_ari=sweep.get("adjacent_ari", None),
             tiny_cluster_penalty=tiny_dict,
             best_resolution=float(best_res),
             plateaus=plateaus if isinstance(plateaus, list) else None,
             figdir=figdir_cluster,
+            plateau_probes=(
+                [
+                    float(plateau["representative_resolution"])
+                    for plateau in plateaus
+                    if plateau.get("representative_resolution") is not None
+                ]
+                if isinstance(plateaus, list)
+                else None
+            ),
         ))
+        if isinstance(plateaus, list):
+            artifacts.extend(
+                plot_utils.plot_plateau_probe_reproducibility(
+                    plateaus=plateaus,
+                    figdir=figdir_cluster,
+                )
+            )
 
     # Bio metrics plot (if present)
     if (

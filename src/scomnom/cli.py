@@ -1250,7 +1250,7 @@ def adata_ops_metadata_import(
 @app.command(
     "cluster-and-annotate",
     help=(
-        "Clustering (resolution sweep + adjacent-resolution stability + post-selection "
+        "Clustering (resolution sweep + adjacent-resolution stability + plateau-probe "
         "subsampling reproducibility) and optional CellTypist + decoupler annotation "
         "(MSigDB/DoRothEA/PROGENy)."
     ),
@@ -1343,17 +1343,17 @@ def cluster_and_annotate(
     n_resolutions: int = typer.Option(25, "--n-resolutions"),
 
     # -----------------------------
-    # Adjacent-resolution stability / post-selection reproducibility
+    # Adjacent-resolution stability / subsampling reproducibility
     # -----------------------------
     stability_repeats: int = typer.Option(
         5,
         "--stability-repeats",
-        help="[Post-selection reproducibility] Number of subsampling repeats after resolution selection.",
+        help="[BISC reproducibility] Number of subsampling repeats for plateau probes and the final partition.",
     ),
     subsample_frac: float = typer.Option(
         0.8,
         "--subsample-frac",
-        help="[Post-selection reproducibility] Fraction of cells retained per repeat.",
+        help="[BISC reproducibility] Fraction of cells retained per repeat.",
     ),
     random_state: int = typer.Option(42, "--random-state"),
     tiny_cluster_size: int = typer.Option(20, "--tiny-cluster-size"),
@@ -1363,7 +1363,7 @@ def cluster_and_annotate(
     stability_threshold: float = typer.Option(
         0.85,
         "--stability-threshold",
-        help="[Adjacent-resolution stability] Minimum smoothed ARI for structural plateau membership.",
+        help="[Adjacent-resolution stability] Minimum raw adjacent ARI for a strong plateau edge.",
     ),
     w_stab: float = typer.Option(
         0.50,

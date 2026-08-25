@@ -351,6 +351,7 @@ class _BiscQuickConfig:
     res_min: float = 0.4
     res_max: float = 1.6
     n_resolutions: int = 7
+    # Plateau-probe selection and final-partition reproducibility
     stability_repeats: int = 5
     subsample_frac: float = 0.8
     min_cluster_size: int = 20

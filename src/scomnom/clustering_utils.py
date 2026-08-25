@@ -923,11 +923,15 @@ _BISC_MIN_FEASIBLE_STABILITY = 0.60
 _BISC_PARSIMONY_TOLERANCE = 0.03
 _BISC_MAX_CLUSTERS_PER_BIOLOGICAL_LABEL = 2.5
 _BISC_ABSOLUTE_MINIMUM_CLUSTER_SIZE = 5
+_BISC_PLATEAU_SUPPORT_FRACTION = 0.50
+_BISC_SELECTOR_VERSION = "raw_edge_plateau_v2"
 
 
-def _bisc_fixed_rule_snapshot() -> Dict[str, float | int]:
+def _bisc_fixed_rule_snapshot() -> Dict[str, float | int | str]:
     return {
+        "selector_version": _BISC_SELECTOR_VERSION,
         "minimum_feasible_stability": _BISC_MIN_FEASIBLE_STABILITY,
+        "plateau_support_fraction": _BISC_PLATEAU_SUPPORT_FRACTION,
         "parsimony_tolerance": _BISC_PARSIMONY_TOLERANCE,
         "max_clusters_per_biological_label": _BISC_MAX_CLUSTERS_PER_BIOLOGICAL_LABEL,
         "absolute_minimum_cluster_size": _BISC_ABSOLUTE_MINIMUM_CLUSTER_SIZE,
@@ -938,6 +942,15 @@ def _bisc_fixed_rule_snapshot() -> Dict[str, float | int]:
 class Plateau:
     resolutions: List[float]
     mean_stability: float
+    internal_floor: Optional[float] = None
+    internal_peak: Optional[float] = None
+    boundary_level: Optional[float] = None
+    prominence: Optional[float] = None
+    representative_resolution: Optional[float] = None
+    representative_score: Optional[float] = None
+    reproducibility_mean: Optional[float] = None
+    reproducibility_min: Optional[float] = None
+    selected: bool = False
 
 
 @dataclass
@@ -947,6 +960,11 @@ class ResolutionSelectionResult:
     stability: Dict[float, float]
     tiny_cluster_penalty: Dict[float, float]
     plateaus: List[Plateau]
+    structural_scores: Dict[float, float]
+    selected_plateau_index: Optional[int]
+    alternative_plateau_index: Optional[int]
+    selection_mode: str
+    confidence: str
     bio_homogeneity: Optional[Dict[float, float]] = None
     bio_fragmentation: Optional[Dict[float, float]] = None
     bio_ari: Optional[Dict[float, float]] = None
@@ -989,39 +1007,74 @@ def _detect_plateaus(
     config: ResolutionSelectionConfig,
     stability: Dict[float, float],
 ) -> List[Plateau]:
+    del stability
     sorted_res = sorted(metrics.resolutions)
+    if len(sorted_res) < 2:
+        return []
+    ari_adjacent = metrics.ari_adjacent or _compute_ari_adjacent(
+        sorted_res, metrics.labels_per_resolution
+    )
+    edges = [
+        float(ari_adjacent[(left, right)])
+        for left, right in zip(sorted_res[:-1], sorted_res[1:])
+    ]
+    minimum_edges = max(1, int(config.min_plateau_len) - 1)
+    support_level = _BISC_MIN_FEASIBLE_STABILITY + _BISC_PLATEAU_SUPPORT_FRACTION * (
+        float(config.stability_threshold) - _BISC_MIN_FEASIBLE_STABILITY
+    )
+    support_level = min(float(config.stability_threshold), support_level)
+
+    seed_runs: List[Tuple[int, int]] = []
+    start: Optional[int] = None
+    for index, value in enumerate(edges):
+        if value >= config.stability_threshold and start is None:
+            start = index
+        if start is not None and (
+            value < config.stability_threshold or index == len(edges) - 1
+        ):
+            end = index if value >= config.stability_threshold else index - 1
+            seed_runs.append((start, end))
+            start = None
+
+    intervals: set[Tuple[int, int]] = set()
+    for core_start, core_end in seed_runs:
+        start, end = core_start, core_end
+        while end - start + 1 < minimum_edges:
+            neighbours: List[Tuple[float, int, int]] = []
+            if start > 0 and edges[start - 1] >= support_level:
+                neighbours.append((edges[start - 1], -1, start - 1))
+            if end + 1 < len(edges) and edges[end + 1] >= support_level:
+                neighbours.append((edges[end + 1], 0, end + 1))
+            if not neighbours:
+                break
+            _, _, chosen = max(neighbours)
+            if chosen < start:
+                start = chosen
+            else:
+                end = chosen
+        if end - start + 1 >= minimum_edges:
+            intervals.add((start, end))
+
     plateaus: List[Plateau] = []
-    current_segment: List[float] = []
-
-    for idx, r in enumerate(sorted_res):
-        stab_ok = stability.get(r, 0.0) >= config.stability_threshold
-
-        if idx > 0:
-            r_prev = sorted_res[idx - 1]
-            n_prev = metrics.cluster_counts[r_prev]
-            n_curr = metrics.cluster_counts[r]
-            jump = robust_cluster_jump(n_prev, n_curr, alpha=10)
-            jump_ok = jump <= config.max_cluster_jump_frac
-        else:
-            jump_ok = True
-
-        sizes = metrics.cluster_sizes[r]
-        median_size = float(np.median(sizes)) if sizes.size > 0 else 0.0
-        size_ok = median_size >= config.min_cluster_size
-        min_ok = (sizes.size == 0) or (sizes.min() >= _BISC_ABSOLUTE_MINIMUM_CLUSTER_SIZE)
-
-        if stab_ok and jump_ok and size_ok and min_ok:
-            current_segment.append(r)
-        else:
-            if len(current_segment) >= config.min_plateau_len:
-                mean_stab = float(np.mean([stability[x] for x in current_segment]))
-                plateaus.append(Plateau(resolutions=current_segment.copy(), mean_stability=mean_stab))
-            current_segment = []
-
-    if len(current_segment) >= config.min_plateau_len:
-        mean_stab = float(np.mean([stability[x] for x in current_segment]))
-        plateaus.append(Plateau(resolutions=current_segment.copy(), mean_stability=mean_stab))
-
+    for start, end in sorted(intervals):
+        internal = np.asarray(edges[start : end + 1], dtype=float)
+        boundaries: List[float] = []
+        if start > 0:
+            boundaries.append(edges[start - 1])
+        if end + 1 < len(edges):
+            boundaries.append(edges[end + 1])
+        boundary = max(boundaries) if boundaries else _BISC_MIN_FEASIBLE_STABILITY
+        floor = float(np.min(internal))
+        plateaus.append(
+            Plateau(
+                resolutions=[float(r) for r in sorted_res[start : end + 2]],
+                mean_stability=float(np.mean(internal)),
+                internal_floor=floor,
+                internal_peak=float(np.max(internal)),
+                boundary_level=float(boundary),
+                prominence=float(floor - boundary),
+            )
+        )
     return plateaus
 
 
@@ -1059,6 +1112,7 @@ def compute_tiny_cluster_penalty(cluster_sizes: np.ndarray, tiny_threshold: int)
 def select_best_resolution(
     metrics: ResolutionMetrics,
     config: ResolutionSelectionConfig,
+    plateau_reproducibility: Optional[Dict[float, Sequence[float]]] = None,
 ) -> ResolutionSelectionResult:
     ari_adjacent = metrics.ari_adjacent or _compute_ari_adjacent(
         resolutions=metrics.resolutions,
@@ -1086,12 +1140,17 @@ def select_best_resolution(
     frag_good = {r: 1.0 - frag_norm.get(r, 0.0) for r in frag_norm}
     bioari_norm = _normalize_scores(metrics.bio_ari or {})
 
-    def composite(r: float) -> float:
-        s = (
+    structural_scores = {
+        float(r): float(
             config.w_stab * stab_norm.get(r, 0.0)
             + config.w_sil * sil_norm.get(r, 0.0)
             + config.w_tiny * tiny_norm.get(r, 0.0)
         )
+        for r in metrics.resolutions
+    }
+
+    def composite(r: float) -> float:
+        s = structural_scores[r]
         if use_bio:
             s += (
                 config.w_hom * hom_norm.get(r, 0.0)
@@ -1110,17 +1169,39 @@ def select_best_resolution(
             "provide at least three tested resolutions."
         )
 
-    feasible = [
+    size_safe = [
         r
         for r in interior
+        if (
+            metrics.cluster_sizes[r].size == 0
+            or int(np.min(metrics.cluster_sizes[r]))
+            >= _BISC_ABSOLUTE_MINIMUM_CLUSTER_SIZE
+        )
+        and (
+            metrics.cluster_sizes[r].size > 0
+            and float(np.median(metrics.cluster_sizes[r])) >= config.min_cluster_size
+        )
+    ]
+    if not size_safe:
+        raise ValueError(
+            "No interior BISC resolution satisfies the minimum cluster-size safeguards"
+        )
+    structurally_feasible = [
+        r
+        for r in size_safe
         if stability.get(r, 0.0) >= _BISC_MIN_FEASIBLE_STABILITY
     ]
+    structural_candidates = structurally_feasible if structurally_feasible else size_safe
 
-    if use_bio and metrics.n_bio_labels:
+    def apply_biological_cluster_limit(candidates: Sequence[float]) -> List[float]:
+        retained = [float(r) for r in candidates]
+        if not (use_bio and metrics.n_bio_labels):
+            return retained
         max_clusters = _BISC_MAX_CLUSTERS_PER_BIOLOGICAL_LABEL * metrics.n_bio_labels
-        feasible = [r for r in feasible if metrics.cluster_counts.get(r, 0) <= max_clusters]
-
-    SearchSet = feasible if feasible else interior
+        capped = [
+            r for r in retained if metrics.cluster_counts.get(r, 0) <= max_clusters
+        ]
+        return capped if capped else retained
 
     def pick_parsimonious(cands, eps=_BISC_PARSIMONY_TOLERANCE):
         if not cands:
@@ -1128,10 +1209,14 @@ def select_best_resolution(
         best = max(cands, key=lambda r: all_scores.get(r, -np.inf))
         best_val = all_scores[best]
         near = [r for r in cands if all_scores.get(r, -np.inf) >= (1 - eps) * best_val]
-        return min(near) if near else best
+        return (
+            min(near, key=lambda r: (metrics.cluster_counts[r], r))
+            if near
+            else best
+        )
 
     plateaus = _detect_plateaus(metrics, config, stability)
-    search_set = set(SearchSet)
+    search_set = set(structural_candidates)
     feasible_plateaus = [
         (
             plateau,
@@ -1142,18 +1227,139 @@ def select_best_resolution(
     feasible_plateaus = [item for item in feasible_plateaus if item[1]]
 
     if feasible_plateaus:
-        _, plateau_res = max(
-            feasible_plateaus,
-            key=lambda item: (item[0].mean_stability, len(item[0].resolutions)),
+        global_stability_values = np.asarray(
+            [stability[r] for r in sorted_res], dtype=float
+        )
+        lower = float(np.min(global_stability_values))
+        span = float(np.max(global_stability_values) - lower)
+        global_norm = _normalize_scores(stability)
+        ari_adjacent = metrics.ari_adjacent or _compute_ari_adjacent(
+            sorted_res, metrics.labels_per_resolution
         )
 
-        best = pick_parsimonious(plateau_res)
+        for plateau, candidates in feasible_plateaus:
+            local_scores: Dict[float, float] = {}
+            plateau_set = set(plateau.resolutions)
+            for resolution in candidates:
+                index = sorted_res.index(resolution)
+                terms: List[float] = []
+                if index > 0 and sorted_res[index - 1] in plateau_set:
+                    terms.append(ari_adjacent[(sorted_res[index - 1], resolution)])
+                if index + 1 < len(sorted_res) and sorted_res[index + 1] in plateau_set:
+                    terms.append(ari_adjacent[(resolution, sorted_res[index + 1])])
+                local_stability = float(np.mean(terms)) if terms else stability[resolution]
+                local_norm = (
+                    0.0
+                    if np.isclose(span, 0.0)
+                    else float(np.clip((local_stability - lower) / span, 0.0, 1.0))
+                )
+                structural_score = structural_scores[resolution]
+                local_scores[resolution] = (
+                    float(
+                        structural_score
+                        - config.w_stab * global_norm[resolution]
+                        + config.w_stab * local_norm
+                    )
+                    if np.isfinite(structural_score)
+                    else local_norm
+                )
+            best_probe_score = max(local_scores.values())
+            exact_best = [
+                resolution
+                for resolution, score in local_scores.items()
+                if np.isclose(score, best_probe_score, rtol=1e-12, atol=1e-12)
+            ]
+            probe = min(
+                exact_best,
+                key=lambda r: (metrics.cluster_counts[r], r),
+            )
+            plateau.representative_resolution = float(probe)
+            plateau.representative_score = float(local_scores[probe])
+
+        if plateau_reproducibility is not None:
+            for plateau, _ in feasible_plateaus:
+                probe = float(plateau.representative_resolution)
+                values = [float(value) for value in plateau_reproducibility.get(probe, [])]
+                if not values:
+                    raise ValueError(
+                        f"Missing fixed-resolution subsampling results for plateau probe {probe:.3f}"
+                    )
+                plateau.reproducibility_mean = float(np.mean(values))
+                plateau.reproducibility_min = float(np.min(values))
+            best_reproducibility = max(
+                float(plateau.reproducibility_mean)
+                for plateau, _ in feasible_plateaus
+            )
+            best_plateaus = [
+                item
+                for item in feasible_plateaus
+                if np.isclose(
+                    float(item[0].reproducibility_mean),
+                    best_reproducibility,
+                    rtol=1e-12,
+                    atol=1e-12,
+                )
+            ]
+            selected_plateau, plateau_res = min(
+                best_plateaus,
+                key=lambda item: (
+                    metrics.cluster_counts[float(item[0].representative_resolution)],
+                    float(item[0].representative_resolution),
+                ),
+            )
+            selection_mode = "plateau_probe_subsampling"
+        else:
+            selected_plateau, plateau_res = max(
+                feasible_plateaus,
+                key=lambda item: (item[0].mean_stability, len(item[0].resolutions)),
+            )
+            selection_mode = "structural_preselection"
+        selected_plateau.selected = True
+        alternatives = [
+            item for item in feasible_plateaus if item[0] is not selected_plateau
+        ]
+        if plateau_reproducibility is not None:
+            alternative = (
+                max(
+                    alternatives,
+                    key=lambda item: (
+                        float(item[0].reproducibility_mean),
+                        -metrics.cluster_counts[
+                            float(item[0].representative_resolution)
+                        ],
+                        -float(item[0].representative_resolution),
+                    ),
+                )
+                if alternatives
+                else None
+            )
+        else:
+            alternative = (
+                max(
+                    alternatives,
+                    key=lambda item: (
+                        item[0].mean_stability,
+                        len(item[0].resolutions),
+                    ),
+                )
+                if alternatives
+                else None
+            )
+        final_candidates = apply_biological_cluster_limit(plateau_res)
+        best = pick_parsimonious(final_candidates)
         return ResolutionSelectionResult(
             best_resolution=float(best),
             scores=all_scores,
             stability=stability,
             tiny_cluster_penalty=tiny_penalty,
             plateaus=plateaus,
+            structural_scores=structural_scores,
+            selected_plateau_index=plateaus.index(selected_plateau),
+            alternative_plateau_index=(
+                plateaus.index(alternative[0]) if alternative is not None else None
+            ),
+            selection_mode=selection_mode,
+            confidence="multiscale" if alternatives else "clear",
             bio_homogeneity=metrics.bio_homogeneity,
             bio_fragmentation=metrics.bio_fragmentation,
             bio_ari=metrics.bio_ari,
@@ -1170,8 +1376,9 @@ def select_best_resolution(
                 return r
         return None
 
-    knee = stability_knee(SearchSet)
-    best = knee if knee is not None else pick_parsimonious(SearchSet)
+    fallback_candidates = apply_biological_cluster_limit(structural_candidates)
+    knee = stability_knee(fallback_candidates)
+    best = knee if knee is not None else pick_parsimonious(fallback_candidates)
 
     return ResolutionSelectionResult(
         best_resolution=float(best),
@@ -1179,10 +1386,66 @@ def select_best_resolution(
         stability=stability,
         tiny_cluster_penalty=tiny_penalty,
         plateaus=plateaus,
+        structural_scores=structural_scores,
+        selected_plateau_index=None,
+        alternative_plateau_index=None,
+        selection_mode="stability_knee_fallback" if knee is not None else "composite_fallback",
+        confidence="weak",
         bio_homogeneity=metrics.bio_homogeneity,
         bio_fragmentation=metrics.bio_fragmentation,
         bio_ari=metrics.bio_ari,
     )
+
+
+def _subsampling_candidate_stability(
+    adata: ad.AnnData,
+    cfg: ClusterAnnotateConfig,
+    embedding_key: str,
+    labels_per_resolution: Dict[float, np.ndarray],
+    candidate_resolutions: Sequence[float],
+) -> Dict[float, List[float]]:
+    candidates = sorted({float(r) for r in candidate_resolutions})
+    if not candidates:
+        return {}
+    missing = [r for r in candidates if r not in labels_per_resolution]
+    if missing:
+        raise ValueError(f"Missing full-data labels for BISC probes: {missing}")
+
+    embedding = np.asarray(adata.obsm[embedding_key], dtype=np.float32)
+    n_sub = int(round(cfg.subsample_frac * adata.n_obs))
+    if not 2 <= n_sub <= adata.n_obs:
+        raise ValueError(
+            "BISC subsampling requires at least two retained cells"
+        )
+    results: Dict[float, List[float]] = {r: [] for r in candidates}
+    LOGGER.info(
+        "Evaluating %d structural plateau probe(s) across %d %.0f%% cell subsamples",
+        len(candidates),
+        cfg.stability_repeats,
+        100.0 * cfg.subsample_frac,
+    )
+    for repeat in range(cfg.stability_repeats):
+        seed = cfg.random_state + repeat
+        rng = np.random.default_rng(seed)
+        positions = rng.choice(adata.n_obs, size=n_sub, replace=False)
+        sub = ad.AnnData(obs=pd.DataFrame(index=adata.obs_names[positions].copy()))
+        sub.obsm[embedding_key] = embedding[positions]
+        sc.pp.neighbors(sub, use_rep=embedding_key, random_state=seed)
+        for candidate_index, resolution in enumerate(candidates):
+            key = f"{cfg.label_key}_probe_{repeat}_{candidate_index}"
+            sc.tl.leiden(
+                sub,
+                resolution=resolution,
+                key_added=key,
+                random_state=seed,
+                flavor="igraph",
+            )
+            ari = adjusted_rand_score(
+                labels_per_resolution[resolution][positions],
+                sub.obs[key].to_numpy(),
+            )
+            results[resolution].append(float(ari))
+    return results
 
 
 # -------------------------------------------------------------------------
@@ -1319,18 +1582,106 @@ def _resolution_sweep(
         use_bio=use_bio,
     )
 
-    selection = select_best_resolution(metrics, sel_cfg)
+    preselection = select_best_resolution(metrics, sel_cfg)
+    probe_resolutions = [
+        float(plateau.representative_resolution)
+        for plateau in preselection.plateaus
+        if plateau.representative_resolution is not None
+    ]
+    plateau_probe_stability = _subsampling_candidate_stability(
+        adata,
+        cfg,
+        embedding_key,
+        clusterings_float,
+        probe_resolutions,
+    )
+    selection = select_best_resolution(
+        metrics,
+        sel_cfg,
+        plateau_reproducibility=(
+            plateau_probe_stability if plateau_probe_stability else None
+        ),
+    )
     best_res = float(selection.best_resolution)
 
+    ari_adjacent = metrics.ari_adjacent or _compute_ari_adjacent(
+        res_list, clusterings_float
+    )
+
+    selected_plateau = (
+        selection.plateaus[selection.selected_plateau_index]
+        if selection.selected_plateau_index is not None
+        else None
+    )
+    alternative_plateau = (
+        selection.plateaus[selection.alternative_plateau_index]
+        if selection.alternative_plateau_index is not None
+        else None
+    )
+    selected_probe = (
+        float(selected_plateau.representative_resolution)
+        if selected_plateau is not None
+        else None
+    )
+    alternative_probe = (
+        float(alternative_plateau.representative_resolution)
+        if alternative_plateau is not None
+        else None
+    )
     sweep: Dict[str, object] = {
         "resolutions": np.array(res_list, dtype=float),
         "silhouette_scores": silhouette_scores,
         "n_clusters": n_clusters_list,
         "composite_scores": [selection.scores[r] for r in res_list],
+        "structural_scores": [selection.structural_scores[r] for r in res_list],
         "stability_scores": [selection.stability[r] for r in res_list],
+        "adjacent_ari": [
+            float(ari_adjacent[(left, right)])
+            for left, right in zip(res_list[:-1], res_list[1:])
+        ],
         "tiny_cluster_penalty": [selection.tiny_cluster_penalty[r] for r in res_list],
         "cluster_sizes": cluster_sizes,
-        "plateaus": [{"resolutions": p.resolutions, "mean_stability": p.mean_stability} for p in selection.plateaus],
+        "plateaus": [asdict(plateau) for plateau in selection.plateaus],
+        "selection": {
+            "mode": selection.selection_mode,
+            "confidence": selection.confidence,
+            "selected_plateau_index": selection.selected_plateau_index,
+            "alternative_plateau_index": selection.alternative_plateau_index,
+            "best_resolution": best_res,
+            "best_n_clusters": int(metrics.cluster_counts[best_res]),
+            "final_score": float(selection.scores[best_res]),
+            "selected_probe_resolution": selected_probe,
+            "selected_probe_n_clusters": (
+                int(metrics.cluster_counts[selected_probe])
+                if selected_probe is not None
+                else None
+            ),
+            "alternative_probe_resolution": alternative_probe,
+            "alternative_probe_n_clusters": (
+                int(metrics.cluster_counts[alternative_probe])
+                if alternative_probe is not None
+                else None
+            ),
+            "probe_reproducibility_gap": (
+                float(selected_plateau.reproducibility_mean)
+                - float(alternative_plateau.reproducibility_mean)
+                if selected_plateau is not None
+                and alternative_plateau is not None
+                and selected_plateau.reproducibility_mean is not None
+                and alternative_plateau.reproducibility_mean is not None
+                else None
+            ),
+            "probe_cluster_count_gap": (
+                int(metrics.cluster_counts[alternative_probe])
+                - int(metrics.cluster_counts[selected_probe])
+                if selected_probe is not None and alternative_probe is not None
+                else None
+            ),
+        },
+        "plateau_probe_subsampling_ari": {
+            _res_key(resolution): [float(value) for value in values]
+            for resolution, values in plateau_probe_stability.items()
+        },
         "selection_config": asdict(sel_cfg),
         "selection_rules": _bisc_fixed_rule_snapshot(),
     }
@@ -1516,7 +1867,17 @@ def run_BISC(
     sweep = dict(sweep) if isinstance(sweep, dict) else {}
     sweep["bio_mask_stats"] = bio_mask_stats
 
-    stability_aris = _subsampling_stability(adata, cfg, embedding_key, best_res)
+    probe_stability = sweep.get("plateau_probe_subsampling_ari", {})
+    probe_stability = probe_stability if isinstance(probe_stability, dict) else {}
+    retained_final_stability = probe_stability.get(_res_key(best_res), [])
+    if retained_final_stability:
+        stability_aris = [float(value) for value in retained_final_stability]
+        LOGGER.info(
+            "Reusing plateau-probe subsampling results for final resolution %.3f",
+            best_res,
+        )
+    else:
+        stability_aris = _subsampling_stability(adata, cfg, embedding_key, best_res)
 
     _apply_final_clustering(adata, cfg, best_res)
 
@@ -1551,7 +1912,12 @@ def run_BISC(
             "resolutions": [float(r) for r in sweep.get("resolutions", [])],
             "silhouette_scores": [float(x) for x in sweep.get("silhouette_scores", [])],
             "n_clusters": [int(x) for x in sweep.get("n_clusters", [])],
+            "adjacent_ari": sweep.get("adjacent_ari", None),
             "plateaus": sweep.get("plateaus", None),
+            "selection": sweep.get("selection", {}),
+            "plateau_probe_subsampling_ari": sweep.get(
+                "plateau_probe_subsampling_ari", {}
+            ),
             "selection_config": sweep.get("selection_config", {}),
             "selection_rules": sweep.get("selection_rules", {}),
             "bio_mask_stats": sweep.get("bio_mask_stats", None),
@@ -1585,6 +1951,9 @@ def run_BISC(
 
     rinfo.setdefault("stability", {})
     rinfo["stability"]["subsampling_ari"] = [float(x) for x in stability_aris]
+    rinfo["stability"]["subsampling_role"] = "final_partition_diagnostic"
+    rinfo["stability"]["plateau_probe_subsampling_ari"] = probe_stability
+    rinfo["stability"]["plateau_probe_selection_role"] = "cross_plateau_selection"
 
     res_list = [float(r) for r in rinfo.get("sweep", {}).get("resolutions", [])]
     sil_list = rinfo.get("sweep", {}).get("silhouette_scores", []) or []
@@ -1596,11 +1965,16 @@ def run_BISC(
     rinfo["diagnostics"]["cluster_counts"] = {_res_key(r): int(n) for r, n in zip(res_list, n_list)}
 
     comp_list = sweep.get("composite_scores", None)
+    structural_list = sweep.get("structural_scores", None)
     stab_list = sweep.get("stability_scores", None)
     tiny_list = sweep.get("tiny_cluster_penalty", None)
 
     if isinstance(comp_list, list) and len(comp_list) == len(res_list):
         rinfo["diagnostics"]["composite_scores"] = {_res_key(r): float(v) for r, v in zip(res_list, comp_list)}
+    if isinstance(structural_list, list) and len(structural_list) == len(res_list):
+        rinfo["diagnostics"]["structural_scores"] = {
+            _res_key(r): float(v) for r, v in zip(res_list, structural_list)
+        }
     if isinstance(stab_list, list) and len(stab_list) == len(res_list):
         rinfo["diagnostics"]["resolution_stability"] = {_res_key(r): float(v) for r, v in zip(res_list, stab_list)}
     if isinstance(tiny_list, list) and len(tiny_list) == len(res_list):

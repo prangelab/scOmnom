@@ -137,6 +137,43 @@ def test_plot_milo_regions_emits_grouped_region_artifact():
     assert artifacts[0].fig.axes[0].get_title() == "Milo grouped differential-abundance regions"
 
 
+def test_plot_milo_effect_review_qc_summarizes_triggers_by_region():
+    results = pd.DataFrame(
+        {
+            "pair": ["control_vs_treated"] * 7,
+            "region_id": ["region_001"] * 3 + ["region_002"] * 2 + [np.nan, "region_003"],
+            "region_cluster_label": ["C01"] * 3 + ["C02"] * 2 + [np.nan, "C03"],
+            "effect_review_reason": [
+                "ok",
+                "extreme_log2fc",
+                "extreme_log2fc;minimum_sample_support",
+                "minimum_sample_support",
+                "ok",
+                "ok",
+                "extreme_log2fc",
+            ],
+            "tested": [True] * 6 + [False],
+            "extreme_log2fc_threshold": [3.0] * 7,
+            "min_nonzero_per_level_required": [3] * 7,
+        }
+    )
+
+    summary = pu._summarize_milo_effect_review(results)
+    overall = summary.loc[summary["row_type"] == "all_tested"].iloc[0]
+    assert overall["n_total"] == 6
+    assert overall["n_no_review"] == 3
+    assert overall["n_extreme_log2fc"] == 1
+    assert overall["n_minimum_sample_support"] == 1
+    assert overall["n_both"] == 1
+
+    with pu.capture_plot_artifacts() as artifacts:
+        pu.plot_milo_effect_review_qc(results, Path("da"))
+
+    assert [artifact.stem for artifact in artifacts] == ["milo_qc_effect_review"]
+    assert artifacts[0].fig._suptitle.get_text() == "Milo QC: effect-review triggers"
+    assert "minimum support: 3 nonzero samples" in artifacts[0].fig.texts[-1].get_text()
+
+
 def test_use_system_tar_zstd_prefers_python_path_on_macos(monkeypatch):
     monkeypatch.setattr(iu.sys, "platform", "darwin", raising=False)
     monkeypatch.setenv("SCOMNOM_FORCE_SYSTEM_TAR_ZSTD", "")
@@ -801,6 +838,7 @@ def test_plot_stability_curves_structural_only(tmp_path, reset_root_figdir, mock
     sil = {"0.200": 0.1, "0.400": 0.3, "0.600": 0.2}
     stab = {"0.200": 0.9, "0.400": 0.85, "0.600": 0.8}
     comp = {"0.200": 0.2, "0.400": 0.5, "0.600": 0.4}
+    structural = {"0.200": 0.3, "0.400": 0.4, "0.600": 0.35}
     tiny = {"0.200": 0.6, "0.400": 0.7, "0.600": 0.5}
     plateaus = [{"resolutions": [0.2, 0.4]}]
 
@@ -810,6 +848,8 @@ def test_plot_stability_curves_structural_only(tmp_path, reset_root_figdir, mock
             silhouette=sil,
             stability=stab,
             composite=comp,
+            structural=structural,
+            adjacent_ari=[0.91, 0.82],
             tiny_cluster_penalty=tiny,
             best_resolution=0.4,
             plateaus=plateaus,
@@ -819,6 +859,9 @@ def test_plot_stability_curves_structural_only(tmp_path, reset_root_figdir, mock
     assert [a.stem for a in artifacts] == ["cluster_selection_stability"]
     labels = [line.get_label() for line in artifacts[0].fig.axes[0].lines]
     assert "Adjacent-resolution stability (smoothed ARI)" in labels
+    assert "Raw adjacent ARI (plateau edges)" in labels
+    assert "Structural score (probe selection)" in labels
+    assert "Full composite (final selection)" in labels
 
 
 def test_plot_stability_curves_with_bio(tmp_path, reset_root_figdir, mock_save_multi):
@@ -846,6 +889,38 @@ def test_plot_stability_curves_with_bio(tmp_path, reset_root_figdir, mock_save_m
         )
 
     assert [a.stem for a in artifacts] == ["cluster_selection_stability_alt"]
+
+
+def test_plot_plateau_probe_reproducibility_marks_selected_plateau(
+    tmp_path, reset_root_figdir, mock_save_multi
+):
+    plateaus = [
+        {
+            "resolutions": [0.2, 0.3],
+            "representative_resolution": 0.3,
+            "reproducibility_mean": 0.91,
+            "reproducibility_min": 0.86,
+            "selected": False,
+        },
+        {
+            "resolutions": [0.7, 0.8],
+            "representative_resolution": 0.8,
+            "reproducibility_mean": 0.95,
+            "reproducibility_min": 0.92,
+            "selected": True,
+        },
+    ]
+
+    with pu.capture_plot_artifacts() as artifacts:
+        pu.plot_plateau_probe_reproducibility(
+            plateaus=plateaus,
+            figdir=tmp_path / "figs",
+        )
+
+    assert [artifact.stem for artifact in artifacts] == [
+        "plateau_probe_reproducibility"
+    ]
+    assert artifacts[0].fig.axes[0].get_title() == "Cross-plateau reproducibility"
 
 
 def test_plot_biological_metrics(tmp_path, reset_root_figdir, mock_save_multi):

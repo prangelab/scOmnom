@@ -96,6 +96,99 @@ def test_plateau_stability_tie_prefers_longer_plateau(monkeypatch):
     assert result.best_resolution == 0.4
 
 
+def test_raw_edges_preserve_plateau_despite_unstable_outgoing_transition():
+    metrics = make_metrics(adjacent_ari=(0.94, 0.95, 0.70, 0.72))
+
+    result = cu.select_best_resolution(metrics, make_config(min_plateau_len=3))
+
+    assert [plateau.resolutions for plateau in result.plateaus] == [
+        [0.1, 0.2, 0.3]
+    ]
+
+
+def test_support_edge_rescues_short_strong_plateau_core():
+    metrics = make_metrics(adjacent_ari=(0.93, 0.82, 0.70, 0.70))
+
+    result = cu.select_best_resolution(metrics, make_config(min_plateau_len=3))
+
+    assert [plateau.resolutions for plateau in result.plateaus] == [
+        [0.1, 0.2, 0.3]
+    ]
+
+
+def test_plateau_probe_uses_exact_structural_maximum_before_final_parsimony(monkeypatch):
+    silhouette = {0.1: 0.0, 0.2: 0.98, 0.3: 1.0, 0.4: 0.0}
+    metrics = make_metrics(resolutions=(0.1, 0.2, 0.3, 0.4), silhouette=silhouette)
+    set_plateaus(monkeypatch, cu.Plateau([0.2, 0.3], mean_stability=0.90))
+
+    result = cu.select_best_resolution(metrics, make_config())
+
+    assert result.plateaus[0].representative_resolution == 0.3
+    assert result.best_resolution == 0.2
+
+
+def test_subsampling_selects_plateau_without_three_percent_gate(monkeypatch):
+    silhouette = {
+        0.1: 0.0,
+        0.2: 1.0,
+        0.3: 0.0,
+        0.4: 1.0,
+        0.5: 0.0,
+        0.6: 0.0,
+    }
+    metrics = make_metrics(
+        resolutions=(0.1, 0.2, 0.3, 0.4, 0.5, 0.6),
+        silhouette=silhouette,
+    )
+    set_plateaus(
+        monkeypatch,
+        cu.Plateau([0.2, 0.3], mean_stability=0.95),
+        cu.Plateau([0.4, 0.5], mean_stability=0.90),
+    )
+
+    result = cu.select_best_resolution(
+        metrics,
+        make_config(),
+        plateau_reproducibility={0.2: [0.93, 0.93], 0.4: [0.95, 0.95]},
+    )
+
+    assert result.selected_plateau_index == 1
+    assert result.alternative_plateau_index == 0
+    assert result.best_resolution == 0.4
+    assert result.selection_mode == "plateau_probe_subsampling"
+    assert result.confidence == "multiscale"
+
+
+def test_biological_cluster_limit_does_not_remove_structural_plateau(monkeypatch):
+    silhouette = {0.1: 0.0, 0.2: 1.0, 0.3: 0.0, 0.4: 0.5, 0.5: 0.4, 0.6: 0.0}
+    metrics = make_metrics(
+        resolutions=(0.1, 0.2, 0.3, 0.4, 0.5, 0.6),
+        silhouette=silhouette,
+        cluster_counts={0.1: 2, 0.2: 8, 0.3: 4, 0.4: 4, 0.5: 5, 0.6: 6},
+        bio_homogeneity={r: 0.5 for r in (0.1, 0.2, 0.3, 0.4, 0.5, 0.6)},
+        bio_fragmentation={r: 0.5 for r in (0.1, 0.2, 0.3, 0.4, 0.5, 0.6)},
+        bio_ari={r: 0.5 for r in (0.1, 0.2, 0.3, 0.4, 0.5, 0.6)},
+        n_bio_labels=2,
+    )
+    set_plateaus(
+        monkeypatch,
+        cu.Plateau([0.2, 0.3], mean_stability=0.95),
+        cu.Plateau([0.4, 0.5], mean_stability=0.90),
+    )
+    config = make_config(use_bio=True, w_hom=0.15, w_frag=0.10, w_bioari=0.15)
+
+    result = cu.select_best_resolution(
+        metrics,
+        config,
+        plateau_reproducibility={0.2: [0.98, 0.98], 0.4: [0.90, 0.90]},
+    )
+
+    assert result.selected_plateau_index == 0
+    assert result.plateaus[0].representative_resolution == 0.2
+    assert result.best_resolution == 0.3
+    assert result.confidence == "multiscale"
+
+
 def test_three_percent_parsimony_selects_lowest_near_optimal_resolution(monkeypatch):
     silhouette = {0.1: 0.0, 0.2: 0.971, 0.3: 0.98, 0.4: 1.0, 0.5: 0.0}
     metrics = make_metrics(silhouette=silhouette)
@@ -237,7 +330,7 @@ def test_minimum_feasible_stability_filters_plateau_candidates(monkeypatch):
     assert result.best_resolution == 0.4
 
 
-def test_later_feasible_plateau_is_used_when_best_plateau_becomes_infeasible(monkeypatch):
+def test_structural_preselection_is_not_redirected_by_biological_cluster_limit(monkeypatch):
     resolutions = (0.1, 0.2, 0.3, 0.4, 0.5)
     counts = {0.1: 4, 0.2: 12, 0.3: 6, 0.4: 8, 0.5: 14}
     metrics = make_metrics(
@@ -256,10 +349,11 @@ def test_later_feasible_plateau_is_used_when_best_plateau_becomes_infeasible(mon
 
     result = cu.select_best_resolution(metrics, make_config(use_bio=True))
 
-    assert result.best_resolution == 0.3
+    assert result.selected_plateau_index == 0
+    assert result.best_resolution == 0.2
 
 
-def test_no_feasible_plateau_uses_no_plateau_fallback(monkeypatch):
+def test_bio_limit_does_not_force_fallback_outside_selected_plateau(monkeypatch):
     resolutions = (0.1, 0.2, 0.3, 0.4, 0.5)
     counts = {0.1: 4, 0.2: 12, 0.3: 6, 0.4: 8, 0.5: 14}
     metrics = make_metrics(
@@ -274,7 +368,8 @@ def test_no_feasible_plateau_uses_no_plateau_fallback(monkeypatch):
 
     result = cu.select_best_resolution(metrics, make_config(use_bio=True))
 
-    assert result.best_resolution == 0.3
+    assert result.selected_plateau_index == 0
+    assert result.best_resolution == 0.2
 
 
 def test_tiny_cluster_penalty_discourages_tiny_cluster_burden(monkeypatch):
@@ -299,7 +394,7 @@ def test_tiny_cluster_penalty_discourages_tiny_cluster_burden(monkeypatch):
     assert result.best_resolution == 0.2
 
 
-def test_absolute_minimum_cluster_size_controls_plateau_membership():
+def test_absolute_minimum_cluster_size_does_not_change_raw_edge_geometry():
     resolutions = (0.1, 0.2)
     config = make_config(min_plateau_len=2)
     stability = {0.1: 0.9, 0.2: 0.9}
@@ -316,12 +411,29 @@ def test_absolute_minimum_cluster_size_controls_plateau_membership():
     )
 
     assert len(cu._detect_plateaus(accepted, config, stability)) == 1
-    assert cu._detect_plateaus(rejected, config, stability) == []
+    assert len(cu._detect_plateaus(rejected, config, stability)) == 1
+
+
+def test_absolute_minimum_cluster_size_remains_a_selection_safeguard():
+    metrics = make_metrics(
+        resolutions=(0.1, 0.2, 0.3),
+        cluster_counts={0.1: 2, 0.2: 2, 0.3: 2},
+        cluster_sizes={
+            0.1: np.array([100, 100]),
+            0.2: np.array([4, 100]),
+            0.3: np.array([100, 100]),
+        },
+    )
+
+    with pytest.raises(ValueError, match="minimum cluster-size safeguards"):
+        cu.select_best_resolution(metrics, make_config())
 
 
 def test_fixed_rule_snapshot_records_validated_values():
     assert cu._bisc_fixed_rule_snapshot() == {
+        "selector_version": "raw_edge_plateau_v2",
         "minimum_feasible_stability": 0.60,
+        "plateau_support_fraction": 0.50,
         "parsimony_tolerance": 0.03,
         "max_clusters_per_biological_label": 2.5,
         "absolute_minimum_cluster_size": 5,
