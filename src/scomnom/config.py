@@ -525,7 +525,6 @@ class ClusterAnnotateConfig(BaseModel):
     tiny_cluster_size: int = 20
     min_cluster_size: int = 20
     min_plateau_len: int = 3
-    max_cluster_jump_frac: float = 0.4
     stability_threshold: float = 0.85
 
     w_stab: float = 0.50
@@ -731,6 +730,16 @@ class ClusterAnnotateConfig(BaseModel):
     # ------------------------------------------------------------------
     # Validators
     # ------------------------------------------------------------------
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_removed_bisc_options(cls, values):
+        if isinstance(values, dict) and "max_cluster_jump_frac" in values:
+            raise ValueError(
+                "max_cluster_jump_frac was removed because it did not affect BISC selection; "
+                "remove it from the configuration"
+            )
+        return values
+
     @model_validator(mode="after")
     def _check_resolution_range(self):
         if self.res_min >= self.res_max:

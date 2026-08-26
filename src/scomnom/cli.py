@@ -1359,7 +1359,6 @@ def cluster_and_annotate(
     tiny_cluster_size: int = typer.Option(20, "--tiny-cluster-size"),
     min_cluster_size: int = typer.Option(20, "--min-cluster-size"),
     min_plateau_len: int = typer.Option(3, "--min-plateau-len"),
-    max_cluster_jump_frac: float = typer.Option(0.4, "--max-cluster-jump-frac"),
     stability_threshold: float = typer.Option(
         0.85,
         "--stability-threshold",
@@ -1682,7 +1681,6 @@ def cluster_and_annotate(
         tiny_cluster_size=tiny_cluster_size,
         min_cluster_size=min_cluster_size,
         min_plateau_len=min_plateau_len,
-        max_cluster_jump_frac=max_cluster_jump_frac,
         stability_threshold=stability_threshold,
         w_stab=w_stab,
         w_sil=w_sil,

@@ -907,7 +907,6 @@ class ResolutionMetrics:
 class ResolutionSelectionConfig:
     stability_threshold: float = 0.85
     min_plateau_len: int = 3
-    max_cluster_jump_frac: float = 0.4
     min_cluster_size: int = 20
     tiny_cluster_size: int = 20
     w_stab: float = 0.50
@@ -1570,7 +1569,6 @@ def _resolution_sweep(
     sel_cfg = ResolutionSelectionConfig(
         stability_threshold=getattr(cfg, "stability_threshold", 0.85),
         min_plateau_len=getattr(cfg, "min_plateau_len", 3),
-        max_cluster_jump_frac=getattr(cfg, "max_cluster_jump_frac", 0.4),
         min_cluster_size=getattr(cfg, "min_cluster_size", 20),
         tiny_cluster_size=getattr(cfg, "tiny_cluster_size", 20),
         w_stab=getattr(cfg, "w_stab", 0.50),

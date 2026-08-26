@@ -357,7 +357,6 @@ class _BiscQuickConfig:
     min_cluster_size: int = 20
     tiny_cluster_size: int = 20
     min_plateau_len: int = 3
-    max_cluster_jump_frac: float = 0.4
     stability_threshold: float = 0.85
     w_stab: float = 0.50
     w_sil: float = 0.35

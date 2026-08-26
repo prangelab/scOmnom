@@ -1,7 +1,9 @@
 import numpy as np
 import pytest
+from pydantic import ValidationError
 
 import scomnom.clustering_utils as cu
+from scomnom.config import ClusterAnnotateConfig
 
 
 def make_metrics(
@@ -51,7 +53,6 @@ def make_config(**overrides):
     values = {
         "stability_threshold": 0.85,
         "min_plateau_len": 2,
-        "max_cluster_jump_frac": 0.4,
         "min_cluster_size": 20,
         "tiny_cluster_size": 20,
         "w_stab": 0.0,
@@ -64,6 +65,14 @@ def make_config(**overrides):
     }
     values.update(overrides)
     return cu.ResolutionSelectionConfig(**values)
+
+
+def test_removed_cluster_jump_option_is_rejected():
+    with pytest.raises(ValidationError, match="max_cluster_jump_frac was removed"):
+        ClusterAnnotateConfig(
+            input_path="input.zarr.tar.zst",
+            max_cluster_jump_frac=0.4,
+        )
 
 
 def set_plateaus(monkeypatch, *plateaus):

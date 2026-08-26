@@ -63,8 +63,6 @@ The two-sided smoothed stability curve remains part of the structural score and 
 * `min_cluster_size`: **20**
 * `tiny_cluster_size`: **20**
 
-`max_cluster_jump_frac` remains accepted in configuration files for compatibility with earlier releases but no longer deletes individual plateau members. Raw partition agreement now carries the structural-boundary decision.
-
 ---
 
 #### Biological metrics (CellTypist-guided)
@@ -126,7 +124,7 @@ Selection proceeds in four ordered stages:
 
 Biological guidance therefore acts across the complete selected plateau rather than as a post-hoc override among structural probes. When no detected plateau contains a feasible candidate, BISC applies the stability-knee fallback across the feasible interior resolution set.
 
-Four fixed safeguards define the validated selector behavior:
+Five fixed safeguards define the validated selector behavior:
 
 | Safeguard | Value | Role |
 |---|---:|---|
