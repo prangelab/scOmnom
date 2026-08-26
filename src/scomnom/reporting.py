@@ -228,6 +228,10 @@ def _describe_plot(rel_path: Path) -> str:
         return "Resolution sweep diagnostics: centroid separation and number of clusters."
     if "plateau_probe_reproducibility" in stem:
         return "Fixed-resolution subsampling reproducibility used to select among BISC plateaus."
+    if "plateau_persistence" in stem:
+        return "Partition, internal-edge, and boundary persistence for BISC plateaus."
+    if "plateau_boundary_persistence" in stem:
+        return "Subsampling persistence of adjacent-resolution edges and plateau boundaries."
     if "stability" in stem and "ari" in stem:
         return "Post-selection subsampling reproducibility (ARI vs full-data partition)."
     if "cluster_selection" in stem or "stability_curves" in stem:

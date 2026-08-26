@@ -923,7 +923,7 @@ _BISC_PARSIMONY_TOLERANCE = 0.03
 _BISC_MAX_CLUSTERS_PER_BIOLOGICAL_LABEL = 2.5
 _BISC_ABSOLUTE_MINIMUM_CLUSTER_SIZE = 5
 _BISC_PLATEAU_SUPPORT_FRACTION = 0.50
-_BISC_SELECTOR_VERSION = "raw_edge_plateau_v2"
+_BISC_SELECTOR_VERSION = "raw_edge_persistence_v3"
 
 
 def _bisc_fixed_rule_snapshot() -> Dict[str, float | int | str]:
@@ -949,6 +949,11 @@ class Plateau:
     representative_score: Optional[float] = None
     reproducibility_mean: Optional[float] = None
     reproducibility_min: Optional[float] = None
+    internal_edge_persistence_mean: Optional[float] = None
+    internal_edge_persistence_min: Optional[float] = None
+    boundary_persistence_mean: Optional[float] = None
+    boundary_persistence_min: Optional[float] = None
+    persistence_score: Optional[float] = None
     selected: bool = False
 
 
@@ -1001,6 +1006,64 @@ def _compute_smoothed_stability(
     return stab
 
 
+def _plateau_support_level(config: ResolutionSelectionConfig) -> float:
+    support = _BISC_MIN_FEASIBLE_STABILITY + _BISC_PLATEAU_SUPPORT_FRACTION * (
+        float(config.stability_threshold) - _BISC_MIN_FEASIBLE_STABILITY
+    )
+    return min(float(config.stability_threshold), float(support))
+
+
+def _detect_plateau_intervals(
+    edges: Sequence[float],
+    config: ResolutionSelectionConfig,
+) -> List[Tuple[int, int]]:
+    """Return disjoint rescued edge intervals around strong-edge cores."""
+    edge_values = [float(value) for value in edges]
+    minimum_edges = max(1, int(config.min_plateau_len) - 1)
+    support_level = _plateau_support_level(config)
+
+    cores: List[Tuple[int, int]] = []
+    start: Optional[int] = None
+    for index in range(len(edge_values) + 1):
+        strong = (
+            index < len(edge_values)
+            and edge_values[index] >= float(config.stability_threshold)
+        )
+        if strong and start is None:
+            start = index
+        if start is None or strong:
+            continue
+        cores.append((start, index - 1))
+        start = None
+
+    intervals: List[Tuple[int, int]] = []
+    for core_start, core_end in cores:
+        start, end = core_start, core_end
+        while end - start + 1 < minimum_edges:
+            neighbours: List[Tuple[float, int]] = []
+            if start > 0 and edge_values[start - 1] >= support_level:
+                neighbours.append((edge_values[start - 1], start - 1))
+            if end + 1 < len(edge_values) and edge_values[end + 1] >= support_level:
+                neighbours.append((edge_values[end + 1], end + 1))
+            if not neighbours:
+                break
+            _, chosen = max(neighbours, key=lambda item: (item[0], -item[1]))
+            if chosen < start:
+                start = chosen
+            else:
+                end = chosen
+        if end - start + 1 >= minimum_edges:
+            intervals.append((start, end))
+
+    merged: List[Tuple[int, int]] = []
+    for start, end in sorted(set(intervals)):
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
 def _detect_plateaus(
     metrics: ResolutionMetrics,
     config: ResolutionSelectionConfig,
@@ -1017,45 +1080,10 @@ def _detect_plateaus(
         float(ari_adjacent[(left, right)])
         for left, right in zip(sorted_res[:-1], sorted_res[1:])
     ]
-    minimum_edges = max(1, int(config.min_plateau_len) - 1)
-    support_level = _BISC_MIN_FEASIBLE_STABILITY + _BISC_PLATEAU_SUPPORT_FRACTION * (
-        float(config.stability_threshold) - _BISC_MIN_FEASIBLE_STABILITY
-    )
-    support_level = min(float(config.stability_threshold), support_level)
-
-    seed_runs: List[Tuple[int, int]] = []
-    start: Optional[int] = None
-    for index, value in enumerate(edges):
-        if value >= config.stability_threshold and start is None:
-            start = index
-        if start is not None and (
-            value < config.stability_threshold or index == len(edges) - 1
-        ):
-            end = index if value >= config.stability_threshold else index - 1
-            seed_runs.append((start, end))
-            start = None
-
-    intervals: set[Tuple[int, int]] = set()
-    for core_start, core_end in seed_runs:
-        start, end = core_start, core_end
-        while end - start + 1 < minimum_edges:
-            neighbours: List[Tuple[float, int, int]] = []
-            if start > 0 and edges[start - 1] >= support_level:
-                neighbours.append((edges[start - 1], -1, start - 1))
-            if end + 1 < len(edges) and edges[end + 1] >= support_level:
-                neighbours.append((edges[end + 1], 0, end + 1))
-            if not neighbours:
-                break
-            _, _, chosen = max(neighbours)
-            if chosen < start:
-                start = chosen
-            else:
-                end = chosen
-        if end - start + 1 >= minimum_edges:
-            intervals.add((start, end))
+    intervals = _detect_plateau_intervals(edges, config)
 
     plateaus: List[Plateau] = []
-    for start, end in sorted(intervals):
+    for start, end in intervals:
         internal = np.asarray(edges[start : end + 1], dtype=float)
         boundaries: List[float] = []
         if start > 0:
@@ -1108,10 +1136,90 @@ def compute_tiny_cluster_penalty(cluster_sizes: np.ndarray, tiny_threshold: int)
     return float(0.5 * (penalty_cluster_fraction + penalty_cell_fraction))
 
 
+def _annotate_plateau_persistence(
+    plateaus: Sequence[Plateau],
+    sorted_resolutions: Sequence[float],
+    config: ResolutionSelectionConfig,
+    plateau_reproducibility: Dict[float, Sequence[float]],
+    adjacent_reproducibility: Dict[Tuple[float, float], Sequence[float]],
+) -> None:
+    """Attach fixed-partition, internal-edge, and boundary persistence metrics."""
+    sorted_res = [float(value) for value in sorted_resolutions]
+    edge_keys = list(zip(sorted_res[:-1], sorted_res[1:]))
+    missing_edges = [key for key in edge_keys if key not in adjacent_reproducibility]
+    if missing_edges:
+        raise ValueError(
+            "Missing subsampling results for adjacent BISC edges: "
+            f"{missing_edges}"
+        )
+    repeat_counts = {len(adjacent_reproducibility[key]) for key in edge_keys}
+    if not repeat_counts or len(repeat_counts) != 1 or next(iter(repeat_counts)) == 0:
+        raise ValueError("Adjacent-edge subsampling results must have equal nonzero lengths")
+    n_repeats = next(iter(repeat_counts))
+    support_level = _plateau_support_level(config)
+
+    for plateau in plateaus:
+        probe = float(plateau.representative_resolution)
+        probe_values = [
+            float(value) for value in plateau_reproducibility.get(probe, [])
+        ]
+        if len(probe_values) != n_repeats:
+            raise ValueError(
+                f"Expected {n_repeats} fixed-resolution subsampling results for "
+                f"plateau probe {probe:.3f}; found {len(probe_values)}"
+            )
+        plateau.reproducibility_mean = float(np.mean(probe_values))
+        plateau.reproducibility_min = float(np.min(probe_values))
+
+        start = sorted_res.index(float(plateau.resolutions[0]))
+        end = sorted_res.index(float(plateau.resolutions[-1]))
+        internal_indices = list(range(start, end))
+
+        internal_by_repeat: List[float] = []
+        boundary_by_repeat: List[float] = []
+        for repeat in range(n_repeats):
+            internal_values = [
+                float(adjacent_reproducibility[edge_keys[index]][repeat])
+                for index in internal_indices
+            ]
+            internal_by_repeat.append(
+                float(all(value >= support_level for value in internal_values))
+            )
+            boundary_checks: List[bool] = []
+            if start > 0:
+                boundary_checks.append(
+                    float(adjacent_reproducibility[edge_keys[start - 1]][repeat])
+                    < internal_values[0]
+                )
+            if end < len(sorted_res) - 1:
+                boundary_checks.append(
+                    float(adjacent_reproducibility[edge_keys[end]][repeat])
+                    < internal_values[-1]
+                )
+            boundary_by_repeat.append(
+                float(np.mean(boundary_checks)) if boundary_checks else 1.0
+            )
+
+        plateau.internal_edge_persistence_mean = float(np.mean(internal_by_repeat))
+        plateau.internal_edge_persistence_min = float(np.min(internal_by_repeat))
+        plateau.boundary_persistence_mean = float(np.mean(boundary_by_repeat))
+        plateau.boundary_persistence_min = float(np.min(boundary_by_repeat))
+        plateau.persistence_score = float(
+            min(
+                plateau.reproducibility_mean,
+                plateau.internal_edge_persistence_mean,
+                plateau.boundary_persistence_mean,
+            )
+        )
+
+
 def select_best_resolution(
     metrics: ResolutionMetrics,
     config: ResolutionSelectionConfig,
     plateau_reproducibility: Optional[Dict[float, Sequence[float]]] = None,
+    adjacent_reproducibility: Optional[
+        Dict[Tuple[float, float], Sequence[float]]
+    ] = None,
 ) -> ResolutionSelectionResult:
     ari_adjacent = metrics.ari_adjacent or _compute_ari_adjacent(
         resolutions=metrics.resolutions,
@@ -1285,16 +1393,32 @@ def select_best_resolution(
                     )
                 plateau.reproducibility_mean = float(np.mean(values))
                 plateau.reproducibility_min = float(np.min(values))
-            best_reproducibility = max(
-                float(plateau.reproducibility_mean)
+            if adjacent_reproducibility is not None:
+                _annotate_plateau_persistence(
+                    [plateau for plateau, _ in feasible_plateaus],
+                    sorted_res,
+                    config,
+                    plateau_reproducibility,
+                    adjacent_reproducibility,
+                )
+            best_persistence = max(
+                float(
+                    plateau.persistence_score
+                    if plateau.persistence_score is not None
+                    else plateau.reproducibility_mean
+                )
                 for plateau, _ in feasible_plateaus
             )
             best_plateaus = [
                 item
                 for item in feasible_plateaus
                 if np.isclose(
-                    float(item[0].reproducibility_mean),
-                    best_reproducibility,
+                    float(
+                        item[0].persistence_score
+                        if item[0].persistence_score is not None
+                        else item[0].reproducibility_mean
+                    ),
+                    best_persistence,
                     rtol=1e-12,
                     atol=1e-12,
                 )
@@ -1306,7 +1430,11 @@ def select_best_resolution(
                     float(item[0].representative_resolution),
                 ),
             )
-            selection_mode = "plateau_probe_subsampling"
+            selection_mode = (
+                "plateau_persistence_subsampling"
+                if adjacent_reproducibility is not None
+                else "plateau_probe_subsampling"
+            )
         else:
             selected_plateau, plateau_res = max(
                 feasible_plateaus,
@@ -1322,7 +1450,11 @@ def select_best_resolution(
                 max(
                     alternatives,
                     key=lambda item: (
-                        float(item[0].reproducibility_mean),
+                        float(
+                            item[0].persistence_score
+                            if item[0].persistence_score is not None
+                            else item[0].reproducibility_mean
+                        ),
                         -metrics.cluster_counts[
                             float(item[0].representative_resolution)
                         ],
@@ -1346,6 +1478,12 @@ def select_best_resolution(
             )
         final_candidates = apply_biological_cluster_limit(plateau_res)
         best = pick_parsimonious(final_candidates)
+        confidence = "multiscale" if alternatives else "clear"
+        if (
+            selected_plateau.persistence_score is not None
+            and selected_plateau.persistence_score < _BISC_MIN_FEASIBLE_STABILITY
+        ):
+            confidence = "unstable"
         return ResolutionSelectionResult(
             best_resolution=float(best),
             scores=all_scores,
@@ -1358,7 +1496,7 @@ def select_best_resolution(
                 plateaus.index(alternative[0]) if alternative is not None else None
             ),
             selection_mode=selection_mode,
-            confidence="multiscale" if alternatives else "clear",
+            confidence=confidence,
             bio_homogeneity=metrics.bio_homogeneity,
             bio_fragmentation=metrics.bio_fragmentation,
             bio_ari=metrics.bio_ari,
@@ -1396,16 +1534,19 @@ def select_best_resolution(
     )
 
 
-def _subsampling_candidate_stability(
+def _subsampling_resolution_stability(
     adata: ad.AnnData,
     cfg: ClusterAnnotateConfig,
     embedding_key: str,
     labels_per_resolution: Dict[float, np.ndarray],
     candidate_resolutions: Sequence[float],
-) -> Dict[float, List[float]]:
+) -> Tuple[
+    Dict[float, List[float]],
+    Dict[Tuple[float, float], List[float]],
+]:
     candidates = sorted({float(r) for r in candidate_resolutions})
     if not candidates:
-        return {}
+        return {}, {}
     missing = [r for r in candidates if r not in labels_per_resolution]
     if missing:
         raise ValueError(f"Missing full-data labels for BISC probes: {missing}")
@@ -1417,8 +1558,11 @@ def _subsampling_candidate_stability(
             "BISC subsampling requires at least two retained cells"
         )
     results: Dict[float, List[float]] = {r: [] for r in candidates}
+    edge_results: Dict[Tuple[float, float], List[float]] = {
+        edge: [] for edge in zip(candidates[:-1], candidates[1:])
+    }
     LOGGER.info(
-        "Evaluating %d structural plateau probe(s) across %d %.0f%% cell subsamples",
+        "Evaluating %d BISC resolutions and their boundaries across %d %.0f%% cell subsamples",
         len(candidates),
         cfg.stability_repeats,
         100.0 * cfg.subsample_frac,
@@ -1430,6 +1574,7 @@ def _subsampling_candidate_stability(
         sub = ad.AnnData(obs=pd.DataFrame(index=adata.obs_names[positions].copy()))
         sub.obsm[embedding_key] = embedding[positions]
         sc.pp.neighbors(sub, use_rep=embedding_key, random_state=seed)
+        repeat_labels: Dict[float, np.ndarray] = {}
         for candidate_index, resolution in enumerate(candidates):
             key = f"{cfg.label_key}_probe_{repeat}_{candidate_index}"
             sc.tl.leiden(
@@ -1439,12 +1584,36 @@ def _subsampling_candidate_stability(
                 random_state=seed,
                 flavor="igraph",
             )
+            labels = sub.obs[key].to_numpy()
+            repeat_labels[resolution] = labels
             ari = adjusted_rand_score(
                 labels_per_resolution[resolution][positions],
-                sub.obs[key].to_numpy(),
+                labels,
             )
             results[resolution].append(float(ari))
-    return results
+        for left, right in zip(candidates[:-1], candidates[1:]):
+            edge_results[(left, right)].append(
+                float(adjusted_rand_score(repeat_labels[left], repeat_labels[right]))
+            )
+    return results, edge_results
+
+
+def _subsampling_candidate_stability(
+    adata: ad.AnnData,
+    cfg: ClusterAnnotateConfig,
+    embedding_key: str,
+    labels_per_resolution: Dict[float, np.ndarray],
+    candidate_resolutions: Sequence[float],
+) -> Dict[float, List[float]]:
+    """Compatibility wrapper returning fixed-resolution reproducibility only."""
+    candidate_results, _ = _subsampling_resolution_stability(
+        adata,
+        cfg,
+        embedding_key,
+        labels_per_resolution,
+        candidate_resolutions,
+    )
+    return candidate_results
 
 
 # -------------------------------------------------------------------------
@@ -1581,23 +1750,32 @@ def _resolution_sweep(
     )
 
     preselection = select_best_resolution(metrics, sel_cfg)
-    probe_resolutions = [
+    candidate_subsampling_ari, edge_subsampling_ari = (
+        _subsampling_resolution_stability(
+            adata,
+            cfg,
+            embedding_key,
+            clusterings_float,
+            res_list,
+        )
+    )
+    probe_resolutions = {
         float(plateau.representative_resolution)
         for plateau in preselection.plateaus
         if plateau.representative_resolution is not None
-    ]
-    plateau_probe_stability = _subsampling_candidate_stability(
-        adata,
-        cfg,
-        embedding_key,
-        clusterings_float,
-        probe_resolutions,
-    )
+    }
+    plateau_probe_stability = {
+        resolution: candidate_subsampling_ari[resolution]
+        for resolution in probe_resolutions
+    }
     selection = select_best_resolution(
         metrics,
         sel_cfg,
         plateau_reproducibility=(
             plateau_probe_stability if plateau_probe_stability else None
+        ),
+        adjacent_reproducibility=(
+            edge_subsampling_ari if plateau_probe_stability else None
         ),
     )
     best_res = float(selection.best_resolution)
@@ -1626,6 +1804,39 @@ def _resolution_sweep(
         if alternative_plateau is not None
         else None
     )
+    support_level = _plateau_support_level(sel_cfg)
+    edge_persistence = []
+    for left, right in zip(res_list[:-1], res_list[1:]):
+        full_ari = float(ari_adjacent[(left, right)])
+        values = [float(value) for value in edge_subsampling_ari[(left, right)]]
+        if full_ari >= float(sel_cfg.stability_threshold):
+            full_state = "strong"
+        elif full_ari >= support_level:
+            full_state = "support"
+        else:
+            full_state = "separator"
+        edge_persistence.append(
+            {
+                "left_resolution": float(left),
+                "right_resolution": float(right),
+                "full_data_ari": full_ari,
+                "full_data_state": full_state,
+                "strong_probability": float(
+                    np.mean(
+                        np.asarray(values, dtype=float)
+                        >= float(sel_cfg.stability_threshold)
+                    )
+                ),
+                "support_probability": float(
+                    np.mean(np.asarray(values, dtype=float) >= support_level)
+                ),
+                "state_retention_probability": float(
+                    np.mean(np.asarray(values, dtype=float) >= support_level)
+                    if full_state != "separator"
+                    else np.mean(np.asarray(values, dtype=float) < support_level)
+                ),
+            }
+        )
     sweep: Dict[str, object] = {
         "resolutions": np.array(res_list, dtype=float),
         "silhouette_scores": silhouette_scores,
@@ -1669,6 +1880,15 @@ def _resolution_sweep(
                 and alternative_plateau.reproducibility_mean is not None
                 else None
             ),
+            "plateau_persistence_gap": (
+                float(selected_plateau.persistence_score)
+                - float(alternative_plateau.persistence_score)
+                if selected_plateau is not None
+                and alternative_plateau is not None
+                and selected_plateau.persistence_score is not None
+                and alternative_plateau.persistence_score is not None
+                else None
+            ),
             "probe_cluster_count_gap": (
                 int(metrics.cluster_counts[alternative_probe])
                 - int(metrics.cluster_counts[selected_probe])
@@ -1680,6 +1900,17 @@ def _resolution_sweep(
             _res_key(resolution): [float(value) for value in values]
             for resolution, values in plateau_probe_stability.items()
         },
+        "resolution_subsampling_ari": {
+            _res_key(resolution): [float(value) for value in values]
+            for resolution, values in candidate_subsampling_ari.items()
+        },
+        "edge_subsampling_ari": {
+            f"{_res_key(left)}|{_res_key(right)}": [
+                float(value) for value in values
+            ]
+            for (left, right), values in edge_subsampling_ari.items()
+        },
+        "edge_persistence": edge_persistence,
         "selection_config": asdict(sel_cfg),
         "selection_rules": _bisc_fixed_rule_snapshot(),
     }
@@ -1865,13 +2096,15 @@ def run_BISC(
     sweep = dict(sweep) if isinstance(sweep, dict) else {}
     sweep["bio_mask_stats"] = bio_mask_stats
 
-    probe_stability = sweep.get("plateau_probe_subsampling_ari", {})
-    probe_stability = probe_stability if isinstance(probe_stability, dict) else {}
-    retained_final_stability = probe_stability.get(_res_key(best_res), [])
+    resolution_stability = sweep.get("resolution_subsampling_ari", {})
+    resolution_stability = (
+        resolution_stability if isinstance(resolution_stability, dict) else {}
+    )
+    retained_final_stability = resolution_stability.get(_res_key(best_res), [])
     if retained_final_stability:
         stability_aris = [float(value) for value in retained_final_stability]
         LOGGER.info(
-            "Reusing plateau-probe subsampling results for final resolution %.3f",
+            "Reusing resolution-sweep subsampling results for final resolution %.3f",
             best_res,
         )
     else:

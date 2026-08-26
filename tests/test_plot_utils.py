@@ -923,6 +923,44 @@ def test_plot_plateau_probe_reproducibility_marks_selected_plateau(
     assert artifacts[0].fig.axes[0].get_title() == "Cross-plateau reproducibility"
 
 
+def test_plot_plateau_and_boundary_persistence(
+    tmp_path, reset_root_figdir, mock_save_multi
+):
+    plateaus = [
+        {
+            "representative_resolution": 0.3,
+            "reproducibility_mean": 0.91,
+            "internal_edge_persistence_mean": 0.90,
+            "boundary_persistence_mean": 0.80,
+            "persistence_score": 0.80,
+            "selected": True,
+        }
+    ]
+    edges = [
+        {
+            "left_resolution": 0.2,
+            "right_resolution": 0.3,
+            "full_data_state": "strong",
+            "state_retention_probability": 0.9,
+        },
+        {
+            "left_resolution": 0.3,
+            "right_resolution": 0.4,
+            "full_data_state": "separator",
+            "state_retention_probability": 0.8,
+        },
+    ]
+
+    with pu.capture_plot_artifacts() as artifacts:
+        pu.plot_plateau_persistence(plateaus, tmp_path / "figs")
+        pu.plot_edge_persistence(edges, tmp_path / "figs")
+
+    assert [artifact.stem for artifact in artifacts] == [
+        "plateau_persistence",
+        "plateau_boundary_persistence",
+    ]
+
+
 def test_plot_biological_metrics(tmp_path, reset_root_figdir, mock_save_multi):
     figdir = tmp_path / "figs"
     pu.setup_scanpy_figs(figdir)

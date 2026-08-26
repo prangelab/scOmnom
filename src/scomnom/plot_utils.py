@@ -4732,6 +4732,117 @@ def plot_plateau_probe_reproducibility(
 
 
 @collect_plot_artifacts
+def plot_plateau_persistence(
+    plateaus: Sequence[Mapping[str, object]],
+    figdir: Path | str,
+    stem: str = "plateau_persistence",
+) -> None:
+    rows = [
+        plateau
+        for plateau in plateaus
+        if plateau.get("representative_resolution") is not None
+        and plateau.get("persistence_score") is not None
+    ]
+    if not rows:
+        return
+    rows = sorted(rows, key=lambda row: float(row["representative_resolution"]))
+    resolutions = np.asarray(
+        [float(row["representative_resolution"]) for row in rows], dtype=float
+    )
+    series = (
+        ("Probe partition ARI", "reproducibility_mean", "#177E89", "o"),
+        ("Internal-edge persistence", "internal_edge_persistence_mean", "#4C78A8", "s"),
+        ("Boundary persistence", "boundary_persistence_mean", "#E17C05", "^"),
+        ("Selection persistence", "persistence_score", "#24343B", "X"),
+    )
+
+    fig, ax = plt.subplots(figsize=(7.4, 4.6))
+    for label, key, color, marker in series:
+        values = [float(row[key]) for row in rows]
+        ax.plot(
+            resolutions,
+            values,
+            color=color,
+            marker=marker,
+            linewidth=1.5,
+            markersize=5,
+            label=label,
+        )
+    selected = [
+        index for index, row in enumerate(rows) if bool(row.get("selected", False))
+    ]
+    if selected:
+        index = selected[0]
+        ax.axvline(resolutions[index], color="#24343B", linestyle="--", alpha=0.7)
+    ax.set_xlabel("Structural plateau probe resolution")
+    ax.set_ylabel("Persistence")
+    ax.set_ylim(0.0, 1.02)
+    ax.set_title("Plateau persistence under cell subsampling")
+    ax.grid(axis="y", alpha=0.2)
+    ax.legend(loc="best", fontsize=8)
+    fig.tight_layout()
+    record_plot_artifact(stem, _ensure_path(figdir), fig)
+
+
+@collect_plot_artifacts
+def plot_edge_persistence(
+    edges: Sequence[Mapping[str, object]],
+    figdir: Path | str,
+    stem: str = "plateau_boundary_persistence",
+) -> None:
+    rows = [
+        edge
+        for edge in edges
+        if edge.get("left_resolution") is not None
+        and edge.get("right_resolution") is not None
+        and edge.get("state_retention_probability") is not None
+    ]
+    if not rows:
+        return
+    rows = sorted(rows, key=lambda row: float(row["left_resolution"]))
+    midpoint = np.asarray(
+        [
+            0.5
+            * (float(row["left_resolution"]) + float(row["right_resolution"]))
+            for row in rows
+        ],
+        dtype=float,
+    )
+    retention = np.asarray(
+        [float(row["state_retention_probability"]) for row in rows], dtype=float
+    )
+    state_colors = {
+        "strong": "#177E89",
+        "support": "#4C78A8",
+        "separator": "#E17C05",
+    }
+
+    fig, ax = plt.subplots(figsize=(7.4, 4.4))
+    ax.plot(midpoint, retention, color="#8B979C", linewidth=1.0, zorder=1)
+    for state, color in state_colors.items():
+        mask = np.asarray(
+            [str(row.get("full_data_state")) == state for row in rows], dtype=bool
+        )
+        if mask.any():
+            ax.scatter(
+                midpoint[mask],
+                retention[mask],
+                color=color,
+                s=34,
+                label=state.capitalize(),
+                zorder=2,
+            )
+    ax.set_xlabel("Adjacent-resolution edge midpoint")
+    ax.set_ylabel("Full-data edge-state retention")
+    ax.set_ylim(0.0, 1.02)
+    ax.set_title("Plateau-edge and boundary persistence")
+    ax.grid(axis="y", alpha=0.2)
+    ax.legend(loc="best", fontsize=8)
+    fig.tight_layout()
+    record_plot_artifact(stem, _ensure_path(figdir), fig)
+
+
+@collect_plot_artifacts
 def plot_biological_metrics(
         resolutions: Sequence[float | str],
         bio_homogeneity: Mapping[Any, Any],

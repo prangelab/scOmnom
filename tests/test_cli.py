@@ -153,9 +153,8 @@ def test_cluster_help():
     assert "Clustering" in result.output
     assert "--penalty-alpha" not in result.output
     normalized_help = " ".join(result.output.split())
-    assert "plateau-probe" in normalized_help
-    assert "reproducibility" in normalized_help
-    assert "adjacent-resolution stability" in normalized_help.lower()
+    assert "edge-defined bisc plateaus" in normalized_help.lower()
+    assert "subsampling persistence" in normalized_help.lower()
 
 
 def test_cluster_requires_input():

@@ -91,7 +91,7 @@ def test_plateau_probe_subsampling_reuses_one_neighbor_graph_per_repeat(
     monkeypatch.setattr(cu.sc.pp, "neighbors", fake_neighbors)
     monkeypatch.setattr(cu.sc.tl, "leiden", fake_leiden)
 
-    result = cu._subsampling_candidate_stability(
+    result, edges = cu._subsampling_resolution_stability(
         adata,
         cfg,
         "X_pca",
@@ -102,9 +102,11 @@ def test_plateau_probe_subsampling_reuses_one_neighbor_graph_per_repeat(
     assert neighbor_calls == [(9, 7), (9, 8), (9, 9)]
     assert set(result) == {0.2, 0.4}
     assert all(len(values) == 3 for values in result.values())
+    assert set(edges) == {(0.2, 0.4)}
+    assert len(edges[(0.2, 0.4)]) == 3
 
 
-def test_resolution_sweep_uses_probe_subsampling_to_choose_plateau(
+def test_resolution_sweep_uses_persistence_subsampling_to_choose_plateau(
     tmp_path, monkeypatch
 ):
     adata = synthetic_adata()
@@ -127,19 +129,36 @@ def test_resolution_sweep_uses_probe_subsampling_to_choose_plateau(
         cu,
         "_detect_plateaus",
         lambda *args, **kwargs: [
-            cu.Plateau([0.2, 0.3], mean_stability=0.95),
+            cu.Plateau([0.2, 0.30000000000000004], mean_stability=0.95),
             cu.Plateau([0.4, 0.5], mean_stability=0.90),
         ],
     )
 
-    def fake_probe_stability(
+    def fake_resolution_stability(
         adata_in, cfg_in, embedding_key, labels_per_resolution, candidate_resolutions
     ):
         del adata_in, cfg_in, embedding_key, labels_per_resolution
-        assert candidate_resolutions == [0.2, 0.4]
-        return {0.2: [0.93, 0.93], 0.4: [0.95, 0.95]}
+        assert np.allclose(candidate_resolutions, [0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
+        candidates = {
+            resolution: [0.90, 0.90] for resolution in candidate_resolutions
+        }
+        candidates[candidate_resolutions[1]] = [0.93, 0.93]
+        candidates[candidate_resolutions[3]] = [0.95, 0.95]
+        values = ([0.60, 0.60], [0.90, 0.90], [0.60, 0.60], [0.90, 0.90], [0.60, 0.60])
+        edges = {
+            edge: value
+            for edge, value in zip(
+                zip(candidate_resolutions[:-1], candidate_resolutions[1:]),
+                values,
+            )
+        }
+        return candidates, edges
 
-    monkeypatch.setattr(cu, "_subsampling_candidate_stability", fake_probe_stability)
+    monkeypatch.setattr(
+        cu,
+        "_subsampling_resolution_stability",
+        fake_resolution_stability,
+    )
 
     best, sweep, _ = cu._resolution_sweep(
         adata,
@@ -151,7 +170,7 @@ def test_resolution_sweep_uses_probe_subsampling_to_choose_plateau(
     assert best == 0.4
     assert sweep["selection"]["selected_plateau_index"] == 1
     assert sweep["selection"]["alternative_plateau_index"] == 0
-    assert sweep["selection"]["mode"] == "plateau_probe_subsampling"
+    assert sweep["selection"]["mode"] == "plateau_persistence_subsampling"
     assert sweep["selection"]["confidence"] == "multiscale"
     assert sweep["selection"]["probe_reproducibility_gap"] == pytest.approx(0.02)
     assert sweep["selection"]["selected_probe_n_clusters"] == 2
@@ -169,6 +188,12 @@ def test_clustering_report_captions_distinguish_stability_concepts():
     )
     assert _describe_plot(Path("plateau_probe_reproducibility.png")) == (
         "Fixed-resolution subsampling reproducibility used to select among BISC plateaus."
+    )
+    assert _describe_plot(Path("plateau_persistence.png")) == (
+        "Partition, internal-edge, and boundary persistence for BISC plateaus."
+    )
+    assert _describe_plot(Path("plateau_boundary_persistence.png")) == (
+        "Subsampling persistence of adjacent-resolution edges and plateau boundaries."
     )
 
 

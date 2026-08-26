@@ -1250,8 +1250,8 @@ def adata_ops_metadata_import(
 @app.command(
     "cluster-and-annotate",
     help=(
-        "Clustering (resolution sweep + adjacent-resolution stability + plateau-probe "
-        "subsampling reproducibility) and optional CellTypist + decoupler annotation "
+        "Clustering (resolution sweep + edge-defined BISC plateaus + subsampling "
+        "persistence) and optional CellTypist + decoupler annotation "
         "(MSigDB/DoRothEA/PROGENy)."
     ),
 )
@@ -1348,7 +1348,7 @@ def cluster_and_annotate(
     stability_repeats: int = typer.Option(
         5,
         "--stability-repeats",
-        help="[BISC reproducibility] Number of subsampling repeats for plateau probes and the final partition.",
+        help="[BISC persistence] Number of repeats used to assess candidate partitions, plateau edges, and boundaries.",
     ),
     subsample_frac: float = typer.Option(
         0.8,

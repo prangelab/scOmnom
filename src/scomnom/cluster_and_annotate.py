@@ -168,9 +168,28 @@ def _plot_round_clustering_diagnostics(
             ),
         ))
         if isinstance(plateaus, list):
+            if any(
+                plateau.get("persistence_score") is not None
+                for plateau in plateaus
+            ):
+                artifacts.extend(
+                    plot_utils.plot_plateau_persistence(
+                        plateaus=plateaus,
+                        figdir=figdir_cluster,
+                    )
+                )
+            else:
+                artifacts.extend(
+                    plot_utils.plot_plateau_probe_reproducibility(
+                        plateaus=plateaus,
+                        figdir=figdir_cluster,
+                    )
+                )
+        edge_persistence = sweep.get("edge_persistence", None)
+        if isinstance(edge_persistence, list):
             artifacts.extend(
-                plot_utils.plot_plateau_probe_reproducibility(
-                    plateaus=plateaus,
+                plot_utils.plot_edge_persistence(
+                    edges=edge_persistence,
                     figdir=figdir_cluster,
                 )
             )

@@ -516,7 +516,7 @@ class ClusterAnnotateConfig(BaseModel):
     res_max: float = Field(2.5, ge=0.0)
     n_resolutions: int = Field(25, ge=3)
 
-    # Plateau-probe selection and final-partition subsampling reproducibility
+    # Resolution, plateau-edge, and boundary persistence under cell subsampling
     stability_repeats: int = Field(5, ge=1)
     subsample_frac: float = Field(0.8, gt=0.0, le=1.0)
     random_state: int = 42

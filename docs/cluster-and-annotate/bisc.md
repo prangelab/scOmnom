@@ -52,7 +52,7 @@ BISC measures adjacent-resolution stability using the **Adjusted Rand Index (ARI
 * high ARI → clustering structure changes little between neighboring resolutions
 * low ARI → clusters split or merge aggressively
 
-Raw adjacent ARI edges define stable plateaus. A run of strong edges at or above the stability threshold forms a plateau core. When a core is shorter than the minimum plateau span, connected support edges may extend it only until that minimum is reached. Once a core is long enough, weaker neighboring edges do not broaden it. This prevents an unstable transition leaving a plateau from erasing the stable region before it.
+Raw adjacent ARI edges define stable plateaus. Contiguous strong edges at or above the stability threshold form a plateau core. A shorter core may recruit the strongest neighboring support edge until it reaches the minimum span; an already qualified core is not expanded. Rescued candidates that touch or overlap are merged because no transition remains between them. Candidates separated by an unused edge remain distinct. Plateaus are therefore disjoint, while support edges cannot cause unrestricted growth across a resolution sweep.
 
 The two-sided smoothed stability curve remains part of the structural score and diagnostic output, but it no longer defines plateau membership or boundaries.
 
@@ -119,7 +119,7 @@ Selection proceeds in four ordered stages:
 
 1. BISC identifies raw-edge structural plateaus.
 2. It chooses one exact structural probe per plateau using plateau-local stability, silhouette separation, and the tiny-cluster term. The 3% parsimony tolerance is not used here.
-3. Each probe is rebuilt over repeated cell subsamples. The probe with the highest mean fixed-resolution ARI selects the plateau; exact ties prefer the less complex probe.
+3. Every candidate resolution is rebuilt on the same repeated cell subsamples. For each full-data plateau, BISC measures fixed-resolution probe reproducibility, the fraction of subsamples in which all internal edges retain support, and the persistence of its local boundary valleys. It does not redetect or select plateaus recursively within each subsample. The plateau persistence score is the weakest of the mean probe, internal-edge, and boundary persistence values. The plateau with the highest persistence score is selected; exact ties prefer the less complex probe.
 4. Within the selected plateau, BISC ranks every feasible resolution using the complete structural and biological composite. It applies the 3% parsimony tolerance once, at this final stage, and chooses the near-best resolution with the fewest clusters.
 
 Biological guidance therefore acts across the complete selected plateau rather than as a post-hoc override among structural probes. When no detected plateau contains a feasible candidate, BISC applies the stability-knee fallback across the feasible interior resolution set.
@@ -129,18 +129,18 @@ Five fixed safeguards define the validated selector behavior:
 | Safeguard | Value | Role |
 |---|---:|---|
 | Minimum feasible adjacent-resolution stability | 0.60 | Restricts the candidate search set to partitions with sufficient local agreement when available. |
-| Plateau support fraction | 0.50 | Defines the support-edge level halfway between the 0.60 feasibility floor and the configured strong-edge threshold; support edges only complete short cores. |
+| Plateau support fraction | 0.50 | Defines the support-edge level halfway between the 0.60 feasibility floor and the configured strong-edge threshold; support edges may complete a short core but cannot broaden an already qualified core. |
 | Parsimony tolerance | 3% | Selects the least cluster-heavy resolution whose full composite is within 3% of the best candidate in the chosen plateau. |
 | Biological cluster-count limit | 2.5x | Limits the final within-plateau candidates to 2.5 times the number of confident biological reference labels when biological guidance is active; it does not remove structural plateaus from cross-plateau comparison. |
 | Absolute minimum cluster size | 5 cells | Excludes pathological partitions from selection without changing raw-edge plateau geometry. |
 
-These safeguards are fixed properties of the validated BISC selector rather than command-line tuning parameters. Their values are stored with every new BISC sweep. Use the resolution lens (`res_min`, `res_max`, and `n_resolutions`) as the primary control over the biological granularity under evaluation.
+These safeguards are fixed properties of the current BISC selector rather than command-line tuning parameters. Their values and the selector version are stored with every new BISC sweep. Use the resolution lens (`res_min`, `res_max`, and `n_resolutions`) as the primary control over the biological granularity under evaluation.
 
 #### Subsampling reproducibility
 
-BISC rebuilds each structural plateau probe on repeated cell subsamples and compares it with the same fixed-resolution full-data partition by ARI. These values select among plateaus. The default evaluation uses five repeats retaining 80% of cells (`stability_repeats = 5`, `subsample_frac = 0.8`). After the final within-plateau call, BISC also records subsampling reproducibility for the selected partition; when the final resolution is itself a probe, the already computed values are reused.
+BISC rebuilds the complete resolution sweep on repeated cell subsamples. One neighbour graph is reused for all resolutions within each repeat. The default evaluation uses five repeats retaining 80% of cells (`stability_repeats = 5`, `subsample_frac = 0.8`). The paired sweeps provide three distinct forms of evidence: agreement with each fixed-resolution full-data partition, retention of support across each full-data plateau, and persistence of the local valleys that delimit that plateau. These measurements test the full-data candidates without recursively rerunning the selector. The selected final resolution reuses its already computed fixed-resolution reproducibility values.
 
-The native outputs distinguish the two roles. `plateau_probe_reproducibility` compares structural scales, while `clustering_stability_ari` reports the final partition diagnostic. The selection curve shows the raw adjacent ARI edges that define plateau geometry and places probe markers on the structural score rather than the full biological composite. Plateau boundaries, probes, reproducibility summaries, the selected and runner-up plateaus, reproducibility and complexity gaps, selector version, and final decision are retained in the clustering round metadata. Confidence is reported conservatively as `clear` for one eligible structural plateau, `multiscale` for more than one, and `weak` when BISC must use the no-plateau fallback.
+The native outputs distinguish these quantities. `plateau_persistence` compares partition, internal-edge, and boundary persistence across structural scales. `plateau_boundary_persistence` reports how often each full-data edge retains its support or separator state. `clustering_stability_ari` reports fixed-resolution reproducibility for the final partition. The selection curve continues to show the raw adjacent ARI edges and structural probe positions. All edge-level values, plateau persistence summaries, the selected and runner-up plateaus, persistence and complexity gaps, selector version, and final decision are retained in the clustering round metadata. Confidence is reported as `clear` for one eligible structural plateau, `multiscale` for more than one, `unstable` when the selected plateau's weakest persistence component is below the feasibility floor, and `weak` when BISC must use the no-plateau fallback.
 
 Historical scOmnom archives may contain a `penalized_scores` diagnostic from an earlier selector design. The field remains loadable for reproducibility, but current BISC runs neither generate nor use it.
 

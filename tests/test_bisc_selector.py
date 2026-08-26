@@ -125,6 +125,56 @@ def test_support_edge_rescues_short_strong_plateau_core():
     ]
 
 
+def test_below_threshold_edge_separates_strong_cores():
+    metrics = make_metrics(
+        resolutions=(0.1, 0.2, 0.3, 0.4, 0.5),
+        adjacent_ari=(0.91, 0.80, 0.92, 0.70),
+    )
+
+    result = cu.select_best_resolution(metrics, make_config(min_plateau_len=2))
+
+    assert [plateau.resolutions for plateau in result.plateaus] == [
+        [0.1, 0.2],
+        [0.3, 0.4],
+    ]
+
+
+def test_contiguous_strong_edges_form_one_plateau():
+    metrics = make_metrics(adjacent_ari=(0.91, 0.90, 0.89, 0.70))
+
+    result = cu.select_best_resolution(metrics, make_config(min_plateau_len=3))
+
+    assert [plateau.resolutions for plateau in result.plateaus] == [
+        [0.1, 0.2, 0.3, 0.4]
+    ]
+
+
+def test_touching_rescued_cores_are_merged_without_unrestricted_growth():
+    metrics = make_metrics(
+        resolutions=(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7),
+        adjacent_ari=(0.70, 0.91, 0.80, 0.92, 0.82, 0.70),
+    )
+
+    result = cu.select_best_resolution(metrics, make_config(min_plateau_len=3))
+
+    assert [plateau.resolutions for plateau in result.plateaus] == [
+        [0.2, 0.3, 0.4, 0.5, 0.6]
+    ]
+
+
+def test_low_edge_separates_plateaus_without_overlap():
+    metrics = make_metrics(
+        resolutions=(0.1, 0.2, 0.3, 0.4, 0.5, 0.6),
+        adjacent_ari=(0.91, 0.80, 0.70, 0.79, 0.92),
+    )
+
+    result = cu.select_best_resolution(metrics, make_config(min_plateau_len=2))
+
+    spans = [plateau.resolutions for plateau in result.plateaus]
+    assert spans == [[0.1, 0.2], [0.5, 0.6]]
+    assert set(spans[0]).isdisjoint(spans[1])
+
+
 def test_plateau_probe_uses_exact_structural_maximum_before_final_parsimony(monkeypatch):
     silhouette = {0.1: 0.0, 0.2: 0.98, 0.3: 1.0, 0.4: 0.0}
     metrics = make_metrics(resolutions=(0.1, 0.2, 0.3, 0.4), silhouette=silhouette)
@@ -166,6 +216,38 @@ def test_subsampling_selects_plateau_without_three_percent_gate(monkeypatch):
     assert result.best_resolution == 0.4
     assert result.selection_mode == "plateau_probe_subsampling"
     assert result.confidence == "multiscale"
+
+
+def test_boundary_persistence_can_outweigh_probe_partition_ari(monkeypatch):
+    resolutions = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6)
+    metrics = make_metrics(resolutions=resolutions)
+    set_plateaus(
+        monkeypatch,
+        cu.Plateau([0.2, 0.3], mean_stability=0.95),
+        cu.Plateau([0.4, 0.5], mean_stability=0.90),
+    )
+    edge_values = {
+        (0.1, 0.2): [0.90, 0.90],
+        (0.2, 0.3): [0.90, 0.90],
+        (0.3, 0.4): [0.60, 0.60],
+        (0.4, 0.5): [0.90, 0.90],
+        (0.5, 0.6): [0.60, 0.60],
+    }
+
+    result = cu.select_best_resolution(
+        metrics,
+        make_config(),
+        plateau_reproducibility={0.2: [0.95, 0.95], 0.4: [0.90, 0.90]},
+        adjacent_reproducibility=edge_values,
+    )
+
+    assert result.best_resolution == 0.4
+    assert result.selection_mode == "plateau_persistence_subsampling"
+    assert result.plateaus[0].boundary_persistence_mean == pytest.approx(0.5)
+    assert result.plateaus[0].persistence_score == pytest.approx(0.5)
+    assert result.plateaus[1].boundary_persistence_mean == pytest.approx(1.0)
+    assert result.plateaus[1].persistence_score == pytest.approx(0.9)
+    assert result.plateaus[1].selected
 
 
 def test_biological_cluster_limit_does_not_remove_structural_plateau(monkeypatch):
@@ -440,7 +522,7 @@ def test_absolute_minimum_cluster_size_remains_a_selection_safeguard():
 
 def test_fixed_rule_snapshot_records_validated_values():
     assert cu._bisc_fixed_rule_snapshot() == {
-        "selector_version": "raw_edge_plateau_v2",
+        "selector_version": "raw_edge_persistence_v3",
         "minimum_feasible_stability": 0.60,
         "plateau_support_fraction": 0.50,
         "parsimony_tolerance": 0.03,
