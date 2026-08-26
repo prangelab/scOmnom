@@ -63,6 +63,83 @@ def test_resolution_sweep_stores_fixed_selector_rules(tmp_path, monkeypatch):
     assert sweep["selection_rules"] == cu._bisc_fixed_rule_snapshot()
 
 
+def test_run_bisc_registers_persistence_metadata(tmp_path, monkeypatch):
+    adata = synthetic_adata(n_cells=12)
+    adata.uns["neighbors"] = {}
+    cfg = ClusterAnnotateConfig(
+        input_path=tmp_path / "integrated.zarr",
+        label_key="bisc",
+        bio_guided_clustering=False,
+    )
+    resolutions = np.array([0.1, 0.2, 0.3])
+    probe_stability = {"0.200": [0.91, 0.93]}
+    resolution_stability = {
+        "0.100": [0.82, 0.84],
+        "0.200": [0.91, 0.93],
+        "0.300": [0.86, 0.88],
+    }
+    edge_stability = {
+        "0.100|0.200": [0.79, 0.81],
+        "0.200|0.300": [0.89, 0.90],
+    }
+    edge_persistence = [
+        {
+            "left_resolution": 0.1,
+            "right_resolution": 0.2,
+            "state_retention_probability": 1.0,
+        }
+    ]
+    sweep = {
+        "resolutions": resolutions,
+        "silhouette_scores": [0.1, 0.2, 0.1],
+        "n_clusters": [2, 3, 4],
+        "adjacent_ari": [0.8, 0.9],
+        "plateaus": [],
+        "selection": {"mode": "plateau_persistence_subsampling"},
+        "plateau_probe_subsampling_ari": probe_stability,
+        "resolution_subsampling_ari": resolution_stability,
+        "edge_subsampling_ari": edge_stability,
+        "edge_persistence": edge_persistence,
+        "selection_config": {},
+        "selection_rules": cu._bisc_fixed_rule_snapshot(),
+        "composite_scores": [0.1, 0.9, 0.2],
+        "structural_scores": [0.1, 0.9, 0.2],
+        "stability_scores": [0.8, 0.9, 0.9],
+        "tiny_cluster_penalty": [1.0, 1.0, 1.0],
+    }
+
+    monkeypatch.setattr(
+        cu,
+        "_resolution_sweep",
+        lambda *args, **kwargs: (0.2, sweep, {}),
+    )
+
+    def fake_final_clustering(adata_in, cfg_in, resolution):
+        adata_in.obs[cfg_in.label_key] = pd.Categorical(
+            np.arange(adata_in.n_obs) % 3
+        )
+
+    monkeypatch.setattr(cu, "_apply_final_clustering", fake_final_clustering)
+    monkeypatch.setattr(cu, "_final_real_silhouette_qc", lambda *args, **kwargs: None)
+
+    cu.run_BISC(
+        adata,
+        cfg,
+        embedding_key="X_pca",
+        celltypist_labels=None,
+        celltypist_proba=None,
+        make_figures=False,
+    )
+
+    round_info = adata.uns["cluster_rounds"][adata.uns["active_cluster_round"]]
+    registered = round_info["sweep"]
+    assert registered["resolution_subsampling_ari"] == resolution_stability
+    assert registered["edge_subsampling_ari"] == edge_stability
+    assert registered["edge_persistence"] == edge_persistence
+    assert round_info["stability"]["plateau_probe_subsampling_ari"] == probe_stability
+    assert round_info["stability"]["subsampling_ari"] == [0.91, 0.93]
+
+
 def test_plateau_probe_subsampling_reuses_one_neighbor_graph_per_repeat(
     tmp_path, monkeypatch
 ):

@@ -2100,6 +2100,8 @@ def run_BISC(
     resolution_stability = (
         resolution_stability if isinstance(resolution_stability, dict) else {}
     )
+    probe_stability = sweep.get("plateau_probe_subsampling_ari", {})
+    probe_stability = probe_stability if isinstance(probe_stability, dict) else {}
     retained_final_stability = resolution_stability.get(_res_key(best_res), [])
     if retained_final_stability:
         stability_aris = [float(value) for value in retained_final_stability]
@@ -2149,6 +2151,11 @@ def run_BISC(
             "plateau_probe_subsampling_ari": sweep.get(
                 "plateau_probe_subsampling_ari", {}
             ),
+            "resolution_subsampling_ari": sweep.get(
+                "resolution_subsampling_ari", {}
+            ),
+            "edge_subsampling_ari": sweep.get("edge_subsampling_ari", {}),
+            "edge_persistence": sweep.get("edge_persistence", []),
             "selection_config": sweep.get("selection_config", {}),
             "selection_rules": sweep.get("selection_rules", {}),
             "bio_mask_stats": sweep.get("bio_mask_stats", None),
