@@ -250,9 +250,28 @@ def build_entropy_margin_mask(
     n = P.shape[0]
     if n == 0:
         return np.zeros((0,), dtype=bool), {"n_cells": 0}
+    if P.ndim != 2 or P.shape[1] < 2:
+        raise ValueError("CellTypist confidence masking requires at least two probability columns.")
+    if not np.isfinite(P).all():
+        raise ValueError("CellTypist probability matrix contains non-finite values.")
+    if (P < 0.0).any() or (P > 1.0).any():
+        raise ValueError("CellTypist probability values must lie in [0, 1].")
+    if not (0.0 < float(entropy_quantile) <= 1.0):
+        raise ValueError("entropy_quantile must lie in (0, 1].")
+    if float(entropy_abs_limit) < 0.0:
+        raise ValueError("entropy_abs_limit must be non-negative.")
+    if not (0.0 <= float(margin_min) <= 1.0):
+        raise ValueError("margin_min must lie in [0, 1].")
+
+    row_sums = P.sum(axis=1)
+    if (row_sums <= 0.0).any():
+        raise ValueError("CellTypist probability matrix contains rows with no positive score.")
 
     eps = 1e-12
-    P_clip = np.clip(P, eps, 1.0)
+    # CellTypist applies independent logistic transforms to one-vs-rest scores;
+    # normalize only for Shannon entropy while retaining raw score margins.
+    P_normalized = P / row_sums[:, None]
+    P_clip = np.clip(P_normalized, eps, 1.0)
     entropy = -np.sum(P_clip * np.log(P_clip), axis=1)
 
     top2 = np.partition(P, kth=-2, axis=1)[:, -2:]
@@ -274,6 +293,102 @@ def build_entropy_margin_mask(
         "entropy_quantile": float(entropy_quantile),
         "entropy_q_value": float(H_q),
         "entropy_cut_used": float(H_cut),
+        "entropy_cut_rule": "max_baseline_or_quantile",
+        "entropy_probability_normalization": "row_sum",
+        "probability_row_sum_min": float(row_sums.min()),
+        "probability_row_sum_median": float(np.median(row_sums)),
+        "probability_row_sum_max": float(row_sums.max()),
         "margin_min": float(margin_min),
     }
     return mask, stats
+
+
+def summarize_cluster_celltypist_labels(
+    clusters: pd.Series,
+    labels: pd.Series,
+    confidence_mask: np.ndarray,
+    *,
+    celltypist_ok: bool,
+    min_confident_cells: int,
+    min_confident_fraction: float,
+    min_label_purity: float,
+) -> tuple[dict[str, str], pd.DataFrame]:
+    """Assign auditable cluster labels from confidence-masked cell predictions."""
+    if len(clusters) != len(labels) or len(clusters) != len(confidence_mask):
+        raise ValueError("clusters, labels, and confidence_mask must have equal length.")
+    if int(min_confident_cells) < 0:
+        raise ValueError("min_confident_cells must be non-negative.")
+    if not (0.0 <= float(min_confident_fraction) <= 1.0):
+        raise ValueError("min_confident_fraction must lie in [0, 1].")
+    if not (0.0 <= float(min_label_purity) <= 1.0):
+        raise ValueError("min_label_purity must lie in [0, 1].")
+
+    frame = pd.DataFrame(
+        {
+            "cluster": clusters.astype(str).to_numpy(),
+            "label": labels.astype(str).to_numpy(),
+            "confident": np.asarray(confidence_mask, dtype=bool),
+        },
+        index=clusters.index,
+    )
+    assignments: dict[str, str] = {}
+    rows: list[dict[str, object]] = []
+
+    for cluster, group in frame.groupby("cluster", sort=False):
+        confident = group.loc[group["confident"]]
+        n_total = int(group.shape[0])
+        n_confident = int(confident.shape[0])
+        confident_fraction = float(n_confident / n_total) if n_total else 0.0
+        valid_labels = confident.loc[
+            ~confident["label"].str.strip().str.lower().isin({"", "unknown", "nan", "none"}),
+            "label",
+        ]
+        counts = valid_labels.value_counts()
+        winner = "Unknown"
+        winner_count = 0
+        runner_up = ""
+        runner_up_count = 0
+        if not counts.empty:
+            ranked = sorted(
+                ((str(label), int(count)) for label, count in counts.items()),
+                key=lambda item: (-item[1], item[0]),
+            )
+            winner, winner_count = ranked[0]
+            if len(ranked) > 1:
+                runner_up, runner_up_count = ranked[1]
+
+        winner_fraction = float(winner_count / n_confident) if n_confident else 0.0
+        runner_up_fraction = float(runner_up_count / n_confident) if n_confident else 0.0
+        reason = "assigned"
+        if not celltypist_ok:
+            reason = "celltypist_unavailable"
+        elif n_confident < int(min_confident_cells):
+            reason = "insufficient_confident_cells"
+        elif confident_fraction < float(min_confident_fraction):
+            reason = "insufficient_confident_fraction"
+        elif winner_count == 0:
+            reason = "no_confident_labels"
+        elif winner_fraction <= float(min_label_purity):
+            reason = "insufficient_label_purity"
+
+        assigned = winner if reason == "assigned" else "Unknown"
+        assignments[str(cluster)] = assigned
+        rows.append(
+            {
+                "cluster": str(cluster),
+                "n_total": n_total,
+                "n_confident": n_confident,
+                "confident_fraction": confident_fraction,
+                "winning_label": winner,
+                "winning_count": winner_count,
+                "winning_fraction": winner_fraction,
+                "runner_up_label": runner_up,
+                "runner_up_count": runner_up_count,
+                "runner_up_fraction": runner_up_fraction,
+                "assigned_label": assigned,
+                "status": reason,
+            }
+        )
+
+    audit = pd.DataFrame(rows)
+    return assignments, audit

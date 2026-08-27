@@ -2,7 +2,7 @@
 
 Integration methods are benchmarked using `scIB`.
 
-By default, benchmarking uses **CellTypist confident cell-level labels**. CellTypist is a supervised cell type classifier that assigns a label and a confidence score to each cell. Cells that do not pass the confidence mask are excluded from benchmarking.
+By default, benchmarking uses **CellTypist confident cell-level labels**. CellTypist is a supervised cell type classifier that assigns a label and independent logistic scores to each cell. scOmnom row-normalizes these scores for entropy, retains the raw top1-top2 margin, and excludes cells that do not pass both confidence gates from benchmarking.
 
 CellTypist is used downstream as well: the same predictions and confidence mask are reused during `cluster-and-annotate` for biologically informed clustering diagnostics and cluster-level annotation. For consistent results, choose an appropriate CellTypist model for your dataset up front.
 

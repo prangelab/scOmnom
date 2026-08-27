@@ -75,7 +75,7 @@ The pseudobulk input is genes by cluster, or genes by cluster-condition group wh
 | Option | Default | Notes |
 | --- | --- | --- |
 | `--decoupler-method` | `consensus` | Fallback method for resources that do not have a resource-specific method set. |
-| `--decoupler-consensus-methods` | `ulm`, `mlm`, `wsum` | Constituent methods used by consensus. Repeat the option to override. |
+| `--decoupler-consensus-methods` | `ulm`, `mlm`, `wsum` | At least two distinct constituents combined by decoupler's signed per-method z-score consensus. `wsum` resolves to WAGGR weighted-sum scoring. |
 | `--decoupler-min-n-targets` | `5` | Fallback minimum target count for resources without a resource-specific value. |
 | `--decoupler-bar-split-signed` / `--no-decoupler-bar-split-signed` | split signed bars | Plot positive and negative activities separately. |
 | `--decoupler-bar-top-n-up` | none | Optional cap on positive barplot entries. |

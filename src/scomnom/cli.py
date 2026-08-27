@@ -97,6 +97,7 @@ def validate_decoupler_consensus_methods(
     - lowercases
     - deduplicates (order-preserving)
     - checks against supported decoupler methods
+    - requires at least two distinct constituent methods
     """
     if value is None:
         return None
@@ -119,9 +120,9 @@ def validate_decoupler_consensus_methods(
             seen.add(m_norm)
             methods.append(m_norm)
 
-    if not methods:
+    if len(methods) < 2:
         raise typer.BadParameter(
-            "--decoupler-consensus-methods must contain at least one valid method."
+            "--decoupler-consensus-methods must contain at least two distinct methods."
         )
 
     return methods
@@ -649,17 +650,17 @@ def integrate(
     bio_entropy_abs_limit: float = typer.Option(
         0.5,
         "--bio-entropy-abs-limit",
-        help="[Bio] Entropy absolute limit for CellTypist confidence mask.",
+        help="[Bio] Baseline entropy cutoff; the adaptive mask uses max(baseline, quantile cutoff).",
     ),
     bio_entropy_quantile: float = typer.Option(
         0.7,
         "--bio-entropy-quantile",
-        help="[Bio] Entropy quantile for CellTypist confidence mask (cut uses max(abs, quantile)).",
+        help="[Bio] Entropy quantile for CellTypist confidence mask (cut uses max(baseline, quantile)).",
     ),
     bio_margin_min: float = typer.Option(
         0.10,
         "--bio-margin-min",
-        help="[Bio] Minimum top1-top2 probability margin for CellTypist confidence mask.",
+        help="[Bio] Minimum top1-top2 raw CellTypist score margin for the confidence mask.",
     ),
     bio_mask_min_cells: int = typer.Option(
         500,
@@ -680,6 +681,11 @@ def integrate(
         0.10,
         "--pretty-label-min-masked-frac",
         help="[CellTypist] Min masked fraction in a cluster to assign cluster-level label; else Unknown.",
+    ),
+    pretty_label_min_purity: float = typer.Option(
+        0.50,
+        "--pretty-label-min-purity",
+        help="[CellTypist] Winning label fraction among confident cells that must be exceeded; else Unknown.",
     ),
 
     # ------------------------------------------------------------------
@@ -772,6 +778,7 @@ def integrate(
         bio_mask_min_frac=bio_mask_min_frac,
         pretty_label_min_masked_cells=pretty_label_min_masked_cells,
         pretty_label_min_masked_frac=pretty_label_min_masked_frac,
+        pretty_label_min_purity=pretty_label_min_purity,
         # annotated secondary integration
         annotated_run=annotated_run,
         scib_truth_label_key=str(scib_truth_label_key).lower(),
@@ -1410,17 +1417,17 @@ def cluster_and_annotate(
     bio_entropy_abs_limit: float = typer.Option(
         0.5,
         "--bio-entropy-abs-limit",
-        help="[Bio] Absolute entropy ceiling. Cells with entropy <= this always pass.",
+        help="[Bio] Baseline entropy cutoff; the adaptive mask uses max(baseline, quantile cutoff).",
     ),
     bio_entropy_quantile: float = typer.Option(
         0.7,
         "--bio-entropy-quantile",
-        help="[Bio] Entropy quantile. Final entropy cut is max(abs_limit, q-threshold).",
+        help="[Bio] Entropy quantile. Final entropy cut is max(baseline, quantile threshold).",
     ),
     bio_margin_min: float = typer.Option(
         0.10,
         "--bio-margin-min",
-        help="[Bio] Minimum margin (top1 - top2) to pass mask.",
+        help="[Bio] Minimum raw CellTypist score margin (top1 - top2) to pass the mask.",
     ),
     bio_mask_min_cells: int = typer.Option(
         500,
@@ -1443,6 +1450,11 @@ def cluster_and_annotate(
         0.10,
         "--pretty-label-min-masked-frac",
         help="[CellTypist] Minimum masked fraction in a cluster to assign cluster-level label; else Unknown.",
+    ),
+    pretty_label_min_purity: float = typer.Option(
+        0.50,
+        "--pretty-label-min-purity",
+        help="[CellTypist] Winning label fraction among confident cells that must be exceeded; else Unknown.",
     ),
 
     # -----------------------------
@@ -1480,7 +1492,7 @@ def cluster_and_annotate(
     decoupler_consensus_methods: Optional[List[str]] = typer.Option(
         None,
         "--decoupler-consensus-methods",
-        help="[Decoupler] List of consensus methods (e.g. --decoupler-consensus-methods ulm --decoupler-consensus-methods mlm).",
+        help="[Decoupler] At least two methods combined by decoupler's signed per-method z-score consensus.",
         callback=validate_decoupler_consensus_methods,
     ),
     decoupler_min_n_targets: int = typer.Option(
@@ -1700,6 +1712,7 @@ def cluster_and_annotate(
 
         pretty_label_min_masked_cells=pretty_label_min_masked_cells,
         pretty_label_min_masked_frac=pretty_label_min_masked_frac,
+        pretty_label_min_purity=pretty_label_min_purity,
 
         run_decoupler=run_decoupler,
         decoupler_pseudobulk_agg=decoupler_pseudobulk_agg,

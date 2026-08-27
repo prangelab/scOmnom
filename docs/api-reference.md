@@ -154,7 +154,7 @@ Parameters:
 - `decoupler_pseudobulk_agg`: Aggregation for round-native pseudobulk (`"mean"` or `"median"`).
 - `decoupler_use_raw`: Whether to prefer raw-like counts for pseudobulk.
 - `decoupler_method`: Decoupler scoring method.
-- `decoupler_consensus_methods`: Methods combined when `decoupler_method="consensus"`.
+- `decoupler_consensus_methods`: At least two distinct methods combined by decoupler's signed per-method z-score consensus. `wsum` resolves to WAGGR weighted-sum scoring.
 - `decoupler_min_n_targets`: Minimum targets per pathway/TF set.
 - `msigdb_gene_sets`: MSigDB keywords and/or `.gmt` files.
 - `msigdb_method`: Decoupler method for MSigDB.
@@ -189,7 +189,7 @@ Parameters:
 - `de_decoupler_source`: Which DE table source to use (`"auto"`, `"all"`, `"pseudobulk"`, `"cell"`, `"none"`).
 - `de_decoupler_stat_col`: Preferred statistic column used to build the enrichment matrix.
 - `decoupler_method`: Decoupler scoring method.
-- `decoupler_consensus_methods`: Methods combined when `decoupler_method="consensus"`.
+- `decoupler_consensus_methods`: At least two distinct methods combined by decoupler's signed per-method z-score consensus. `wsum` resolves to WAGGR weighted-sum scoring.
 - `decoupler_min_n_targets`: Minimum targets per pathway/TF set.
 - `msigdb_gene_sets`: MSigDB keywords and/or `.gmt` files.
 - `msigdb_method`: Decoupler method for MSigDB.

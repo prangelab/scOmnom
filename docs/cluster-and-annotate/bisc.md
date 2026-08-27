@@ -71,11 +71,12 @@ If CellTypist predictions are available, BISC incorporates biological consistenc
 
 This is enabled by default (`bio_guided_clustering = True`).
 
-Only high-confidence cells are considered, using a probability-based mask:
+Only high-confidence cells are considered. CellTypist logistic scores are row-normalized for Shannon entropy, while the top1-top2 margin is calculated from the original scores:
 
-* entropy limit: **≤ 0.5**
+* entropy baseline: **0.5**
 * entropy quantile: **0.7**
-* minimum margin (top1 − top2): **0.10**
+* adaptive entropy cutoff: **max(baseline, quantile)**
+* minimum raw-score margin (top1 − top2): **0.10**
 
 Safety gates:
 
@@ -134,13 +135,13 @@ Five fixed safeguards define the validated selector behavior:
 | Biological cluster-count limit | 2.5x | Limits the final within-plateau candidates to 2.5 times the number of confident biological reference labels when biological guidance is active; it does not remove structural plateaus from cross-plateau comparison. |
 | Absolute minimum cluster size | 5 cells | Excludes pathological partitions from selection without changing raw-edge plateau geometry. |
 
-These safeguards are fixed properties of the current BISC selector rather than command-line tuning parameters. Their values and the selector version are stored with every new BISC sweep. Use the resolution lens (`res_min`, `res_max`, and `n_resolutions`) as the primary control over the biological granularity under evaluation.
+These safeguards are fixed properties of the current BISC selector rather than command-line tuning parameters. Their values and selector identity are stored with every new BISC sweep. Use the resolution lens (`res_min`, `res_max`, and `n_resolutions`) as the primary control over the biological granularity under evaluation.
 
 #### Subsampling reproducibility
 
 BISC rebuilds the complete resolution sweep on repeated cell subsamples. One neighbour graph is reused for all resolutions within each repeat. The default evaluation uses five repeats retaining 80% of cells (`stability_repeats = 5`, `subsample_frac = 0.8`). The paired sweeps provide three distinct forms of evidence: agreement with each fixed-resolution full-data partition, retention of support across each full-data plateau, and persistence of the local valleys that delimit that plateau. These measurements test the full-data candidates without recursively rerunning the selector. The selected final resolution reuses its already computed fixed-resolution reproducibility values.
 
-The native outputs distinguish these quantities. `plateau_persistence` compares partition, internal-edge, and boundary persistence across structural scales. `plateau_boundary_persistence` reports how often each full-data edge retains its support or separator state. `clustering_stability_ari` reports fixed-resolution reproducibility for the final partition. The selection curve continues to show the raw adjacent ARI edges and structural probe positions. All edge-level values, plateau persistence summaries, the selected and runner-up plateaus, persistence and complexity gaps, selector version, and final decision are retained in the clustering round metadata. Confidence is reported as `clear` for one eligible structural plateau, `multiscale` for more than one, `unstable` when the selected plateau's weakest persistence component is below the feasibility floor, and `weak` when BISC must use the no-plateau fallback.
+The native outputs distinguish these quantities. `plateau_persistence` compares partition, internal-edge, and boundary persistence across structural scales. `plateau_boundary_persistence` reports how often each full-data edge retains its support or separator state. `clustering_stability_ari` reports fixed-resolution reproducibility for the final partition. The selection curve continues to show the raw adjacent ARI edges and structural probe positions. All edge-level values, plateau persistence summaries, the selected and runner-up plateaus, persistence and complexity gaps, selector identity, and final decision are retained in the clustering round metadata. Confidence is reported as `clear` for one eligible structural plateau, `multiscale` for more than one, `unstable` when the selected plateau's weakest persistence component is below the feasibility floor, and `weak` when BISC must use the no-plateau fallback.
 
 Historical scOmnom archives may contain a `penalized_scores` diagnostic from an earlier selector design. The field remains loadable for reproducibility, but current BISC runs neither generate nor use it.
 

@@ -8,6 +8,36 @@ from matplotlib.figure import Figure
 import multiprocessing
 
 
+_ALLOWED_DECOUPLER_CONSENSUS_METHODS = {"ulm", "mlm", "wsum", "aucell"}
+
+
+def _normalize_decoupler_consensus_methods(value: object) -> object:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        values = [value]
+    else:
+        values = list(value)
+
+    methods: list[str] = []
+    for item in values:
+        for part in str(item).split(","):
+            method = part.strip().lower()
+            if method and method not in methods:
+                methods.append(method)
+
+    invalid = [method for method in methods if method not in _ALLOWED_DECOUPLER_CONSENSUS_METHODS]
+    if invalid:
+        raise ValueError(
+            "Unsupported decoupler consensus method(s): "
+            f"{', '.join(invalid)}. Allowed methods: "
+            f"{', '.join(sorted(_ALLOWED_DECOUPLER_CONSENSUS_METHODS))}"
+        )
+    if len(methods) < 2:
+        raise ValueError("decoupler_consensus_methods must contain at least two distinct methods")
+    return methods
+
+
 def _normalize_optional_model_name(value: object) -> object:
     if value is None:
         return None
@@ -318,7 +348,8 @@ class IntegrateConfig(BaseModel):
 
     bio_entropy_abs_limit: float = Field(
         0.5,
-        description="Absolute entropy ceiling for CellTypist proba mask (cells with H <= this pass).",
+        ge=0.0,
+        description="Baseline entropy cutoff for the CellTypist confidence mask. The adaptive cutoff is the larger of this value and the configured entropy quantile.",
     )
 
     bio_entropy_quantile: float = Field(
@@ -355,6 +386,13 @@ class IntegrateConfig(BaseModel):
         ge=0.0,
         le=1.0,
         description="Minimum fraction of masked cells within a cluster required to assign a CellTypist cluster label.",
+    )
+
+    pretty_label_min_purity: float = Field(
+        0.50,
+        ge=0.0,
+        le=1.0,
+        description="Winning CellTypist label fraction among confident cells that a cluster must exceed; otherwise the cluster label is Unknown.",
     )
 
     # ------------------------------------------------------------------
@@ -556,7 +594,7 @@ class ClusterAnnotateConfig(BaseModel):
 
     bio_entropy_abs_limit: float = Field(
         0.5,
-        description="Absolute entropy ceiling for CellTypist proba mask (cells with H <= this pass).",
+        description="Baseline entropy cutoff for the CellTypist confidence mask. The adaptive cutoff is the larger of this value and the configured entropy quantile.",
     )
 
     bio_entropy_quantile: float = Field(
@@ -595,6 +633,13 @@ class ClusterAnnotateConfig(BaseModel):
         description="Minimum fraction of masked cells within a cluster required to assign a CellTypist cluster label.",
     )
 
+    pretty_label_min_purity: float = Field(
+        0.50,
+        ge=0.0,
+        le=1.0,
+        description="Winning CellTypist label fraction among confident cells that a cluster must exceed; otherwise the cluster label is Unknown.",
+    )
+
     # ------------------------------------------------------------------
     # Decoupler (cluster-level pseudobulk + nets)
     # ------------------------------------------------------------------
@@ -614,7 +659,10 @@ class ClusterAnnotateConfig(BaseModel):
         "consensus",
         description="Decoupler method (default: consensus).",
     )
-    decoupler_consensus_methods: Optional[List[str]] = ["ulm", "mlm", "wsum"]
+    decoupler_consensus_methods: Optional[List[str]] = Field(
+        default_factory=lambda: ["ulm", "mlm", "wsum"],
+        description="At least two distinct methods combined by decoupler's signed per-method z-score consensus.",
+    )
     decoupler_bar_split_signed: bool = False
     decoupler_bar_top_n_up: Optional[int] = None
     decoupler_bar_top_n_down: Optional[int] = None
@@ -764,6 +812,11 @@ class ClusterAnnotateConfig(BaseModel):
             raise ValueError("decoupler_pseudobulk_agg must be one of: 'mean', 'median'")
         return v
 
+    @field_validator("decoupler_consensus_methods", mode="before")
+    @classmethod
+    def _validate_decoupler_consensus_methods(cls, v):
+        return _normalize_decoupler_consensus_methods(v)
+
     @field_validator("bio_entropy_abs_limit")
     @classmethod
     def _validate_bio_entropy_abs_limit(cls, v: float) -> float:
@@ -788,7 +841,7 @@ class ClusterAnnotateConfig(BaseModel):
             raise ValueError("bio_margin_min must be in [0, 1]")
         return v
 
-    @field_validator("pretty_label_min_masked_frac", "bio_mask_min_frac")
+    @field_validator("pretty_label_min_masked_frac", "pretty_label_min_purity", "bio_mask_min_frac")
     @classmethod
     def _validate_frac_01(cls, v: float) -> float:
         v = float(v)
@@ -971,7 +1024,10 @@ class MarkersAndDEConfig(BaseModel):
     de_decoupler_source: str = "auto"
     de_decoupler_stat_col: str = "stat"
     decoupler_method: str = "consensus"
-    decoupler_consensus_methods: Optional[List[str]] = ["ulm", "mlm", "wsum"]
+    decoupler_consensus_methods: Optional[List[str]] = Field(
+        default_factory=lambda: ["ulm", "mlm", "wsum"],
+        description="At least two distinct methods combined by decoupler's signed per-method z-score consensus.",
+    )
     decoupler_min_n_targets: int = 5
     decoupler_bar_split_signed: bool = True
     decoupler_bar_top_n_up: Optional[int] = None
@@ -1143,3 +1199,9 @@ class MarkersAndDEConfig(BaseModel):
             if legacy_key in migrated and new_key not in migrated:
                 migrated[new_key] = migrated.pop(legacy_key)
         return migrated
+
+
+    @field_validator("decoupler_consensus_methods", mode="before")
+    @classmethod
+    def _validate_decoupler_consensus_methods(cls, v):
+        return _normalize_decoupler_consensus_methods(v)

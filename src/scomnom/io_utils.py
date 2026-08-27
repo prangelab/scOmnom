@@ -25,7 +25,165 @@ LOGGER = logging.getLogger(__name__)
 
 _SIDECAR_REF_TYPE = "scomnom.ref.v1"
 _SIDECAR_GROUP_ROOT = "__scomnom_payloads__"
-_SIDECAR_GROUP_VERSION = "v1"
+_SIDECAR_GROUP_VERSION = "v2"
+
+
+def _encode_sidecar_dataframe_column(series: pd.Series) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
+    """Encode one DataFrame column without coercing heterogeneous frames to strings."""
+    dtype = series.dtype
+    dtype_name = str(dtype)
+    missing = series.isna().to_numpy(dtype=bool)
+    attrs: dict[str, object] = {"dtype": dtype_name}
+
+    if isinstance(dtype, pd.CategoricalDtype):
+        attrs.update(
+            {
+                "encoding": "categorical_codes",
+                "categories_json": json.dumps(
+                    [str(value) for value in series.cat.categories],
+                    ensure_ascii=True,
+                ),
+                "ordered": bool(series.cat.ordered),
+            }
+        )
+        return series.cat.codes.to_numpy(dtype=np.int64), missing, attrs
+
+    if pd.api.types.is_bool_dtype(dtype):
+        attrs["encoding"] = "boolean"
+        values = series.fillna(False).astype(bool).to_numpy(dtype=np.bool_)
+        return values, missing, attrs
+
+    if pd.api.types.is_integer_dtype(dtype):
+        attrs["encoding"] = "integer"
+        target = np.uint64 if dtype_name.lower().startswith("uint") else np.int64
+        values = series.fillna(0).to_numpy(dtype=target)
+        return values, missing, attrs
+
+    if pd.api.types.is_float_dtype(dtype):
+        attrs["encoding"] = "floating"
+        values = series.fillna(0.0).to_numpy(dtype=np.float64)
+        return values, missing, attrs
+
+    if pd.api.types.is_datetime64_any_dtype(dtype):
+        attrs["encoding"] = "datetime_ns"
+        values = series.array.asi8.astype(np.int64, copy=False)
+        return values, missing, attrs
+
+    if pd.api.types.is_timedelta64_dtype(dtype):
+        attrs["encoding"] = "timedelta_ns"
+        values = series.array.asi8.astype(np.int64, copy=False)
+        return values, missing, attrs
+
+    attrs["encoding"] = "string" if dtype_name.startswith(("string", "arrow")) else "object_string"
+    values = np.asarray(["" if is_missing else str(value) for value, is_missing in zip(series, missing)], dtype=object)
+    return values, missing, attrs
+
+
+def _decode_sidecar_dataframe_column(
+    data: np.ndarray,
+    missing: np.ndarray,
+    attrs: dict[str, object],
+) -> pd.Series:
+    """Restore a column written by ``_encode_sidecar_dataframe_column``."""
+    encoding = str(attrs.get("encoding", "object_string"))
+    dtype_name = str(attrs.get("dtype", "object"))
+    missing = np.asarray(missing, dtype=bool)
+
+    if encoding == "categorical_codes":
+        categories = json.loads(str(attrs.get("categories_json", "[]")))
+        categorical = pd.Categorical.from_codes(
+            np.asarray(data, dtype=np.int64),
+            categories=categories,
+            ordered=bool(attrs.get("ordered", False)),
+        )
+        return pd.Series(categorical)
+
+    if encoding == "boolean":
+        target_dtype = "boolean" if dtype_name == "boolean" or missing.any() else "bool"
+        values = pd.array(np.asarray(data, dtype=bool), dtype=target_dtype)
+        if missing.any():
+            values[missing] = pd.NA
+        return pd.Series(values)
+
+    if encoding == "integer":
+        target_dtype = dtype_name
+        values = pd.array(np.asarray(data), dtype=target_dtype)
+        if missing.any():
+            values[missing] = pd.NA
+        return pd.Series(values)
+
+    if encoding == "floating":
+        values = np.asarray(data, dtype=np.float64).copy()
+        values[missing] = np.nan
+        result = pd.Series(values)
+        try:
+            return result.astype(dtype_name)
+        except (TypeError, ValueError):
+            return result
+
+    if encoding == "datetime_ns":
+        values = np.asarray(data, dtype=np.int64).copy()
+        values[missing] = np.iinfo(np.int64).min
+        if "," in dtype_name and dtype_name.endswith("]"):
+            timezone = dtype_name.rsplit(",", 1)[1][:-1].strip()
+            index = pd.to_datetime(values, unit="ns", utc=True).tz_convert(timezone)
+            return pd.Series(index)
+        return pd.Series(pd.to_datetime(values, unit="ns"))
+
+    if encoding == "timedelta_ns":
+        values = np.asarray(data, dtype=np.int64).copy()
+        values[missing] = np.iinfo(np.int64).min
+        return pd.Series(pd.to_timedelta(values, unit="ns"))
+
+    strings = np.asarray(data).astype(str)
+    if encoding == "string" or dtype_name.startswith(("string", "arrow")):
+        values = pd.array(strings, dtype="string")
+        values[missing] = pd.NA
+        result = pd.Series(values)
+        try:
+            return result.astype(dtype_name)
+        except (TypeError, ValueError):
+            return result
+
+    values = strings.astype(object)
+    values[missing] = None
+    return pd.Series(values, dtype=object)
+
+
+def _restore_legacy_dataframe_column(series: pd.Series, dtype_name: str) -> pd.Series:
+    """Restore a column from the legacy single-string-matrix sidecar layout."""
+    dtype_name = str(dtype_name)
+    if dtype_name in {"bool", "boolean"}:
+        normalized = series.astype(str).str.strip().str.lower()
+        mapped = normalized.map(
+            {
+                "true": True,
+                "1": True,
+                "false": False,
+                "0": False,
+                "<na>": pd.NA,
+                "nan": pd.NA,
+                "none": pd.NA,
+                "": pd.NA,
+            }
+        )
+        unknown = mapped.isna() & ~normalized.isin({"<na>", "nan", "none", ""})
+        if unknown.any():
+            raise ValueError(f"Unrecognized Boolean values: {sorted(normalized[unknown].unique())}")
+        target = "boolean" if dtype_name == "boolean" or mapped.isna().any() else "bool"
+        return mapped.astype(target)
+
+    if pd.api.types.is_integer_dtype(pd.api.types.pandas_dtype(dtype_name)):
+        return pd.to_numeric(series, errors="raise").astype(dtype_name)
+    if pd.api.types.is_float_dtype(pd.api.types.pandas_dtype(dtype_name)):
+        return pd.to_numeric(series, errors="raise").astype(dtype_name)
+    if dtype_name == "object":
+        result = series.astype(object)
+        return result.where(~result.isna(), None)
+    try:
+        return series.astype(dtype_name)
+    except (TypeError, ValueError):
+        return series
 
 # Official CellTypist model registry
 CELLTYPIST_REGISTRY_URL = "https://celltypist.cog.sanger.ac.uk/models/models.json"
@@ -1567,6 +1725,28 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
                 arr = _to_unicode_ndarray(arr)
             grp.create_array(name, data=arr, overwrite=True)
 
+        def _write_axis(grp, name: str, axis: pd.Index) -> None:
+            axis_group = grp.create_group(name)
+            axis_group.attrs["index_class"] = type(axis).__name__
+            axis_group.attrs["name_json"] = json.dumps(axis.name, default=str, ensure_ascii=True)
+            if isinstance(axis, pd.RangeIndex):
+                axis_group.attrs["start"] = int(axis.start)
+                axis_group.attrs["stop"] = int(axis.stop)
+                axis_group.attrs["step"] = int(axis.step)
+                return
+            if isinstance(axis, pd.MultiIndex):
+                values = _to_unicode_array(axis.map(str).tolist())
+                _create_array_safe(axis_group, "data", values)
+                _create_array_safe(axis_group, "missing", np.zeros(len(axis), dtype=np.bool_))
+                axis_group.attrs["encoding"] = "object_string"
+                axis_group.attrs["dtype"] = "object"
+                return
+            data, missing, attrs = _encode_sidecar_dataframe_column(pd.Series(axis.array))
+            _create_array_safe(axis_group, "data", data)
+            _create_array_safe(axis_group, "missing", missing.astype(np.bool_))
+            for key, value in attrs.items():
+                axis_group.attrs[key] = value
+
         for payload in _sidecar_payloads:
             pid = str(payload["id"])
             kind = str(payload["kind"])
@@ -1581,18 +1761,21 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
             try:
                 if kind == "dataframe":
                     df = obj
-                    data = np.asarray(df.to_numpy(copy=False))
-                    data_cast = "native"
-                    if data.dtype == object:
-                        data = _to_unicode_matrix(df.astype(str).to_numpy(copy=False))
-                        data_cast = "str"
-                    _create_array_safe(grp, "data", data)
                     idx = _to_unicode_array(df.index.astype(str).tolist())
                     cols = _to_unicode_array(df.columns.astype(str).tolist())
                     _create_array_safe(grp, "index", idx)
                     _create_array_safe(grp, "columns", cols)
-                    grp.attrs["dtypes"] = json.dumps([str(x) for x in df.dtypes], ensure_ascii=True)
-                    grp.attrs["data_cast"] = data_cast
+                    grp.attrs["storage_layout"] = "typed_columns_v2"
+                    _write_axis(grp, "index_axis", df.index)
+                    _write_axis(grp, "columns_axis", df.columns)
+                    column_root = grp.create_group("column_data")
+                    for position in range(df.shape[1]):
+                        column_group = column_root.create_group(f"{position:06d}")
+                        data, missing, attrs = _encode_sidecar_dataframe_column(df.iloc[:, position])
+                        _create_array_safe(column_group, "data", data)
+                        _create_array_safe(column_group, "missing", missing.astype(np.bool_))
+                        for key, value in attrs.items():
+                            column_group.attrs[key] = value
                     manifest_entries.append({"id": pid, "kind": kind, "shape": [int(df.shape[0]), int(df.shape[1])]})
                 elif kind == "series":
                     series = obj
@@ -1618,20 +1801,16 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
                 else:
                     raise RuntimeError(f"Unknown sidecar payload kind: {kind!r}")
             except Exception as e:
-                LOGGER.warning(
-                    "save_dataset: sidecar payload failed (id=%s kind=%s); skipping payload. (%s)",
-                    pid,
-                    kind,
-                    e,
-                )
                 if pid in side_root:
                     del side_root[pid]
-                continue
+                raise RuntimeError(
+                    f"Failed to write sidecar payload id={pid!r} kind={kind!r}"
+                ) from e
 
         if "__manifest__" in side_root:
             del side_root["__manifest__"]
         manifest_grp = side_root.create_group("__manifest__")
-        manifest_grp.attrs["schema_version"] = "1"
+        manifest_grp.attrs["schema_version"] = "2"
         manifest_grp.attrs["created_by"] = "save_dataset"
         manifest_grp.attrs["payload_count"] = int(len(manifest_entries))
         manifest_grp.attrs["entries_json"] = json.dumps(manifest_entries, ensure_ascii=True)
@@ -1640,8 +1819,22 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
     # Payload tagging
     # ------------------------------------------------------------
     def _df_to_tagged_payload(df: pd.DataFrame) -> dict:
-        payload = df.to_dict(orient="split")
-        return {"__type__": "pandas.DataFrame", "orient": "split", "payload": payload}
+        missing = df.isna().to_numpy(dtype=bool)
+        data = [
+            ["" if is_missing else str(value) for value, is_missing in zip(row, mask_row)]
+            for row, mask_row in zip(df.to_numpy(dtype=object), missing)
+        ]
+        return {
+            "__type__": "pandas.DataFrame",
+            "orient": "split",
+            "payload": {
+                "index": [str(value) for value in df.index],
+                "columns": [str(value) for value in df.columns],
+                "data": data,
+                "missing": missing.tolist(),
+                "dtypes": [str(dtype) for dtype in df.dtypes],
+            },
+        }
 
     def _ndarray_to_payload(a: np.ndarray) -> dict:
         return {
@@ -1836,10 +2029,7 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
                     _log_mem_checkpoint("post_write_zarr_stage")
                     if sidecar_enabled and _sidecar_payloads:
                         _log_mem_checkpoint("pre_write_sidecar_stage")
-                        try:
-                            _write_sidecar_payloads(tmp_zarr_dir)
-                        except Exception as e:
-                            LOGGER.warning("save_dataset: sidecar stage failed; continuing without sidecar payloads. (%s)", e)
+                        _write_sidecar_payloads(tmp_zarr_dir)
                         _log_mem_checkpoint("post_write_sidecar_stage")
 
                     LOGGER.debug("save_dataset: archiving staged zarr to %s", archive_path)
@@ -1858,10 +2048,7 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
                 _log_mem_checkpoint("post_write_zarr")
                 if sidecar_enabled and _sidecar_payloads:
                     _log_mem_checkpoint("pre_write_sidecar")
-                    try:
-                        _write_sidecar_payloads(out_path)
-                    except Exception as e:
-                        LOGGER.warning("save_dataset: sidecar stage failed; continuing without sidecar payloads. (%s)", e)
+                    _write_sidecar_payloads(out_path)
                     _log_mem_checkpoint("post_write_sidecar")
         elif fmt == "h5ad":
             LOGGER.debug("save_dataset: writing h5ad %s", out_path)
@@ -1910,6 +2097,28 @@ def load_dataset(path: Path) -> ad.AnnData:
     zarr_source_dir: Path | None = None
     zarr_root_cache = None
 
+    def _load_sidecar_axis(node, fallback: np.ndarray) -> pd.Index:
+        index_class = str(node.attrs.get("index_class", "Index"))
+        try:
+            name = json.loads(str(node.attrs.get("name_json", "null")))
+        except Exception:
+            name = None
+        if index_class == "RangeIndex":
+            return pd.RangeIndex(
+                start=int(node.attrs["start"]),
+                stop=int(node.attrs["stop"]),
+                step=int(node.attrs["step"]),
+                name=name,
+            )
+        if "data" not in node:
+            return pd.Index(fallback, name=name)
+        restored = _decode_sidecar_dataframe_column(
+            np.asarray(node["data"]),
+            np.asarray(node["missing"]),
+            dict(node.attrs),
+        )
+        return pd.Index(restored.array, name=name)
+
     def _load_sidecar_ref(ref_obj: dict):
         nonlocal zarr_root_cache
         if zarr_source_dir is None:
@@ -1935,9 +2144,39 @@ def load_dataset(path: Path) -> ad.AnnData:
 
         kind = str(ref_obj.get("kind", "")).strip() or str(node.attrs.get("kind", "")).strip()
         if kind == "dataframe":
-            data = np.asarray(node["data"])
             index = np.asarray(node["index"]).astype(str)
             columns = np.asarray(node["columns"]).astype(str)
+            if str(node.attrs.get("storage_layout", "")) == "typed_columns_v2":
+                restored_index = (
+                    _load_sidecar_axis(node["index_axis"], index)
+                    if "index_axis" in node
+                    else pd.Index(index, dtype=str)
+                )
+                restored_column_index = (
+                    _load_sidecar_axis(node["columns_axis"], columns)
+                    if "columns_axis" in node
+                    else pd.Index(columns, dtype=str)
+                )
+                column_root = node["column_data"]
+                restored_columns: list[pd.Series] = []
+                for position in range(len(restored_column_index)):
+                    column_node = column_root[f"{position:06d}"]
+                    restored_columns.append(
+                        _decode_sidecar_dataframe_column(
+                            np.asarray(column_node["data"]),
+                            np.asarray(column_node["missing"]),
+                            dict(column_node.attrs),
+                        )
+                    )
+                if restored_columns:
+                    df = pd.concat(restored_columns, axis=1)
+                    df.columns = restored_column_index
+                else:
+                    df = pd.DataFrame(index=range(len(restored_index)), columns=restored_column_index)
+                df.index = restored_index
+                return df
+
+            data = np.asarray(node["data"])
             df = pd.DataFrame(data=data, index=pd.Index(index, dtype=str), columns=pd.Index(columns, dtype=str))
             dtypes_raw = node.attrs.get("dtypes", None)
             if dtypes_raw:
@@ -1946,7 +2185,7 @@ def load_dataset(path: Path) -> ad.AnnData:
                     if isinstance(dtypes_list, list) and len(dtypes_list) == len(df.columns):
                         for col, dt in zip(df.columns, dtypes_list):
                             try:
-                                df[col] = df[col].astype(str(dt))
+                                df[col] = _restore_legacy_dataframe_column(df[col], str(dt))
                             except Exception:
                                 continue
                 except Exception:
@@ -2009,6 +2248,19 @@ def load_dataset(path: Path) -> ad.AnnData:
                             index=payload.get("index", []),
                             columns=payload.get("columns", []),
                         )
+                        missing = np.asarray(payload.get("missing", []), dtype=bool)
+                        dtypes = payload.get("dtypes", [])
+                        if missing.shape == df.shape and len(dtypes) == len(df.columns):
+                            restored_columns: list[pd.Series] = []
+                            for position, dtype_name in enumerate(dtypes):
+                                column = df.iloc[:, position].copy()
+                                column.loc[missing[:, position]] = pd.NA
+                                restored_columns.append(
+                                    _restore_legacy_dataframe_column(column, str(dtype_name))
+                                )
+                            df = pd.concat(restored_columns, axis=1)
+                            df.columns = payload.get("columns", [])
+                            df.index = payload.get("index", [])
                         df.index = df.index.astype(str)
                         df.columns = df.columns.astype(str)
                         return df

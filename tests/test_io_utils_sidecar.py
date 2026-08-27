@@ -6,7 +6,39 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 
-from scomnom.io_utils import load_dataset, save_dataset
+from scomnom.io_utils import _restore_legacy_dataframe_column, load_dataset, save_dataset
+
+
+def _mixed_dataframe() -> pd.DataFrame:
+    index = pd.Index(["r0", "r1", "r2"], dtype=str)
+    return pd.DataFrame(
+        {
+            "label": pd.Series(["A", None, "C"], index=index, dtype="string"),
+            "passed": pd.Series([True, False, True], index=index, dtype="bool"),
+            "reviewed": pd.Series([True, pd.NA, False], index=index, dtype="boolean"),
+            "count": pd.Series([1, pd.NA, 3], index=index, dtype="Int64"),
+            "score": pd.Series([1.5, np.nan, -0.25], index=index, dtype="float64"),
+            "note": pd.Series(["kept", None, "rejected"], index=index, dtype=object),
+        },
+        index=index,
+    )
+
+
+def _adata_with_uns_frame(key: str, frame: pd.DataFrame) -> ad.AnnData:
+    adata = ad.AnnData(X=np.zeros((3, 2), dtype=np.float32))
+    adata.obs_names = ["cell0", "cell1", "cell2"]
+    adata.var_names = ["gene0", "gene1"]
+    adata.uns[key] = frame
+    return adata
+
+
+def test_legacy_boolean_string_restore_preserves_false_values() -> None:
+    restored = _restore_legacy_dataframe_column(
+        pd.Series(["True", "False", "1", "0"]),
+        "bool",
+    )
+    assert restored.dtype == bool
+    assert restored.tolist() == [True, False, True, False]
 
 
 def test_save_and_load_dataset_with_uns_sidecar_roundtrip(tmp_path: Path) -> None:
@@ -24,7 +56,7 @@ def test_save_and_load_dataset_with_uns_sidecar_roundtrip(tmp_path: Path) -> Non
     out_path = tmp_path / "sidecar_test.zarr"
     save_dataset(adata, out_path, fmt="zarr", archive=False)
 
-    assert (out_path / "__scomnom_payloads__" / "v1").exists()
+    assert (out_path / "__scomnom_payloads__" / "v2").exists()
 
     loaded = load_dataset(out_path)
     assert isinstance(loaded.uns["df_payload"], pd.DataFrame)
@@ -53,6 +85,83 @@ def test_save_and_load_dataset_with_object_dataframe_sidecar(tmp_path: Path) -> 
     loaded = load_dataset(out_path)
     assert isinstance(loaded.uns["object_df"], pd.DataFrame)
     assert loaded.uns["object_df"].shape == (2, 2)
+
+
+def test_mixed_dataframe_sidecar_preserves_values_dtypes_and_missingness(tmp_path: Path) -> None:
+    expected = _mixed_dataframe()
+    adata = _adata_with_uns_frame("mixed", expected)
+
+    out_path = tmp_path / "mixed.zarr"
+    save_dataset(adata, out_path, fmt="zarr", archive=False)
+
+    assert (out_path / "__scomnom_payloads__" / "v2").exists()
+    loaded = load_dataset(out_path)
+    pd.testing.assert_frame_equal(loaded.uns["mixed"], expected)
+
+
+def test_mixed_dataframe_roundtrip_in_archived_zarr(tmp_path: Path) -> None:
+    expected = _mixed_dataframe()
+    adata = _adata_with_uns_frame("mixed", expected)
+
+    out_path = tmp_path / "mixed.zarr"
+    archive_path = tmp_path / "mixed.zarr.tar.zst"
+    save_dataset(adata, out_path, fmt="zarr", archive=True)
+
+    assert archive_path.exists()
+    loaded = load_dataset(archive_path)
+    pd.testing.assert_frame_equal(loaded.uns["mixed"], expected)
+
+
+def test_mixed_dataframe_roundtrip_in_h5ad(tmp_path: Path) -> None:
+    expected = _mixed_dataframe()
+    adata = _adata_with_uns_frame("mixed", expected)
+
+    out_path = tmp_path / "mixed.h5ad"
+    save_dataset(adata, out_path, fmt="h5ad", archive=False)
+
+    loaded = load_dataset(out_path)
+    pd.testing.assert_frame_equal(loaded.uns["mixed"], expected)
+
+
+def test_compaction_edge_audit_booleans_roundtrip_with_mapping(tmp_path: Path) -> None:
+    adata = _adata_with_uns_frame(
+        "unused",
+        pd.DataFrame({"value": [1]}, index=["row"]),
+    )
+    del adata.uns["unused"]
+    pairwise = pd.DataFrame(
+        {
+            "cluster_a": ["C00", "C00", "C01"],
+            "cluster_b": ["C01", "C02", "C02"],
+            "progeny_pass": [True, False, True],
+            "dorothea_pass": [True, False, False],
+            "merge_pass": [True, False, False],
+            "similarity": [0.97, 0.42, 0.71],
+        }
+    )
+    adata.uns["cluster_rounds"] = {
+        "r1_compacted": {
+            "compaction": {
+                "pairwise_evidence": pairwise,
+                "reverse_map": {"C00": "C00+C01", "C01": "C00+C01", "C02": "C02"},
+                "decision_log": ["C00+C01 merged", "C02 retained"],
+            }
+        }
+    }
+
+    out_path = tmp_path / "compaction.zarr"
+    save_dataset(adata, out_path, fmt="zarr", archive=False)
+    loaded = load_dataset(out_path)
+    compaction = loaded.uns["cluster_rounds"]["r1_compacted"]["compaction"]
+
+    pd.testing.assert_frame_equal(compaction["pairwise_evidence"], pairwise)
+    assert compaction["pairwise_evidence"]["merge_pass"].tolist() == [True, False, False]
+    assert compaction["reverse_map"] == {
+        "C00": "C00+C01",
+        "C01": "C00+C01",
+        "C02": "C02",
+    }
+    assert list(compaction["decision_log"]) == ["C00+C01 merged", "C02 retained"]
 
 
 def test_save_and_load_dataset_with_object_ndarray_sidecar(tmp_path: Path) -> None:

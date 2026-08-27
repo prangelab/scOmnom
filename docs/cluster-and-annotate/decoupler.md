@@ -31,7 +31,7 @@ The default resources are:
 | `--decoupler-pseudobulk-agg` | `decoupler_pseudobulk_agg` | `mean` | Aggregation used to build the round-level pseudobulk matrix; allowed values are `mean` and `median`. |
 | `--decoupler-use-raw` / `--no-decoupler-use-raw` | `decoupler_use_raw` | `True` | Prefer raw-like count layers for pseudobulk input when available. |
 | `--decoupler-method` | `decoupler_method` | `consensus` | Default decoupler method used by resources unless overridden below. |
-| `--decoupler-consensus-methods` | `decoupler_consensus_methods` | `ulm`, `mlm`, `wsum` | Methods combined when a resource uses `consensus`. Supported values are `ulm`, `mlm`, `wsum`, and `aucell`. |
+| `--decoupler-consensus-methods` | `decoupler_consensus_methods` | `ulm`, `mlm`, `wsum` | At least two distinct methods combined by decoupler's signed per-method z-score consensus. Supported values are `ulm`, `mlm`, `wsum`, and `aucell`. |
 | `--decoupler-min-n-targets` | `decoupler_min_n_targets` | `5` | Generic minimum target count per source. |
 | `--decoupler-bar-split-signed` / `--no-decoupler-bar-split-signed` | `decoupler_bar_split_signed` | `False` | Split decoupler barplots into positive and negative activities. |
 | `--decoupler-bar-top-n-up` | `decoupler_bar_top_n_up` | `None` | Number of positive activities to show when signed barplots are split. |
@@ -51,6 +51,8 @@ The default resources are:
 | `--dorothea-organism` | `dorothea_organism` | `human` | Organism used when loading DoRothEA resources. |
 
 For non-human PROGENy and DoRothEA runs, scOmnom first asks decoupler for the requested organism. If that resource is unavailable, it retries with the human resource and translates targets through HCOP orthology before scoring. That fallback requires access to the public HCOP map at runtime.
+
+Consensus does not average raw method scores. Each successful method is sign-split and standardized by decoupler before combination, avoiding scale domination by one estimator. The legacy `wsum` name is retained as a user-facing compatibility alias and resolves to the current WAGGR weighted-sum implementation. The configured minimum target count is passed to every constituent method. A consensus requires at least two requested and two successful methods; otherwise the resource fails explicitly. Each stored resource payload records requested, resolved, successful, and failed methods in `method_provenance`.
 
 Compaction has additional decoupler-derived similarity thresholds such as `--thr-progeny`, `--thr-dorothea`, and `--thr-msigdb-default`; those are documented on the [Compaction](compaction.md) page because they control merge decisions rather than activity inference itself.
 

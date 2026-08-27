@@ -249,7 +249,22 @@ def test_clusterannotate_defaults(tmp_path):
     assert cfg.w_tiny == 0.15
     assert cfg.bio_guided_clustering is True
     assert cfg.force_celltypist_recompute is False
+    assert cfg.decoupler_consensus_methods == ["ulm", "mlm", "wsum"]
     assert not hasattr(cfg, "penalty_alpha")
+
+
+def test_clusterannotate_validates_decoupler_consensus_methods(tmp_path):
+    cfg = ClusterAnnotateConfig(
+        input_path=tmp_path / "a.h5ad",
+        decoupler_consensus_methods=["ULM", "mlm", "ulm"],
+    )
+    assert cfg.decoupler_consensus_methods == ["ulm", "mlm"]
+
+    with pytest.raises(ValueError, match="at least two distinct"):
+        ClusterAnnotateConfig(
+            input_path=tmp_path / "a.h5ad",
+            decoupler_consensus_methods=["ulm", "ulm"],
+        )
 
 
 def test_clusterannotate_requires_three_resolution_points(tmp_path):
@@ -280,3 +295,13 @@ def test_markers_and_de_defaults_to_milo_m05_values(tmp_path):
     assert cfg.composition_milo_group_regions is True
     assert cfg.composition_milo_group_min_overlap == 1
     assert cfg.composition_milo_group_max_lfc_delta is None
+    assert cfg.decoupler_consensus_methods == ["ulm", "mlm", "wsum"]
+
+
+def test_markers_and_de_validates_decoupler_consensus_methods(tmp_path):
+    with pytest.raises(ValueError, match="at least two distinct"):
+        MarkersAndDEConfig(
+            input_path=tmp_path / "clustered.h5ad",
+            output_dir=tmp_path,
+            decoupler_consensus_methods=["wsum"],
+        )

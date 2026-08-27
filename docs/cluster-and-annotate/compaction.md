@@ -2,7 +2,7 @@
 
 Large datasets can yield clusters that are transcriptionally distinct but *biologically redundant*. The optional **compaction** step merges such clusters using **multi-view biological agreement** computed from decoupler activities.
 
-Compaction is **CellTypist-grouped**: cluster pairs are only compared *within the same* CellTypist cluster label group (with an option to skip `Unknown` groups).
+Compaction is **CellTypist-grouped**: cluster pairs are only compared *within the same* CellTypist cluster label group (with an option to skip `Unknown` groups). These grouping labels are confidence- and purity-gated. A cluster remains `Unknown` when it lacks sufficient confident-cell coverage or no label has a strict majority, preventing ties or weak votes from silently authorizing merges.
 
 #### What signals are used
 

@@ -3,9 +3,16 @@ from pathlib import Path
 from typer.testing import CliRunner
 from unittest.mock import patch
 
-from scomnom.cli import app
+from scomnom.cli import app, validate_decoupler_consensus_methods
 
 runner = CliRunner()
+
+
+def test_decoupler_consensus_method_callback_requires_two_distinct_methods():
+    assert validate_decoupler_consensus_methods(["ULM", "mlm", "ulm"]) == ["ulm", "mlm"]
+
+    with pytest.raises(Exception, match="at least two distinct"):
+        validate_decoupler_consensus_methods(["ulm", "ulm"])
 
 
 # ---------------------------------------------------------

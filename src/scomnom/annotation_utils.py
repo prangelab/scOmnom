@@ -998,6 +998,45 @@ def ensure_round_msigdb_activity_by_gmt(
 # -------------------------------------------------------------------------
 # Decoupler runner (shared low-level helper)
 # -------------------------------------------------------------------------
+def _dc_consensus_from_estimates(
+    dc,
+    estimates: dict[str, pd.DataFrame],
+    *,
+    verbose: bool,
+) -> pd.DataFrame:
+    """Combine sources-by-samples estimates with decoupler's signed z-score consensus."""
+    if len(estimates) < 2:
+        raise ValueError("decoupler consensus requires at least two successful methods.")
+    if not callable(getattr(dc.mt, "consensus", None)):
+        raise RuntimeError("decoupler.mt.consensus is unavailable in the installed decoupler version.")
+
+    frames = list(estimates.values())
+    common_sources = set(frames[0].index.astype(str))
+    common_samples = set(frames[0].columns.astype(str))
+    for frame in frames[1:]:
+        common_sources &= set(frame.index.astype(str))
+        common_samples &= set(frame.columns.astype(str))
+    if not common_sources or not common_samples:
+        raise RuntimeError("decoupler consensus: no common sources/samples across methods.")
+
+    common_sources = sorted(common_sources)
+    common_samples = sorted(common_samples)
+    result = {
+        f"score_{name}": frame.rename_axis(index=None, columns=None)
+        .loc[common_sources, common_samples]
+        .T
+        for name, frame in estimates.items()
+    }
+    consensus_result = dc.mt.consensus(result, verbose=verbose)
+    scores = consensus_result[0] if isinstance(consensus_result, (tuple, list)) else consensus_result
+    if not isinstance(scores, pd.DataFrame) or scores.empty:
+        raise RuntimeError("decoupler.mt.consensus returned empty or invalid scores.")
+    scores = scores.loc[common_samples, common_sources]
+    if not np.isfinite(scores.to_numpy(dtype=float)).all():
+        raise RuntimeError("decoupler.mt.consensus returned non-finite scores.")
+    return scores.T
+
+
 def _dc_run_method(
     *,
     method: str,
@@ -1062,66 +1101,80 @@ def _dc_run_method(
     if net_use.empty:
         raise ValueError(f"decoupler: after min_n={min_n} filtering, net is empty.")
 
-    try:
-        available = {m.lower() for m in dc.mt.show_methods()}
-    except Exception:
-        available = {m.lower() for m in dir(dc.mt) if not m.startswith("_")}
+    def _run_one(m: str) -> tuple[pd.DataFrame, dict[str, object]]:
+        requested = (m or "").lower().strip()
+        resolved = requested
+        kwargs: dict[str, object] = {"tmin": int(min_n)}
+        if requested == "wsum" and not callable(getattr(dc.mt, "wsum", None)):
+            resolved = "waggr"
+            kwargs.update({"fun": "wsum", "times": 0})
 
-    def _run_one(m: str) -> pd.DataFrame:
-        m = (m or "").lower().strip()
-        if m not in available:
+        func = getattr(dc.mt, resolved, None)
+        if not callable(func):
             raise ValueError(
-                f"decoupler: method '{m}' not available. "
-                f"Use decoupler.mt.show_methods() to inspect available methods."
+                f"decoupler: method '{requested}' is unavailable in the installed version."
             )
 
-        func = getattr(dc.mt, m)
-        out = func(data=mat_sxg, net=net_use, verbose=verbose)
+        out = func(data=mat_sxg, net=net_use, verbose=verbose, **kwargs)
         acts = out[0] if isinstance(out, (tuple, list)) else out
         if not isinstance(acts, pd.DataFrame) or acts.empty:
-            raise RuntimeError(f"decoupler: method '{m}' returned empty/invalid activities.")
+            raise RuntimeError(f"decoupler: method '{requested}' returned empty/invalid activities.")
         # acts is samples x sources -> convert to sources x samples
-        return acts.T
+        estimate = acts.T
+        if not np.isfinite(estimate.to_numpy(dtype=float)).all():
+            raise RuntimeError(f"decoupler: method '{requested}' returned non-finite activities.")
+        return estimate, {
+            "requested": requested,
+            "resolved": resolved,
+            "kwargs": kwargs,
+        }
 
     if method == "consensus":
         methods = list(consensus_methods) if consensus_methods else ["ulm", "mlm", "wsum"]
-        methods = [m.lower().strip() for m in methods if m and str(m).strip()]
-        if not methods:
-            raise ValueError("decoupler consensus: consensus_methods is empty.")
+        methods = list(dict.fromkeys(m.lower().strip() for m in methods if m and str(m).strip()))
+        if len(methods) < 2:
+            raise ValueError("decoupler consensus: at least two constituent methods are required.")
 
-        ests: list[pd.DataFrame] = []
+        estimates: dict[str, pd.DataFrame] = {}
+        resolutions: dict[str, dict[str, object]] = {}
         errs: list[str] = []
         for m in methods:
             try:
-                ests.append(_run_one(m))
+                estimate, resolution = _run_one(m)
+                estimates[m] = estimate
+                resolutions[m] = resolution
             except Exception as e:
                 errs.append(f"{m}: {e}")
 
-        if not ests:
+        if len(estimates) < 2:
             raise RuntimeError(
-                "decoupler consensus: all constituent methods failed: " + " | ".join(errs)
+                "decoupler consensus: fewer than two constituent methods succeeded: "
+                + " | ".join(errs)
             )
+        if errs:
+            LOGGER.warning("decoupler consensus: excluded failed constituents: %s", " | ".join(errs))
 
-        common_sources = set(ests[0].index)
-        common_samples = set(ests[0].columns)
-        for e in ests[1:]:
-            common_sources &= set(e.index)
-            common_samples &= set(e.columns)
+        consensus = _dc_consensus_from_estimates(dc, estimates, verbose=verbose)
+        consensus.attrs["method_provenance"] = {
+            "requested_method": "consensus",
+            "combiner": "decoupler.mt.consensus_signed_zscore",
+            "requested_constituents": methods,
+            "successful_constituents": list(estimates),
+            "failed_constituents": errs,
+            "resolved_constituents": resolutions,
+        }
+        return consensus
 
-        if not common_sources or not common_samples:
-            raise RuntimeError("decoupler consensus: no common sources/samples across methods.")
-
-        common_sources = sorted(common_sources)
-        common_samples = sorted(common_samples)
-
-        stack = np.stack(
-            [e.loc[common_sources, common_samples].to_numpy() for e in ests], axis=0
-        )
-        mean_est = np.nanmean(stack, axis=0)
-
-        return pd.DataFrame(mean_est, index=common_sources, columns=common_samples)
-
-    return _run_one(method)
+    estimate, resolution = _run_one(method)
+    estimate.attrs["method_provenance"] = {
+        "requested_method": method,
+        "combiner": None,
+        "requested_constituents": [method],
+        "successful_constituents": [method],
+        "failed_constituents": [],
+        "resolved_constituents": {method: resolution},
+    }
+    return estimate
 
 
 # -------------------------------------------------------------------------
@@ -1288,6 +1341,7 @@ def _dc_activity_from_stats(
         consensus_methods=consensus_methods,
     )
     activity = est.T
+    activity.attrs.update(est.attrs)
     return activity
 
 
@@ -1727,6 +1781,7 @@ def _run_msigdb(
             consensus_methods=getattr(cfg, "decoupler_consensus_methods", None),
         )
         activity = est.T  # clusters x pathways
+        activity.attrs.update(est.attrs)
         activity.index.name = "cluster"
         activity.columns.name = "pathway"
     except Exception as e:
@@ -1758,6 +1813,7 @@ def _run_msigdb(
             "used_keywords": used_keywords,
             "input": f"{store_key}:pseudobulk_expr(genes_x_clusters)",
             "resource": "msigdb_gmt",
+            "method_provenance": dict(activity.attrs.get("method_provenance", {})),
             "round_id": rid,
             "gene_filter": list(filter_info["gene_filter"]) if filter_info else [],
             "n_genes_input": int(filter_info["n_genes_input"]) if filter_info else int(expr.shape[0]),
@@ -1845,6 +1901,7 @@ def _run_progeny(
             consensus_methods=getattr(cfg, "decoupler_consensus_methods", None),
         )
         activity = est.T
+        activity.attrs.update(est.attrs)
         activity.index.name = "cluster"
         activity.columns.name = "pathway"
     except Exception as e:
@@ -1861,6 +1918,7 @@ def _run_progeny(
             "resource": "progeny",
             "organism": str(organism),
             "round_id": rid,
+            "method_provenance": dict(activity.attrs.get("method_provenance", {})),
             "gene_filter": list(filter_info["gene_filter"]) if filter_info else [],
             "n_genes_input": int(filter_info["n_genes_input"]) if filter_info else int(expr.shape[0]),
             "n_genes_retained": int(filter_info["n_genes_retained"]) if filter_info else int(expr.shape[0]),
@@ -1953,6 +2011,7 @@ def _run_dorothea(
             consensus_methods=getattr(cfg, "decoupler_consensus_methods", None),
         )
         activity = est.T
+        activity.attrs.update(est.attrs)
         activity.index.name = "cluster"
         activity.columns.name = "TF"
     except Exception as e:
@@ -1969,6 +2028,7 @@ def _run_dorothea(
             "input": f"{store_key}:pseudobulk_expr(genes_x_clusters)",
             "resource": "dorothea",
             "round_id": rid,
+            "method_provenance": dict(activity.attrs.get("method_provenance", {})),
             "gene_filter": list(filter_info["gene_filter"]) if filter_info else [],
             "n_genes_input": int(filter_info["n_genes_input"]) if filter_info else int(expr.shape[0]),
             "n_genes_retained": int(filter_info["n_genes_retained"]) if filter_info else int(expr.shape[0]),
@@ -2061,6 +2121,7 @@ def _run_msigdb_from_stats(
             "used_keywords": used_keywords,
             "input": str(input_label),
             "resource": "msigdb_gmt",
+            "method_provenance": dict(activity.attrs.get("method_provenance", {})),
         },
         "activity_by_gmt": activity_by_gmt,
         "feature_meta": feature_meta,
@@ -2126,6 +2187,7 @@ def _run_progeny_from_stats(
             "input": str(input_label),
             "resource": "progeny",
             "organism": str(organism),
+            "method_provenance": dict(activity.attrs.get("method_provenance", {})),
         },
         "feature_meta": None,
     }
@@ -2197,6 +2259,7 @@ def _run_dorothea_from_stats(
             "confidence": list(conf),
             "input": str(input_label),
             "resource": "dorothea",
+            "method_provenance": dict(activity.attrs.get("method_provenance", {})),
         },
         "feature_meta": None,
     }

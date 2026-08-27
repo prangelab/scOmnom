@@ -647,13 +647,22 @@ def _run_celltypist_annotation(
         celltypist_ok = False
 
     # --------------------------------------------------------------
-    # B) Cluster-level majority CellTypist label (ROUND-SCOPED)
-    #    Mask-aware if probability matrix exists; otherwise unmasked.
+    # B) Cluster-level CellTypist label (ROUND-SCOPED)
+    #    Confidence and vote quality are both required unless masking is disabled explicitly.
     # --------------------------------------------------------------
     bio_mask = None
-    bio_mask_stats = None
+    bio_mask_stats: dict | None = None
     try:
-        if "celltypist_proba" in adata.obsm and "celltypist_proba_columns" in adata.uns:
+        mask_mode = str(getattr(cfg, "bio_mask_mode", "entropy_margin"))
+        if mask_mode == "none":
+            bio_mask = np.ones((adata.n_obs,), dtype=bool)
+            bio_mask_stats = {
+                "mode": "none",
+                "n_cells": int(adata.n_obs),
+                "kept": int(adata.n_obs),
+                "kept_frac": 1.0 if adata.n_obs else 0.0,
+            }
+        elif "celltypist_proba" in adata.obsm and "celltypist_proba_columns" in adata.uns:
             pm = pd.DataFrame(
                 adata.obsm["celltypist_proba"],
                 index=adata.obs_names,
@@ -665,44 +674,45 @@ def _run_celltypist_annotation(
                 entropy_quantile=float(getattr(cfg, "bio_entropy_quantile", 0.7)),
                 margin_min=float(getattr(cfg, "bio_margin_min", 0.10)),
             )
+            bio_mask_stats["mode"] = "entropy_margin"
+        else:
+            bio_mask_stats = {
+                "mode": mask_mode,
+                "n_cells": int(adata.n_obs),
+                "kept": 0,
+                "kept_frac": 0.0,
+                "disabled_reason": "missing_probability_matrix",
+            }
     except Exception as e:
-        LOGGER.warning("CellTypist mask reconstruction failed; proceeding unmasked. (%s)", e)
-        bio_mask = None
-        bio_mask_stats = None
+        LOGGER.warning("CellTypist mask reconstruction failed; cluster labels will remain Unknown. (%s)", e)
+        bio_mask_stats = {
+            "mode": str(getattr(cfg, "bio_mask_mode", "entropy_margin")),
+            "n_cells": int(adata.n_obs),
+            "kept": 0,
+            "kept_frac": 0.0,
+            "disabled_reason": f"mask_error:{type(e).__name__}",
+        }
 
     if bio_mask is None or getattr(bio_mask, "shape", (None,))[0] != adata.n_obs:
-        bio_mask = np.ones((adata.n_obs,), dtype=bool)
+        bio_mask = np.zeros((adata.n_obs,), dtype=bool)
+    if not celltypist_ok:
+        bio_mask = np.zeros((adata.n_obs,), dtype=bool)
 
     min_masked_cells = int(getattr(cfg, "pretty_label_min_masked_cells", 25) or 25)
     min_masked_frac = float(getattr(cfg, "pretty_label_min_masked_frac", 0.10) or 0.10)
+    min_label_purity = float(getattr(cfg, "pretty_label_min_purity", 0.50))
 
     clust_vals = adata.obs[cluster_key].astype(str)
     ct_vals = adata.obs[cell_key].astype(str)
-
-    tmp = pd.DataFrame(
-        {
-            "cluster": clust_vals.to_numpy(),
-            "ct": ct_vals.to_numpy(),
-            "masked": bio_mask,
-        },
-        index=adata.obs_names,
+    majority_map, cluster_label_audit = ct_utils.summarize_cluster_celltypist_labels(
+        clust_vals,
+        ct_vals,
+        bio_mask,
+        celltypist_ok=celltypist_ok,
+        min_confident_cells=min_masked_cells,
+        min_confident_fraction=min_masked_frac,
+        min_label_purity=min_label_purity,
     )
-
-    cluster_sizes = tmp.groupby("cluster").size().to_dict()
-
-    majority_map: dict[str, str] = {}
-    for c, g in tmp.groupby("cluster", sort=False):
-        g_masked = g[g["masked"]]
-        n_total = int(cluster_sizes.get(c, len(g)))
-        n_masked = int(g_masked.shape[0])
-
-        # If too few confident cells OR CellTypist not actually OK -> Unknown
-        if (not celltypist_ok) or (n_masked < min_masked_cells) or (n_total > 0 and (n_masked / n_total) < min_masked_frac):
-            majority_map[str(c)] = "Unknown"
-            continue
-
-        vc = g_masked["ct"].value_counts()
-        majority_map[str(c)] = str(vc.idxmax()) if not vc.empty else "Unknown"
 
     adata.obs[cluster_ct_key] = clust_vals.map(majority_map).astype("category")
     adata.obs[cluster_ct_base] = adata.obs[cluster_ct_key]  # alias to latest round
@@ -755,6 +765,8 @@ def _run_celltypist_annotation(
                     "pretty_label_masked": True,
                     "pretty_label_min_masked_cells": int(min_masked_cells),
                     "pretty_label_min_masked_frac": float(min_masked_frac),
+                    "pretty_label_min_purity": float(min_label_purity),
+                    "celltypist_cluster_label_audit": cluster_label_audit,
                     "celltypist_ok": bool(celltypist_ok),
                 }
             )

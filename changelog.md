@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+- added typed DataFrame sidecars for Zarr and H5AD round-trips, including nullable Booleans and legacy Boolean-string recovery
+- corrected CellTypist confidence entropy to operate on row-normalized logistic scores while retaining the raw score margin
+- added confidence coverage and strict-majority purity gates with a stored per-cluster CellTypist label audit
+- replaced raw-score decoupler averaging with decoupler's signed per-method z-score consensus, restored `wsum` through WAGGR, propagated target-count filters, and stored method provenance
+
 ## 0.7.1 [16-06-2026]
 Load-and-filter QC refinement release:
 - added optional fixed lower-count filtering via `--min-counts`

@@ -74,9 +74,9 @@ Related options:
 | `--celltypist-cluster-label-key` | `celltypist_cluster_label` | Base obs key for cluster-level CellTypist labels used later by `cluster-and-annotate`. |
 | `--scib-truth-label-key` | `celltypist` | Truth label choice for scIB benchmarking. Valid values include `celltypist`, `leiden`, and `final`. |
 | `--label-key` | `leiden` | scIB/reporting label key when benchmarking against a plain obs column. This does not control scANVI supervision labels. |
-| `--bio-entropy-abs-limit` | `0.5` | Absolute entropy ceiling used when building confident CellTypist masks. |
-| `--bio-entropy-quantile` | `0.7` | Entropy quantile used with the absolute ceiling; the entropy cutoff is `max(abs_limit, quantile_value)`. |
-| `--bio-margin-min` | `0.10` | Minimum top1-top2 CellTypist probability margin required for confidence. |
+| `--bio-entropy-abs-limit` | `0.5` | Baseline cutoff for Shannon entropy calculated from row-normalized CellTypist logistic scores. |
+| `--bio-entropy-quantile` | `0.7` | Entropy quantile used with the baseline; the adaptive cutoff is `max(abs_limit, quantile_value)`. |
+| `--bio-margin-min` | `0.10` | Minimum top1-top2 raw CellTypist score margin required for confidence. |
 
 Shared options that are mostly consumed by `cluster-and-annotate`, but are accepted on `integrate` for consistency:
 
@@ -87,6 +87,7 @@ Shared options that are mostly consumed by `cluster-and-annotate`, but are accep
 | `--bio-mask-min-frac` | `0.05` | Downstream safety gate: disable the bio mask if too small a fraction of cells pass. |
 | `--pretty-label-min-masked-cells` | `25` | Minimum confident cells in a cluster needed to assign a CellTypist-backed pretty label. |
 | `--pretty-label-min-masked-frac` | `0.10` | Minimum confident fraction in a cluster needed to assign a CellTypist-backed pretty label. |
+| `--pretty-label-min-purity` | `0.50` | Winning CellTypist label fraction among confident cells that the cluster must exceed; ties remain `Unknown`. |
 
 See also [scIB benchmarking and truth labels](benchmarking.md).
 
@@ -112,9 +113,9 @@ Annotated-run knobs:
 | `--annotated-run-final-label-key` | round `pretty_cluster_key`, then `cluster_label` | Override the obs column used as final labels. |
 | `--annotated-run-confidence-mask-key` | `celltypist_confident_entropy_margin` | Obs key where the reconstructed boolean confidence mask is stored. |
 | `--annotated-run-scanvi-labels-key` | `scanvi_labels__annotated` | Obs key where final-label-or-`Unknown` supervision labels are stored. |
-| `--bio-entropy-abs-limit` | `0.5` | Absolute entropy ceiling for confident CellTypist predictions. |
-| `--bio-entropy-quantile` | `0.7` | Entropy quantile used with the absolute ceiling; the entropy cutoff is `max(abs_limit, quantile_value)`. |
-| `--bio-margin-min` | `0.10` | Minimum top1-top2 CellTypist probability margin required for confidence. |
+| `--bio-entropy-abs-limit` | `0.5` | Baseline cutoff for Shannon entropy calculated from row-normalized CellTypist logistic scores. |
+| `--bio-entropy-quantile` | `0.7` | Entropy quantile used with the baseline; the adaptive cutoff is `max(abs_limit, quantile_value)`. |
+| `--bio-margin-min` | `0.10` | Minimum top1-top2 raw CellTypist score margin required for confidence. |
 | `--multi-gpu` / `--single-gpu` | `--single-gpu` | Use all visible CUDA devices for the annotated scVI/scANVI training. |
 
 Example:

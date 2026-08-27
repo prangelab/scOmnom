@@ -155,7 +155,7 @@ This tests whether the treatment effect differs by genotype inside each cluster.
 | `--de-decoupler-source` | `auto` | Source for DE-derived activity inference: `auto`, `all`, `pseudobulk`, `cell`, or `none`. |
 | `--de-decoupler-stat-col` | `stat` | DE statistic column used as the activity input. |
 | `--decoupler-method` | `consensus` | Default decoupler method. |
-| `--decoupler-consensus-methods` | `ulm`, `mlm`, `wsum` | Methods combined when using `consensus`; user can repeat this option. |
+| `--decoupler-consensus-methods` | `ulm`, `mlm`, `wsum` | At least two distinct methods combined by decoupler's signed per-method z-score consensus; `wsum` resolves to WAGGR. |
 | `--decoupler-min-n-targets` | `5` | Minimum targets per source. |
 | `--decoupler-bar-split-signed` / `--no-decoupler-bar-split-signed` | enabled | Split decoupler barplots into positive and negative activity directions. |
 | `--decoupler-bar-top-n-up` | none | Number of positive activities to show in split barplots. |
