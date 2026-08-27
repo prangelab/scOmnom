@@ -522,7 +522,7 @@ def test_absolute_minimum_cluster_size_remains_a_selection_safeguard():
 
 def test_fixed_rule_snapshot_records_validated_values():
     assert cu._bisc_fixed_rule_snapshot() == {
-        "selector_version": "raw_edge_persistence_v3",
+        "selector_version": "raw_edge_persistence",
         "minimum_feasible_stability": 0.60,
         "plateau_support_fraction": 0.50,
         "parsimony_tolerance": 0.03,

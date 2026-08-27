@@ -923,7 +923,7 @@ _BISC_PARSIMONY_TOLERANCE = 0.03
 _BISC_MAX_CLUSTERS_PER_BIOLOGICAL_LABEL = 2.5
 _BISC_ABSOLUTE_MINIMUM_CLUSTER_SIZE = 5
 _BISC_PLATEAU_SUPPORT_FRACTION = 0.50
-_BISC_SELECTOR_VERSION = "raw_edge_persistence_v3"
+_BISC_SELECTOR_VERSION = "raw_edge_persistence"
 
 
 def _bisc_fixed_rule_snapshot() -> Dict[str, float | int | str]:
