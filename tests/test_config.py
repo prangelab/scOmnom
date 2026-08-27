@@ -250,7 +250,44 @@ def test_clusterannotate_defaults(tmp_path):
     assert cfg.bio_guided_clustering is True
     assert cfg.force_celltypist_recompute is False
     assert cfg.decoupler_consensus_methods == ["ulm", "mlm", "wsum"]
+    assert cfg.compact_zscore_scope == "global"
+    assert cfg.compact_grouping == "complete_link"
+    assert cfg.compact_adaptive_quantile == pytest.approx(0.90)
     assert not hasattr(cfg, "penalty_alpha")
+
+
+def test_clusterannotate_migrates_legacy_compaction_caps(tmp_path):
+    cfg = ClusterAnnotateConfig(
+        input_path=tmp_path / "a.h5ad",
+        thr_progeny=0.91,
+        thr_dorothea=0.83,
+        thr_msigdb_default=0.89,
+        thr_msigdb_by_gmt={"HALLMARK": 0.88},
+    )
+    assert cfg.compact_progeny_threshold_cap == pytest.approx(0.91)
+    assert cfg.compact_dorothea_threshold_cap == pytest.approx(0.83)
+    assert cfg.compact_msigdb_threshold_cap == pytest.approx(0.89)
+    assert cfg.compact_msigdb_threshold_cap_by_gmt == {"HALLMARK": 0.88}
+
+    with pytest.raises(ValueError, match="Conflicting compaction options"):
+        ClusterAnnotateConfig(
+            input_path=tmp_path / "a.h5ad",
+            thr_progeny=0.91,
+            compact_progeny_threshold_cap=0.92,
+        )
+
+
+def test_clusterannotate_compaction_caps_respect_floors(tmp_path):
+    with pytest.raises(ValueError):
+        ClusterAnnotateConfig(
+            input_path=tmp_path / "a.h5ad",
+            compact_msigdb_threshold_cap=0.59,
+        )
+    with pytest.raises(ValueError, match="HALLMARK"):
+        ClusterAnnotateConfig(
+            input_path=tmp_path / "a.h5ad",
+            compact_msigdb_threshold_cap_by_gmt={"HALLMARK": 0.59},
+        )
 
 
 def test_clusterannotate_validates_decoupler_consensus_methods(tmp_path):

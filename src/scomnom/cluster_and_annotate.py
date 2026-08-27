@@ -31,7 +31,10 @@ from .annotation_utils import (
     run_decoupler_for_round,
     clear_top_level_decoupler_state,
 )
-from .compaction_utils import create_compacted_round_from_parent_round
+from .compaction_utils import (
+    create_compacted_round_from_parent_round,
+    export_compaction_audit_tables,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -602,19 +605,36 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                     celltypist_obs_key=str(getattr(cfg, "celltypist_label_key", "")),
                     notes=f"Compacted from {parent_round_id}",
                     min_cells=int(getattr(cfg, "compact_min_cells", 0) or 0),
-                    zscore_scope=str(
-                        getattr(cfg, "compact_zscore_scope", "within_celltypist_label")
-                        or "within_celltypist_label"
-                    ),
+                    zscore_scope=str(getattr(cfg, "compact_zscore_scope", "global") or "global"),
                     grouping=str(
-                        getattr(cfg, "compact_grouping", "connected_components")
-                        or "connected_components"
+                        getattr(cfg, "compact_grouping", "complete_link") or "complete_link"
                     ),
-                    thr_progeny=float(getattr(cfg, "thr_progeny", 0.98) or 0.98),
-                    thr_dorothea=float(getattr(cfg, "thr_dorothea", 0.98) or 0.98),
-                    thr_msigdb_default=float(getattr(cfg, "thr_msigdb_default", 0.98) or 0.98),
-                    thr_msigdb_by_gmt=getattr(cfg, "thr_msigdb_by_gmt", None),
+                    progeny_threshold_cap=float(
+                        getattr(cfg, "compact_progeny_threshold_cap", 0.98)
+                    ),
+                    dorothea_threshold_cap=float(
+                        getattr(cfg, "compact_dorothea_threshold_cap", 0.98)
+                    ),
+                    msigdb_threshold_cap=float(
+                        getattr(cfg, "compact_msigdb_threshold_cap", 0.98)
+                    ),
+                    msigdb_threshold_cap_by_gmt=getattr(
+                        cfg, "compact_msigdb_threshold_cap_by_gmt", None
+                    ),
+                    adaptive_quantile=float(getattr(cfg, "compact_adaptive_quantile", 0.90)),
                     msigdb_required=bool(getattr(cfg, "msigdb_required", True)),
+                )
+
+                export_compaction_audit_tables(
+                    adata,
+                    round_id=new_round_id,
+                    output_dir=(
+                        cfg.resolved_output_dir
+                        / "tables"
+                        / "cluster_and_annotate"
+                        / new_round_id
+                        / "compaction"
+                    ),
                 )
 
                 # activate compacted round
@@ -716,6 +736,13 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                                 child_round_id=new_round_id,
                                 figdir=Path("cluster_and_annotate") / new_round_id / "clustering",
                                 min_frac=0.02,
+                            )
+                        )
+                        artifacts.extend(
+                            plot_utils.plot_compaction_review(
+                                adata,
+                                child_round_id=new_round_id,
+                                figdir=Path("cluster_and_annotate") / new_round_id / "clustering",
                             )
                         )
                         plot_utils.persist_plot_artifacts(artifacts)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import anndata as ad
@@ -12,6 +13,16 @@ from scomnom.annotation_utils import ensure_round_msigdb_activity_by_gmt
 from .clustering_utils import _create_shallow_round_from_parent, _ensure_cluster_rounds
 
 LOGGER = logging.getLogger(__name__)
+
+FLOOR_PROGENY = 0.70
+FLOOR_DOROTHEA = 0.60
+MSIGDB_FLOOR_BY_GMT = {"HALLMARK": 0.60, "REACTOME": 0.45}
+FLOOR_MSIGDB_DEFAULT = 0.50
+MSIGDB_MAJORITY_FRAC = 0.67
+MSIGDB_TOPK = 25
+ADAPTIVE_MIN_GROUP_SIZE = 4
+MIN_VARIABLE_FEATURES = 2
+COMPACTION_METHOD_IDENTITY = "multiview_all_pairs"
 
 
 # =============================================================================
@@ -26,30 +37,136 @@ class CompactionOutputs:
     edges: pd.DataFrame
     adjacency: Dict[str, List[Tuple[str, str]]]
     decision_log: List[Dict[str, Any]]
+    cluster_eligibility: pd.DataFrame
+    group_membership: pd.DataFrame
+    thresholds_by_label: pd.DataFrame
+    view_audit: pd.DataFrame
 
 
-def _as_float_df(df: pd.DataFrame) -> pd.DataFrame:
-    x = df.copy()
-    x.index = x.index.astype(str)
-    x.columns = x.columns.astype(str)
-    return x.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+def _normalize_celltypist_label(value: Any) -> str:
+    label = str(value).strip()
+    if not label or label.lower() in {"unknown", "nan", "none", "null", "na"}:
+        return "UNKNOWN"
+    return label
+
+
+def _prepare_activity_view(
+    name: str,
+    value: Any,
+    *,
+    all_clusters: list[str],
+    required: bool,
+    min_variable_features: int = MIN_VARIABLE_FEATURES,
+) -> tuple[pd.DataFrame | None, dict[str, Any]]:
+    audit: dict[str, Any] = {
+        "view": str(name),
+        "required": bool(required),
+        "status": "available",
+        "n_input_features": 0,
+        "n_variable_features": 0,
+        "n_complete_clusters": 0,
+        "incomplete_clusters": "",
+        "dropped_constant_features": "",
+    }
+    if value is None or not isinstance(value, pd.DataFrame) or value.empty:
+        audit["status"] = "missing"
+        if required:
+            raise ValueError(f"Compaction requires non-empty {name} activity.")
+        return None, audit
+
+    frame = value.copy()
+    frame.index = frame.index.astype(str)
+    frame.columns = frame.columns.astype(str)
+    if frame.index.has_duplicates:
+        raise ValueError(f"Compaction {name} activity has duplicate cluster rows.")
+    if frame.columns.has_duplicates:
+        raise ValueError(f"Compaction {name} activity has duplicate feature columns.")
+
+    numeric = frame.apply(pd.to_numeric, errors="coerce").reindex(index=all_clusters)
+    audit["n_input_features"] = int(numeric.shape[1])
+    finite_rows = np.isfinite(numeric.to_numpy(dtype=float)).all(axis=1)
+    complete_clusters = numeric.index[finite_rows].astype(str).tolist()
+    incomplete_clusters = numeric.index[~finite_rows].astype(str).tolist()
+    audit["n_complete_clusters"] = int(len(complete_clusters))
+    audit["incomplete_clusters"] = ",".join(incomplete_clusters)
+
+    if len(complete_clusters) < 2:
+        audit["status"] = "insufficient_complete_clusters"
+        if required:
+            raise ValueError(
+                f"Compaction {name} activity has fewer than two clusters with complete finite evidence."
+            )
+        return None, audit
+
+    complete = numeric.loc[complete_clusters]
+    standard_deviation = complete.std(axis=0)
+    variable_columns = standard_deviation.index[
+        np.isfinite(standard_deviation.to_numpy(dtype=float))
+        & (standard_deviation.to_numpy(dtype=float) > 0.0)
+    ].astype(str).tolist()
+    dropped = [column for column in numeric.columns if str(column) not in set(variable_columns)]
+    audit["n_variable_features"] = int(len(variable_columns))
+    audit["dropped_constant_features"] = ",".join(map(str, dropped))
+
+    if len(variable_columns) < int(min_variable_features):
+        audit["status"] = "insufficient_variable_features"
+        if required:
+            raise ValueError(
+                f"Compaction {name} activity has {len(variable_columns)} variable features; "
+                f"at least {int(min_variable_features)} are required."
+            )
+        return None, audit
+
+    numeric = numeric.loc[:, variable_columns]
+    zscores = pd.DataFrame(
+        np.nan,
+        index=numeric.index,
+        columns=numeric.columns,
+        dtype=float,
+    )
+    means = complete.loc[:, variable_columns].mean(axis=0)
+    scales = complete.loc[:, variable_columns].std(axis=0)
+    zscores.loc[complete_clusters] = (complete.loc[:, variable_columns] - means) / scales
+    return zscores, audit
 
 
 def _cosine(a: np.ndarray, b: np.ndarray) -> float:
     a = np.asarray(a, dtype=float)
     b = np.asarray(b, dtype=float)
+    if a.size == 0 or a.size != b.size or not np.isfinite(a).all() or not np.isfinite(b).all():
+        return float("nan")
     na = float(np.linalg.norm(a))
     nb = float(np.linalg.norm(b))
     if na == 0.0 or nb == 0.0:
-        return 0.0
+        return float("nan")
     return float(np.dot(a, b) / (na * nb))
 
 
-def _zscore_cols(df: pd.DataFrame, eps: float = 1e-9) -> pd.DataFrame:
-    mu = df.mean(axis=0)
-    sd = df.std(axis=0).replace(0, np.nan)
-    z = (df - mu) / (sd + eps)
-    return z.replace([np.inf, -np.inf], 0.0).fillna(0.0)
+def _cosine_topk_union(a: np.ndarray, b: np.ndarray, *, k: int = MSIGDB_TOPK) -> float:
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    if a.size == 0 or a.size != b.size or not np.isfinite(a).all() or not np.isfinite(b).all():
+        return float("nan")
+    n_select = min(int(k), int(a.size))
+    if n_select <= 0:
+        return float("nan")
+    top_a = np.argpartition(np.abs(a), -n_select)[-n_select:]
+    top_b = np.argpartition(np.abs(b), -n_select)[-n_select:]
+    selected = np.unique(np.concatenate([top_a, top_b]))
+    return _cosine(a[selected], b[selected])
+
+
+def _safe_quantile(values: list[float], quantile: float) -> float:
+    finite = np.asarray([value for value in values if np.isfinite(value)], dtype=float)
+    if finite.size == 0:
+        return float("nan")
+    return float(np.quantile(finite, float(quantile)))
+
+
+def _msigdb_required_passes(n_blocks: int) -> int:
+    if n_blocks <= 0:
+        return 0
+    return int(max(1, min(n_blocks, np.ceil(MSIGDB_MAJORITY_FRAC * n_blocks))))
 
 
 def _connected_components(nodes: List[str], edges: List[Tuple[str, str]]) -> List[List[str]]:
@@ -79,9 +196,9 @@ def _connected_components(nodes: List[str], edges: List[Tuple[str, str]]) -> Lis
     return comps
 
 
-def _clique_components(nodes: List[str], pass_edges_set: set[Tuple[str, str]]) -> List[List[str]]:
+def _complete_link_components(nodes: List[str], pass_edges_set: set[Tuple[str, str]]) -> List[List[str]]:
     """
-    Greedy clique cover:
+    Deterministic all-pairs clique cover:
     - repeatedly pick highest-degree remaining node as seed
     - grow a clique by adding candidates connected to all clique members
     """
@@ -94,7 +211,7 @@ def _clique_components(nodes: List[str], pass_edges_set: set[Tuple[str, str]]) -
         adj[v].add(u)
 
     remaining = set(nodes)
-    cliques: List[List[str]] = []
+    components: List[List[str]] = []
 
     def degree(n: str) -> int:
         return len(adj[n] & remaining)
@@ -111,10 +228,10 @@ def _clique_components(nodes: List[str], pass_edges_set: set[Tuple[str, str]]) -
             candidates = {c for c in candidates if all((c in adj[m]) for m in clique)}
             candidates.discard(cand)
 
-        cliques.append(sorted(clique))
+        components.append(sorted(clique))
         remaining -= clique
 
-    return cliques
+    return components
 
 
 def compact_clusters_by_multiview_agreement(
@@ -124,448 +241,359 @@ def compact_clusters_by_multiview_agreement(
     celltypist_obs_key: str,
     min_cells: int = 0,
     zscore_scope: str = "global",
-    similarity_metric: str = "cosine_zscore",
-    grouping: str = "connected_components",
-    thr_progeny: float = 0.98,
-    thr_dorothea: float = 0.98,
-    thr_msigdb_default: float = 0.98,
-    thr_msigdb_by_gmt: Optional[Dict[str, float]] = None,
+    grouping: str = "complete_link",
+    progeny_threshold_cap: float = 0.98,
+    dorothea_threshold_cap: float = 0.98,
+    msigdb_threshold_cap: float = 0.98,
+    msigdb_threshold_cap_by_gmt: Optional[Dict[str, float]] = None,
+    adaptive_quantile: float = 0.90,
     msigdb_required: bool = True,
 ) -> CompactionOutputs:
-    """
-    Compaction decision engine.
+    """Return conservative compaction groups from trusted multiview evidence."""
+    if str(zscore_scope).strip().lower() != "global":
+        raise ValueError("Compaction zscore_scope must be 'global'.")
+    grouping = str(grouping).strip().lower()
+    if grouping == "clique":
+        grouping = "complete_link"
+    if grouping not in {"complete_link", "connected_components"}:
+        raise ValueError("grouping must be 'complete_link' or legacy 'connected_components'")
+    if not 0.0 < float(adaptive_quantile) <= 1.0:
+        raise ValueError("adaptive_quantile must be in (0, 1]")
+    if not FLOOR_PROGENY <= float(progeny_threshold_cap) <= 1.0:
+        raise ValueError(f"progeny_threshold_cap must be in [{FLOOR_PROGENY}, 1]")
+    if not FLOOR_DOROTHEA <= float(dorothea_threshold_cap) <= 1.0:
+        raise ValueError(f"dorothea_threshold_cap must be in [{FLOOR_DOROTHEA}, 1]")
+    minimum_default_msigdb_cap = max(FLOOR_MSIGDB_DEFAULT, *MSIGDB_FLOOR_BY_GMT.values())
+    if not minimum_default_msigdb_cap <= float(msigdb_threshold_cap) <= 1.0:
+        raise ValueError(f"msigdb_threshold_cap must be in [{minimum_default_msigdb_cap}, 1]")
 
-    HARD GUARANTEE:
-      - Compaction is confined within CellTypist label groups.
-      - Clusters assigned to UNKNOWN/Unknown are NEVER compacted (always singletons).
-    """
-    import numpy as np
-    import pandas as pd
+    msigdb_threshold_cap_by_gmt = dict(msigdb_threshold_cap_by_gmt or {})
+    for gmt, value in msigdb_threshold_cap_by_gmt.items():
+        floor = MSIGDB_FLOOR_BY_GMT.get(str(gmt).upper(), FLOOR_MSIGDB_DEFAULT)
+        if not floor <= float(value) <= 1.0:
+            raise ValueError(f"MSigDB cap for {gmt!r} must be in [{floor}, 1]")
 
-    thr_msigdb_by_gmt = dict(thr_msigdb_by_gmt or {})
-
-    labels_obs_key = round_snapshot.get("labels_obs_key", None)
+    labels_obs_key = round_snapshot.get("labels_obs_key")
     if not labels_obs_key or labels_obs_key not in adata.obs:
         raise KeyError("round_snapshot['labels_obs_key'] missing or not in adata.obs")
-
-    if celltypist_obs_key not in adata.obs:
-        raise KeyError(f"celltypist_obs_key '{celltypist_obs_key}' not found in adata.obs")
-
-    cluster_per_cell = adata.obs[labels_obs_key].astype(str)
-    celltypist_per_cell = adata.obs[celltypist_obs_key].astype(str)
-
+    cluster_per_cell = adata.obs[str(labels_obs_key)].astype(str)
     cluster_sizes = cluster_per_cell.value_counts()
     all_clusters = sorted(cluster_sizes.index.astype(str).tolist())
 
-    dec = round_snapshot.get("decoupler", {})
-    prog = dec.get("progeny", {}).get("activity", None)
-    doro = dec.get("dorothea", {}).get("activity", None)
-    msig_by_gmt = dec.get("msigdb", {}).get("activity_by_gmt", None)
+    annotation = round_snapshot.get("annotation", {})
+    if not isinstance(annotation, dict):
+        raise TypeError("round_snapshot['annotation'] must be a dictionary")
+    celltypist_cluster_key = annotation.get("celltypist_cluster_key")
+    if not isinstance(celltypist_cluster_key, str) or celltypist_cluster_key not in adata.obs:
+        raise KeyError("Compaction requires the round-specific CellTypist cluster label column.")
+    audit = annotation.get("celltypist_cluster_label_audit")
+    if not isinstance(audit, pd.DataFrame) or audit.empty:
+        raise KeyError("Compaction requires annotation['celltypist_cluster_label_audit'].")
+    required_audit_columns = {
+        "cluster", "n_total", "n_confident", "confident_fraction", "winning_label",
+        "winning_fraction", "runner_up_fraction", "assigned_label", "status",
+    }
+    missing_audit_columns = sorted(required_audit_columns - set(audit.columns))
+    if missing_audit_columns:
+        raise ValueError(f"CellTypist cluster audit is missing columns: {missing_audit_columns}")
+    if audit["cluster"].astype(str).duplicated().any():
+        raise ValueError("CellTypist cluster audit contains duplicate cluster rows.")
+    audit_by_cluster = audit.assign(cluster=audit["cluster"].astype(str)).set_index("cluster")
 
-    if prog is None or doro is None:
-        raise KeyError("Missing progeny/dorothea activity in round_snapshot['decoupler']")
+    decoupler = round_snapshot.get("decoupler", {})
+    if not isinstance(decoupler, dict):
+        raise TypeError("round_snapshot['decoupler'] must be a dictionary")
+    progeny, progeny_audit = _prepare_activity_view(
+        "PROGENy", decoupler.get("progeny", {}).get("activity"),
+        all_clusters=all_clusters, required=True,
+    )
+    dorothea, dorothea_audit = _prepare_activity_view(
+        "DoRothEA", decoupler.get("dorothea", {}).get("activity"),
+        all_clusters=all_clusters, required=True,
+    )
+    assert progeny is not None and dorothea is not None
 
-    prog = _as_float_df(prog).reindex(index=all_clusters).fillna(0.0)
-    doro = _as_float_df(doro).reindex(index=all_clusters).fillna(0.0)
-
-    if msigdb_required:
-        if not isinstance(msig_by_gmt, dict) or not msig_by_gmt:
-            raise KeyError("Missing msigdb activity_by_gmt in round_snapshot['decoupler']['msigdb']")
-        msig_by_gmt_clean: Dict[str, pd.DataFrame] = {}
-        for gmt, df in msig_by_gmt.items():
-            if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-                continue
-            msig_by_gmt_clean[str(gmt)] = _as_float_df(df).reindex(index=all_clusters).fillna(0.0)
-        if not msig_by_gmt_clean:
-            raise ValueError("msigdb_required=True but no non-empty GMT blocks found")
-        msig_by_gmt = msig_by_gmt_clean
-    else:
-        msig_by_gmt = {}
-
-    # ------------------------------------------------------------------
-    # z-score strategy
-    # ------------------------------------------------------------------
-    zscope = (zscore_scope or "global").strip().lower()
-    if zscope not in {"global", "within_celltypist_label"}:
-        LOGGER.warning("Compaction: unknown zscore_scope=%r; falling back to 'global'.", zscore_scope)
-        zscope = "global"
-
-    WITHIN_LABEL_MIN_CLUSTERS = 4
-
-    prog_z_global = _zscore_cols(prog)
-    doro_z_global = _zscore_cols(doro)
-    msig_z_global = {g: _zscore_cols(df) for g, df in msig_by_gmt.items()}
-
-    # ------------------------------------------------------------------
-    # Determine cluster grouping label (CellTypist majority per cluster)
-    # ------------------------------------------------------------------
-    def _normalize_ct_label(x: Any) -> str:
-        s = str(x).strip()
-        if s == "" or s.lower() in {"nan", "none", "null", "na"}:
-            return "UNKNOWN"
-        # treat any "unknown" spelling/casing as UNKNOWN
-        if s.strip().lower() == "unknown":
-            return "UNKNOWN"
-        return s
-
-    ann = round_snapshot.get("annotation", {})
-    ann = ann if isinstance(ann, dict) else {}
-    ct_cluster_key = ann.get("celltypist_cluster_key", None)
-
-    # If there is a cluster-level CT column, take MAJORITY vote (robust to NaNs/mixed)
-    if isinstance(ct_cluster_key, str) and ct_cluster_key in adata.obs:
-        tmp = pd.DataFrame(
-            {
-                "cluster": cluster_per_cell.values,
-                "ct_cluster": adata.obs[ct_cluster_key].map(_normalize_ct_label).values,
-            }
+    raw_msigdb = decoupler.get("msigdb", {}).get("activity_by_gmt")
+    if raw_msigdb is None:
+        raw_msigdb = {}
+    if not isinstance(raw_msigdb, dict):
+        raise TypeError("MSigDB activity_by_gmt must be a dictionary when present.")
+    msigdb: dict[str, pd.DataFrame] = {}
+    view_audits = [progeny_audit, dorothea_audit]
+    for gmt, value in sorted(raw_msigdb.items(), key=lambda item: str(item[0])):
+        prepared, block_audit = _prepare_activity_view(
+            f"MSigDB:{gmt}", value, all_clusters=all_clusters, required=msigdb_required,
         )
-        majority_ct: Dict[str, str] = (
-            tmp.groupby("cluster", observed=True)["ct_cluster"]
-            .agg(lambda x: x.value_counts().index[0] if len(x) else "UNKNOWN")
-            .astype(str)
-            .to_dict()
-        )
-        LOGGER.info(
-            "Compaction: using cluster-level CT key %r for gating (majority vote).",
-            str(ct_cluster_key),
-        )
-    else:
-        tmp = pd.DataFrame(
-            {
-                "cluster": cluster_per_cell.values,
-                "ct": adata.obs[celltypist_obs_key].map(_normalize_ct_label).values,
-            }
-        )
-        majority_ct = (
-            tmp.groupby("cluster", observed=True)["ct"]
-            .agg(lambda x: x.value_counts().index[0] if len(x) else "UNKNOWN")
-            .astype(str)
-            .to_dict()
-        )
-        LOGGER.info(
-            "Compaction: using cell-level CT key %r for gating (majority vote).",
-            str(celltypist_obs_key),
-        )
+        view_audits.append(block_audit)
+        if prepared is not None:
+            msigdb[str(gmt)] = prepared
+    if msigdb_required and not msigdb:
+        raise ValueError("msigdb_required=True but no valid MSigDB activity blocks are available.")
 
-    label_to_clusters: Dict[str, List[str]] = {}
-    for cl in all_clusters:
-        if min_cells and int(cluster_sizes.get(cl, 0)) < int(min_cells):
-            continue
-        lab = _normalize_ct_label(majority_ct.get(cl, "UNKNOWN"))
-        label_to_clusters.setdefault(lab, []).append(cl)
+    complete_by_view: dict[str, set[str]] = {
+        "PROGENy": set(progeny.dropna(axis=0, how="any").index.astype(str)),
+        "DoRothEA": set(dorothea.dropna(axis=0, how="any").index.astype(str)),
+    }
+    for gmt, frame in msigdb.items():
+        complete_by_view[f"MSigDB:{gmt}"] = set(frame.dropna(axis=0, how="any").index.astype(str))
 
-    # ------------------------------------------------------------------
-    # HARD POLICY: UNKNOWN clusters are NEVER compacted (always singleton).
-    # Remove UNKNOWN group from compaction graph construction.
-    # Those clusters will be re-added as singleton components via "missing".
-    # ------------------------------------------------------------------
-    if "UNKNOWN" in label_to_clusters:
-        n_unknown = len(label_to_clusters.get("UNKNOWN", []))
-        LOGGER.info(
-            "Compaction: excluding %d UNKNOWN clusters from compaction (policy: never compact Unknown).",
-            int(n_unknown),
-        )
-        label_to_clusters.pop("UNKNOWN", None)
-
-    # HARD sanity check: each cluster appears at most once in label_to_clusters
-    all_seen = [c for xs in label_to_clusters.values() for c in xs]
-    if len(all_seen) != len(set(all_seen)):
-        raise RuntimeError("Compaction bug: a cluster appears in multiple CellTypist label groups")
-
-    counts = {k: len(v) for k, v in label_to_clusters.items()}
-    top = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:10]
-    LOGGER.info("Compaction: label_to_clusters top groups (label, n_clusters): %s", top)
-
-    # ------------------------------------------------------------------
-    # Thresholds + MSigDB majority + MSigDB top-K union
-    # ------------------------------------------------------------------
-    TOPK_MSIGDB = 25
-    ADAPT_Q = 0.90
-
-    FLOOR_PROG = 0.70
-    FLOOR_DORO = 0.60
-
-    MSIGDB_FLOOR_BY_GMT = {"HALLMARK": 0.60, "REACTOME": 0.45}
-    FLOOR_MSIG_DEFAULT = 0.50
-    MSIGDB_MAJORITY_FRAC = 0.67
-
-    def _safe_quantile(vals: List[float], q: float, default: float) -> float:
-        v = np.array([x for x in vals if np.isfinite(x)], dtype=float)
-        if v.size == 0:
-            return float(default)
-        return float(np.quantile(v, q))
-
-    def _cosine_topk_union(v_a: np.ndarray, v_b: np.ndarray, k: int = TOPK_MSIGDB) -> float:
-        a = np.asarray(v_a, dtype=float)
-        b = np.asarray(v_b, dtype=float)
-        if a.size == 0 or b.size == 0 or a.size != b.size:
-            return 0.0
-        kk = int(min(int(k), int(a.size)))
-        if kk <= 0:
-            return 0.0
-        ia = np.argpartition(np.abs(a), -kk)[-kk:]
-        ib = np.argpartition(np.abs(b), -kk)[-kk:]
-        idx = np.unique(np.concatenate([ia, ib], axis=0))
-        if idx.size == 0:
-            return 0.0
-        return _cosine(a[idx], b[idx])
-
-    def _cap_for_gmt(gmt: str) -> float:
-        if gmt in thr_msigdb_by_gmt:
-            return float(thr_msigdb_by_gmt[gmt])
-        return float(thr_msigdb_default)
-
-    def _floor_for_gmt(gmt: str) -> float:
-        g = str(gmt).upper()
-        return float(MSIGDB_FLOOR_BY_GMT.get(g, FLOOR_MSIG_DEFAULT))
-
-    def _msig_required_passes(n_gmts: int, frac: float) -> int:
-        if n_gmts <= 0:
-            return 0
-        if n_gmts == 1:
-            return 1
-        if n_gmts == 2:
-            return 1
-        need = int(np.ceil(float(frac) * float(n_gmts)))
-        return int(max(1, min(n_gmts, need)))
-
-    edge_rows: List[Dict[str, Any]] = []
-    adjacency: Dict[str, List[Tuple[str, str]]] = {}
-    pass_edges_by_label: Dict[str, List[Tuple[str, str]]] = {}
-    adaptive_thresholds_by_label: Dict[str, Dict[str, Any]] = {}
-
-    def _effective_z_views_for_label(
-        clusters_for_label: List[str],
-    ) -> tuple[pd.DataFrame, pd.DataFrame, Dict[str, pd.DataFrame], str]:
-        c = [str(x) for x in clusters_for_label]
-        if zscope == "within_celltypist_label" and len(c) >= WITHIN_LABEL_MIN_CLUSTERS:
-            prog_z_loc = _zscore_cols(prog.loc[c])
-            doro_z_loc = _zscore_cols(doro.loc[c])
-            msig_z_loc = {g: _zscore_cols(msig_by_gmt[g].loc[c]) for g in msig_by_gmt.keys()}
-            return prog_z_loc, doro_z_loc, msig_z_loc, "within_celltypist_label"
-
-        return (
-            prog_z_global.loc[c],
-            doro_z_global.loc[c],
-            {g: msig_z_global[g].loc[c] for g in msig_by_gmt.keys()},
-            "global",
-        )
-
-    for ct_label, clusters in sorted(label_to_clusters.items(), key=lambda kv: kv[0]):
-        clusters = sorted(map(str, clusters))
-        if len(clusters) < 2:
-            continue
-
-        prog_z, doro_z, msig_z, effective_scope = _effective_z_views_for_label(clusters)
-
-        prog_sims: List[float] = []
-        doro_sims: List[float] = []
-        msig_sims_by_gmt: Dict[str, List[float]] = {g: [] for g in msig_z.keys()}
-
-        for i in range(len(clusters)):
-            a = clusters[i]
-            va_prog = prog_z.loc[a].to_numpy()
-            va_doro = doro_z.loc[a].to_numpy()
-            for j in range(i + 1, len(clusters)):
-                b = clusters[j]
-                prog_sims.append(_cosine(va_prog, prog_z.loc[b].to_numpy()))
-                doro_sims.append(_cosine(va_doro, doro_z.loc[b].to_numpy()))
-                for gmt, dfz in msig_z.items():
-                    ms = _cosine_topk_union(dfz.loc[a].to_numpy(), dfz.loc[b].to_numpy(), k=TOPK_MSIGDB)
-                    msig_sims_by_gmt[gmt].append(float(ms))
-
-        q_prog = _safe_quantile(prog_sims, ADAPT_Q, default=FLOOR_PROG)
-        q_doro = _safe_quantile(doro_sims, ADAPT_Q, default=FLOOR_DORO)
-
-        thr_prog_ct = max(FLOOR_PROG, float(q_prog))
-        thr_doro_ct = max(FLOOR_DORO, float(q_doro))
-
-        if thr_progeny is not None:
-            thr_prog_ct = min(float(thr_progeny), float(thr_prog_ct))
-        if thr_dorothea is not None:
-            thr_doro_ct = min(float(thr_dorothea), float(thr_doro_ct))
-
-        thr_msig_ct: Dict[str, float] = {}
-        for gmt, sims in msig_sims_by_gmt.items():
-            floor_g = _floor_for_gmt(gmt)
-            q_m = _safe_quantile(sims, ADAPT_Q, default=floor_g)
-            thr_eff = max(float(floor_g), float(q_m))
-            thr_eff = min(float(_cap_for_gmt(gmt)), float(thr_eff))
-            thr_msig_ct[str(gmt)] = float(thr_eff)
-
-        adaptive_thresholds_by_label[str(ct_label)] = {
-            "thr_progeny": float(thr_prog_ct),
-            "thr_dorothea": float(thr_doro_ct),
-            "thr_msigdb_by_gmt": {str(g): float(t) for g, t in thr_msig_ct.items()},
-            "adaptive_quantile": float(ADAPT_Q),
-            "msigdb_topk": int(TOPK_MSIGDB),
-            "msigdb_majority_frac": float(MSIGDB_MAJORITY_FRAC),
-            "zscore_scope_arg": str(zscore_scope),
-            "zscore_scope_effective": str(effective_scope),
-            "within_label_min_clusters_for_zscore": int(WITHIN_LABEL_MIN_CLUSTERS),
-        }
-
-        passed_edges: List[Tuple[str, str]] = []
-
-        for i in range(len(clusters)):
-            a = clusters[i]
-            va_prog = prog_z.loc[a].to_numpy()
-            va_doro = doro_z.loc[a].to_numpy()
-            for j in range(i + 1, len(clusters)):
-                b = clusters[j]
-
-                sim_prog = _cosine(va_prog, prog_z.loc[b].to_numpy())
-                sim_doro = _cosine(va_doro, doro_z.loc[b].to_numpy())
-
-                pass_prog = bool(sim_prog >= float(thr_prog_ct))
-                pass_doro = bool(sim_doro >= float(thr_doro_ct))
-
-                msig_pass_flags: Dict[str, bool] = {}
-                msig_fail_gmts: List[str] = []
-                msig_sims: Dict[str, float] = {}
-
-                for gmt, dfz in msig_z.items():
-                    s = _cosine_topk_union(dfz.loc[a].to_numpy(), dfz.loc[b].to_numpy(), k=TOPK_MSIGDB)
-                    msig_sims[gmt] = float(s)
-                    thr_g = float(
-                        thr_msig_ct.get(
-                            str(gmt),
-                            min(_cap_for_gmt(str(gmt)), max(_floor_for_gmt(str(gmt)), 0.0)),
-                        )
-                    )
-                    ok = bool(s >= thr_g)
-                    msig_pass_flags[gmt] = ok
-                    if not ok:
-                        msig_fail_gmts.append(str(gmt))
-
-                if msigdb_required:
-                    n_gmts = int(len(msig_z))
-                    if n_gmts <= 0:
-                        pass_msigdb = False
-                        n_pass = 0
-                        need = 0
-                    else:
-                        n_pass = int(sum(bool(v) for v in msig_pass_flags.values()))
-                        need = _msig_required_passes(n_gmts, MSIGDB_MAJORITY_FRAC)
-                        pass_msigdb = bool(n_pass >= need)
-                else:
-                    pass_msigdb = True
-                    n_pass = int(sum(bool(v) for v in msig_pass_flags.values()))
-                    need = _msig_required_passes(int(len(msig_z)), MSIGDB_MAJORITY_FRAC)
-
-                pass_all = bool(pass_prog and pass_doro and pass_msigdb)
-                if pass_all:
-                    passed_edges.append((a, b))
-
-                row: Dict[str, Any] = {
-                    "celltypist_label": ct_label,
-                    "a": a,
-                    "b": b,
-                    "n_a": int(cluster_sizes.get(a, 0)),
-                    "n_b": int(cluster_sizes.get(b, 0)),
-                    "sim_progeny": float(sim_prog),
-                    "thr_progeny": float(thr_prog_ct),
-                    "pass_progeny": bool(pass_prog),
-                    "sim_dorothea": float(sim_doro),
-                    "thr_dorothea": float(thr_doro_ct),
-                    "pass_dorothea": bool(pass_doro),
-                    "msigdb_topk": int(TOPK_MSIGDB),
-                    "msigdb_majority_frac": float(MSIGDB_MAJORITY_FRAC),
-                    "msigdb_majority_need": int(need),
-                    "msigdb_majority_passed": int(n_pass),
-                    "pass_msigdb_majority": bool(pass_msigdb),
-                    "fail_msigdb_gmts": ",".join(msig_fail_gmts) if msig_fail_gmts else "",
-                    "pass_all": bool(pass_all),
-                    "similarity_metric": f"{similarity_metric}+msigdb_topk_union_k{TOPK_MSIGDB}+adaptive_q{ADAPT_Q}",
-                    "zscore_scope": str(zscore_scope),
-                    "zscore_scope_effective": str(effective_scope),
-                    "grouping": grouping,
-                }
-
-                for gmt, s in msig_sims.items():
-                    thr_g = float(
-                        thr_msig_ct.get(
-                            str(gmt),
-                            min(_cap_for_gmt(str(gmt)), max(_floor_for_gmt(str(gmt)), 0.0)),
-                        )
-                    )
-                    row[f"sim_msigdb__{gmt}"] = float(s)
-                    row[f"thr_msigdb__{gmt}"] = float(thr_g)
-                    row[f"pass_msigdb__{gmt}"] = bool(s >= thr_g)
-
-                row["pass_msigdb_all_gmt"] = bool(pass_msigdb)
-                edge_rows.append(row)
-
-        pass_edges_by_label[ct_label] = passed_edges
-        adjacency[ct_label] = passed_edges
-
-    edges_df = pd.DataFrame(edge_rows)
-
-    decision_log: List[Dict[str, Any]] = []
-    all_components: List[List[str]] = []
-
-    for ct_label, clusters in sorted(label_to_clusters.items(), key=lambda kv: kv[0]):
-        clusters = sorted(map(str, clusters))
-        if not clusters:
-            continue
-        passed_edges = pass_edges_by_label.get(ct_label, [])
-
-        if grouping == "connected_components":
-            comps = _connected_components(clusters, passed_edges)
-        elif grouping == "clique":
-            s = set((min(u, v), max(u, v)) for (u, v) in passed_edges)
-            comps = _clique_components(clusters, s)
+    eligibility_rows: list[dict[str, Any]] = []
+    label_to_clusters: dict[str, list[str]] = {}
+    for cluster in all_clusters:
+        reasons: list[str] = []
+        audit_row = audit_by_cluster.loc[cluster] if cluster in audit_by_cluster.index else None
+        assigned_label = "UNKNOWN"
+        if audit_row is None:
+            reasons.append("missing_celltypist_audit")
+            audit_values = {key: np.nan for key in required_audit_columns - {"cluster"}}
         else:
-            raise ValueError("grouping must be 'connected_components' or 'clique'")
+            audit_values = audit_row.to_dict()
+            assigned_label = _normalize_celltypist_label(audit_values.get("assigned_label"))
+            audit_n_total = pd.to_numeric(audit_values.get("n_total"), errors="coerce")
+            if not np.isfinite(audit_n_total) or int(audit_n_total) != int(cluster_sizes.get(cluster, 0)):
+                reasons.append("celltypist_audit_size_mismatch")
+            if str(audit_values.get("status")) != "assigned":
+                reasons.append(f"celltypist_{audit_values.get('status')}")
+            if assigned_label == "UNKNOWN":
+                reasons.append("celltypist_unknown")
 
-        for comp in comps:
-            if len(comp) <= 1:
-                continue
-            decision_log.append(
-                {
-                    "celltypist_label": ct_label,
-                    "members": list(comp),
-                    "n_members": int(len(comp)),
-                    "reason": (
-                        "adaptive multiview agreement within CellTypist label "
-                        "(progeny + dorothea + msigdb_majority(topK))"
-                    ),
-                    "grouping": grouping,
-                    "adaptive": adaptive_thresholds_by_label.get(str(ct_label), None),
-                }
+        cluster_labels = adata.obs.loc[cluster_per_cell == cluster, celltypist_cluster_key]
+        observed_labels = {
+            _normalize_celltypist_label(value) for value in cluster_labels.astype(object).tolist()
+        }
+        if len(observed_labels) != 1 or assigned_label not in observed_labels:
+            reasons.append("celltypist_cluster_label_mismatch")
+        if int(min_cells) > 0 and int(cluster_sizes.get(cluster, 0)) < int(min_cells):
+            reasons.append("below_compact_min_cells")
+        for view_name in ("PROGENy", "DoRothEA"):
+            if cluster not in complete_by_view[view_name]:
+                reasons.append(f"missing_{view_name.lower()}_activity")
+        if msigdb_required:
+            for gmt in msigdb:
+                if cluster not in complete_by_view[f"MSigDB:{gmt}"]:
+                    reasons.append(f"missing_msigdb_{gmt}_activity")
+
+        reasons = sorted(set(reasons))
+        eligible = not reasons
+        row = {
+            "cluster": cluster,
+            "n_cells": int(cluster_sizes.get(cluster, 0)),
+            "assigned_label": assigned_label,
+            "n_confident": audit_values.get("n_confident", np.nan),
+            "confident_fraction": audit_values.get("confident_fraction", np.nan),
+            "winning_label": audit_values.get("winning_label", ""),
+            "winning_fraction": audit_values.get("winning_fraction", np.nan),
+            "runner_up_fraction": audit_values.get("runner_up_fraction", np.nan),
+            "celltypist_status": audit_values.get("status", "missing"),
+            "required_activity_complete": not any("activity" in reason for reason in reasons),
+            "eligible": bool(eligible),
+            "exclusion_reasons": ";".join(reasons),
+        }
+        for view_name, complete_clusters in complete_by_view.items():
+            row[f"complete__{view_name}"] = cluster in complete_clusters
+        eligibility_rows.append(row)
+        if eligible:
+            label_to_clusters.setdefault(assigned_label, []).append(cluster)
+
+    cluster_eligibility = pd.DataFrame(eligibility_rows)
+    eligibility_by_cluster = cluster_eligibility.set_index("cluster")
+    edge_rows: list[dict[str, Any]] = []
+    threshold_rows: list[dict[str, Any]] = []
+    adjacency: dict[str, list[tuple[str, str]]] = {}
+    components: list[list[str]] = []
+    decision_log: list[dict[str, Any]] = []
+
+    def floor_for_gmt(gmt: str) -> float:
+        return float(MSIGDB_FLOOR_BY_GMT.get(str(gmt).upper(), FLOOR_MSIGDB_DEFAULT))
+
+    def cap_for_gmt(gmt: str) -> float:
+        return float(msigdb_threshold_cap_by_gmt.get(str(gmt), msigdb_threshold_cap))
+
+    for celltypist_label, clusters in sorted(label_to_clusters.items()):
+        clusters = sorted(clusters)
+        if len(clusters) < 2:
+            components.extend([[cluster] for cluster in clusters])
+            adjacency[celltypist_label] = []
+            continue
+
+        pair_indices = [(a, b) for i, a in enumerate(clusters) for b in clusters[i + 1:]]
+        similarities: dict[str, dict[tuple[str, str], float]] = {
+            "PROGENy": {
+                pair: _cosine(progeny.loc[pair[0]].to_numpy(), progeny.loc[pair[1]].to_numpy())
+                for pair in pair_indices
+            },
+            "DoRothEA": {
+                pair: _cosine(dorothea.loc[pair[0]].to_numpy(), dorothea.loc[pair[1]].to_numpy())
+                for pair in pair_indices
+            },
+        }
+        for gmt, frame in msigdb.items():
+            similarities[f"MSigDB:{gmt}"] = {
+                pair: _cosine_topk_union(
+                    frame.loc[pair[0]].to_numpy(), frame.loc[pair[1]].to_numpy()
+                )
+                for pair in pair_indices
+            }
+
+        adaptive = len(clusters) >= ADAPTIVE_MIN_GROUP_SIZE
+        view_thresholds: dict[str, dict[str, float | bool]] = {}
+        threshold_specs = {
+            "PROGENy": (FLOOR_PROGENY, float(progeny_threshold_cap)),
+            "DoRothEA": (FLOOR_DOROTHEA, float(dorothea_threshold_cap)),
+            **{
+                f"MSigDB:{gmt}": (floor_for_gmt(gmt), cap_for_gmt(gmt))
+                for gmt in msigdb
+            },
+        }
+        for view_name, (floor, cap) in threshold_specs.items():
+            relative = (
+                _safe_quantile(list(similarities[view_name].values()), adaptive_quantile)
+                if adaptive else float("nan")
             )
-        all_components.extend([list(c) for c in comps])
+            uncapped = max(float(floor), float(relative)) if np.isfinite(relative) else float(floor)
+            effective = min(float(cap), uncapped)
+            view_thresholds[view_name] = {
+                "floor": float(floor), "relative": float(relative),
+                "cap": float(cap), "effective": float(effective), "adaptive": bool(adaptive),
+            }
+            threshold_rows.append({
+                "celltypist_label": celltypist_label,
+                "n_clusters": len(clusters),
+                "view": view_name,
+                "floor": float(floor),
+                "adaptive_used": bool(adaptive),
+                "adaptive_quantile": float(adaptive_quantile) if adaptive else np.nan,
+                "adaptive_value": float(relative),
+                "cap": float(cap),
+                "effective_threshold": float(effective),
+            })
 
-    # Any cluster not covered yet becomes its own singleton (this includes UNKNOWN clusters we excluded above)
-    covered = set(c for comp in all_components for c in comp)
-    missing = [c for c in all_clusters if c not in covered]
-    for c in missing:
-        all_components.append([c])
+        passed_edges: list[tuple[str, str]] = []
+        for a, b in pair_indices:
+            pass_progeny = similarities["PROGENy"][(a, b)] >= view_thresholds["PROGENy"]["effective"]
+            pass_dorothea = similarities["DoRothEA"][(a, b)] >= view_thresholds["DoRothEA"]["effective"]
+            msigdb_passes = {
+                gmt: similarities[f"MSigDB:{gmt}"][(a, b)]
+                >= view_thresholds[f"MSigDB:{gmt}"]["effective"]
+                for gmt in msigdb
+            }
+            n_msigdb_passed = sum(msigdb_passes.values())
+            n_msigdb_required = _msigdb_required_passes(len(msigdb))
+            pass_msigdb = n_msigdb_passed >= n_msigdb_required if msigdb_required else True
+            pass_all = bool(pass_progeny and pass_dorothea and pass_msigdb)
+            if pass_all:
+                passed_edges.append((a, b))
 
-    def comp_size(members: List[str]) -> int:
-        return int(sum(int(cluster_sizes.get(m, 0)) for m in members))
+            required_margins = [
+                similarities["PROGENy"][(a, b)] - float(view_thresholds["PROGENy"]["effective"]),
+                similarities["DoRothEA"][(a, b)] - float(view_thresholds["DoRothEA"]["effective"]),
+            ]
+            msigdb_margins = sorted(
+                (
+                    similarities[f"MSigDB:{gmt}"][(a, b)]
+                    - float(view_thresholds[f"MSigDB:{gmt}"]["effective"])
+                    for gmt in msigdb
+                ),
+                reverse=True,
+            )
+            msigdb_decision_margin = float("nan")
+            if msigdb_required:
+                msigdb_decision_margin = float(msigdb_margins[n_msigdb_required - 1])
+                required_margins.append(msigdb_decision_margin)
+            row: dict[str, Any] = {
+                "celltypist_label": celltypist_label,
+                "a": a, "b": b,
+                "n_a": int(cluster_sizes[a]), "n_b": int(cluster_sizes[b]),
+                "confident_fraction_a": eligibility_by_cluster.loc[a, "confident_fraction"],
+                "confident_fraction_b": eligibility_by_cluster.loc[b, "confident_fraction"],
+                "winning_fraction_a": eligibility_by_cluster.loc[a, "winning_fraction"],
+                "winning_fraction_b": eligibility_by_cluster.loc[b, "winning_fraction"],
+                "sim_progeny": similarities["PROGENy"][(a, b)],
+                "floor_progeny": FLOOR_PROGENY,
+                "cap_progeny": float(progeny_threshold_cap),
+                "threshold_progeny": view_thresholds["PROGENy"]["effective"],
+                "pass_progeny": bool(pass_progeny),
+                "sim_dorothea": similarities["DoRothEA"][(a, b)],
+                "floor_dorothea": FLOOR_DOROTHEA,
+                "cap_dorothea": float(dorothea_threshold_cap),
+                "threshold_dorothea": view_thresholds["DoRothEA"]["effective"],
+                "pass_dorothea": bool(pass_dorothea),
+                "msigdb_required": bool(msigdb_required),
+                "msigdb_majority_fraction": MSIGDB_MAJORITY_FRAC,
+                "msigdb_majority_needed": n_msigdb_required,
+                "msigdb_majority_passed": n_msigdb_passed,
+                "msigdb_decision_margin": msigdb_decision_margin,
+                "pass_msigdb": bool(pass_msigdb),
+                "pass_all": pass_all,
+                "decision_margin": float(min(required_margins)),
+                "grouping": grouping,
+            }
+            for gmt, passed in msigdb_passes.items():
+                view_name = f"MSigDB:{gmt}"
+                row[f"sim_msigdb__{gmt}"] = similarities[view_name][(a, b)]
+                row[f"floor_msigdb__{gmt}"] = view_thresholds[view_name]["floor"]
+                row[f"cap_msigdb__{gmt}"] = view_thresholds[view_name]["cap"]
+                row[f"threshold_msigdb__{gmt}"] = view_thresholds[view_name]["effective"]
+                row[f"pass_msigdb__{gmt}"] = bool(passed)
+            edge_rows.append(row)
 
-    comps_sorted = sorted(all_components, key=lambda comp: (-comp_size(comp), [str(x) for x in comp]))
+        adjacency[celltypist_label] = passed_edges
+        if grouping == "connected_components":
+            label_components = _connected_components(clusters, passed_edges)
+        else:
+            canonical_edges = {(min(a, b), max(a, b)) for a, b in passed_edges}
+            label_components = _complete_link_components(clusters, canonical_edges)
+        components.extend(label_components)
+        for component in label_components:
+            if len(component) > 1:
+                decision_log.append({
+                    "celltypist_label": celltypist_label,
+                    "members": list(component),
+                    "n_members": len(component),
+                    "reason": "required multiview agreement within a trusted CellTypist label",
+                    "grouping": grouping,
+                })
 
-    cluster_id_map: Dict[str, str] = {}
-    reverse_map: Dict[str, List[str]] = {}
-    for i, members in enumerate(comps_sorted):
-        new_id = f"C{i:02d}"
-        reverse_map[new_id] = list(members)
-        for old in members:
-            cluster_id_map[str(old)] = new_id
+    covered = {cluster for component in components for cluster in component}
+    components.extend([[cluster] for cluster in all_clusters if cluster not in covered])
 
-    cluster_renumbering = {k: k for k in reverse_map.keys()}
+    def component_size(component: list[str]) -> int:
+        return int(sum(int(cluster_sizes[cluster]) for cluster in component))
+
+    sorted_components = sorted(components, key=lambda item: (-component_size(item), item))
+    cluster_id_map: dict[str, str] = {}
+    reverse_map: dict[str, list[str]] = {}
+    membership_rows: list[dict[str, Any]] = []
+    eligibility_lookup = cluster_eligibility.set_index("cluster")
+    for index, members in enumerate(sorted_components):
+        compacted_cluster = f"C{index:02d}"
+        reverse_map[compacted_cluster] = list(members)
+        for cluster in members:
+            cluster_id_map[cluster] = compacted_cluster
+            membership_rows.append({
+                "compacted_cluster": compacted_cluster,
+                "parent_cluster": cluster,
+                "parent_n_cells": int(cluster_sizes[cluster]),
+                "compacted_n_cells": component_size(members),
+                "n_parent_clusters": len(members),
+                "did_merge": len(members) > 1,
+                "celltypist_label": eligibility_lookup.loc[cluster, "assigned_label"],
+                "parent_eligible": bool(eligibility_lookup.loc[cluster, "eligible"]),
+                "parent_exclusion_reasons": eligibility_lookup.loc[cluster, "exclusion_reasons"],
+            })
 
     return CompactionOutputs(
-        components=[list(m) for m in reverse_map.values()],
+        components=[list(members) for members in reverse_map.values()],
         cluster_id_map=cluster_id_map,
         reverse_map=reverse_map,
-        cluster_renumbering=cluster_renumbering,
-        edges=edges_df,
+        cluster_renumbering={cluster: cluster for cluster in reverse_map},
+        edges=pd.DataFrame(edge_rows),
         adjacency=adjacency,
         decision_log=decision_log,
+        cluster_eligibility=cluster_eligibility,
+        group_membership=pd.DataFrame(membership_rows),
+        thresholds_by_label=pd.DataFrame(threshold_rows),
+        view_audit=pd.DataFrame(view_audits),
     )
 
 
@@ -594,22 +622,17 @@ def create_compacted_round_from_parent_round(
     celltypist_obs_key: str,
     notes: str = "",
     labels_obs_key_new: str | None = None,
-    # compaction params
     min_cells: int = 0,
-    zscore_scope: str = "within_celltypist_label",
-    grouping: str = "connected_components",
-    thr_progeny: float = 0.98,
-    thr_dorothea: float = 0.98,
-    thr_msigdb_default: float = 0.98,
-    thr_msigdb_by_gmt: dict[str, float] | None = None,
+    zscore_scope: str = "global",
+    grouping: str = "complete_link",
+    progeny_threshold_cap: float = 0.98,
+    dorothea_threshold_cap: float = 0.98,
+    msigdb_threshold_cap: float = 0.98,
+    msigdb_threshold_cap_by_gmt: dict[str, float] | None = None,
+    adaptive_quantile: float = 0.90,
     msigdb_required: bool = True,
 ) -> None:
-    """
-    Creates a new COMPACTED round derived from a parent round.
-
-    HARD GUARANTEE:
-      - UNKNOWN clusters are never compacted (forced).
-    """
+    """Create and activate a fully audited compacted child round."""
     _ensure_cluster_rounds(adata)
 
     rounds = adata.uns.get("cluster_rounds", {})
@@ -625,10 +648,13 @@ def create_compacted_round_from_parent_round(
     if not parent_cluster_key:
         raise KeyError("Parent round missing 'cluster_key'.")
 
-    if msigdb_required:
+    try:
         ensure_round_msigdb_activity_by_gmt(parent)
+    except (KeyError, TypeError, ValueError) as exc:
+        if msigdb_required:
+            raise
+        LOGGER.info("Compaction: optional MSigDB GMT activity is unavailable: %s", exc)
 
-    # Force policy: Unknown clusters are never compacted.
     outputs = compact_clusters_by_multiview_agreement(
         adata=adata,
         round_snapshot=parent,
@@ -636,10 +662,11 @@ def create_compacted_round_from_parent_round(
         min_cells=min_cells,
         zscore_scope=zscore_scope,
         grouping=grouping,
-        thr_progeny=thr_progeny,
-        thr_dorothea=thr_dorothea,
-        thr_msigdb_default=thr_msigdb_default,
-        thr_msigdb_by_gmt=thr_msigdb_by_gmt,
+        progeny_threshold_cap=progeny_threshold_cap,
+        dorothea_threshold_cap=dorothea_threshold_cap,
+        msigdb_threshold_cap=msigdb_threshold_cap,
+        msigdb_threshold_cap_by_gmt=msigdb_threshold_cap_by_gmt,
+        adaptive_quantile=adaptive_quantile,
         msigdb_required=msigdb_required,
     )
 
@@ -658,29 +685,54 @@ def create_compacted_round_from_parent_round(
     )
     adata.obs[labels_obs_key_new] = adata.obs[labels_obs_key_new].astype(str).astype("category")
 
+    decoupler = parent.get("decoupler", {})
+    upstream_provenance = {}
+    if isinstance(decoupler, dict):
+        for view_name in ("progeny", "dorothea", "msigdb"):
+            payload = decoupler.get(view_name, {})
+            if isinstance(payload, dict):
+                upstream_provenance[view_name] = dict(payload.get("method_provenance", {}))
+
     compacting_payload = {
+        "method_identity": COMPACTION_METHOD_IDENTITY,
         "parent_round_id": str(parent_round_id),
         "within_celltypist_label_only": True,
-        "celltypist_gating_key": str(celltypist_obs_key),
-        "unknown_policy": "never_compact_unknown",  # NEW explicit audit field
-        "similarity_metric": "cosine_zscore",
+        "celltypist_cell_key": str(celltypist_obs_key),
+        "celltypist_cluster_key": parent.get("annotation", {}).get("celltypist_cluster_key"),
+        "unknown_policy": "singleton",
+        "ineligible_policy": "singleton",
+        "no_op_policy": "retain_active_compacted_child",
+        "similarity_metric": "cosine_after_global_feature_zscore",
+        "msigdb_similarity_metric": f"top_{MSIGDB_TOPK}_union_cosine_after_global_feature_zscore",
         "params": {
             "min_cells": int(min_cells),
             "zscore_scope": str(zscore_scope),
-            "grouping": str(grouping),
+            "grouping": "complete_link" if str(grouping) == "clique" else str(grouping),
+            "adaptive_min_group_size": ADAPTIVE_MIN_GROUP_SIZE,
+            "adaptive_quantile": float(adaptive_quantile),
             "msigdb_required": bool(msigdb_required),
+            "msigdb_majority_fraction": MSIGDB_MAJORITY_FRAC,
         },
-        "thresholds": {
-            "thr_progeny": float(thr_progeny),
-            "thr_dorothea": float(thr_dorothea),
-            "thr_msigdb_default": float(thr_msigdb_default),
-            "thr_msigdb_by_gmt": dict(thr_msigdb_by_gmt or {}),
+        "threshold_policy": {
+            "progeny_floor": FLOOR_PROGENY,
+            "dorothea_floor": FLOOR_DOROTHEA,
+            "msigdb_floor_default": FLOOR_MSIGDB_DEFAULT,
+            "msigdb_floor_by_gmt": dict(MSIGDB_FLOOR_BY_GMT),
+            "progeny_cap": float(progeny_threshold_cap),
+            "dorothea_cap": float(dorothea_threshold_cap),
+            "msigdb_cap_default": float(msigdb_threshold_cap),
+            "msigdb_cap_by_gmt": dict(msigdb_threshold_cap_by_gmt or {}),
         },
+        "upstream_method_provenance": upstream_provenance,
+        "view_audit": outputs.view_audit,
+        "cluster_eligibility": outputs.cluster_eligibility,
+        "thresholds_by_label": outputs.thresholds_by_label,
         "pairwise": {
             "edges": outputs.edges,
             "adjacency": outputs.adjacency,
         },
-        "components": None,
+        "components": outputs.components,
+        "group_membership": outputs.group_membership,
         "decision_log": outputs.decision_log,
         "did_merge": bool(did_merge),
         "reverse_map": outputs.reverse_map,
@@ -688,8 +740,11 @@ def create_compacted_round_from_parent_round(
 
     cfg_snapshot = None
     try:
-        if hasattr(cfg, "__dataclass_fields__"):
+        if hasattr(cfg, "model_dump"):
+            cfg_snapshot = cfg.model_dump(mode="json")
+        elif hasattr(cfg, "__dataclass_fields__"):
             from dataclasses import asdict
+
             cfg_snapshot = asdict(cfg)
     except Exception:
         cfg_snapshot = None
@@ -713,3 +768,36 @@ def create_compacted_round_from_parent_round(
         compacting=compacting_payload,
         inherit_fields=(),
     )
+
+
+def export_compaction_audit_tables(
+    adata: ad.AnnData,
+    *,
+    round_id: str,
+    output_dir: str | Path,
+) -> dict[str, Path]:
+    """Write the stored compaction review tables without recomputing decisions."""
+    rounds = adata.uns.get("cluster_rounds", {})
+    if not isinstance(rounds, dict) or round_id not in rounds:
+        raise KeyError(f"Compaction round {round_id!r} was not found.")
+    compacting = rounds[round_id].get("compacting", {})
+    if not isinstance(compacting, dict):
+        raise KeyError(f"Round {round_id!r} has no compaction payload.")
+
+    tables = {
+        "view_audit": compacting.get("view_audit"),
+        "cluster_eligibility": compacting.get("cluster_eligibility"),
+        "thresholds_by_label": compacting.get("thresholds_by_label"),
+        "pairwise_evidence": compacting.get("pairwise", {}).get("edges"),
+        "group_membership": compacting.get("group_membership"),
+    }
+    target = Path(output_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    written: dict[str, Path] = {}
+    for name, table in tables.items():
+        if not isinstance(table, pd.DataFrame):
+            table = pd.DataFrame() if table is None else pd.DataFrame(table)
+        path = target / f"{name}.tsv"
+        table.to_csv(path, sep="\t", index=False)
+        written[name] = path
+    return written

@@ -1,104 +1,73 @@
-# Compaction: merging redundant clusters
+# Compaction: consolidating redundant clusters
 
-Large datasets can yield clusters that are transcriptionally distinct but *biologically redundant*. The optional **compaction** step merges such clusters using **multi-view biological agreement** computed from decoupler activities.
+Compaction is an optional conservative step after BISC clustering and annotation. It tests whether parent clusters with the same trusted CellTypist label also agree across independent regulatory and pathway activity views. Supported clusters are consolidated in a new clustering round; the BISC parent round remains available.
 
-Compaction is **CellTypist-grouped**: cluster pairs are only compared *within the same* CellTypist cluster label group (with an option to skip `Unknown` groups). These grouping labels are confidence- and purity-gated. A cluster remains `Unknown` when it lacks sufficient confident-cell coverage or no label has a strict majority, preventing ties or weak votes from silently authorizing merges.
+Compaction does not infer missing evidence. A cluster with an `Unknown` label, a failed CellTypist confidence or purity gate, an incomplete required activity profile, or fewer than `compact_min_cells` cells remains a singleton and is recorded as ineligible.
 
-#### What signals are used
+## Required evidence
 
-Compaction requires decoupler outputs from:
+Compaction uses the round-specific CellTypist cluster-label audit and decoupler activities from:
 
-- **PROGENy** activity (required)
-- **DoRothEA** activity (required)
-- **MSigDB activity split by GMT** (required by default; can be made optional)
+* PROGENy, required;
+* DoRothEA, required;
+* available MSigDB GMT blocks, required by default.
 
-#### Similarity metric
+The CellTypist gate is inherited from the annotation step. Compaction does not replace it with an unmasked vote over cell-level predictions.
 
-For each pair of clusters within the same CellTypist group:
+Each numeric activity view is checked for duplicate axes, non-finite values, missing cluster rows, constant features, and inadequate dimensionality. A wholly unavailable required view stops compaction. A cluster missing a required row remains a singleton.
 
-- activities are **z-scored** (see scope below)
-- similarity is computed as **cosine similarity** on the z-scored vectors
+## Similarity calculation
 
-For MSigDB, similarity is computed using a **Top-K union** strategy (default **K = 25**):
-- take the union of the top-|z| features from both clusters (by absolute z-score)
-- compute cosine similarity on that union vector
+Valid activity features are z-scored across all clusters with complete evidence for that view. PROGENy and DoRothEA pairs are compared by cosine similarity.
 
-#### Z-score scope (with guardrail)
+For each MSigDB GMT block, scOmnom takes the union of the 25 features with the largest absolute z-score in either cluster and calculates cosine similarity on that union. When `msigdb_required=False`, available MSigDB similarities remain in the audit output but do not determine whether a pair passes.
 
-Compaction supports two z-scoring modes:
+## Threshold policy
 
-- `global` (recommended): z-score each activity column across **all clusters**
-- `within_celltypist_label`: z-score each activity column **within each CellTypist group**
+Every view has an immutable evidence floor:
 
-Guardrail: `within_celltypist_label` falls back to `global` if a CellTypist group contains fewer than **4** clusters (to avoid unstable z-scores).
+| View | Floor |
+|---|---:|
+| PROGENy | 0.70 |
+| DoRothEA | 0.60 |
+| MSigDB HALLMARK | 0.60 |
+| MSigDB REACTOME | 0.45 |
+| Other MSigDB blocks | 0.50 |
 
-Default in the config:
-- `compact_zscore_scope = "global"`
+For CellTypist groups containing two or three eligible clusters, scOmnom uses the floor directly. For groups containing at least four eligible clusters, it also calculates the configured within-group similarity quantile, 0.90 by default. The effective threshold is:
 
-#### Adaptive thresholds (per CellTypist group)
+```text
+min(user cap, max(immutable floor, adaptive quantile))
+```
 
-Rather than using fixed similarity thresholds only, compaction computes **adaptive per-group thresholds** based on within-group similarity distributions:
+The cap limits how strict the adaptive threshold can become; it cannot lower the threshold below its floor. The relevant settings are:
 
-- for each view (PROGENy / DoRothEA / each MSigDB GMT block), compute the **0.90 quantile** of pairwise similarities within the CellTypist group
-- then apply a **floor** (minimum strictness)
-- then apply a **cap** (maximum strictness) from user-provided thresholds
+* `compact_progeny_threshold_cap=0.98`;
+* `compact_dorothea_threshold_cap=0.98`;
+* `compact_msigdb_threshold_cap=0.98`;
+* `compact_msigdb_threshold_cap_by_gmt` for per-GMT overrides;
+* `compact_adaptive_quantile=0.90`.
 
-This yields effective thresholds that can relax when a CellTypist group is intrinsically heterogeneous, but never below conservative floors.
+Legacy `thr_*` configuration keys and CLI flags are accepted as compatibility aliases for these caps.
 
-Floors:
-- PROGENy floor: **0.70**
-- DoRothEA floor: **0.60**
-- MSigDB floors:
-  - `HALLMARK`: **0.60**
-  - `REACTOME`: **0.45**
-  - default for other GMTs: **0.50**
+## Pair and group decisions
 
-Caps (from config defaults; can be overridden):
-- `thr_progeny = 0.98`
-- `thr_dorothea = 0.98`
-- `thr_msigdb_default = 0.98`
-- optional per-GMT caps via `thr_msigdb_by_gmt`
+A pair passes when PROGENy and DoRothEA pass and, when required, at least `ceil(0.67 * n_blocks)` valid MSigDB blocks pass. Pairs are only evaluated within the same trusted CellTypist label.
 
-#### MSigDB majority rule
+The default `compact_grouping="complete_link"` forms deterministic groups in which every pair has passed. This prevents a chain such as A-B and B-C from merging A, B, and C when A-C failed. `connected_components` remains available only for replaying historical configurations. The legacy value `clique` maps to `complete_link`.
 
-MSigDB is evaluated per GMT block, then combined using a majority rule:
+## Outputs
 
-- if there is **1** GMT: require **1/1**
-- if there are **2** GMTs: require **1/2**
-- if there are **≥ 3** GMTs: require `ceil(0.67 × n_gmts)` passing GMTs
+Compaction always creates and activates an explicit child round, including when no pair merges. A no-op child is stored with `did_merge=False`, so downstream stages retain one predictable state without implying that a biological merge occurred.
 
-Default MSigDB majority fraction: **0.67**.
+The child round stores:
 
-If `msigdb_required = False`, MSigDB is not required for passing (but similarities are still computed if available).
+* the compaction method identity and full configuration snapshot;
+* upstream activity-method provenance;
+* activity-view validation results;
+* one eligibility record for every parent cluster;
+* per-label floors, adaptive values, caps, and effective thresholds;
+* all evaluated pairwise similarities and pass decisions;
+* complete-link components, parent-to-child membership, and reverse mappings.
 
-#### Pass condition and grouping
-
-An edge (merge suggestion) between two clusters is created only if all required views pass:
-
-- PROGENy similarity ≥ effective PROGENy threshold **AND**
-- DoRothEA similarity ≥ effective DoRothEA threshold **AND**
-- MSigDB majority rule passes (if required)
-
-Edges are then converted into merge groups using one of:
-
-- `connected_components` (default): merge connected components of the pass graph
-- `clique`: greedy clique cover on the pass graph (stricter grouping)
-
-Default in the config:
-- `compact_grouping = "connected_components"`
-
-#### Size and label filters
-
-- `compact_min_cells` (default `0`): clusters smaller than this are excluded from compaction decisions
-- `compact_skip_unknown_celltypist_groups` (default `False`): optionally exclude CellTypist groups labeled `Unknown`/`UNKNOWN`
-
-#### Compaction outputs
-
-Compaction produces:
-
-* a new clustering stored as a new, non-destructive AnnData clustering round
-* a full **pairwise audit table** of edges with per-view similarities, adaptive thresholds (and which scope was effectively used), and MSigDB majority statistics
-* a **decision log** listing multi-cluster merge groups and their rationale
-* a mapping from original cluster ids to compacted ids (e.g. `C00`, `C01`, …), sorted by total component size
-
----
+The CLI writes `view_audit.tsv`, `cluster_eligibility.tsv`, `thresholds_by_label.tsv`, `pairwise_evidence.tsv`, and `group_membership.tsv` under the round-specific `tables/cluster_and_annotate/` tree. The `compaction_review` figure summarizes candidate confidence and the pairs nearest the decision boundary; `compaction_flow` shows the parent-to-child mapping.

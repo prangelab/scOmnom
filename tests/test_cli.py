@@ -212,6 +212,32 @@ def test_cluster_dispatch(mock_run):
 
 
 @patch("scomnom.cli.run_clustering")
+def test_cluster_dispatch_compaction_caps_and_legacy_aliases(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "cluster-and-annotate",
+            "--input-path", "integrated.h5ad",
+            "--compact-progeny-threshold-cap", "0.91",
+            "--thr-dorothea", "0.83",
+            "--compact-msigdb-threshold-cap", "0.89",
+            "--thr-msigdb-by-gmt", "HALLMARK=0.88,REACTOME=0.80",
+            "--compact-adaptive-quantile", "0.85",
+        ],
+    )
+    assert result.exit_code == 0
+    cfg = mock_run.call_args[0][0]
+    assert cfg.compact_progeny_threshold_cap == pytest.approx(0.91)
+    assert cfg.compact_dorothea_threshold_cap == pytest.approx(0.83)
+    assert cfg.compact_msigdb_threshold_cap == pytest.approx(0.89)
+    assert cfg.compact_msigdb_threshold_cap_by_gmt == {
+        "HALLMARK": pytest.approx(0.88),
+        "REACTOME": pytest.approx(0.80),
+    }
+    assert cfg.compact_adaptive_quantile == pytest.approx(0.85)
+
+
+@patch("scomnom.cli.run_clustering")
 def test_cluster_dispatch_force_celltypist_recompute(mock_run):
     result = runner.invoke(
         app,

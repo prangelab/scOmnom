@@ -54,7 +54,7 @@ For non-human PROGENy and DoRothEA runs, scOmnom first asks decoupler for the re
 
 Consensus does not average raw method scores. Each successful method is sign-split and standardized by decoupler before combination, avoiding scale domination by one estimator. The legacy `wsum` name is retained as a user-facing compatibility alias and resolves to the current WAGGR weighted-sum implementation. The configured minimum target count is passed to every constituent method. A consensus requires at least two requested and two successful methods; otherwise the resource fails explicitly. Each stored resource payload records requested, resolved, successful, and failed methods in `method_provenance`.
 
-Compaction has additional decoupler-derived similarity thresholds such as `--thr-progeny`, `--thr-dorothea`, and `--thr-msigdb-default`; those are documented on the [Compaction](compaction.md) page because they control merge decisions rather than activity inference itself.
+Compaction has additional decoupler-derived threshold caps such as `--compact-progeny-threshold-cap`, `--compact-dorothea-threshold-cap`, and `--compact-msigdb-threshold-cap`. These are documented on the [Compaction](compaction.md) page because they control merge decisions rather than activity inference itself.
 
 For details on decoupler methods and resources, see:
 

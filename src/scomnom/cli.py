@@ -1560,35 +1560,44 @@ def cluster_and_annotate(
         "--compact-min-cells",
         help="[Compaction] Exclude clusters smaller than this from compaction decisions (0 disables).",
     ),
-    compact_zscore_scope: Literal["within_celltypist_label", "global"] = typer.Option(
+    compact_zscore_scope: Literal["global"] = typer.Option(
         "global",
         "--compact-zscore-scope",
-        help="[Compaction] Z-score scope for similarity comparisons.",
+        help="[Compaction] Feature z-score scope for activity comparisons.",
     ),
-    compact_grouping: Literal["connected_components", "clique"] = typer.Option(
-        "connected_components",
+    compact_grouping: Literal["complete_link", "connected_components", "clique"] = typer.Option(
+        "complete_link",
         "--compact-grouping",
-        help="[Compaction] How to form compaction groups from pass edges.",
+        help="[Compaction] Form groups by all-pairs agreement; legacy modes remain available for replay.",
     ),
-    thr_progeny: float = typer.Option(
+    compact_progeny_threshold_cap: float = typer.Option(
         0.98,
+        "--compact-progeny-threshold-cap",
         "--thr-progeny",
-        help="[Compaction] Similarity threshold for PROGENy activities (cosine on z-scored activities).",
+        help="[Compaction] Upper cap on the adaptive PROGENy threshold (legacy: --thr-progeny).",
     ),
-    thr_dorothea: float = typer.Option(
+    compact_dorothea_threshold_cap: float = typer.Option(
         0.98,
+        "--compact-dorothea-threshold-cap",
         "--thr-dorothea",
-        help="[Compaction] Similarity threshold for DoRothEA activities (cosine on z-scored activities).",
+        help="[Compaction] Upper cap on the adaptive DoRothEA threshold (legacy: --thr-dorothea).",
     ),
-    thr_msigdb_default: float = typer.Option(
+    compact_msigdb_threshold_cap: float = typer.Option(
         0.98,
+        "--compact-msigdb-threshold-cap",
         "--thr-msigdb-default",
-        help="[Compaction] Default similarity threshold for each MSigDB GMT block.",
+        help="[Compaction] Default upper cap on adaptive MSigDB thresholds.",
     ),
-    thr_msigdb_by_gmt: Optional[str] = typer.Option(
+    compact_msigdb_threshold_cap_by_gmt: Optional[str] = typer.Option(
         None,
+        "--compact-msigdb-threshold-cap-by-gmt",
         "--thr-msigdb-by-gmt",
-        help="[Compaction] Optional per-GMT thresholds as 'HALLMARK=0.99,REACTOME=0.985'.",
+        help="[Compaction] Optional per-GMT caps as 'HALLMARK=0.99,REACTOME=0.985'.",
+    ),
+    compact_adaptive_quantile: float = typer.Option(
+        0.90,
+        "--compact-adaptive-quantile",
+        help="[Compaction] Similarity quantile used for CellTypist groups with at least four clusters.",
     ),
     msigdb_required: bool = typer.Option(
         True,
@@ -1641,29 +1650,30 @@ def cluster_and_annotate(
         gene_sets_list = [x.strip() for x in msigdb_gene_sets_cli.split(",") if x.strip()]
 
     # ---------------------------------------------------------
-    # Parse thr_msigdb_by_gmt "A=0.99,B=0.985" -> dict
+    # Parse per-GMT compaction caps "A=0.99,B=0.985" -> dict
     # ---------------------------------------------------------
-    thr_msigdb_by_gmt_dict: Optional[Dict[str, float]] = None
-    if thr_msigdb_by_gmt:
+    compact_msigdb_threshold_cap_by_gmt_dict: Optional[Dict[str, float]] = None
+    if compact_msigdb_threshold_cap_by_gmt:
         d: Dict[str, float] = {}
-        for part in str(thr_msigdb_by_gmt).split(","):
+        for part in str(compact_msigdb_threshold_cap_by_gmt).split(","):
             part = part.strip()
             if not part:
                 continue
             if "=" not in part:
                 raise typer.BadParameter(
-                    "--thr-msigdb-by-gmt must be 'GMT=thr,GMT=thr' (e.g. HALLMARK=0.99,REACTOME=0.985)"
+                    "--compact-msigdb-threshold-cap-by-gmt must be "
+                    "'GMT=cap,GMT=cap' (e.g. HALLMARK=0.99,REACTOME=0.985)"
                 )
             k, v = part.split("=", 1)
             k = k.strip()
             v = v.strip()
             if not k:
-                raise typer.BadParameter("Empty GMT key in --thr-msigdb-by-gmt")
+                raise typer.BadParameter("Empty GMT key in --compact-msigdb-threshold-cap-by-gmt")
             try:
                 d[k] = float(v)
             except Exception:
-                raise typer.BadParameter(f"Non-numeric threshold for GMT {k!r}: {v!r}")
-        thr_msigdb_by_gmt_dict = d or None
+                raise typer.BadParameter(f"Non-numeric compaction cap for GMT {k!r}: {v!r}")
+        compact_msigdb_threshold_cap_by_gmt_dict = d or None
 
     # ---------------------------------------------------------
     # Build config
@@ -1741,10 +1751,11 @@ def cluster_and_annotate(
         compact_min_cells=compact_min_cells,
         compact_zscore_scope=compact_zscore_scope,
         compact_grouping=compact_grouping,
-        thr_progeny=thr_progeny,
-        thr_dorothea=thr_dorothea,
-        thr_msigdb_default=thr_msigdb_default,
-        thr_msigdb_by_gmt=thr_msigdb_by_gmt_dict,
+        compact_progeny_threshold_cap=compact_progeny_threshold_cap,
+        compact_dorothea_threshold_cap=compact_dorothea_threshold_cap,
+        compact_msigdb_threshold_cap=compact_msigdb_threshold_cap,
+        compact_msigdb_threshold_cap_by_gmt=compact_msigdb_threshold_cap_by_gmt_dict,
+        compact_adaptive_quantile=compact_adaptive_quantile,
         msigdb_required=msigdb_required,
 
         make_figures=make_figures,

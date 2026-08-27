@@ -709,41 +709,47 @@ class ClusterAnnotateConfig(BaseModel):
         description="Exclude clusters smaller than this from compaction decisions (0 disables).",
     )
 
-    compact_zscore_scope: Literal["within_celltypist_label", "global"] = Field(
+    compact_zscore_scope: Literal["global"] = Field(
         "global",
-        description="Z-score scope for similarity comparisons during compaction.",
+        description="Feature z-score scope for compaction activity comparisons.",
     )
 
-    compact_grouping: Literal["connected_components", "clique"] = Field(
-        "connected_components",
-        description="How to form compaction groups from pairwise-pass edges.",
+    compact_grouping: Literal["complete_link", "connected_components", "clique"] = Field(
+        "complete_link",
+        description="All-pairs grouping rule; connected_components and clique are legacy compatibility values.",
     )
 
-    # Thresholds used by compaction decision engine
-    thr_progeny: float = Field(
+    compact_progeny_threshold_cap: float = Field(
         0.98,
-        ge=-1.0,
+        ge=0.70,
         le=1.0,
-        description="Similarity threshold for PROGENy activities when deciding compaction edges.",
+        description="Upper cap on the adaptive PROGENy similarity threshold; the immutable floor is 0.70.",
     )
 
-    thr_dorothea: float = Field(
+    compact_dorothea_threshold_cap: float = Field(
         0.98,
-        ge=-1.0,
+        ge=0.60,
         le=1.0,
-        description="Similarity threshold for DoRothEA activities when deciding compaction edges.",
+        description="Upper cap on the adaptive DoRothEA similarity threshold; the immutable floor is 0.60.",
     )
 
-    thr_msigdb_default: float = Field(
+    compact_msigdb_threshold_cap: float = Field(
         0.98,
-        ge=-1.0,
+        ge=0.60,
         le=1.0,
-        description="Default similarity threshold for each MSigDB GMT block when deciding compaction edges.",
+        description="Default upper cap on adaptive MSigDB similarity thresholds.",
     )
 
-    thr_msigdb_by_gmt: Optional[Dict[str, float]] = Field(
+    compact_msigdb_threshold_cap_by_gmt: Optional[Dict[str, float]] = Field(
         None,
-        description="Optional per-GMT similarity thresholds for MSigDB compaction (overrides thr_msigdb_default per GMT key).",
+        description="Optional per-GMT upper caps on adaptive MSigDB similarity thresholds.",
+    )
+
+    compact_adaptive_quantile: float = Field(
+        0.90,
+        gt=0.0,
+        le=1.0,
+        description="Within-label similarity quantile used only for groups containing at least four clusters.",
     )
 
     msigdb_required: bool = Field(
@@ -781,11 +787,28 @@ class ClusterAnnotateConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _reject_removed_bisc_options(cls, values):
-        if isinstance(values, dict) and "max_cluster_jump_frac" in values:
+        if not isinstance(values, dict):
+            return values
+        values = dict(values)
+        if "max_cluster_jump_frac" in values:
             raise ValueError(
                 "max_cluster_jump_frac was removed because it did not affect BISC selection; "
                 "remove it from the configuration"
             )
+        legacy_compaction_keys = {
+            "thr_progeny": "compact_progeny_threshold_cap",
+            "thr_dorothea": "compact_dorothea_threshold_cap",
+            "thr_msigdb_default": "compact_msigdb_threshold_cap",
+            "thr_msigdb_by_gmt": "compact_msigdb_threshold_cap_by_gmt",
+        }
+        for legacy, replacement in legacy_compaction_keys.items():
+            if legacy not in values:
+                continue
+            if replacement in values and values[replacement] != values[legacy]:
+                raise ValueError(
+                    f"Conflicting compaction options {legacy!r} and {replacement!r}; use only {replacement!r}."
+                )
+            values[replacement] = values.pop(legacy)
         return values
 
     @model_validator(mode="after")
@@ -849,25 +872,22 @@ class ClusterAnnotateConfig(BaseModel):
             raise ValueError("value must be in [0, 1]")
         return v
 
-    @field_validator("thr_progeny", "thr_dorothea", "thr_msigdb_default")
+    @field_validator("compact_msigdb_threshold_cap_by_gmt")
     @classmethod
-    def _validate_similarity_thresholds(cls, v: float) -> float:
-        v = float(v)
-        # cosine similarities live in [-1, 1]
-        if v < -1.0 or v > 1.0:
-            raise ValueError("similarity threshold must be in [-1, 1]")
-        return v
-
-    @field_validator("thr_msigdb_by_gmt")
-    @classmethod
-    def _validate_thr_msigdb_by_gmt(cls, v: Optional[Dict[str, float]]) -> Optional[Dict[str, float]]:
+    def _validate_compact_msigdb_caps(
+        cls, v: Optional[Dict[str, float]]
+    ) -> Optional[Dict[str, float]]:
         if v is None:
             return None
         out: Dict[str, float] = {}
+        floors = {"HALLMARK": 0.60, "REACTOME": 0.45}
         for k, val in dict(v).items():
             vv = float(val)
-            if vv < -1.0 or vv > 1.0:
-                raise ValueError(f"thr_msigdb_by_gmt[{k!r}] must be in [-1, 1]")
+            floor = floors.get(str(k).upper(), 0.50)
+            if vv < floor or vv > 1.0:
+                raise ValueError(
+                    f"compact_msigdb_threshold_cap_by_gmt[{k!r}] must be in [{floor}, 1]"
+                )
             out[str(k)] = vv
         return out
 

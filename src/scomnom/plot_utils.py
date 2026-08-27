@@ -4583,6 +4583,117 @@ def plot_compaction_flow(
     record_plot_artifact(stem, figdir, fig, savefig_kwargs={"bbox_inches": "tight"})
 
 
+@collect_plot_artifacts
+def plot_compaction_review(
+    adata: "ad.AnnData",
+    *,
+    child_round_id: str,
+    figdir: "Path | str",
+    stem: str = "compaction_review",
+    max_pairs: int = 30,
+) -> None:
+    """Plot candidate eligibility and pairs nearest the compaction boundary."""
+    rounds = adata.uns.get("cluster_rounds", {})
+    if not isinstance(rounds, dict) or child_round_id not in rounds:
+        LOGGER.warning("compaction_review: round %r not found.", child_round_id)
+        return
+    compacting = rounds[child_round_id].get("compacting", {})
+    if not isinstance(compacting, dict):
+        LOGGER.warning("compaction_review: round %r has no compaction payload.", child_round_id)
+        return
+
+    eligibility = compacting.get("cluster_eligibility")
+    pairwise = compacting.get("pairwise", {}).get("edges")
+    if not isinstance(eligibility, pd.DataFrame) or eligibility.empty:
+        LOGGER.warning("compaction_review: cluster eligibility table is unavailable.")
+        return
+    if not isinstance(pairwise, pd.DataFrame):
+        pairwise = pd.DataFrame()
+
+    fig, axes = plt.subplots(1, 2, figsize=(12.5, 5.2), gridspec_kw={"width_ratios": [1.0, 1.25]})
+    ax_candidates, ax_pairs = axes
+
+    candidate_table = eligibility.copy()
+    confident = pd.to_numeric(candidate_table["confident_fraction"], errors="coerce").fillna(0.0)
+    winning = pd.to_numeric(candidate_table["winning_fraction"], errors="coerce").fillna(0.0)
+    sizes = pd.to_numeric(candidate_table["n_cells"], errors="coerce").fillna(1.0).clip(lower=1.0)
+    eligible = candidate_table["eligible"].astype(bool).to_numpy()
+    colors = np.where(eligible, "#1B7F5A", "#8B929A")
+    point_sizes = 35.0 + 7.0 * np.sqrt(sizes.to_numpy(dtype=float))
+    ax_candidates.scatter(
+        confident,
+        winning,
+        s=point_sizes,
+        c=colors,
+        alpha=0.85,
+        edgecolor="white",
+        linewidth=0.6,
+    )
+    for cluster, x_value, y_value in zip(candidate_table["cluster"], confident, winning):
+        ax_candidates.annotate(
+            str(cluster),
+            (float(x_value), float(y_value)),
+            xytext=(3, 3),
+            textcoords="offset points",
+            fontsize=7,
+        )
+    ax_candidates.set(xlim=(-0.03, 1.03), ylim=(-0.03, 1.03))
+    ax_candidates.set_xlabel("Confident-cell fraction")
+    ax_candidates.set_ylabel("Winning-label fraction")
+    ax_candidates.set_title("Compaction candidate audit")
+    ax_candidates.grid(alpha=0.18, linewidth=0.6)
+    ax_candidates.legend(
+        handles=[
+            Patch(facecolor="#1B7F5A", label="Eligible"),
+            Patch(facecolor="#8B929A", label="Singleton by QC"),
+        ],
+        frameon=False,
+        loc="lower left",
+    )
+
+    if pairwise.empty:
+        ax_pairs.text(0.5, 0.5, "No eligible within-label pairs", ha="center", va="center")
+        ax_pairs.set_axis_off()
+    else:
+        reviewed = pairwise.copy()
+        reviewed["decision_margin"] = pd.to_numeric(reviewed["decision_margin"], errors="coerce")
+        reviewed = reviewed.loc[np.isfinite(reviewed["decision_margin"])].copy()
+        reviewed["distance_to_boundary"] = reviewed["decision_margin"].abs()
+        reviewed = reviewed.sort_values(
+            ["distance_to_boundary", "celltypist_label", "a", "b"], kind="stable"
+        ).head(max(1, int(max_pairs)))
+        reviewed = reviewed.iloc[::-1]
+        labels = [f"{a} / {b}" for a, b in zip(reviewed["a"], reviewed["b"])]
+        bar_colors = np.where(reviewed["pass_all"].astype(bool), "#1B7F5A", "#C4493D")
+        positions = np.arange(reviewed.shape[0])
+        ax_pairs.barh(
+            positions,
+            reviewed["decision_margin"].to_numpy(dtype=float),
+            color=bar_colors,
+            alpha=0.88,
+        )
+        ax_pairs.axvline(0.0, color="#252A30", linewidth=1.0)
+        ax_pairs.set_yticks(positions)
+        ax_pairs.set_yticklabels(labels, fontsize=7)
+        ax_pairs.set_xlabel("Minimum required-view margin")
+        ax_pairs.set_title(f"Pairs nearest decision boundary (up to {int(max_pairs)})")
+        ax_pairs.grid(axis="x", alpha=0.18, linewidth=0.6)
+
+    n_parent = int(candidate_table.shape[0])
+    membership = compacting.get("group_membership")
+    n_child = (
+        int(membership["compacted_cluster"].nunique())
+        if isinstance(membership, pd.DataFrame) and not membership.empty
+        else n_parent
+    )
+    fig.suptitle(
+        f"Compaction review: {child_round_id} ({n_parent} parent clusters to {n_child} groups)",
+        fontsize=13,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    record_plot_artifact(stem, _ensure_path(figdir), fig, savefig_kwargs={"bbox_inches": "tight"})
+
+
 
 # ----------------------------------------------------------------------
 # Selection curves (silhouette, adjacent stability, composite, tiny penalty)
