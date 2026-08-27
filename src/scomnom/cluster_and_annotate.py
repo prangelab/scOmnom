@@ -621,6 +621,15 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                     msigdb_threshold_cap_by_gmt=getattr(
                         cfg, "compact_msigdb_threshold_cap_by_gmt", None
                     ),
+                    transcriptomic_source=str(
+                        getattr(cfg, "compact_transcriptomic_source", "auto") or "auto"
+                    ),
+                    transcriptomic_n_features=int(
+                        getattr(cfg, "compact_transcriptomic_n_features", 2000)
+                    ),
+                    transcriptomic_threshold_cap=float(
+                        getattr(cfg, "compact_transcriptomic_threshold_cap", 0.99)
+                    ),
                     adaptive_quantile=float(getattr(cfg, "compact_adaptive_quantile", 0.90)),
                     msigdb_required=bool(getattr(cfg, "msigdb_required", True)),
                 )

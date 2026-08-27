@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -8,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import anndata as ad
 import numpy as np
 import pandas as pd
+from scipy import sparse
 
 from scomnom.annotation_utils import ensure_round_msigdb_activity_by_gmt
 from .clustering_utils import _create_shallow_round_from_parent, _ensure_cluster_rounds
@@ -16,13 +18,15 @@ LOGGER = logging.getLogger(__name__)
 
 FLOOR_PROGENY = 0.70
 FLOOR_DOROTHEA = 0.60
+FLOOR_TRANSCRIPTOMIC = 0.90
 MSIGDB_FLOOR_BY_GMT = {"HALLMARK": 0.60, "REACTOME": 0.45}
 FLOOR_MSIGDB_DEFAULT = 0.50
 MSIGDB_MAJORITY_FRAC = 0.67
 MSIGDB_TOPK = 25
 ADAPTIVE_MIN_GROUP_SIZE = 4
 MIN_VARIABLE_FEATURES = 2
-COMPACTION_METHOD_IDENTITY = "multiview_all_pairs"
+DEFAULT_TRANSCRIPTOMIC_N_FEATURES = 2000
+COMPACTION_METHOD_IDENTITY = "multiview_all_pairs_with_transcriptomic_guard"
 
 
 # =============================================================================
@@ -41,6 +45,7 @@ class CompactionOutputs:
     group_membership: pd.DataFrame
     thresholds_by_label: pd.DataFrame
     view_audit: pd.DataFrame
+    transcriptomic_provenance: Dict[str, Any]
 
 
 def _normalize_celltypist_label(value: Any) -> str:
@@ -140,6 +145,139 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
     if na == 0.0 or nb == 0.0:
         return float("nan")
     return float(np.dot(a, b) / (na * nb))
+
+
+def _pearson(a: np.ndarray, b: np.ndarray) -> float:
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    if a.size < 2 or a.size != b.size or not np.isfinite(a).all() or not np.isfinite(b).all():
+        return float("nan")
+    a_centered = a - float(a.mean())
+    b_centered = b - float(b.mean())
+    denominator = float(np.linalg.norm(a_centered) * np.linalg.norm(b_centered))
+    if denominator == 0.0:
+        return float("nan")
+    return float(np.dot(a_centered, b_centered) / denominator)
+
+
+def _prepare_transcriptomic_view(
+    adata: ad.AnnData,
+    *,
+    cluster_per_cell: pd.Series,
+    all_clusters: list[str],
+    source: str = "auto",
+    n_features: int = DEFAULT_TRANSCRIPTOMIC_N_FEATURES,
+) -> tuple[pd.DataFrame, dict[str, Any], dict[str, Any]]:
+    requested_source = str(source).strip()
+    normalized_source = requested_source.lower()
+    valid_sources = {"auto", "counts_cb", "counts_raw", "x"}
+    if normalized_source not in valid_sources:
+        raise ValueError("transcriptomic_source must be one of: auto, counts_cb, counts_raw, X")
+    if int(n_features) < MIN_VARIABLE_FEATURES:
+        raise ValueError(
+            f"transcriptomic_n_features must be at least {MIN_VARIABLE_FEATURES}"
+        )
+
+    if normalized_source == "auto":
+        if "counts_cb" in adata.layers:
+            resolved_source = "counts_cb"
+        elif "counts_raw" in adata.layers:
+            resolved_source = "counts_raw"
+        else:
+            resolved_source = "X"
+    elif normalized_source == "x":
+        resolved_source = "X"
+    else:
+        resolved_source = normalized_source
+
+    if resolved_source == "X":
+        matrix = adata.X
+        aggregation = "cluster_mean_existing_X"
+    else:
+        if resolved_source not in adata.layers:
+            raise KeyError(f"Compaction transcriptomic source {resolved_source!r} is unavailable.")
+        matrix = adata.layers[resolved_source]
+        aggregation = "cluster_sum_target_10000_log1p"
+
+    if matrix.shape != adata.shape:
+        raise ValueError("Compaction transcriptomic matrix is not aligned to adata.")
+    if adata.var_names.astype(str).duplicated().any():
+        raise ValueError("Compaction transcriptomic features must have unique names.")
+
+    cluster_index = {cluster: index for index, cluster in enumerate(all_clusters)}
+    codes = cluster_per_cell.map(cluster_index).to_numpy(dtype=int)
+    membership = sparse.csr_matrix(
+        (
+            np.ones(adata.n_obs, dtype=float),
+            (codes, np.arange(adata.n_obs, dtype=int)),
+        ),
+        shape=(len(all_clusters), adata.n_obs),
+    )
+    aggregated = membership @ matrix
+    if sparse.issparse(aggregated):
+        aggregated = aggregated.toarray()
+    else:
+        aggregated = np.asarray(aggregated, dtype=float)
+
+    cluster_sizes = np.bincount(codes, minlength=len(all_clusters)).astype(float)
+    if resolved_source == "X":
+        values = aggregated / cluster_sizes[:, None]
+    else:
+        if np.nanmin(aggregated) < 0.0:
+            raise ValueError(f"Compaction count source {resolved_source!r} contains negative values.")
+        library_sizes = aggregated.sum(axis=1)
+        if (library_sizes <= 0.0).any():
+            empty = [all_clusters[index] for index in np.flatnonzero(library_sizes <= 0.0)]
+            raise ValueError(f"Compaction transcriptomic pseudobulks are empty for clusters: {empty}")
+        values = np.log1p(aggregated / library_sizes[:, None] * 10000.0)
+
+    finite_features = np.isfinite(values).all(axis=0)
+    variances = np.var(values, axis=0)
+    variable_features = finite_features & np.isfinite(variances) & (variances > 0.0)
+    variable_indices = np.flatnonzero(variable_features)
+    if variable_indices.size < MIN_VARIABLE_FEATURES:
+        raise ValueError(
+            "Compaction transcriptomic view has fewer than two complete variable features."
+        )
+    ranked = variable_indices[
+        np.argsort(-variances[variable_indices], kind="stable")
+    ]
+    selected = ranked[: min(int(n_features), int(ranked.size))]
+    selected_names = adata.var_names.astype(str).to_numpy()[selected].tolist()
+    selected_hash = hashlib.sha256("\n".join(selected_names).encode("utf-8")).hexdigest()
+    frame = pd.DataFrame(
+        values[:, selected],
+        index=all_clusters,
+        columns=selected_names,
+        dtype=float,
+    )
+    audit = {
+        "view": "Transcriptome",
+        "required": True,
+        "status": "available",
+        "source": resolved_source,
+        "aggregation": aggregation,
+        "feature_selection": "top_variance_across_parent_cluster_pseudobulks",
+        "n_input_features": int(adata.n_vars),
+        "n_variable_features": int(variable_indices.size),
+        "n_selected_features": int(selected.size),
+        "n_complete_clusters": int(len(all_clusters)),
+        "incomplete_clusters": "",
+        "selected_feature_sha256": selected_hash,
+    }
+    provenance = {
+        "requested_source": requested_source,
+        "resolved_source": resolved_source,
+        "aggregation": aggregation,
+        "normalization_target_sum": 10000.0 if resolved_source != "X" else None,
+        "feature_selection": "top_variance_across_parent_cluster_pseudobulks",
+        "n_input_features": int(adata.n_vars),
+        "n_variable_features": int(variable_indices.size),
+        "n_selected_features": int(selected.size),
+        "selected_feature_sha256": selected_hash,
+        "selected_features": selected_names,
+    }
+    return frame, audit, provenance
 
 
 def _cosine_topk_union(a: np.ndarray, b: np.ndarray, *, k: int = MSIGDB_TOPK) -> float:
@@ -246,6 +384,9 @@ def compact_clusters_by_multiview_agreement(
     dorothea_threshold_cap: float = 0.98,
     msigdb_threshold_cap: float = 0.98,
     msigdb_threshold_cap_by_gmt: Optional[Dict[str, float]] = None,
+    transcriptomic_source: str = "auto",
+    transcriptomic_n_features: int = DEFAULT_TRANSCRIPTOMIC_N_FEATURES,
+    transcriptomic_threshold_cap: float = 0.99,
     adaptive_quantile: float = 0.90,
     msigdb_required: bool = True,
 ) -> CompactionOutputs:
@@ -263,6 +404,10 @@ def compact_clusters_by_multiview_agreement(
         raise ValueError(f"progeny_threshold_cap must be in [{FLOOR_PROGENY}, 1]")
     if not FLOOR_DOROTHEA <= float(dorothea_threshold_cap) <= 1.0:
         raise ValueError(f"dorothea_threshold_cap must be in [{FLOOR_DOROTHEA}, 1]")
+    if not FLOOR_TRANSCRIPTOMIC <= float(transcriptomic_threshold_cap) <= 1.0:
+        raise ValueError(
+            f"transcriptomic_threshold_cap must be in [{FLOOR_TRANSCRIPTOMIC}, 1]"
+        )
     minimum_default_msigdb_cap = max(FLOOR_MSIGDB_DEFAULT, *MSIGDB_FLOOR_BY_GMT.values())
     if not minimum_default_msigdb_cap <= float(msigdb_threshold_cap) <= 1.0:
         raise ValueError(f"msigdb_threshold_cap must be in [{minimum_default_msigdb_cap}, 1]")
@@ -279,6 +424,15 @@ def compact_clusters_by_multiview_agreement(
     cluster_per_cell = adata.obs[str(labels_obs_key)].astype(str)
     cluster_sizes = cluster_per_cell.value_counts()
     all_clusters = sorted(cluster_sizes.index.astype(str).tolist())
+    transcriptome, transcriptome_audit, transcriptomic_provenance = (
+        _prepare_transcriptomic_view(
+            adata,
+            cluster_per_cell=cluster_per_cell,
+            all_clusters=all_clusters,
+            source=transcriptomic_source,
+            n_features=transcriptomic_n_features,
+        )
+    )
 
     annotation = round_snapshot.get("annotation", {})
     if not isinstance(annotation, dict):
@@ -319,7 +473,7 @@ def compact_clusters_by_multiview_agreement(
     if not isinstance(raw_msigdb, dict):
         raise TypeError("MSigDB activity_by_gmt must be a dictionary when present.")
     msigdb: dict[str, pd.DataFrame] = {}
-    view_audits = [progeny_audit, dorothea_audit]
+    view_audits = [transcriptome_audit, progeny_audit, dorothea_audit]
     for gmt, value in sorted(raw_msigdb.items(), key=lambda item: str(item[0])):
         prepared, block_audit = _prepare_activity_view(
             f"MSigDB:{gmt}", value, all_clusters=all_clusters, required=msigdb_required,
@@ -331,6 +485,7 @@ def compact_clusters_by_multiview_agreement(
         raise ValueError("msigdb_required=True but no valid MSigDB activity blocks are available.")
 
     complete_by_view: dict[str, set[str]] = {
+        "Transcriptome": set(transcriptome.dropna(axis=0, how="any").index.astype(str)),
         "PROGENy": set(progeny.dropna(axis=0, how="any").index.astype(str)),
         "DoRothEA": set(dorothea.dropna(axis=0, how="any").index.astype(str)),
     }
@@ -365,7 +520,7 @@ def compact_clusters_by_multiview_agreement(
             reasons.append("celltypist_cluster_label_mismatch")
         if int(min_cells) > 0 and int(cluster_sizes.get(cluster, 0)) < int(min_cells):
             reasons.append("below_compact_min_cells")
-        for view_name in ("PROGENy", "DoRothEA"):
+        for view_name in ("Transcriptome", "PROGENy", "DoRothEA"):
             if cluster not in complete_by_view[view_name]:
                 reasons.append(f"missing_{view_name.lower()}_activity")
         if msigdb_required:
@@ -418,6 +573,13 @@ def compact_clusters_by_multiview_agreement(
 
         pair_indices = [(a, b) for i, a in enumerate(clusters) for b in clusters[i + 1:]]
         similarities: dict[str, dict[tuple[str, str], float]] = {
+            "Transcriptome": {
+                pair: _pearson(
+                    transcriptome.loc[pair[0]].to_numpy(),
+                    transcriptome.loc[pair[1]].to_numpy(),
+                )
+                for pair in pair_indices
+            },
             "PROGENy": {
                 pair: _cosine(progeny.loc[pair[0]].to_numpy(), progeny.loc[pair[1]].to_numpy())
                 for pair in pair_indices
@@ -438,6 +600,7 @@ def compact_clusters_by_multiview_agreement(
         adaptive = len(clusters) >= ADAPTIVE_MIN_GROUP_SIZE
         view_thresholds: dict[str, dict[str, float | bool]] = {}
         threshold_specs = {
+            "Transcriptome": (FLOOR_TRANSCRIPTOMIC, float(transcriptomic_threshold_cap)),
             "PROGENy": (FLOOR_PROGENY, float(progeny_threshold_cap)),
             "DoRothEA": (FLOOR_DOROTHEA, float(dorothea_threshold_cap)),
             **{
@@ -470,6 +633,10 @@ def compact_clusters_by_multiview_agreement(
 
         passed_edges: list[tuple[str, str]] = []
         for a, b in pair_indices:
+            pass_transcriptome = (
+                similarities["Transcriptome"][(a, b)]
+                >= view_thresholds["Transcriptome"]["effective"]
+            )
             pass_progeny = similarities["PROGENy"][(a, b)] >= view_thresholds["PROGENy"]["effective"]
             pass_dorothea = similarities["DoRothEA"][(a, b)] >= view_thresholds["DoRothEA"]["effective"]
             msigdb_passes = {
@@ -480,11 +647,15 @@ def compact_clusters_by_multiview_agreement(
             n_msigdb_passed = sum(msigdb_passes.values())
             n_msigdb_required = _msigdb_required_passes(len(msigdb))
             pass_msigdb = n_msigdb_passed >= n_msigdb_required if msigdb_required else True
-            pass_all = bool(pass_progeny and pass_dorothea and pass_msigdb)
+            pass_all = bool(
+                pass_transcriptome and pass_progeny and pass_dorothea and pass_msigdb
+            )
             if pass_all:
                 passed_edges.append((a, b))
 
             required_margins = [
+                similarities["Transcriptome"][(a, b)]
+                - float(view_thresholds["Transcriptome"]["effective"]),
                 similarities["PROGENy"][(a, b)] - float(view_thresholds["PROGENy"]["effective"]),
                 similarities["DoRothEA"][(a, b)] - float(view_thresholds["DoRothEA"]["effective"]),
             ]
@@ -508,6 +679,11 @@ def compact_clusters_by_multiview_agreement(
                 "confident_fraction_b": eligibility_by_cluster.loc[b, "confident_fraction"],
                 "winning_fraction_a": eligibility_by_cluster.loc[a, "winning_fraction"],
                 "winning_fraction_b": eligibility_by_cluster.loc[b, "winning_fraction"],
+                "sim_transcriptome": similarities["Transcriptome"][(a, b)],
+                "floor_transcriptome": FLOOR_TRANSCRIPTOMIC,
+                "cap_transcriptome": float(transcriptomic_threshold_cap),
+                "threshold_transcriptome": view_thresholds["Transcriptome"]["effective"],
+                "pass_transcriptome": bool(pass_transcriptome),
                 "sim_progeny": similarities["PROGENy"][(a, b)],
                 "floor_progeny": FLOOR_PROGENY,
                 "cap_progeny": float(progeny_threshold_cap),
@@ -550,7 +726,10 @@ def compact_clusters_by_multiview_agreement(
                     "celltypist_label": celltypist_label,
                     "members": list(component),
                     "n_members": len(component),
-                    "reason": "required multiview agreement within a trusted CellTypist label",
+                    "reason": (
+                        "required transcriptomic and activity-view agreement within a trusted "
+                        "CellTypist label"
+                    ),
                     "grouping": grouping,
                 })
 
@@ -594,6 +773,7 @@ def compact_clusters_by_multiview_agreement(
         group_membership=pd.DataFrame(membership_rows),
         thresholds_by_label=pd.DataFrame(threshold_rows),
         view_audit=pd.DataFrame(view_audits),
+        transcriptomic_provenance=transcriptomic_provenance,
     )
 
 
@@ -629,6 +809,9 @@ def create_compacted_round_from_parent_round(
     dorothea_threshold_cap: float = 0.98,
     msigdb_threshold_cap: float = 0.98,
     msigdb_threshold_cap_by_gmt: dict[str, float] | None = None,
+    transcriptomic_source: str = "auto",
+    transcriptomic_n_features: int = DEFAULT_TRANSCRIPTOMIC_N_FEATURES,
+    transcriptomic_threshold_cap: float = 0.99,
     adaptive_quantile: float = 0.90,
     msigdb_required: bool = True,
 ) -> None:
@@ -666,6 +849,9 @@ def create_compacted_round_from_parent_round(
         dorothea_threshold_cap=dorothea_threshold_cap,
         msigdb_threshold_cap=msigdb_threshold_cap,
         msigdb_threshold_cap_by_gmt=msigdb_threshold_cap_by_gmt,
+        transcriptomic_source=transcriptomic_source,
+        transcriptomic_n_features=transcriptomic_n_features,
+        transcriptomic_threshold_cap=transcriptomic_threshold_cap,
         adaptive_quantile=adaptive_quantile,
         msigdb_required=msigdb_required,
     )
@@ -704,22 +890,28 @@ def create_compacted_round_from_parent_round(
         "no_op_policy": "retain_active_compacted_child",
         "similarity_metric": "cosine_after_global_feature_zscore",
         "msigdb_similarity_metric": f"top_{MSIGDB_TOPK}_union_cosine_after_global_feature_zscore",
+        "transcriptomic_similarity_metric": "pearson_cluster_pseudobulk",
+        "transcriptomic_provenance": outputs.transcriptomic_provenance,
         "params": {
             "min_cells": int(min_cells),
             "zscore_scope": str(zscore_scope),
             "grouping": "complete_link" if str(grouping) == "clique" else str(grouping),
             "adaptive_min_group_size": ADAPTIVE_MIN_GROUP_SIZE,
             "adaptive_quantile": float(adaptive_quantile),
+            "transcriptomic_source": str(transcriptomic_source),
+            "transcriptomic_n_features": int(transcriptomic_n_features),
             "msigdb_required": bool(msigdb_required),
             "msigdb_majority_fraction": MSIGDB_MAJORITY_FRAC,
         },
         "threshold_policy": {
             "progeny_floor": FLOOR_PROGENY,
             "dorothea_floor": FLOOR_DOROTHEA,
+            "transcriptomic_floor": FLOOR_TRANSCRIPTOMIC,
             "msigdb_floor_default": FLOOR_MSIGDB_DEFAULT,
             "msigdb_floor_by_gmt": dict(MSIGDB_FLOOR_BY_GMT),
             "progeny_cap": float(progeny_threshold_cap),
             "dorothea_cap": float(dorothea_threshold_cap),
+            "transcriptomic_cap": float(transcriptomic_threshold_cap),
             "msigdb_cap_default": float(msigdb_threshold_cap),
             "msigdb_cap_by_gmt": dict(msigdb_threshold_cap_by_gmt or {}),
         },

@@ -6,6 +6,7 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
+from scipy import sparse
 
 from scomnom.compaction_utils import (
     _complete_link_components,
@@ -53,7 +54,15 @@ def _make_adata(
         },
         index=[f"cell_{index}" for index in range(cluster_values.size)],
     )
-    adata = ad.AnnData(X=np.zeros((cluster_values.size, 2)), obs=obs)
+    profiles = {
+        "A": np.array([5.0, 4.0, 3.0, 2.0, 1.0, 0.5]),
+        "B": np.array([5.1, 4.1, 3.1, 2.1, 1.1, 0.6]),
+        "C": np.array([0.5, 1.0, 2.0, 3.0, 4.0, 5.0]),
+        "D": np.array([1.0, 5.0, 1.0, 5.0, 1.0, 5.0]),
+    }
+    matrix = np.vstack([profiles[cluster] for cluster in cluster_values])
+    adata = ad.AnnData(X=matrix, obs=obs)
+    adata.var_names = [f"gene_{index}" for index in range(matrix.shape[1])]
 
     audit_rows = []
     for cluster in CLUSTERS:
@@ -120,9 +129,43 @@ def test_compaction_merges_only_supported_pair():
     assert not any(set(component) >= {"A", "B", "C"} for component in result.components)
     pair = result.edges.set_index(["a", "b"]).loc[("A", "B")]
     assert bool(pair["pass_all"])
+    assert bool(pair["pass_transcriptome"])
+    assert pair["sim_transcriptome"] >= 0.90
     thresholds = result.thresholds_by_label.query("celltypist_label == 'Myeloid'")
     assert not thresholds["adaptive_used"].any()
-    assert set(thresholds["effective_threshold"]) == {0.70, 0.60}
+    assert set(thresholds["effective_threshold"]) == {0.90, 0.70, 0.60}
+
+
+def test_transcriptomic_guard_vetoes_activity_supported_pair():
+    labels = {"A": "Pair", "B": "Pair", "C": "Other C", "D": "Other D"}
+    adata, snapshot = _make_adata(labels=labels)
+    cluster_b = adata.obs["clusters__r0"].astype(str) == "B"
+    adata.X[cluster_b.to_numpy()] = np.array([0.5, 1.0, 2.0, 3.0, 4.0, 5.0])
+
+    result = _run(adata, snapshot)
+
+    pair = result.edges.set_index(["a", "b"]).loc[("A", "B")]
+    assert bool(pair["pass_progeny"])
+    assert bool(pair["pass_dorothea"])
+    assert bool(pair["pass_msigdb"])
+    assert not bool(pair["pass_transcriptome"])
+    assert not bool(pair["pass_all"])
+    assert result.cluster_id_map["A"] != result.cluster_id_map["B"]
+
+
+def test_transcriptomic_auto_source_prefers_cellbender_counts():
+    adata, snapshot = _make_adata()
+    adata.layers["counts_raw"] = sparse.csr_matrix(np.rint(adata.X * 10.0))
+    adata.layers["counts_cb"] = sparse.csr_matrix(np.rint(adata.X * 8.0))
+
+    result = _run(adata, snapshot)
+
+    provenance = result.transcriptomic_provenance
+    assert provenance["requested_source"] == "auto"
+    assert provenance["resolved_source"] == "counts_cb"
+    assert provenance["aggregation"] == "cluster_sum_target_10000_log1p"
+    assert provenance["n_selected_features"] == adata.n_vars
+    assert len(provenance["selected_feature_sha256"]) == 64
 
 
 def test_missing_required_activity_row_is_ineligible_without_imputation():
@@ -223,6 +266,8 @@ def test_threshold_caps_cannot_undercut_floors():
         _run(adata, snapshot, msigdb_threshold_cap_by_gmt={"HALLMARK": 0.59})
     with pytest.raises(ValueError, match="msigdb_threshold_cap"):
         _run(adata, snapshot, msigdb_threshold_cap=0.59)
+    with pytest.raises(ValueError, match="transcriptomic_threshold_cap"):
+        _run(adata, snapshot, transcriptomic_threshold_cap=0.89)
 
 
 def test_no_op_child_is_active_and_persists_review_tables(tmp_path):
@@ -243,7 +288,9 @@ def test_no_op_child_is_active_and_persists_review_tables(tmp_path):
     child = adata.uns["cluster_rounds"]["r1_compacted"]
     assert adata.uns["active_cluster_round"] == "r1_compacted"
     assert child["compacting"]["did_merge"] is False
-    assert child["compacting"]["method_identity"] == "multiview_all_pairs"
+    assert child["compacting"]["method_identity"] == "multiview_all_pairs_with_transcriptomic_guard"
+    assert child["compacting"]["transcriptomic_provenance"]["resolved_source"] == "X"
+    assert child["compacting"]["threshold_policy"]["transcriptomic_floor"] == pytest.approx(0.90)
     assert child["compacting"]["components"]
     assert child["cfg"]["compact_grouping"] == "complete_link"
 

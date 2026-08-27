@@ -745,6 +745,33 @@ class ClusterAnnotateConfig(BaseModel):
         description="Optional per-GMT upper caps on adaptive MSigDB similarity thresholds.",
     )
 
+    compact_transcriptomic_source: Literal["auto", "counts_cb", "counts_raw", "X"] = Field(
+        "auto",
+        description=(
+            "Expression source for the required transcriptomic compaction safeguard. "
+            "Auto prefers counts_cb, then counts_raw, then X."
+        ),
+    )
+
+    compact_transcriptomic_n_features: int = Field(
+        2000,
+        ge=2,
+        description=(
+            "Number of variable genes retained across parent-cluster pseudobulks for "
+            "transcriptomic compaction concordance."
+        ),
+    )
+
+    compact_transcriptomic_threshold_cap: float = Field(
+        0.99,
+        ge=0.90,
+        le=1.0,
+        description=(
+            "Upper cap on the adaptive transcriptomic Pearson threshold; the immutable "
+            "floor is 0.90."
+        ),
+    )
+
     compact_adaptive_quantile: float = Field(
         0.90,
         gt=0.0,

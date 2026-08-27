@@ -1594,6 +1594,21 @@ def cluster_and_annotate(
         "--thr-msigdb-by-gmt",
         help="[Compaction] Optional per-GMT caps as 'HALLMARK=0.99,REACTOME=0.985'.",
     ),
+    compact_transcriptomic_source: Literal["auto", "counts_cb", "counts_raw", "X"] = typer.Option(
+        "auto",
+        "--compact-transcriptomic-source",
+        help="[Compaction] Expression source for the required transcriptomic safeguard.",
+    ),
+    compact_transcriptomic_n_features: int = typer.Option(
+        2000,
+        "--compact-transcriptomic-n-features",
+        help="[Compaction] Number of variable genes used for transcriptomic concordance.",
+    ),
+    compact_transcriptomic_threshold_cap: float = typer.Option(
+        0.99,
+        "--compact-transcriptomic-threshold-cap",
+        help="[Compaction] Upper cap on the adaptive transcriptomic Pearson threshold.",
+    ),
     compact_adaptive_quantile: float = typer.Option(
         0.90,
         "--compact-adaptive-quantile",
@@ -1755,6 +1770,9 @@ def cluster_and_annotate(
         compact_dorothea_threshold_cap=compact_dorothea_threshold_cap,
         compact_msigdb_threshold_cap=compact_msigdb_threshold_cap,
         compact_msigdb_threshold_cap_by_gmt=compact_msigdb_threshold_cap_by_gmt_dict,
+        compact_transcriptomic_source=compact_transcriptomic_source,
+        compact_transcriptomic_n_features=compact_transcriptomic_n_features,
+        compact_transcriptomic_threshold_cap=compact_transcriptomic_threshold_cap,
         compact_adaptive_quantile=compact_adaptive_quantile,
         msigdb_required=msigdb_required,
 

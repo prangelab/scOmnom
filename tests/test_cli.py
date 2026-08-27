@@ -222,6 +222,9 @@ def test_cluster_dispatch_compaction_caps_and_legacy_aliases(mock_run):
             "--thr-dorothea", "0.83",
             "--compact-msigdb-threshold-cap", "0.89",
             "--thr-msigdb-by-gmt", "HALLMARK=0.88,REACTOME=0.80",
+            "--compact-transcriptomic-source", "counts_raw",
+            "--compact-transcriptomic-n-features", "1500",
+            "--compact-transcriptomic-threshold-cap", "0.97",
             "--compact-adaptive-quantile", "0.85",
         ],
     )
@@ -234,6 +237,9 @@ def test_cluster_dispatch_compaction_caps_and_legacy_aliases(mock_run):
         "HALLMARK": pytest.approx(0.88),
         "REACTOME": pytest.approx(0.80),
     }
+    assert cfg.compact_transcriptomic_source == "counts_raw"
+    assert cfg.compact_transcriptomic_n_features == 1500
+    assert cfg.compact_transcriptomic_threshold_cap == pytest.approx(0.97)
     assert cfg.compact_adaptive_quantile == pytest.approx(0.85)
 
 

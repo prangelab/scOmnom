@@ -253,6 +253,9 @@ def test_clusterannotate_defaults(tmp_path):
     assert cfg.compact_zscore_scope == "global"
     assert cfg.compact_grouping == "complete_link"
     assert cfg.compact_adaptive_quantile == pytest.approx(0.90)
+    assert cfg.compact_transcriptomic_source == "auto"
+    assert cfg.compact_transcriptomic_n_features == 2000
+    assert cfg.compact_transcriptomic_threshold_cap == pytest.approx(0.99)
     assert not hasattr(cfg, "penalty_alpha")
 
 
@@ -287,6 +290,11 @@ def test_clusterannotate_compaction_caps_respect_floors(tmp_path):
         ClusterAnnotateConfig(
             input_path=tmp_path / "a.h5ad",
             compact_msigdb_threshold_cap_by_gmt={"HALLMARK": 0.59},
+        )
+    with pytest.raises(ValueError):
+        ClusterAnnotateConfig(
+            input_path=tmp_path / "a.h5ad",
+            compact_transcriptomic_threshold_cap=0.89,
         )
 
 
