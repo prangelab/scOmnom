@@ -18,6 +18,7 @@
 | `--max-genes-quantile` | `0.999` | Candidate upper-tail `n_genes_by_counts` quantile cutoff. |
 | `--max-counts-mad` | `5.0` | Candidate upper-tail `total_counts` cutoff: median plus `k * MAD`. |
 | `--max-counts-quantile` | `0.999` | Candidate upper-tail `total_counts` quantile cutoff. |
+| `--skip-doublet-detection` | off | Explicitly skip SOLO for an input already quality controlled and doublet filtered upstream. |
 | `--expected-doublet-rate` | `0.1` | Expected per-sample doublet fraction used to threshold SOLO scores; a conservative high-throughput 10x fallback when an experiment-specific rate is unavailable. |
 
 ## Lower-Tail Filtering
@@ -112,12 +113,17 @@ SOLO supplies the ranking evidence, but the expression-derived score does not in
 
 Continuous scores remain in `adata.obs["doublet_score"]`. To revise the expected fraction after inspecting the scores or experimental loading information, use `--apply-doublet-score` with `--expected-doublet-rate`; this reapplies per-sample calling without retraining scVI or SOLO.
 
+For a public or processed input whose retained cells have already undergone documented doublet filtering, `--skip-doublet-detection` bypasses both SOLO scoring and rate-based calling. It does not create `doublet_score` or `predicted_doublet`, and it does not represent the result as a zero doublet rate. Instead, scOmnom records `performed=False` and the skip reason in `adata.uns["solo_scoring"]`, `adata.uns["doublet_calling"]`, and `doublet_detection_status.tsv`. The usual basic QC filters and minimum-cells-per-sample guard still run.
+
+This option is not a computational fallback for a failed SOLO run. Use it only when upstream doublet handling is part of the input provenance. It cannot be combined with `--apply-doublet-score`.
+
 By default, `--doublet-score-mode auto` estimates the sparse operation size required for global SOLO scoring. If the estimate is at or below `--solo-sparse-nnz-limit`, scoring runs globally. If the estimate is larger, scOmnom switches to blocked SOLO scoring to reduce memory pressure. Blocks are planned from the preferred count matrix (`counts_cb`, then `counts_raw`, then `adata.X`) and respect sample boundaries where possible.
 
 Tuning options:
 
 | Option | Default | What it changes |
 | --- | --- | --- |
+| `--skip-doublet-detection` | off | Skip SOLO and doublet removal for a documented upstream-curated input. Other SOLO controls are ignored. |
 | `--expected-doublet-rate` | `0.1` | Expected fraction called as doublets per sample after SOLO scoring. Lower values are less aggressive; higher values remove more cells. Prefer an experiment-specific value when known. |
 | `--doublet-score-mode` | `auto` | SOLO scoring mode: `global`, `blocked`, or `auto`. In `auto`, large estimated sparse operations switch to blocked scoring. |
 | `--solo-sparse-nnz-limit` | `1500000000` | Sparse operation estimate used by `auto` mode and by the block planner. Lower values make blocked scoring activate earlier and produce smaller blocks. |
@@ -131,6 +137,12 @@ Example forcing blocked scoring:
 scomnom load-and-filter ... \
   --doublet-score-mode blocked \
   --solo-max-cells-per-block 50000
+```
+
+Example for an already QC- and doublet-filtered public matrix:
+
+```bash
+scomnom load-and-filter ... --skip-doublet-detection
 ```
 
 SOLO scoring metadata is stored in `adata.uns["solo_scoring"]`, including the requested mode, effective mode, count layer, global sparse estimate, fallback reason, and block summaries.

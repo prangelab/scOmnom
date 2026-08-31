@@ -16,6 +16,7 @@ from scomnom.load_and_filter import (
     normalize_and_hvg,
     pca_neighbors_umap,
     plan_solo_score_blocks,
+    record_doublet_detection_skip,
     run_load_and_filter,
     run_solo_with_scvi,
     sparse_filter_cells_and_genes,
@@ -576,6 +577,25 @@ def test_call_doublets_and_cleanup_after_solo():
     assert out.n_obs <= adata.n_obs
 
 
+def test_record_doublet_detection_skip(tmp_path):
+    adata = synthetic_adata(n_cells=12, n_genes=8)
+    status_path = tmp_path / "doublet_detection_status.tsv"
+
+    record_doublet_detection_skip(
+        adata,
+        batch_key="sample",
+        out_status=status_path,
+    )
+
+    assert "doublet_score" not in adata.obs
+    assert "predicted_doublet" not in adata.obs
+    assert adata.uns["solo_scoring"]["performed"] is False
+    assert adata.uns["doublet_calling"]["method"] == "skipped"
+    assert adata.uns["doublet_calling"]["n_cells_retained"] == 12
+    status = pd.read_csv(status_path, sep="\t")
+    assert status.loc[0, "reason"] == "user_requested_curated_input"
+
+
 # -------------------------------------------------------------------------
 # normalize_and_hvg
 # -------------------------------------------------------------------------
@@ -603,6 +623,61 @@ def test_pca_neighbors_umap():
 # -------------------------------------------------------------------------
 # Full orchestrator: run_load_and_filter
 # -------------------------------------------------------------------------
+def test_run_load_and_filter_skips_doublet_detection(
+    tmp_path,
+    mock_io,
+    mock_plots,
+    monkeypatch,
+):
+    meta = pd.DataFrame(
+        {
+            "sample": ["A", "B"],
+            "donor": ["P1", "P2"],
+        }
+    )
+    mpath = tmp_path / "meta.tsv"
+    meta.to_csv(mpath, sep="\t", index=False)
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("SOLO or doublet calling should not run")
+
+    monkeypatch.setattr(
+        "scomnom.load_and_filter.run_solo_with_scvi",
+        fail_if_called,
+    )
+    monkeypatch.setattr(
+        "scomnom.load_and_filter.call_doublets",
+        fail_if_called,
+    )
+
+    cfg = LoadAndFilterConfig(
+        metadata_tsv=mpath,
+        batch_key="sample",
+        raw_sample_dir=raw_dir,
+        output_dir=tmp_path,
+        output_name="out",
+        skip_doublet_detection=True,
+        mt_prefix="g",
+        ribo_prefixes=["r"],
+        hb_regex="hb",
+        n_top_genes=60,
+        min_genes=1,
+        min_cells=1,
+        min_cells_per_sample=0,
+        max_pct_mt=100,
+        n_jobs=1,
+    )
+
+    out = run_load_and_filter(cfg)
+
+    assert out.uns["doublet_calling"]["performed"] is False
+    assert "predicted_doublet" not in out.obs
+    assert (tmp_path / "doublet_detection_status.tsv").exists()
+    assert not (tmp_path / "doublets_per_sample.tsv").exists()
+
+
 def test_run_load_and_filter(
     tmp_path,
     mock_io,

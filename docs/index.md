@@ -67,12 +67,15 @@ Use `scomnom --help` and `scomnom <command> --help` for command-specific options
 | `--max-genes-quantile` | `0.999` |
 | `--max-counts-mad` | `5.0` |
 | `--max-counts-quantile` | `0.999` |
+| `--skip-doublet-detection` | off |
 | `--expected-doublet-rate` | `0.1` |
 | `--doublet-score-mode` | `auto` |
 | `--solo-sparse-nnz-limit` | `1500000000` |
 | `--solo-max-cells-per-block` | `none` |
 
 The `0.1` expected doublet rate is a conservative high-throughput 10x fallback. Use an experiment-specific value when available; scOmnom stores continuous SOLO scores so calling can be reapplied without retraining.
+
+Already curated inputs can use `--skip-doublet-detection`. This explicit opt-out retains the post-QC cells without generating SOLO scores or reporting a zero doublet rate, and records the skipped status in the output provenance.
 
 See [Filtering Defaults And Rationale](load-and-filter/filtering.md) for the full table of defaults and tuning guidance.
 

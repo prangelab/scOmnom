@@ -148,10 +148,20 @@ def test_loadandfilter_solo_scoring_defaults(tmp_path):
         metadata_tsv=tmpfile(tmp_path, "meta.tsv"),
         output_dir=tmp_path,
     )
+    assert cfg.skip_doublet_detection is False
     assert cfg.expected_doublet_rate == 0.1
     assert cfg.doublet_score_mode == "auto"
     assert cfg.solo_sparse_nnz_limit == 1_500_000_000
     assert cfg.solo_max_cells_per_block is None
+
+
+def test_loadandfilter_rejects_skip_with_apply_doublet_score(tmp_path):
+    with pytest.raises(ValueError, match="cannot be combined"):
+        LoadAndFilterConfig(
+            output_dir=tmp_path,
+            skip_doublet_detection=True,
+            apply_doublet_score=True,
+        )
 
 
 @pytest.mark.parametrize("rate", [0.0, 1.0, -0.1, 1.1])

@@ -144,6 +144,13 @@ class LoadAndFilterConfig(BaseModel):
     )
 
     # ---- Doublets (SOLO) ----
+    skip_doublet_detection: bool = Field(
+        False,
+        description=(
+            "Skip SOLO scoring and doublet removal for inputs that were already "
+            "quality controlled and doublet filtered upstream."
+        ),
+    )
     expected_doublet_rate: float = Field(
         0.1,
         gt=0.0,
@@ -191,6 +198,11 @@ class LoadAndFilterConfig(BaseModel):
 
     @model_validator(mode="after")
     def check_inputs(self):
+        if self.skip_doublet_detection and self.apply_doublet_score is True:
+            raise ValueError(
+                "skip_doublet_detection cannot be combined with apply_doublet_score"
+            )
+
         # --apply-doublet-score mode
         if self.apply_doublet_score is True:
             # metadata not required

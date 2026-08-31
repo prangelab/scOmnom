@@ -369,6 +369,14 @@ def load_and_filter(
     # -------------------------------------------------------------
     # Doublet detection (SOLO)
     # -------------------------------------------------------------
+    skip_doublet_detection: bool = typer.Option(
+        False,
+        "--skip-doublet-detection",
+        help=(
+            "[SOLO] Skip scoring and doublet removal. Use only when the input "
+            "was already quality controlled and doublet filtered upstream."
+        ),
+    ),
     expected_doublet_rate: float = typer.Option(
         0.1,
         "--expected-doublet-rate",
@@ -491,6 +499,7 @@ def load_and_filter(
         max_genes_quantile=max_genes_quantile,
         max_counts_mad=max_counts_mad,
         max_counts_quantile=max_counts_quantile,
+        skip_doublet_detection=skip_doublet_detection,
         expected_doublet_rate=expected_doublet_rate,
         doublet_score_mode=doublet_score_mode,
         solo_sparse_nnz_limit=solo_sparse_nnz_limit,

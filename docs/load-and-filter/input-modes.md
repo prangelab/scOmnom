@@ -63,6 +63,7 @@ Common raw-only tuning options:
 | `--max-pct-mt` | Controls mitochondrial filtering. |
 | `--max-genes-mad` / `--max-genes-quantile` | Controls upper-tail filtering for detected genes. |
 | `--max-counts-mad` / `--max-counts-quantile` | Controls upper-tail filtering for UMI counts. |
+| `--skip-doublet-detection` | Skips SOLO only when the retained cells were already doublet filtered upstream; the skip is recorded explicitly. |
 | `--expected-doublet-rate` | Sets the expected per-sample fraction used for SOLO calling. The `0.1` default is a conservative high-throughput 10x fallback; prefer an experiment-specific rate when known. |
 
 See [Filtering Defaults And Rationale](filtering.md) for the default values and examples.

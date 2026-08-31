@@ -690,7 +690,10 @@ def _collect_qc_summary(adata) -> Dict[str, Any]:
 
     info = getattr(adata, "uns", {}).get("doublet_calling", None)
     if isinstance(info, dict):
-        summary["doublet_observed_rate"] = info.get("observed_global_rate")
+        if info.get("performed") is False:
+            summary["doublet_detection"] = "skipped"
+        else:
+            summary["doublet_observed_rate"] = info.get("observed_global_rate")
 
     for col in ["total_counts", "n_genes_by_counts", "pct_counts_mt", "pct_counts_ribo", "pct_counts_hb"]:
         if hasattr(obs, "columns") and col in obs.columns:

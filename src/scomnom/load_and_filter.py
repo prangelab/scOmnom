@@ -1198,6 +1198,42 @@ def call_doublets(
         )
 
 
+def record_doublet_detection_skip(
+    adata: ad.AnnData,
+    *,
+    batch_key: str,
+    out_status: Path | None = None,
+) -> None:
+    reason = "user_requested_curated_input"
+    adata.uns["solo_scoring"] = {
+        "performed": False,
+        "status": "skipped",
+        "reason": reason,
+    }
+    adata.uns["doublet_calling"] = {
+        "performed": False,
+        "method": "skipped",
+        "reason": reason,
+        "batch_key": str(batch_key),
+        "n_cells_retained": int(adata.n_obs),
+    }
+
+    if out_status is not None:
+        out_status = Path(out_status)
+        out_status.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            [
+                {
+                    "performed": False,
+                    "reason": reason,
+                    "batch_key": str(batch_key),
+                    "n_cells_retained": int(adata.n_obs),
+                }
+            ]
+        ).to_csv(out_status, sep="\t", index=False)
+        LOGGER.info("Wrote doublet-detection status to %s", out_status)
+
+
 def write_qc_filter_stats(
     adata,
     *,
@@ -1455,15 +1491,26 @@ def run_load_and_filter(
         # ---------------------------------------------------------
         # SOLO doublet score generation
         # ---------------------------------------------------------
-        adata = run_solo_with_scvi(
-            adata,
-            batch_key=cfg.batch_key,
-            doublet_score_mode=cfg.doublet_score_mode,
-            solo_sparse_nnz_limit=cfg.solo_sparse_nnz_limit,
-            solo_max_cells_per_block=cfg.solo_max_cells_per_block,
-        )
+        if cfg.skip_doublet_detection:
+            LOGGER.warning(
+                "Skipping SOLO doublet detection because "
+                "--skip-doublet-detection was requested for a curated input."
+            )
+            record_doublet_detection_skip(
+                adata,
+                batch_key=cfg.batch_key,
+                out_status=cfg.output_dir / "doublet_detection_status.tsv",
+            )
+        else:
+            adata = run_solo_with_scvi(
+                adata,
+                batch_key=cfg.batch_key,
+                doublet_score_mode=cfg.doublet_score_mode,
+                solo_sparse_nnz_limit=cfg.solo_sparse_nnz_limit,
+                solo_max_cells_per_block=cfg.solo_max_cells_per_block,
+            )
 
-        LOGGER.info("Saving Anndata with doublet scores...")
+        LOGGER.info("Saving merged pre-doublet-filter AnnData...")
         pre_path = cfg.output_dir / "adata.merged.zarr"
         io_utils.save_dataset(adata, pre_path, fmt="zarr")
 
@@ -1479,20 +1526,21 @@ def run_load_and_filter(
     # Here 'normal mode' and 'only apply doublet filter' merge again
     batch_key = cfg.batch_key or adata.uns.get("batch_key")
 
-    call_doublets(
-        adata,
-        batch_key=cfg.batch_key or "sample_id",
-        expected_doublet_rate=cfg.expected_doublet_rate,
-        out_stats=cfg.output_dir / "doublets_per_sample.tsv",
-    )
-
-    if cfg.make_figures:
-        artifacts = plot_utils.doublet_plots(
+    if not cfg.skip_doublet_detection:
+        call_doublets(
             adata,
-            batch_key=batch_key,
-            figdir=Path("QC_plots") / "doublets",
+            batch_key=cfg.batch_key or "sample_id",
+            expected_doublet_rate=cfg.expected_doublet_rate,
+            out_stats=cfg.output_dir / "doublets_per_sample.tsv",
         )
-        plot_utils.persist_plot_artifacts(artifacts)
+
+        if cfg.make_figures:
+            artifacts = plot_utils.doublet_plots(
+                adata,
+                batch_key=batch_key,
+                figdir=Path("QC_plots") / "doublets",
+            )
+            plot_utils.persist_plot_artifacts(artifacts)
 
     adata = cleanup_after_solo(
         adata,

@@ -95,12 +95,15 @@ Default `load-and-filter` thresholds:
 | `--max-genes-quantile` | `0.999` |
 | `--max-counts-mad` | `5.0` |
 | `--max-counts-quantile` | `0.999` |
+| `--skip-doublet-detection` | off |
 | `--expected-doublet-rate` | `0.1` |
 | `--doublet-score-mode` | `auto` |
 | `--solo-sparse-nnz-limit` | `1500000000` |
 | `--solo-max-cells-per-block` | `none` |
 
 The `0.1` expected doublet rate is a conservative high-throughput 10x fallback used to threshold SOLO scores separately within each sample. Supply an experiment-specific rate when loading or chemistry information supports one; stored scores can be re-thresholded without retraining SOLO.
+
+Use `--skip-doublet-detection` only when the supplied cells were already quality controlled and doublet filtered upstream. The skip is recorded in the output object and `doublet_detection_status.tsv`; scOmnom does not create doublet scores or imply a zero doublet rate.
 
 See the [filtering defaults and rationale](https://prangelab.org/scOmnom/load-and-filter/filtering/) section for details.
 

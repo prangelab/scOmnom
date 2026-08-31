@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## Unreleased
 
 - Hardened cluster compaction with strict activity validation, frozen CellTypist eligibility gates, immutable evidence floors, deterministic all-pairs grouping, explicit no-op rounds, and native audit tables and review plots. Renamed the former `thr_*` controls as adaptive threshold caps while retaining compatibility aliases.
+- Added `load-and-filter --skip-doublet-detection` for documented upstream-curated inputs, with explicit skip provenance and no synthetic doublet rate or scores.
 
 - added typed DataFrame sidecars for Zarr and H5AD round-trips, including nullable Booleans and legacy Boolean-string recovery
 - corrected CellTypist confidence entropy to operate on row-normalized logistic scores while retaining the raw score margin
