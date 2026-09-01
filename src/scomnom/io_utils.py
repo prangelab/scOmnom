@@ -1502,6 +1502,7 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
     Makes adata.uns safe for H5AD/Zarr by:
       - tagging pandas.DataFrame / Series
       - converting numpy arrays + scalars
+      - JSON-tagging nested sequences that AnnData cannot store as homogeneous arrays
       - sanitizing ALL dict keys using sanitize_identifier()
       - stabilizing key collisions with a hash suffix
     """
@@ -1892,7 +1893,21 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
             return out
 
         if isinstance(obj, (list, tuple)):
-            return [_sanitize(v, path_tokens + (str(i),)) for i, v in enumerate(obj)]
+            sanitized = [
+                _sanitize(v, path_tokens + (str(i),))
+                for i, v in enumerate(obj)
+            ]
+            if any(isinstance(value, (dict, list, tuple)) for value in sanitized):
+                return {
+                    "__type__": "scomnom.json_sequence.v1",
+                    "sequence_type": "tuple" if isinstance(obj, tuple) else "list",
+                    "payload_json": json.dumps(
+                        sanitized,
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    ),
+                }
+            return sanitized
 
         if isinstance(obj, pd.Index):
             return obj.astype(str).tolist()
@@ -2306,6 +2321,15 @@ def load_dataset(path: Path) -> ad.AnnData:
 
             if t == _SIDECAR_REF_TYPE:
                 return _load_sidecar_ref(obj)
+
+            if t == "scomnom.json_sequence.v1":
+                try:
+                    values = _rehydrate(json.loads(str(obj.get("payload_json", "[]"))))
+                    if str(obj.get("sequence_type", "list")) == "tuple":
+                        return tuple(values)
+                    return list(values)
+                except Exception:
+                    return obj
 
         if isinstance(obj, list):
             return [_rehydrate(v) for v in obj]

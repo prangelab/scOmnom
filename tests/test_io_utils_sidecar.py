@@ -164,6 +164,67 @@ def test_compaction_edge_audit_booleans_roundtrip_with_mapping(tmp_path: Path) -
     assert list(compaction["decision_log"]) == ["C00+C01 merged", "C02 retained"]
 
 
+def test_compaction_ragged_sequences_roundtrip(tmp_path: Path) -> None:
+    adata = ad.AnnData(X=np.zeros((3, 2), dtype=np.float32))
+    adata.obs_names = ["cell0", "cell1", "cell2"]
+    adata.var_names = ["gene0", "gene1"]
+    adata.uns["cluster_rounds"] = {
+        "r1_compacted": {
+            "compacting": {
+                "components": [["2", "5"], ["7"], ["3", "4", "8"]],
+                "reverse_map": {
+                    "C00": ["2", "5"],
+                    "C01": ["7"],
+                    "C02": ["3", "4", "8"],
+                },
+                "pairwise": {
+                    "adjacency": {
+                        "T cells": [("2", "5")],
+                        "B cells": [],
+                    }
+                },
+                "decision_log": [
+                    {
+                        "celltypist_label": "T cells",
+                        "members": ["2", "5"],
+                        "n_members": 2,
+                    },
+                    {
+                        "celltypist_label": "Myeloid",
+                        "members": ["3", "4", "8"],
+                        "n_members": 3,
+                    },
+                ],
+            }
+        }
+    }
+
+    out_path = tmp_path / "compaction_ragged.zarr"
+    save_dataset(adata, out_path, fmt="zarr", archive=False)
+    loaded = load_dataset(out_path)
+    compacting = loaded.uns["cluster_rounds"]["r1_compacted"]["compacting"]
+
+    assert compacting["components"] == [["2", "5"], ["7"], ["3", "4", "8"]]
+    reverse_map = {
+        key: list(map(str, members))
+        for key, members in compacting["reverse_map"].items()
+    }
+    assert reverse_map == {
+        "C00": ["2", "5"],
+        "C01": ["7"],
+        "C02": ["3", "4", "8"],
+    }
+    adjacency = {
+        key: [tuple(map(str, pair)) for pair in pairs]
+        for key, pairs in compacting["pairwise"]["adjacency"].items()
+    }
+    assert adjacency == {
+        "T cells": [("2", "5")],
+        "B cells": [],
+    }
+    assert compacting["decision_log"][1]["members"] == ["3", "4", "8"]
+
+
 def test_save_and_load_dataset_with_object_ndarray_sidecar(tmp_path: Path) -> None:
     adata = ad.AnnData(X=np.zeros((2, 2), dtype=np.float32))
     adata.obs_names = ["cell0", "cell1"]
