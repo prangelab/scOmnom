@@ -630,6 +630,19 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                     transcriptomic_threshold_cap=float(
                         getattr(cfg, "compact_transcriptomic_threshold_cap", 0.99)
                     ),
+                    state_divergence_log2fc_threshold=float(
+                        getattr(cfg, "compact_state_divergence_log2fc_threshold", 1.0)
+                    ),
+                    state_divergence_detection_delta_threshold=float(
+                        getattr(
+                            cfg,
+                            "compact_state_divergence_detection_delta_threshold",
+                            0.20,
+                        )
+                    ),
+                    state_divergence_max_fraction=float(
+                        getattr(cfg, "compact_state_divergence_max_fraction", 0.02)
+                    ),
                     adaptive_quantile=float(getattr(cfg, "compact_adaptive_quantile", 0.90)),
                     msigdb_required=bool(getattr(cfg, "msigdb_required", True)),
                 )

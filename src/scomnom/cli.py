@@ -1606,17 +1606,41 @@ def cluster_and_annotate(
     compact_transcriptomic_source: Literal["auto", "counts_cb", "counts_raw", "X"] = typer.Option(
         "auto",
         "--compact-transcriptomic-source",
-        help="[Compaction] Expression source for the required transcriptomic safeguard.",
+        help=(
+            "[Compaction] Count source for the state-divergence veto; auto requires "
+            "counts_cb or counts_raw."
+        ),
     ),
     compact_transcriptomic_n_features: int = typer.Option(
         2000,
         "--compact-transcriptomic-n-features",
-        help="[Compaction] Number of variable genes used for transcriptomic concordance.",
+        help="[Compaction] Number of variable genes used for diagnostic Pearson concordance.",
     ),
     compact_transcriptomic_threshold_cap: float = typer.Option(
         0.99,
         "--compact-transcriptomic-threshold-cap",
-        help="[Compaction] Upper cap on the adaptive transcriptomic Pearson threshold.",
+        help="[Compaction] Upper cap on the diagnostic adaptive Pearson threshold.",
+    ),
+    compact_state_divergence_log2fc_threshold: float = typer.Option(
+        1.0,
+        "--compact-state-divergence-log2fc-threshold",
+        help="[Compaction] Absolute log2FC threshold for the state-divergence veto.",
+    ),
+    compact_state_divergence_detection_delta_threshold: float = typer.Option(
+        0.20,
+        "--compact-state-divergence-detection-delta-threshold",
+        help=(
+            "[Compaction] Absolute detection-fraction difference threshold for the "
+            "state-divergence veto."
+        ),
+    ),
+    compact_state_divergence_max_fraction: float = typer.Option(
+        0.02,
+        "--compact-state-divergence-max-fraction",
+        help=(
+            "[Compaction] Maximum affected-gene fraction that may pass the one-sided "
+            "state-divergence veto."
+        ),
     ),
     compact_adaptive_quantile: float = typer.Option(
         0.90,
@@ -1782,6 +1806,13 @@ def cluster_and_annotate(
         compact_transcriptomic_source=compact_transcriptomic_source,
         compact_transcriptomic_n_features=compact_transcriptomic_n_features,
         compact_transcriptomic_threshold_cap=compact_transcriptomic_threshold_cap,
+        compact_state_divergence_log2fc_threshold=(
+            compact_state_divergence_log2fc_threshold
+        ),
+        compact_state_divergence_detection_delta_threshold=(
+            compact_state_divergence_detection_delta_threshold
+        ),
+        compact_state_divergence_max_fraction=compact_state_divergence_max_fraction,
         compact_adaptive_quantile=compact_adaptive_quantile,
         msigdb_required=msigdb_required,
 

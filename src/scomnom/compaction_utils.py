@@ -26,7 +26,19 @@ MSIGDB_TOPK = 25
 ADAPTIVE_MIN_GROUP_SIZE = 4
 MIN_VARIABLE_FEATURES = 2
 DEFAULT_TRANSCRIPTOMIC_N_FEATURES = 2000
-COMPACTION_METHOD_IDENTITY = "multiview_all_pairs_with_transcriptomic_guard"
+STATE_NORMALIZATION_TARGET = 10000.0
+STATE_LOG2FC_PSEUDOCOUNT = 0.1
+STATE_MIN_EXPRESSED_FRACTION = 0.05
+STATE_TECHNICAL_PREFIXES = ("MT-", "RPS", "RPL", "MTRNR")
+STATE_TECHNICAL_GENES = {"MALAT1"}
+STATE_LOOSE_LOG2FC_THRESHOLD = 0.75
+STATE_LOOSE_DETECTION_DELTA_THRESHOLD = 0.15
+STATE_STRICT_LOG2FC_THRESHOLD = 1.50
+STATE_STRICT_DETECTION_DELTA_THRESHOLD = 0.25
+DEFAULT_STATE_LOG2FC_THRESHOLD = 1.00
+DEFAULT_STATE_DETECTION_DELTA_THRESHOLD = 0.20
+DEFAULT_STATE_MAX_FRACTION = 0.02
+COMPACTION_METHOD_IDENTITY = "multiview_all_pairs_with_state_divergence_veto"
 
 
 # =============================================================================
@@ -46,6 +58,13 @@ class CompactionOutputs:
     thresholds_by_label: pd.DataFrame
     view_audit: pd.DataFrame
     transcriptomic_provenance: Dict[str, Any]
+
+
+@dataclass
+class _StateDivergenceEvidence:
+    expression: pd.DataFrame
+    detection: pd.DataFrame
+    technical_mask: np.ndarray
 
 
 def _normalize_celltypist_label(value: Any) -> str:
@@ -167,7 +186,7 @@ def _prepare_transcriptomic_view(
     all_clusters: list[str],
     source: str = "auto",
     n_features: int = DEFAULT_TRANSCRIPTOMIC_N_FEATURES,
-) -> tuple[pd.DataFrame, dict[str, Any], dict[str, Any]]:
+) -> tuple[pd.DataFrame, _StateDivergenceEvidence, dict[str, Any], dict[str, Any]]:
     requested_source = str(source).strip()
     normalized_source = requested_source.lower()
     valid_sources = {"auto", "counts_cb", "counts_raw", "x"}
@@ -184,7 +203,11 @@ def _prepare_transcriptomic_view(
         elif "counts_raw" in adata.layers:
             resolved_source = "counts_raw"
         else:
-            resolved_source = "X"
+            raise ValueError(
+                "Compaction requires authoritative count evidence in counts_cb or counts_raw "
+                "when transcriptomic_source='auto'. Set transcriptomic_source='X' explicitly "
+                "only when adata.X contains nonnegative counts."
+            )
     elif normalized_source == "x":
         resolved_source = "X"
     else:
@@ -192,17 +215,28 @@ def _prepare_transcriptomic_view(
 
     if resolved_source == "X":
         matrix = adata.X
-        aggregation = "cluster_mean_existing_X"
     else:
         if resolved_source not in adata.layers:
             raise KeyError(f"Compaction transcriptomic source {resolved_source!r} is unavailable.")
         matrix = adata.layers[resolved_source]
-        aggregation = "cluster_sum_target_10000_log1p"
+    aggregation = "cluster_sum_target_10000"
 
     if matrix.shape != adata.shape:
         raise ValueError("Compaction transcriptomic matrix is not aligned to adata.")
     if adata.var_names.astype(str).duplicated().any():
         raise ValueError("Compaction transcriptomic features must have unique names.")
+
+    if sparse.issparse(matrix):
+        count_matrix = matrix.tocsr().astype(np.float64)
+    else:
+        count_matrix = sparse.csr_matrix(np.asarray(matrix, dtype=np.float64))
+    count_matrix.eliminate_zeros()
+    if count_matrix.data.size and (
+        not np.isfinite(count_matrix.data).all() or count_matrix.data.min() < 0.0
+    ):
+        raise ValueError(
+            f"Compaction count source {resolved_source!r} contains non-finite or negative values."
+        )
 
     cluster_index = {cluster: index for index, cluster in enumerate(all_clusters)}
     codes = cluster_per_cell.map(cluster_index).to_numpy(dtype=int)
@@ -213,23 +247,30 @@ def _prepare_transcriptomic_view(
         ),
         shape=(len(all_clusters), adata.n_obs),
     )
-    aggregated = membership @ matrix
+    aggregated = membership @ count_matrix
     if sparse.issparse(aggregated):
         aggregated = aggregated.toarray()
     else:
         aggregated = np.asarray(aggregated, dtype=float)
 
-    cluster_sizes = np.bincount(codes, minlength=len(all_clusters)).astype(float)
-    if resolved_source == "X":
-        values = aggregated / cluster_sizes[:, None]
+    detected = count_matrix.copy()
+    detected.data = np.ones_like(detected.data, dtype=np.float64)
+    detection_counts = membership @ detected
+    if sparse.issparse(detection_counts):
+        detection_counts = detection_counts.toarray()
     else:
-        if np.nanmin(aggregated) < 0.0:
-            raise ValueError(f"Compaction count source {resolved_source!r} contains negative values.")
-        library_sizes = aggregated.sum(axis=1)
-        if (library_sizes <= 0.0).any():
-            empty = [all_clusters[index] for index in np.flatnonzero(library_sizes <= 0.0)]
-            raise ValueError(f"Compaction transcriptomic pseudobulks are empty for clusters: {empty}")
-        values = np.log1p(aggregated / library_sizes[:, None] * 10000.0)
+        detection_counts = np.asarray(detection_counts, dtype=float)
+
+    cluster_sizes = np.bincount(codes, minlength=len(all_clusters)).astype(float)
+    library_sizes = aggregated.sum(axis=1)
+    if (library_sizes <= 0.0).any():
+        empty = [all_clusters[index] for index in np.flatnonzero(library_sizes <= 0.0)]
+        raise ValueError(f"Compaction transcriptomic pseudobulks are empty for clusters: {empty}")
+    normalized_expression = (
+        aggregated / library_sizes[:, None] * STATE_NORMALIZATION_TARGET
+    )
+    detection_fraction = detection_counts / cluster_sizes[:, None]
+    values = np.log1p(normalized_expression)
 
     finite_features = np.isfinite(values).all(axis=0)
     variances = np.var(values, axis=0)
@@ -251,10 +292,37 @@ def _prepare_transcriptomic_view(
         columns=selected_names,
         dtype=float,
     )
+    gene_names = adata.var_names.astype(str)
+    upper_gene_names = gene_names.str.upper()
+    technical_mask = np.asarray(
+        [
+            name in STATE_TECHNICAL_GENES
+            or any(name.startswith(prefix) for prefix in STATE_TECHNICAL_PREFIXES)
+            for name in upper_gene_names
+        ],
+        dtype=bool,
+    )
+    state_evidence = _StateDivergenceEvidence(
+        expression=pd.DataFrame(
+            normalized_expression,
+            index=all_clusters,
+            columns=gene_names,
+            dtype=float,
+        ),
+        detection=pd.DataFrame(
+            detection_fraction,
+            index=all_clusters,
+            columns=gene_names,
+            dtype=float,
+        ),
+        technical_mask=technical_mask,
+    )
     audit = {
         "view": "Transcriptome",
         "required": True,
         "status": "available",
+        "decision_role": "state_divergence_veto",
+        "pearson_role": "diagnostic_only",
         "source": resolved_source,
         "aggregation": aggregation,
         "feature_selection": "top_variance_across_parent_cluster_pseudobulks",
@@ -269,7 +337,11 @@ def _prepare_transcriptomic_view(
         "requested_source": requested_source,
         "resolved_source": resolved_source,
         "aggregation": aggregation,
-        "normalization_target_sum": 10000.0 if resolved_source != "X" else None,
+        "normalization_target_sum": STATE_NORMALIZATION_TARGET,
+        "state_log2fc_pseudocount": STATE_LOG2FC_PSEUDOCOUNT,
+        "state_min_expressed_fraction": STATE_MIN_EXPRESSED_FRACTION,
+        "state_technical_prefixes": list(STATE_TECHNICAL_PREFIXES),
+        "state_technical_genes": sorted(STATE_TECHNICAL_GENES),
         "feature_selection": "top_variance_across_parent_cluster_pseudobulks",
         "n_input_features": int(adata.n_vars),
         "n_variable_features": int(variable_indices.size),
@@ -277,7 +349,66 @@ def _prepare_transcriptomic_view(
         "selected_feature_sha256": selected_hash,
         "selected_features": selected_names,
     }
-    return frame, audit, provenance
+    return frame, state_evidence, audit, provenance
+
+
+def _state_divergence_metrics(
+    evidence: _StateDivergenceEvidence,
+    *,
+    cluster_a: str,
+    cluster_b: str,
+    log2fc_threshold: float,
+    detection_delta_threshold: float,
+) -> dict[str, Any]:
+    expression_a = evidence.expression.loc[cluster_a].to_numpy(dtype=float)
+    expression_b = evidence.expression.loc[cluster_b].to_numpy(dtype=float)
+    detection_a = evidence.detection.loc[cluster_a].to_numpy(dtype=float)
+    detection_b = evidence.detection.loc[cluster_b].to_numpy(dtype=float)
+    log2fc = np.log2(
+        (expression_a + STATE_LOG2FC_PSEUDOCOUNT)
+        / (expression_b + STATE_LOG2FC_PSEUDOCOUNT)
+    )
+    detection_delta = np.abs(detection_a - detection_b)
+    eligible = (
+        np.isfinite(log2fc)
+        & np.isfinite(detection_delta)
+        & (np.maximum(detection_a, detection_b) >= STATE_MIN_EXPRESSED_FRACTION)
+        & ~evidence.technical_mask
+    )
+    n_eligible = int(eligible.sum())
+    if n_eligible < MIN_VARIABLE_FEATURES:
+        raise ValueError(
+            f"Compaction pair {cluster_a!r}/{cluster_b!r} has fewer than two expressed "
+            "non-technical genes for the state-divergence veto."
+        )
+
+    abs_log2fc = np.abs(log2fc)
+
+    def summarize(log2fc_cutoff: float, detection_cutoff: float) -> tuple[int, float]:
+        affected = eligible & (abs_log2fc >= log2fc_cutoff) & (
+            detection_delta >= detection_cutoff
+        )
+        count = int(affected.sum())
+        return count, float(count / n_eligible)
+
+    n_loose, fraction_loose = summarize(
+        STATE_LOOSE_LOG2FC_THRESHOLD,
+        STATE_LOOSE_DETECTION_DELTA_THRESHOLD,
+    )
+    n_medium, fraction_medium = summarize(log2fc_threshold, detection_delta_threshold)
+    n_strict, fraction_strict = summarize(
+        STATE_STRICT_LOG2FC_THRESHOLD,
+        STATE_STRICT_DETECTION_DELTA_THRESHOLD,
+    )
+    return {
+        "n_state_genes_eligible": n_eligible,
+        "n_state_genes_loose": n_loose,
+        "fraction_state_genes_loose": fraction_loose,
+        "n_state_genes_medium": n_medium,
+        "fraction_state_genes_medium": fraction_medium,
+        "n_state_genes_strict": n_strict,
+        "fraction_state_genes_strict": fraction_strict,
+    }
 
 
 def _cosine_topk_union(a: np.ndarray, b: np.ndarray, *, k: int = MSIGDB_TOPK) -> float:
@@ -387,6 +518,9 @@ def compact_clusters_by_multiview_agreement(
     transcriptomic_source: str = "auto",
     transcriptomic_n_features: int = DEFAULT_TRANSCRIPTOMIC_N_FEATURES,
     transcriptomic_threshold_cap: float = 0.99,
+    state_divergence_log2fc_threshold: float = DEFAULT_STATE_LOG2FC_THRESHOLD,
+    state_divergence_detection_delta_threshold: float = DEFAULT_STATE_DETECTION_DELTA_THRESHOLD,
+    state_divergence_max_fraction: float = DEFAULT_STATE_MAX_FRACTION,
     adaptive_quantile: float = 0.90,
     msigdb_required: bool = True,
 ) -> CompactionOutputs:
@@ -408,6 +542,12 @@ def compact_clusters_by_multiview_agreement(
         raise ValueError(
             f"transcriptomic_threshold_cap must be in [{FLOOR_TRANSCRIPTOMIC}, 1]"
         )
+    if float(state_divergence_log2fc_threshold) <= 0.0:
+        raise ValueError("state_divergence_log2fc_threshold must be > 0")
+    if not 0.0 <= float(state_divergence_detection_delta_threshold) <= 1.0:
+        raise ValueError("state_divergence_detection_delta_threshold must be in [0, 1]")
+    if not 0.0 <= float(state_divergence_max_fraction) <= 1.0:
+        raise ValueError("state_divergence_max_fraction must be in [0, 1]")
     minimum_default_msigdb_cap = max(FLOOR_MSIGDB_DEFAULT, *MSIGDB_FLOOR_BY_GMT.values())
     if not minimum_default_msigdb_cap <= float(msigdb_threshold_cap) <= 1.0:
         raise ValueError(f"msigdb_threshold_cap must be in [{minimum_default_msigdb_cap}, 1]")
@@ -424,7 +564,7 @@ def compact_clusters_by_multiview_agreement(
     cluster_per_cell = adata.obs[str(labels_obs_key)].astype(str)
     cluster_sizes = cluster_per_cell.value_counts()
     all_clusters = sorted(cluster_sizes.index.astype(str).tolist())
-    transcriptome, transcriptome_audit, transcriptomic_provenance = (
+    transcriptome, state_evidence, transcriptome_audit, transcriptomic_provenance = (
         _prepare_transcriptomic_view(
             adata,
             cluster_per_cell=cluster_per_cell,
@@ -432,6 +572,28 @@ def compact_clusters_by_multiview_agreement(
             source=transcriptomic_source,
             n_features=transcriptomic_n_features,
         )
+    )
+    transcriptomic_provenance.update(
+        {
+            "decision_rule": "one_sided_state_divergence_veto",
+            "pearson_role": "diagnostic_only",
+            "state_log2fc_threshold": float(state_divergence_log2fc_threshold),
+            "state_detection_delta_threshold": float(
+                state_divergence_detection_delta_threshold
+            ),
+            "state_max_affected_fraction": float(state_divergence_max_fraction),
+            "state_boundary_policy": "affected_fraction_lte_threshold_passes",
+            "diagnostic_envelopes": {
+                "loose": {
+                    "abs_log2fc": STATE_LOOSE_LOG2FC_THRESHOLD,
+                    "detection_delta": STATE_LOOSE_DETECTION_DELTA_THRESHOLD,
+                },
+                "strict": {
+                    "abs_log2fc": STATE_STRICT_LOG2FC_THRESHOLD,
+                    "detection_delta": STATE_STRICT_DETECTION_DELTA_THRESHOLD,
+                },
+            },
+        }
     )
 
     annotation = round_snapshot.get("annotation", {})
@@ -623,6 +785,9 @@ def compact_clusters_by_multiview_agreement(
                 "celltypist_label": celltypist_label,
                 "n_clusters": len(clusters),
                 "view": view_name,
+                "decision_role": (
+                    "diagnostic_only" if view_name == "Transcriptome" else "required"
+                ),
                 "floor": float(floor),
                 "adaptive_used": bool(adaptive),
                 "adaptive_quantile": float(adaptive_quantile) if adaptive else np.nan,
@@ -633,6 +798,15 @@ def compact_clusters_by_multiview_agreement(
 
         passed_edges: list[tuple[str, str]] = []
         for a, b in pair_indices:
+            state_metrics = _state_divergence_metrics(
+                state_evidence,
+                cluster_a=a,
+                cluster_b=b,
+                log2fc_threshold=float(state_divergence_log2fc_threshold),
+                detection_delta_threshold=float(
+                    state_divergence_detection_delta_threshold
+                ),
+            )
             pass_transcriptome = (
                 similarities["Transcriptome"][(a, b)]
                 >= view_thresholds["Transcriptome"]["effective"]
@@ -647,15 +821,25 @@ def compact_clusters_by_multiview_agreement(
             n_msigdb_passed = sum(msigdb_passes.values())
             n_msigdb_required = _msigdb_required_passes(len(msigdb))
             pass_msigdb = n_msigdb_passed >= n_msigdb_required if msigdb_required else True
+            pass_state_divergence = bool(
+                state_metrics["fraction_state_genes_medium"]
+                <= float(state_divergence_max_fraction)
+            )
+            state_fraction = float(state_metrics["fraction_state_genes_medium"])
+            if float(state_divergence_max_fraction) > 0.0:
+                state_decision_margin = (
+                    float(state_divergence_max_fraction) - state_fraction
+                ) / float(state_divergence_max_fraction)
+            else:
+                state_decision_margin = 0.0 if state_fraction == 0.0 else -state_fraction
             pass_all = bool(
-                pass_transcriptome and pass_progeny and pass_dorothea and pass_msigdb
+                pass_state_divergence and pass_progeny and pass_dorothea and pass_msigdb
             )
             if pass_all:
                 passed_edges.append((a, b))
 
             required_margins = [
-                similarities["Transcriptome"][(a, b)]
-                - float(view_thresholds["Transcriptome"]["effective"]),
+                state_decision_margin,
                 similarities["PROGENy"][(a, b)] - float(view_thresholds["PROGENy"]["effective"]),
                 similarities["DoRothEA"][(a, b)] - float(view_thresholds["DoRothEA"]["effective"]),
             ]
@@ -684,6 +868,19 @@ def compact_clusters_by_multiview_agreement(
                 "cap_transcriptome": float(transcriptomic_threshold_cap),
                 "threshold_transcriptome": view_thresholds["Transcriptome"]["effective"],
                 "pass_transcriptome": bool(pass_transcriptome),
+                "pass_transcriptome_diagnostic": bool(pass_transcriptome),
+                "transcriptome_decision_role": "diagnostic_only",
+                **state_metrics,
+                "state_divergence_log2fc_threshold": float(
+                    state_divergence_log2fc_threshold
+                ),
+                "state_divergence_detection_delta_threshold": float(
+                    state_divergence_detection_delta_threshold
+                ),
+                "state_divergence_max_fraction": float(state_divergence_max_fraction),
+                "state_divergence_veto": not pass_state_divergence,
+                "pass_state_divergence": pass_state_divergence,
+                "state_divergence_decision_margin": state_decision_margin,
                 "sim_progeny": similarities["PROGENy"][(a, b)],
                 "floor_progeny": FLOOR_PROGENY,
                 "cap_progeny": float(progeny_threshold_cap),
@@ -727,8 +924,8 @@ def compact_clusters_by_multiview_agreement(
                     "members": list(component),
                     "n_members": len(component),
                     "reason": (
-                        "required transcriptomic and activity-view agreement within a trusted "
-                        "CellTypist label"
+                        "required state-divergence and activity-view agreement within a trusted "
+                        "CellTypist label; Pearson concordance retained as a diagnostic"
                     ),
                     "grouping": grouping,
                 })
@@ -812,6 +1009,9 @@ def create_compacted_round_from_parent_round(
     transcriptomic_source: str = "auto",
     transcriptomic_n_features: int = DEFAULT_TRANSCRIPTOMIC_N_FEATURES,
     transcriptomic_threshold_cap: float = 0.99,
+    state_divergence_log2fc_threshold: float = DEFAULT_STATE_LOG2FC_THRESHOLD,
+    state_divergence_detection_delta_threshold: float = DEFAULT_STATE_DETECTION_DELTA_THRESHOLD,
+    state_divergence_max_fraction: float = DEFAULT_STATE_MAX_FRACTION,
     adaptive_quantile: float = 0.90,
     msigdb_required: bool = True,
 ) -> None:
@@ -852,6 +1052,11 @@ def create_compacted_round_from_parent_round(
         transcriptomic_source=transcriptomic_source,
         transcriptomic_n_features=transcriptomic_n_features,
         transcriptomic_threshold_cap=transcriptomic_threshold_cap,
+        state_divergence_log2fc_threshold=state_divergence_log2fc_threshold,
+        state_divergence_detection_delta_threshold=(
+            state_divergence_detection_delta_threshold
+        ),
+        state_divergence_max_fraction=state_divergence_max_fraction,
         adaptive_quantile=adaptive_quantile,
         msigdb_required=msigdb_required,
     )
@@ -890,7 +1095,8 @@ def create_compacted_round_from_parent_round(
         "no_op_policy": "retain_active_compacted_child",
         "similarity_metric": "cosine_after_global_feature_zscore",
         "msigdb_similarity_metric": f"top_{MSIGDB_TOPK}_union_cosine_after_global_feature_zscore",
-        "transcriptomic_similarity_metric": "pearson_cluster_pseudobulk",
+        "transcriptomic_decision_rule": "one_sided_state_divergence_veto",
+        "transcriptomic_similarity_metric": "pearson_cluster_pseudobulk_diagnostic_only",
         "transcriptomic_provenance": outputs.transcriptomic_provenance,
         "params": {
             "min_cells": int(min_cells),
@@ -900,6 +1106,13 @@ def create_compacted_round_from_parent_round(
             "adaptive_quantile": float(adaptive_quantile),
             "transcriptomic_source": str(transcriptomic_source),
             "transcriptomic_n_features": int(transcriptomic_n_features),
+            "state_divergence_log2fc_threshold": float(
+                state_divergence_log2fc_threshold
+            ),
+            "state_divergence_detection_delta_threshold": float(
+                state_divergence_detection_delta_threshold
+            ),
+            "state_divergence_max_fraction": float(state_divergence_max_fraction),
             "msigdb_required": bool(msigdb_required),
             "msigdb_majority_fraction": MSIGDB_MAJORITY_FRAC,
         },
@@ -912,6 +1125,15 @@ def create_compacted_round_from_parent_round(
             "progeny_cap": float(progeny_threshold_cap),
             "dorothea_cap": float(dorothea_threshold_cap),
             "transcriptomic_cap": float(transcriptomic_threshold_cap),
+            "transcriptomic_pearson_role": "diagnostic_only",
+            "state_divergence_log2fc_threshold": float(
+                state_divergence_log2fc_threshold
+            ),
+            "state_divergence_detection_delta_threshold": float(
+                state_divergence_detection_delta_threshold
+            ),
+            "state_divergence_max_fraction": float(state_divergence_max_fraction),
+            "state_divergence_boundary_policy": "affected_fraction_lte_threshold_passes",
             "msigdb_cap_default": float(msigdb_threshold_cap),
             "msigdb_cap_by_gmt": dict(msigdb_threshold_cap_by_gmt or {}),
         },

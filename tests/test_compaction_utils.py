@@ -63,6 +63,7 @@ def _make_adata(
     matrix = np.vstack([profiles[cluster] for cluster in cluster_values])
     adata = ad.AnnData(X=matrix, obs=obs)
     adata.var_names = [f"gene_{index}" for index in range(matrix.shape[1])]
+    adata.layers["counts_raw"] = sparse.csr_matrix(np.rint(matrix * 10.0))
 
     audit_rows = []
     for cluster in CLUSTERS:
@@ -129,6 +130,7 @@ def test_compaction_merges_only_supported_pair():
     assert not any(set(component) >= {"A", "B", "C"} for component in result.components)
     pair = result.edges.set_index(["a", "b"]).loc[("A", "B")]
     assert bool(pair["pass_all"])
+    assert bool(pair["pass_state_divergence"])
     assert bool(pair["pass_transcriptome"])
     assert pair["sim_transcriptome"] >= 0.90
     thresholds = result.thresholds_by_label.query("celltypist_label == 'Myeloid'")
@@ -136,11 +138,14 @@ def test_compaction_merges_only_supported_pair():
     assert set(thresholds["effective_threshold"]) == {0.90, 0.70, 0.60}
 
 
-def test_transcriptomic_guard_vetoes_activity_supported_pair():
+def test_state_divergence_vetoes_activity_supported_pair():
     labels = {"A": "Pair", "B": "Pair", "C": "Other C", "D": "Other D"}
     adata, snapshot = _make_adata(labels=labels)
     cluster_b = adata.obs["clusters__r0"].astype(str) == "B"
-    adata.X[cluster_b.to_numpy()] = np.array([0.5, 1.0, 2.0, 3.0, 4.0, 5.0])
+    adata.X[cluster_b.to_numpy()] = np.array([0.0, 0.0, 2.0, 3.0, 4.0, 5.0])
+    adata.layers["counts_raw"][cluster_b.to_numpy()] = sparse.csr_matrix(
+        np.tile(np.array([0.0, 0.0, 20.0, 30.0, 40.0, 50.0]), (10, 1))
+    )
 
     result = _run(adata, snapshot)
 
@@ -148,9 +153,28 @@ def test_transcriptomic_guard_vetoes_activity_supported_pair():
     assert bool(pair["pass_progeny"])
     assert bool(pair["pass_dorothea"])
     assert bool(pair["pass_msigdb"])
-    assert not bool(pair["pass_transcriptome"])
+    assert not bool(pair["pass_state_divergence"])
+    assert bool(pair["state_divergence_veto"])
+    assert pair["fraction_state_genes_medium"] > 0.02
     assert not bool(pair["pass_all"])
     assert result.cluster_id_map["A"] != result.cluster_id_map["B"]
+
+
+def test_diagnostic_pearson_cannot_veto_state_supported_pair():
+    labels = {"A": "Pair", "B": "Pair", "C": "Other C", "D": "Other D"}
+    adata, snapshot = _make_adata(labels=labels)
+    cluster_b = adata.obs["clusters__r0"].astype(str).to_numpy() == "B"
+    reversed_profile = np.array([5.0, 10.0, 20.0, 30.0, 40.0, 50.0])
+    adata.layers["counts_raw"][cluster_b] = sparse.csr_matrix(
+        np.tile(reversed_profile, (10, 1))
+    )
+
+    result = _run(adata, snapshot)
+    pair = result.edges.set_index(["a", "b"]).loc[("A", "B")]
+
+    assert not bool(pair["pass_transcriptome_diagnostic"])
+    assert bool(pair["pass_state_divergence"])
+    assert bool(pair["pass_all"])
 
 
 def test_transcriptomic_auto_source_prefers_cellbender_counts():
@@ -163,7 +187,9 @@ def test_transcriptomic_auto_source_prefers_cellbender_counts():
     provenance = result.transcriptomic_provenance
     assert provenance["requested_source"] == "auto"
     assert provenance["resolved_source"] == "counts_cb"
-    assert provenance["aggregation"] == "cluster_sum_target_10000_log1p"
+    assert provenance["aggregation"] == "cluster_sum_target_10000"
+    assert provenance["decision_rule"] == "one_sided_state_divergence_veto"
+    assert provenance["pearson_role"] == "diagnostic_only"
     assert provenance["n_selected_features"] == adata.n_vars
     assert len(provenance["selected_feature_sha256"]) == 64
 
@@ -268,6 +294,44 @@ def test_threshold_caps_cannot_undercut_floors():
         _run(adata, snapshot, msigdb_threshold_cap=0.59)
     with pytest.raises(ValueError, match="transcriptomic_threshold_cap"):
         _run(adata, snapshot, transcriptomic_threshold_cap=0.89)
+    with pytest.raises(ValueError, match="state_divergence_log2fc_threshold"):
+        _run(adata, snapshot, state_divergence_log2fc_threshold=0.0)
+    with pytest.raises(ValueError, match="state_divergence_detection_delta_threshold"):
+        _run(adata, snapshot, state_divergence_detection_delta_threshold=1.01)
+    with pytest.raises(ValueError, match="state_divergence_max_fraction"):
+        _run(adata, snapshot, state_divergence_max_fraction=-0.01)
+
+
+def test_state_divergence_boundary_is_inclusive():
+    source, snapshot = _make_adata(
+        labels={"A": "Pair", "B": "Pair", "C": "Other C", "D": "Other D"}
+    )
+    matrix = np.ones((source.n_obs, 50), dtype=float)
+    cluster_a = source.obs["clusters__r0"].astype(str).to_numpy() == "A"
+    cluster_b = source.obs["clusters__r0"].astype(str).to_numpy() == "B"
+    matrix[cluster_a, 0] = 100.0
+    matrix[cluster_b, 0] = 0.0
+    adata = ad.AnnData(X=matrix.copy(), obs=source.obs.copy())
+    adata.var_names = [f"gene_{index}" for index in range(matrix.shape[1])]
+    adata.layers["counts_raw"] = sparse.csr_matrix(matrix)
+
+    result = _run(adata, snapshot, state_divergence_max_fraction=0.02)
+    pair = result.edges.set_index(["a", "b"]).loc[("A", "B")]
+
+    assert pair["n_state_genes_medium"] == 1
+    assert pair["fraction_state_genes_medium"] == pytest.approx(0.02)
+    assert bool(pair["pass_state_divergence"])
+
+
+def test_auto_count_source_fails_without_authoritative_layer():
+    adata, snapshot = _make_adata()
+    del adata.layers["counts_raw"]
+
+    with pytest.raises(ValueError, match="requires authoritative count evidence"):
+        _run(adata, snapshot)
+
+    result = _run(adata, snapshot, transcriptomic_source="X")
+    assert result.transcriptomic_provenance["resolved_source"] == "X"
 
 
 def test_no_op_child_is_active_and_persists_review_tables(tmp_path):
@@ -288,9 +352,11 @@ def test_no_op_child_is_active_and_persists_review_tables(tmp_path):
     child = adata.uns["cluster_rounds"]["r1_compacted"]
     assert adata.uns["active_cluster_round"] == "r1_compacted"
     assert child["compacting"]["did_merge"] is False
-    assert child["compacting"]["method_identity"] == "multiview_all_pairs_with_transcriptomic_guard"
-    assert child["compacting"]["transcriptomic_provenance"]["resolved_source"] == "X"
+    assert child["compacting"]["method_identity"] == "multiview_all_pairs_with_state_divergence_veto"
+    assert child["compacting"]["transcriptomic_provenance"]["resolved_source"] == "counts_raw"
     assert child["compacting"]["threshold_policy"]["transcriptomic_floor"] == pytest.approx(0.90)
+    assert child["compacting"]["threshold_policy"]["transcriptomic_pearson_role"] == "diagnostic_only"
+    assert child["compacting"]["threshold_policy"]["state_divergence_max_fraction"] == pytest.approx(0.02)
     assert child["compacting"]["components"]
     assert child["cfg"]["compact_grouping"] == "complete_link"
 

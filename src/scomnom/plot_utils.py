@@ -4675,7 +4675,7 @@ def plot_compaction_review(
         ax_pairs.axvline(0.0, color="#252A30", linewidth=1.0)
         ax_pairs.set_yticks(positions)
         ax_pairs.set_yticklabels(labels, fontsize=7)
-        ax_pairs.set_xlabel("Minimum required-view margin")
+        ax_pairs.set_xlabel("Minimum decision margin")
         ax_pairs.set_title(f"Pairs nearest decision boundary (up to {int(max_pairs)})")
         ax_pairs.grid(axis="x", alpha=0.18, linewidth=0.6)
 

@@ -760,8 +760,9 @@ class ClusterAnnotateConfig(BaseModel):
     compact_transcriptomic_source: Literal["auto", "counts_cb", "counts_raw", "X"] = Field(
         "auto",
         description=(
-            "Expression source for the required transcriptomic compaction safeguard. "
-            "Auto prefers counts_cb, then counts_raw, then X."
+            "Count source for the required state-divergence compaction veto. Auto prefers "
+            "counts_cb, then counts_raw, and fails if neither authoritative layer is present; "
+            "X must be requested explicitly."
         ),
     )
 
@@ -770,7 +771,7 @@ class ClusterAnnotateConfig(BaseModel):
         ge=2,
         description=(
             "Number of variable genes retained across parent-cluster pseudobulks for "
-            "transcriptomic compaction concordance."
+            "diagnostic transcriptomic Pearson concordance."
         ),
     )
 
@@ -779,8 +780,37 @@ class ClusterAnnotateConfig(BaseModel):
         ge=0.90,
         le=1.0,
         description=(
-            "Upper cap on the adaptive transcriptomic Pearson threshold; the immutable "
-            "floor is 0.90."
+            "Upper cap on the diagnostic adaptive transcriptomic Pearson threshold; the "
+            "diagnostic floor is 0.90."
+        ),
+    )
+
+    compact_state_divergence_log2fc_threshold: float = Field(
+        1.0,
+        gt=0.0,
+        description=(
+            "Absolute log2 fold-change threshold for genes counted by the transcriptomic "
+            "state-divergence veto."
+        ),
+    )
+
+    compact_state_divergence_detection_delta_threshold: float = Field(
+        0.20,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Absolute detection-fraction difference threshold for genes counted by the "
+            "transcriptomic state-divergence veto."
+        ),
+    )
+
+    compact_state_divergence_max_fraction: float = Field(
+        0.02,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Maximum fraction of eligible genes meeting both state-divergence thresholds. "
+            "Pairs at or below this value may merge; pairs above it are vetoed."
         ),
     )
 

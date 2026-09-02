@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
-- Hardened cluster compaction with a required transcriptomic-concordance safeguard, strict activity validation, frozen CellTypist eligibility gates, immutable evidence floors, deterministic all-pairs grouping, explicit no-op rounds, and native audit tables and review plots. The transcriptomic view uses assay-aware cluster pseudobulks and records its complete feature-selection provenance. Renamed the former `thr_*` controls as adaptive threshold caps while retaining compatibility aliases.
+- Hardened cluster compaction with a required one-sided transcriptomic state-divergence veto, strict activity validation, frozen CellTypist eligibility gates, immutable activity floors, deterministic all-pairs grouping, explicit no-op rounds, and native audit tables and review plots. The default veto blocks pairs when more than 2% of eligible nontechnical genes have both absolute log2 fold change at least 1.0 and detection-fraction difference at least 0.20; Pearson concordance remains diagnostic only. The transcriptomic view requires assay-aware count pseudobulks and records complete provenance. Renamed the former `thr_*` controls as adaptive threshold caps while retaining compatibility aliases.
 
 - added typed DataFrame sidecars for Zarr and H5AD round-trips, including nullable Booleans and legacy Boolean-string recovery
 - corrected CellTypist confidence entropy to operate on row-normalized logistic scores while retaining the raw score margin

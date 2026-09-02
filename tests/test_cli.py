@@ -227,6 +227,9 @@ def test_cluster_dispatch_compaction_caps_and_legacy_aliases(mock_run):
             "--compact-transcriptomic-source", "counts_raw",
             "--compact-transcriptomic-n-features", "1500",
             "--compact-transcriptomic-threshold-cap", "0.97",
+            "--compact-state-divergence-log2fc-threshold", "1.2",
+            "--compact-state-divergence-detection-delta-threshold", "0.25",
+            "--compact-state-divergence-max-fraction", "0.03",
             "--compact-adaptive-quantile", "0.85",
         ],
     )
@@ -242,6 +245,9 @@ def test_cluster_dispatch_compaction_caps_and_legacy_aliases(mock_run):
     assert cfg.compact_transcriptomic_source == "counts_raw"
     assert cfg.compact_transcriptomic_n_features == 1500
     assert cfg.compact_transcriptomic_threshold_cap == pytest.approx(0.97)
+    assert cfg.compact_state_divergence_log2fc_threshold == pytest.approx(1.2)
+    assert cfg.compact_state_divergence_detection_delta_threshold == pytest.approx(0.25)
+    assert cfg.compact_state_divergence_max_fraction == pytest.approx(0.03)
     assert cfg.compact_adaptive_quantile == pytest.approx(0.85)
 
 

@@ -266,6 +266,9 @@ def test_clusterannotate_defaults(tmp_path):
     assert cfg.compact_transcriptomic_source == "auto"
     assert cfg.compact_transcriptomic_n_features == 2000
     assert cfg.compact_transcriptomic_threshold_cap == pytest.approx(0.99)
+    assert cfg.compact_state_divergence_log2fc_threshold == pytest.approx(1.0)
+    assert cfg.compact_state_divergence_detection_delta_threshold == pytest.approx(0.20)
+    assert cfg.compact_state_divergence_max_fraction == pytest.approx(0.02)
     assert not hasattr(cfg, "penalty_alpha")
 
 
@@ -305,6 +308,11 @@ def test_clusterannotate_compaction_caps_respect_floors(tmp_path):
         ClusterAnnotateConfig(
             input_path=tmp_path / "a.h5ad",
             compact_transcriptomic_threshold_cap=0.89,
+        )
+    with pytest.raises(ValueError):
+        ClusterAnnotateConfig(
+            input_path=tmp_path / "a.h5ad",
+            compact_state_divergence_max_fraction=1.01,
         )
 
 
