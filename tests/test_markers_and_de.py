@@ -1261,7 +1261,16 @@ def test_run_liana_ccc_writes_tables_and_uns(monkeypatch, tmp_path: Path) -> Non
     assert (tmp_path / "out" / "tables").exists()
     assert list((tmp_path / "out" / "tables").glob("**/route_family_summary.tsv"))
     assert all(call["use_raw"] is False for call in calls)
-    assert all(call["layer"] == "counts_cb" for call in calls)
+    assert all(call["layer"] == "lognorm_counts_cb" for call in calls)
+    settings_paths = list((tmp_path / "out" / "tables").glob("**/liana_settings.tsv"))
+    assert settings_paths
+    settings_text = settings_paths[0].read_text()
+    assert "input_mode\tlognorm" in settings_text
+    assert "source_count_layer\tcounts_cb" in settings_text
+    assert "expression_transform\tnormalize_total+log1p" in settings_text
+    assert not list((tmp_path / "out" / "tables").glob("**/__settings.txt"))
+    top = runs["sex::female"]["top_interactions"]
+    assert {"route_family", "route_annotation", "route_family_source"}.issubset(top.columns)
 
 
 def test_run_liana_ccc_lognorm_mode_builds_cached_layer(monkeypatch, tmp_path: Path) -> None:
@@ -1359,11 +1368,46 @@ def test_run_liana_ccc_lognorm_mode_builds_cached_layer(monkeypatch, tmp_path: P
     assert all(call["layer"] == "lognorm_counts_cb" for call in calls)
     row_sums = np.asarray(np.expm1(adata.layers["lognorm_counts_cb"]).sum(axis=1)).ravel()
     assert np.allclose(row_sums, np.full(adata.n_obs, 10000.0))
+    assert adata.uns["scomnom_derived_layers"]["lognorm_counts_cb"] == {
+        "source_layer": "counts_cb",
+        "transform": "normalize_total+log1p",
+        "target_sum": 10000.0,
+    }
 
 
 def test_liana_route_family_prefers_cellchat_pathway_lookup() -> None:
     assert md_mod._liana_route_family("BMP2", "BMPR1A_BMPR2") == "BMP"
     assert md_mod._liana_route_family("TGFB1", "TGFBR1_TGFBR2") == "TGFb"
+    assert md_mod._liana_route_info("BMP2", "BMPR1A_BMPR2")["route_family_source"] == "CellChatDB"
+    assert md_mod._liana_route_info("UNKNOWN_LIGAND", "UNKNOWN_RECEPTOR")["route_family_source"] == "heuristic"
+
+
+def test_liana_explicit_missing_expression_sources_fail_closed() -> None:
+    adata = ad.AnnData(X=np.ones((2, 2)))
+
+    with pytest.raises(RuntimeError, match="adata.raw is not initialized"):
+        md_mod._effective_liana_use_raw(adata, requested_use_raw=True, layer=None)
+    with pytest.raises(RuntimeError, match="requested layer 'missing'"):
+        md_mod._effective_liana_layer(
+            adata,
+            requested_use_raw=False,
+            layer="missing",
+            input_mode="counts",
+            lognorm_target_sum=10000.0,
+        )
+
+
+def test_liana_lognorm_rebuilds_layer_when_provenance_does_not_match() -> None:
+    adata = ad.AnnData(X=np.zeros((2, 2)))
+    adata.layers["counts_raw"] = np.array([[1.0, 3.0], [3.0, 1.0]])
+    adata.layers["lognorm_counts_raw"] = np.zeros((2, 2), dtype=np.float32)
+
+    layer = md_mod._build_liana_lognorm_layer(adata, target_sum=5000.0)
+
+    assert layer == "lognorm_counts_raw"
+    row_sums = np.expm1(np.asarray(adata.layers[layer])).sum(axis=1)
+    assert np.allclose(row_sums, np.full(adata.n_obs, 5000.0))
+    assert adata.uns["scomnom_derived_layers"][layer]["target_sum"] == 5000.0
 
 
 def test_run_liana_ccc_expands_a_within_b_condition_spec(monkeypatch, tmp_path: Path) -> None:

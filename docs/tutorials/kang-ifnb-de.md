@@ -157,7 +157,7 @@ scomnom markers-and-de ccc liana \
   --figdir-name figures \
   --round-id r1_scANVI_compacted \
   --condition-key condition \
-  --input-mode counts
+  --input-mode lognorm
 ```
 
 Validated output:
@@ -169,7 +169,7 @@ Validated output:
 
 ![Condition-split LIANA CCC](panels/de_figure3_ccc_draft.png)
 
-Condition-split LIANA cell-cell communication analysis for the Kang IFN-beta PBMC tutorial. Source-target heatmaps, mean-score comparisons, circos summaries, and alluvial plots compare inferred communication structure between `ctrl` and `stim`.
+Condition-split LIANA cell-cell communication analysis for the Kang IFN-beta PBMC tutorial. Source-target heatmaps, mean-score comparisons, circos summaries, and alluvial plots compare inferred communication structure between `ctrl` and `stim`. LIANA uses a library-normalized log1p layer derived from the preferred count assay.
 
 ## Expected Outcomes
 

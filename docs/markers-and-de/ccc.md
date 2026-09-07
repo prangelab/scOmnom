@@ -50,7 +50,7 @@ When an object contains multiple tissues, samples, or datasets, CCC can restrict
 | `--target-level` | none | Allowed receiver dataset levels. Required when `--dataset-key` is set. |
 | `--signal-scope` | `all` for LIANA/NicheNet | `all` or `secreted`; LIANA uses CellChatDB route annotations for secreted filtering. |
 
-For cross-tissue runs, consider `--input-mode lognorm` when datasets differ strongly in depth or chemistry.
+LIANA defaults to `--input-mode lognorm`, using the preferred count layer as the source for library normalization and `log1p`. Raw count-like LIANA input remains available as an explicit expert opt-in.
 
 ## Backend Choice
 

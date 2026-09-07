@@ -359,6 +359,7 @@ def test_markers_and_de_defaults_to_milo_m05_values(tmp_path):
     assert cfg.composition_milo_group_min_overlap == 1
     assert cfg.composition_milo_group_max_lfc_delta is None
     assert cfg.decoupler_consensus_methods == ["ulm", "mlm", "wsum"]
+    assert cfg.liana_input_mode == "lognorm"
 
 
 def test_markers_and_de_validates_decoupler_consensus_methods(tmp_path):

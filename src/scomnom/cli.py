@@ -2938,9 +2938,9 @@ def ccc_liana(
     liana_resource: str = typer.Option("consensus", "--resource"),
     liana_expr_prop: float = typer.Option(0.1, "--expr-prop"),
     liana_input_mode: str = typer.Option(
-        "counts",
+        "lognorm",
         "--input-mode",
-        help="LIANA expression input mode. 'counts' uses counts_cb/counts_raw directly; 'lognorm' builds and reuses a log-normalized layer from counts_cb or counts_raw.",
+        help="LIANA expression input mode. 'lognorm' builds and reuses a library-normalized log1p layer from counts_cb/counts_raw; 'counts' is an explicit expert opt-in.",
     ),
     liana_lognorm_target_sum: float = typer.Option(
         1e4,
@@ -2950,12 +2950,12 @@ def ccc_liana(
     liana_use_raw: bool = typer.Option(
         False,
         "--use-raw/--no-use-raw",
-        help="Use adata.raw explicitly. Default behavior prefers counts_cb, then counts_raw, then adata.X.",
+        help="Use adata.raw explicitly with --input-mode counts. Fails if adata.raw is unavailable.",
     ),
     liana_layer: Optional[str] = typer.Option(
         None,
         "--layer",
-        help="Explicit layer override. By default LIANA prefers counts_cb, then counts_raw, then adata.X.",
+        help="Explicit LIANA layer override. Fails if the named layer is unavailable.",
     ),
     liana_n_perms: Optional[int] = typer.Option(
         1000,
@@ -3064,9 +3064,9 @@ def ccc_liana_paired(
     ),
     pairing_key: str = typer.Option("sample_id", "--pairing-key"),
     input_mode: str = typer.Option(
-        "counts",
+        "lognorm",
         "--input-mode",
-        help="LIANA paired expression input mode. 'counts' uses counts_cb/counts_raw directly; 'lognorm' builds and reuses a log-normalized layer from counts_cb or counts_raw.",
+        help="LIANA paired expression input mode. 'lognorm' builds and reuses a library-normalized log1p layer from counts_cb/counts_raw; 'counts' is an explicit expert opt-in.",
     ),
     lognorm_target_sum: float = typer.Option(
         1e4,

@@ -2714,11 +2714,12 @@ def _lookup_cellchat_route_family(ligand: object, receptor: object) -> tuple[str
 def _lookup_cellchat_route_info(ligand: object, receptor: object) -> dict[str, str]:
     hit = _lookup_cellchat_route_family(ligand, receptor)
     if hit is None:
-        return {"pathway_name": "", "annotation": ""}
+        return {"pathway_name": "", "annotation": "", "source": ""}
     pathway_name, annotation = hit
     return {
         "pathway_name": str(pathway_name or ""),
         "annotation": str(annotation or ""),
+        "source": "CellChatDB",
     }
 
 
@@ -2782,6 +2783,37 @@ def _liana_route_family(ligand: object, receptor: object) -> str:
     return _liana_route_family_heuristic(ligand, receptor)
 
 
+def _liana_route_info(ligand: object, receptor: object) -> dict[str, str]:
+    cellchat = _lookup_cellchat_route_info(ligand, receptor)
+    if cellchat["source"]:
+        return {
+            "route_family": cellchat["pathway_name"],
+            "route_annotation": cellchat["annotation"],
+            "route_family_source": cellchat["source"],
+        }
+    return {
+        "route_family": _liana_route_family_heuristic(ligand, receptor),
+        "route_annotation": "",
+        "route_family_source": "heuristic",
+    }
+
+
+def _annotate_liana_routes(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None:
+        return pd.DataFrame()
+    out = df.copy()
+    if out.empty or not {"ligand_complex", "receptor_complex"}.issubset(out.columns):
+        return out
+    route_info = [
+        _liana_route_info(lig, rec)
+        for lig, rec in zip(out["ligand_complex"], out["receptor_complex"])
+    ]
+    out["route_family"] = [item["route_family"] for item in route_info]
+    out["route_annotation"] = [item["route_annotation"] for item in route_info]
+    out["route_family_source"] = [item["route_family_source"] for item in route_info]
+    return out
+
+
 def _prepare_liana_family_plot_df(df: pd.DataFrame, *, display_map: Mapping[str, str]) -> pd.DataFrame:
     if df is None:
         return pd.DataFrame()
@@ -2797,31 +2829,26 @@ def _prepare_liana_family_plot_df(df: pd.DataFrame, *, display_map: Mapping[str,
     if "receptor_complex" in df.columns:
         out["receptor_family"] = df["receptor_complex"].astype(str).map(_liana_signal_family)
     if {"ligand_complex", "receptor_complex"}.issubset(df.columns):
-        route_info = [
-            _lookup_cellchat_route_info(lig, rec)
-            for lig, rec in zip(df["ligand_complex"], df["receptor_complex"])
-        ]
-        out["route_annotation"] = [x.get("annotation", "") for x in route_info]
-        out["route_family"] = [
-            _liana_route_family(lig, rec)
-            for lig, rec in zip(df["ligand_complex"], df["receptor_complex"])
-        ]
+        annotated = _annotate_liana_routes(df)
+        out["route_annotation"] = annotated["route_annotation"].to_numpy()
+        out["route_family"] = annotated["route_family"].to_numpy()
+        out["route_family_source"] = annotated["route_family_source"].to_numpy()
     return out
 
 
 def _summarize_liana_route_families(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or getattr(df, "empty", True):
-        return pd.DataFrame(columns=["source", "route_family", "n_interactions"])
+        return pd.DataFrame(
+            columns=["source", "route_family", "route_family_source", "n_interactions"]
+        )
     if not {"source", "ligand_complex", "receptor_complex"}.issubset(df.columns):
-        return pd.DataFrame(columns=["source", "route_family", "n_interactions"])
-    work = df.copy()
+        return pd.DataFrame(
+            columns=["source", "route_family", "route_family_source", "n_interactions"]
+        )
+    work = _annotate_liana_routes(df)
     work["source"] = work["source"].astype(str)
-    work["route_family"] = [
-        _liana_route_family(lig, rec)
-        for lig, rec in zip(work["ligand_complex"], work["receptor_complex"])
-    ]
     out = (
-        work.groupby(["source", "route_family"], observed=False)
+        work.groupby(["source", "route_family", "route_family_source"], observed=False)
         .size()
         .rename("n_interactions")
         .reset_index()
@@ -3753,11 +3780,16 @@ def _normalize_liana_candidate_events(
         out["source"] = out["source_token"].astype(str)
     if "target" not in out.columns:
         out["target"] = out["target_token"].astype(str)
+    route_annotations = _annotate_liana_routes(out)
     if "route_family" not in out.columns:
-        out["route_family"] = [
-            _liana_route_family(lig, rec)
-            for lig, rec in zip(out["ligand_complex"], out["receptor_complex"], strict=False)
-        ]
+        out["route_family"] = route_annotations["route_family"].to_numpy()
+    if "route_annotation" not in out.columns:
+        out["route_annotation"] = route_annotations["route_annotation"].to_numpy()
+    if "route_family_source" not in out.columns:
+        if "route_family" in candidate_df.columns:
+            out["route_family_source"] = "provided_unverified"
+        else:
+            out["route_family_source"] = route_annotations["route_family_source"].to_numpy()
     out["branch_pair"] = out["source_label"].astype(str) + " -> " + out["target_label"].astype(str)
     return out
 
@@ -4825,6 +4857,7 @@ def _write_liana_settings(
     groupby: str,
     use_raw: bool,
     layer: Optional[str],
+    requested_layer: Optional[str],
     input_mode: str,
     lognorm_target_sum: Optional[float],
     expr_prop: float,
@@ -4835,28 +4868,37 @@ def _write_liana_settings(
     target_levels: Sequence[str] = (),
     signal_scope: str = "all",
 ) -> None:
+    provenance = _liana_expression_provenance(
+        input_mode=input_mode,
+        effective_layer=layer,
+        requested_layer=requested_layer,
+        use_raw=use_raw,
+    )
     _write_settings(
         out_dir,
-        "__settings.txt",
+        "liana_settings.tsv",
         [
-            f"condition_label={condition_label}",
-            f"condition_key={condition_key}",
-            f"condition_value={condition_value}",
-            f"methods={list(methods)}",
-            f"aggregated_methods={list(aggregated_methods)}",
-            f"resource={resource}",
-            f"groupby={groupby}",
-            f"use_raw={use_raw}",
-            f"layer={layer}",
-            f"input_mode={input_mode}",
-            f"lognorm_target_sum={lognorm_target_sum}",
-            f"expr_prop={expr_prop}",
-            f"n_perms={n_perms}",
-            f"cross_tissue_mode={cross_tissue_mode}",
-            f"dataset_key={dataset_key}",
-            f"source_levels={list(source_levels)}",
-            f"target_levels={list(target_levels)}",
-            f"signal_scope={signal_scope}",
+            f"condition_label\t{condition_label}",
+            f"condition_key\t{condition_key}",
+            f"condition_value\t{condition_value}",
+            f"methods\t{list(methods)}",
+            f"aggregated_methods\t{list(aggregated_methods)}",
+            f"resource\t{resource}",
+            f"groupby\t{groupby}",
+            f"use_raw\t{use_raw}",
+            f"layer\t{layer}",
+            f"input_mode\t{input_mode}",
+            f"expression_source\t{provenance['expression_source']}",
+            f"source_count_layer\t{provenance['source_count_layer']}",
+            f"expression_transform\t{provenance['expression_transform']}",
+            f"lognorm_target_sum\t{lognorm_target_sum}",
+            f"expr_prop\t{expr_prop}",
+            f"n_perms\t{n_perms}",
+            f"cross_tissue_mode\t{cross_tissue_mode}",
+            f"dataset_key\t{dataset_key}",
+            f"source_levels\t{list(source_levels)}",
+            f"target_levels\t{list(target_levels)}",
+            f"signal_scope\t{signal_scope}",
         ],
     )
 
@@ -4903,10 +4945,10 @@ def _effective_liana_use_raw(adata: ad.AnnData, *, requested_use_raw: bool, laye
     if not requested_use_raw:
         return False
     if getattr(adata, "raw", None) is None:
-        LOGGER.warning(
-            "ccc liana: requested use_raw=True but adata.raw is not initialized; falling back to adata.X."
+        raise RuntimeError(
+            "ccc liana: requested use_raw=True but adata.raw is not initialized. "
+            "Initialize adata.raw or select an existing count layer explicitly."
         )
-        return False
     return True
 
 
@@ -4925,9 +4967,23 @@ def _build_liana_lognorm_layer(
             "ccc liana: input_mode=lognorm requires adata.layers['counts_cb'] or adata.layers['counts_raw']."
         )
     target_layer = f"lognorm_{source_layer}"
-    if target_layer in adata.layers:
+    derived_layers = adata.uns.setdefault("scomnom_derived_layers", {})
+    recorded = derived_layers.get(target_layer, {})
+    expected = {
+        "source_layer": source_layer,
+        "transform": "normalize_total+log1p",
+        "target_sum": float(target_sum),
+    }
+    if target_layer in adata.layers and recorded == expected:
         LOGGER.info("ccc liana: reusing adata.layers[%r] as LIANA input.", target_layer)
         return target_layer
+    if target_layer in adata.layers:
+        LOGGER.info(
+            "ccc liana: rebuilding adata.layers[%r] because its normalization provenance "
+            "is absent or differs from target_sum=%s.",
+            target_layer,
+            float(target_sum),
+        )
 
     if target_sum <= 0:
         raise RuntimeError("ccc liana: liana_lognorm_target_sum must be > 0.")
@@ -4968,7 +5024,44 @@ def _build_liana_lognorm_layer(
         work *= scale[:, None]
         np.log1p(work, out=work)
         adata.layers[target_layer] = work
+    derived_layers[target_layer] = expected
     return target_layer
+
+
+def _liana_expression_provenance(
+    *,
+    input_mode: str,
+    effective_layer: Optional[str],
+    requested_layer: Optional[str],
+    use_raw: bool,
+) -> dict[str, str]:
+    mode = str(input_mode).strip().lower()
+    if use_raw:
+        return {
+            "expression_source": "adata.raw",
+            "source_count_layer": "adata.raw",
+            "expression_transform": "none",
+        }
+    if requested_layer is not None:
+        return {
+            "expression_source": f"adata.layers[{str(requested_layer)!r}]",
+            "source_count_layer": (
+                str(requested_layer) if mode == "counts" else "not_recorded_for_explicit_layer"
+            ),
+            "expression_transform": "none" if mode == "counts" else "precomputed_explicit_layer",
+        }
+    if effective_layer is None:
+        return {
+            "expression_source": "adata.X",
+            "source_count_layer": "adata.X",
+            "expression_transform": "none",
+        }
+    layer_name = str(effective_layer)
+    return {
+        "expression_source": f"adata.layers[{layer_name!r}]",
+        "source_count_layer": layer_name.removeprefix("lognorm_") if mode == "lognorm" else layer_name,
+        "expression_transform": "normalize_total+log1p" if mode == "lognorm" else "none",
+    }
 
 
 def _effective_mebocost_layer(
@@ -4997,6 +5090,10 @@ def _effective_liana_layer(
     lognorm_target_sum: float,
 ) -> Optional[str]:
     if layer is not None:
+        if str(layer) not in adata.layers:
+            raise RuntimeError(
+                f"ccc liana: requested layer {str(layer)!r} is not present in adata.layers."
+            )
         return str(layer)
     if requested_use_raw:
         return None
@@ -5006,7 +5103,10 @@ def _effective_liana_layer(
         if preferred in adata.layers:
             LOGGER.info("ccc liana: using adata.layers[%r] as LIANA input.", preferred)
             return str(preferred)
-    LOGGER.info("ccc liana: no counts_cb/counts_raw layer found; using adata.X as LIANA input.")
+    LOGGER.warning(
+        "ccc liana: explicit counts mode found no counts_cb/counts_raw layer; using adata.X. "
+        "Verify that adata.X contains untransformed counts."
+    )
     return None
 
 
@@ -5206,18 +5306,16 @@ def run_liana_ccc(cfg) -> ad.AnnData:
         raise RuntimeError("ccc liana: cannot use both liana_use_raw=True and liana_layer.")
     requested_use_raw = bool(getattr(cfg, "liana_use_raw", False))
     requested_layer = getattr(cfg, "liana_layer", None)
-    liana_input_mode = str(getattr(cfg, "liana_input_mode", "counts")).strip().lower()
+    liana_input_mode = str(getattr(cfg, "liana_input_mode", "lognorm")).strip().lower()
     if liana_input_mode not in {"counts", "lognorm"}:
         raise RuntimeError("ccc liana: liana_input_mode must be one of {'counts', 'lognorm'}.")
     liana_lognorm_target_sum = float(getattr(cfg, "liana_lognorm_target_sum", 1e4))
     if requested_use_raw and liana_input_mode != "counts":
         raise RuntimeError("ccc liana: liana_use_raw=True is only compatible with liana_input_mode='counts'.")
-    if cross_tissue_mode and liana_input_mode == "counts" and not requested_use_raw and requested_layer is None:
+    if liana_input_mode == "counts":
         LOGGER.warning(
-            "ccc liana: cross-tissue mode is running on raw count-like input (%s). "
-            "If source datasets differ strongly in sequencing depth or chemistry, LIANA rankings can be biased by detection depth. "
-            "Consider rerunning with --input-mode lognorm for a depth-normalized expression layer.",
-            "counts_cb/counts_raw",
+            "ccc liana: running on explicit raw count-like input. This expert mode can change "
+            "interaction rankings through library-depth effects; the release default is lognorm."
         )
     liana_layer = _effective_liana_layer(
         adata,
@@ -5343,9 +5441,13 @@ def run_liana_ccc(cfg) -> ad.AnnData:
             LOGGER.warning("ccc liana: no interactions returned for condition=%r", str(condition_label))
             primary_top = pd.DataFrame()
             source_target_summary = pd.DataFrame(columns=["source", "target", "n_interactions"])
-            route_family_summary = pd.DataFrame(columns=["source", "route_family", "n_interactions"])
+            route_family_summary = pd.DataFrame(
+                columns=["source", "route_family", "route_family_source", "n_interactions"]
+            )
         else:
-            primary_top = primary_df.head(int(getattr(cfg, "liana_top_n", 250))).copy()
+            primary_top = _annotate_liana_routes(
+                primary_df.head(int(getattr(cfg, "liana_top_n", 250))).copy()
+            )
             score_col = aggregate_score_col if primary_method == "rank_aggregate" else method_specs[primary_method]["score_col"]
             source_target_summary = _summarize_liana_source_targets(primary_top, score_col=score_col)
             route_family_summary = _summarize_liana_route_families(primary_top)
@@ -5496,6 +5598,7 @@ def run_liana_ccc(cfg) -> ad.AnnData:
             groupby=str(groupby),
             use_raw=use_raw,
             layer=liana_layer,
+            requested_layer=requested_layer,
             input_mode=liana_input_mode,
             lognorm_target_sum=(liana_lognorm_target_sum if liana_input_mode == "lognorm" else None),
             expr_prop=float(getattr(cfg, "liana_expr_prop", 0.1)),
@@ -5507,6 +5610,12 @@ def run_liana_ccc(cfg) -> ad.AnnData:
             signal_scope=str(signal_scope),
         )
 
+        expression_provenance = _liana_expression_provenance(
+            input_mode=liana_input_mode,
+            effective_layer=liana_layer,
+            requested_layer=requested_layer,
+            use_raw=use_raw,
+        )
         runs_store[str(run_spec["run_id"])] = {
             "version": __version__,
             "timestamp_utc": datetime.utcnow().isoformat(),
@@ -5527,6 +5636,8 @@ def run_liana_ccc(cfg) -> ad.AnnData:
             "methods": list(methods),
             "aggregated_methods": list(aggregate_methods),
             "input_mode": liana_input_mode,
+            "expression_layer": liana_layer,
+            **expression_provenance,
             "lognorm_target_sum": liana_lognorm_target_sum if liana_input_mode == "lognorm" else None,
             "primary_method": str(primary_method),
             "top_interactions": primary_top,
@@ -6455,7 +6566,7 @@ def run_liana_paired_rescore(cfg) -> ad.AnnData:
     if str(groupby) not in adata.obs:
         raise RuntimeError(f"ccc liana paired-rescore: groupby={groupby!r} not found in adata.obs")
 
-    liana_input_mode = str(getattr(cfg, "liana_input_mode", "counts")).strip().lower()
+    liana_input_mode = str(getattr(cfg, "liana_input_mode", "lognorm")).strip().lower()
     if liana_input_mode not in {"counts", "lognorm"}:
         raise RuntimeError("ccc liana paired-rescore: liana_input_mode must be one of {'counts', 'lognorm'}.")
     requested_layer = _effective_liana_layer(
@@ -6476,13 +6587,18 @@ def run_liana_paired_rescore(cfg) -> ad.AnnData:
     target_levels = tuple(str(x) for x in (getattr(cfg, "ccc_target_levels", ()) or ()) if str(x))
     cross_tissue_mode = bool(dataset_key)
 
-    if cross_tissue_mode and liana_input_mode == "counts":
+    if liana_input_mode == "counts":
         LOGGER.warning(
-            "ccc liana paired-rescore: cross-tissue mode is running on raw count-like input (counts_cb/counts_raw). "
-            "If source datasets differ strongly in sequencing depth or chemistry, donor-level LIANA rescoring can be biased by detection depth. "
-            "Consider rerunning with --input-mode lognorm for a depth-normalized expression layer."
+            "ccc liana paired-rescore: running on explicit raw count-like input. This expert mode "
+            "can change donor-level edge scores through library-depth effects; the release default is lognorm."
         )
     values_logged = requested_layer is not None and str(requested_layer).startswith("lognorm_")
+    expression_provenance = _liana_expression_provenance(
+        input_mode=liana_input_mode,
+        effective_layer=requested_layer,
+        requested_layer=None,
+        use_raw=False,
+    )
 
     candidate_df = _read_liana_candidate_events(Path(getattr(cfg, "liana_candidate_events")))
     candidate_df = _normalize_liana_candidate_events(
@@ -6618,6 +6734,9 @@ def run_liana_paired_rescore(cfg) -> ad.AnnData:
         f"source_levels\t{','.join(source_levels)}",
         f"target_levels\t{','.join(target_levels)}",
         f"input_mode\t{liana_input_mode}",
+        f"expression_source\t{expression_provenance['expression_source']}",
+        f"source_count_layer\t{expression_provenance['source_count_layer']}",
+        f"expression_transform\t{expression_provenance['expression_transform']}",
         f"lognorm_target_sum\t{getattr(cfg, 'liana_lognorm_target_sum', 1e4) if liana_input_mode == 'lognorm' else ''}",
         f"expression_layer\t{requested_layer}",
         "edge_score_formula\tsqrt(ligand_expr * receptor_expr)",
@@ -6640,6 +6759,7 @@ def run_liana_paired_rescore(cfg) -> ad.AnnData:
         "candidate_events": candidate_df,
         "input_mode": liana_input_mode,
         "expression_layer": requested_layer,
+        **expression_provenance,
         "pairing_key": pairing_key,
     }
     out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.ccc_liana_paired")) + ".zarr")

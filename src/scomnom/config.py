@@ -1179,7 +1179,7 @@ class MarkersAndDEConfig(BaseModel):
     liana_resource: str = "consensus"
     liana_methods: Tuple[str, ...] = ("rank_aggregate",)
     liana_expr_prop: float = 0.1
-    liana_input_mode: str = "counts"
+    liana_input_mode: str = "lognorm"
     liana_lognorm_target_sum: float = 1e4
     liana_use_raw: bool = False
     liana_layer: Optional[str] = None

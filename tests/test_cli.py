@@ -684,6 +684,7 @@ def test_ccc_liana_default_output_name_includes_round_id(mock_run):
     cfg = mock_run.call_args[0][0]
     assert cfg.output_name == "adata.ccc_liana_r5_archetypes"
     assert cfg.output_dir == Path("results")
+    assert cfg.liana_input_mode == "lognorm"
 
 
 @patch("scomnom.cli.run_liana_ccc")

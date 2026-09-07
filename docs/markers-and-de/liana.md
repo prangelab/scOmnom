@@ -93,16 +93,16 @@ scomnom markers-and-de ccc liana ... --liana-method cellphonedb --liana-method n
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `--input-mode` | `counts` | `counts` uses count-like input; `lognorm` builds/reuses a log-normalized layer. |
+| `--input-mode` | `lognorm` | `lognorm` builds/reuses a library-normalized log1p layer; `counts` is an explicit expert opt-in. |
 | `--lognorm-target-sum` | `10000` | Target sum for `--input-mode lognorm`. |
 | `--use-raw` / `--no-use-raw` | `--no-use-raw` | Use `adata.raw` explicitly; only valid with `--input-mode counts`. |
-| `--layer` | none | Explicit layer override. Cannot be combined with `--use-raw`. |
+| `--layer` | none | Explicit layer override. Cannot be combined with `--use-raw`; scOmnom records but does not transform a user-supplied layer. |
 
-For count input, scOmnom prefers `adata.layers["counts_cb"]`, then `adata.layers["counts_raw"]`, then `adata.X`. `--input-mode lognorm` builds `lognorm_counts_cb` or `lognorm_counts_raw` on demand and reuses it.
+By default, scOmnom selects `adata.layers["counts_cb"]` and then `adata.layers["counts_raw"]` as the source count assay, builds `lognorm_counts_cb` or `lognorm_counts_raw` with library normalization to 10,000 counts per cell followed by `log1p`, and reuses that sparse layer only when its recorded source and target sum match. Explicit `--input-mode counts` uses the preferred count assay without transformation and emits a warning because library depth can affect interaction rankings. Explicitly requested missing layers or `adata.raw` fail before inference.
 
 ## CellChatDB Route Families
 
-Route-family plots use the vendored CellChatDB annotation table at `src/scomnom/resources/cellchatdb_interaction_annotations.tsv`. scOmnom first maps each LIANA ligand-receptor pair to CellChatDB route families such as `BMP`, `TGFb`, `NOTCH`, or `CXCL`; unmatched pairs fall back to an internal heuristic classifier.
+Route-family plots use the vendored CellChatDB annotation table at `src/scomnom/resources/cellchatdb_interaction_annotations.tsv`. scOmnom first maps each LIANA ligand-receptor pair to CellChatDB route families such as `BMP`, `TGFb`, `NOTCH`, or `CXCL`; unmatched pairs fall back to a descriptive heuristic classifier. Top-interaction and route-summary tables record `route_family_source` as `CellChatDB` or `heuristic`. Heuristic families are exploratory labels, not database-supported pathway assignments. The strict cross-tissue `secreted` filter retains only interactions explicitly annotated as secreted signaling by CellChatDB.
 
 ## Pooled Outputs
 
@@ -150,7 +150,7 @@ scomnom markers-and-de ccc liana-paired \
 | `--condition-key` | none | Repeatable/comma-separated. Supports `A` and `A@B`. |
 | `--condition-value` | none | Restrict context levels for `A@B`. |
 | `--compare-level` | none | Optional levels of the primary condition variable to keep. |
-| `--input-mode` | `counts` | `counts` or `lognorm`. |
+| `--input-mode` | `lognorm` | `lognorm` by default; `counts` is an explicit expert opt-in. |
 | `--lognorm-target-sum` | `10000` | Target sum for log-normalized layer creation. |
 | `--source-filter` | none | Filter candidate sender labels. |
 | `--target-filter` | none | Filter candidate receiver labels. |
@@ -162,7 +162,7 @@ scomnom markers-and-de ccc liana-paired \
 | `--min-receiver-cells` | `5` | Minimum receiver cells per donor/sample. |
 | `--min-scored-donors-per-group` | `3` | Minimum scored donors per group for effect summaries. |
 
-Paired LIANA scores each candidate edge as `sqrt(ligand_expr * receptor_expr)` per donor/sample, then summarizes edge scores into route-family scores and group-effect tables.
+Paired LIANA scores each candidate edge as `sqrt(ligand_expr * receptor_expr)` per donor/sample, then summarizes edge scores into route-family scores and group-effect tables. It defaults to the same log-normalized expression contract as pooled discovery. Candidate route families retain their recorded source; a route family supplied without provenance is marked `provided_unverified`.
 
 ### Paired Outputs
 
