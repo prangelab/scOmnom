@@ -169,7 +169,7 @@ Validated output:
 
 ![Condition-split LIANA CCC](panels/de_figure3_ccc_draft.png)
 
-Condition-split LIANA cell-cell communication analysis for the Kang IFN-beta PBMC tutorial. Source-target heatmaps, mean-score comparisons, circos summaries, and alluvial plots compare inferred communication structure between `ctrl` and `stim`. LIANA uses a library-normalized log1p layer derived from the preferred count assay.
+Condition-split LIANA cell-cell communication analysis for the Kang IFN-beta PBMC tutorial. Source-target heatmaps, mean-score comparisons, circos summaries, and alluvial plots compare inferred communication structure between `ctrl` and `stim`. LIANA uses a library-normalized log1p layer derived from the preferred count assay. Route-family tables distinguish CellChatDB-backed assignments from descriptive heuristic labels.
 
 ## Expected Outcomes
 
