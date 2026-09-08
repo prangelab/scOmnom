@@ -1,9 +1,9 @@
 # MEBOCOST CCC
 
-`scomnom markers-and-de ccc mebocost` runs MEBOCOST metabolite-mediated cell-cell communication inference on cluster labels from a selected scOmnom clustering round. It writes communication tables, annotation summaries, figures, and an `adata.uns["markers_and_de"]["ccc"]["mebocost"]` payload.
+`scomnom ccc mebocost` runs MEBOCOST metabolite-mediated cell-cell communication inference on cluster labels from a selected scOmnom clustering round. It writes communication tables, annotation summaries, figures, and an `adata.uns["markers_and_de"]["ccc"]["mebocost"]` payload.
 
 ```bash
-scomnom markers-and-de ccc mebocost \
+scomnom ccc mebocost \
   --input-path results/adata.clustered.annotated.zarr.tar.zst \
   --round-id r5_broad_cell_types
 ```
@@ -47,7 +47,7 @@ Cross-tissue mode is activated only when `--dataset-key` is supplied.
 | `--target-level` | none | Allowed receiver dataset levels. Required with `--dataset-key`. |
 
 ```bash
-scomnom markers-and-de ccc mebocost \
+scomnom ccc mebocost \
   --input-path results/adata.merged_dataset_A_dataset_B.zarr.tar.zst \
   --dataset-key dataset \
   --source-level dataset_A \
@@ -109,10 +109,10 @@ Key figures include top metabolite-sensor events, source-target event-count and 
 
 ## Focused Donor-level Rescoring
 
-`scomnom markers-and-de ccc mebocost-paired` rescales a focused candidate event table at donor or sample level. Use it after pooled MEBOCOST has identified candidate metabolite-sensor routes.
+`scomnom ccc mebocost-paired` rescales a focused candidate event table at donor or sample level. Use it after pooled MEBOCOST has identified candidate metabolite-sensor routes.
 
 ```bash
-scomnom markers-and-de ccc mebocost-paired \
+scomnom ccc mebocost-paired \
   --input-path results/adata.merged_dataset_A_dataset_B.zarr.tar.zst \
   --candidate-events results/tables/ccc_mebocost_r5_round1/mebocost_sig_res.tsv \
   --dataset-key dataset \

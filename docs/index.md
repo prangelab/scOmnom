@@ -8,7 +8,7 @@ The manual covers the complete workflow:
 2. `integrate` for batch correction, CellTypist-backed benchmarking, and shared CellTypist predictions
 3. `cluster-and-annotate` for BISC-guided clustering, cluster-level labels, and decoupler activities
 4. optional annotated integration for scANVI refinement
-5. `markers-and-de` for markers, DE, DA, enrichment, and cell-cell communication analyses
+5. independent `markers`, `de`, `da`, `enrichment`, and `ccc` commands for downstream analyses
 
 ## Quick Start
 
@@ -33,16 +33,16 @@ scomnom cluster-and-annotate \
   --output-dir results/
 
 # 4) Marker discovery
-scomnom markers-and-de markers \
+scomnom markers \
   --input-path results/adata.clustered.annotated.zarr
 
 # 5) Within-cluster differential expression
-scomnom markers-and-de de \
+scomnom de \
   --input-path results/adata.clustered.annotated.markers.zarr \
   --condition-key condition
 
 # 6) Differential abundance
-scomnom markers-and-de da \
+scomnom da \
   --input-path results/adata.clustered.annotated.markers.de.zarr \
   --condition-keys condition
 ```
@@ -89,6 +89,6 @@ See [SLURM and HPC](hpc-slurm.md) for the manual section.
 
 - [Manual](manual.md): full workflow reference, examples, expected outputs, AnnData conventions, and HPC notes.
 - [Data conventions](adata-structure.md): scOmnom AnnData structure, count layers, clustering rounds, annotations, and notebook IO guidance.
-- [API Reference](api-reference.md): public Python API exposed through `scomnom`, `scomnom.adata_ops`, `scomnom.markers_and_de`, and `scomnom.plotting`.
+- [API Reference](api-reference.md): public Python API exposed through `scomnom`, `scomnom.adata_ops`, `scomnom.enrichment`, and `scomnom.plotting`.
 - [Changelog](changelog.md): release notes and user-facing behavior changes.
 - [Contributing](contributing.md): project contribution guidelines.

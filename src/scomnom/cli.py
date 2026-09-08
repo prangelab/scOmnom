@@ -1835,7 +1835,7 @@ def cluster_and_annotate(
 
 
 # ======================================================================
-#  markers-and-de
+#  downstream analyses
 # ======================================================================
 class RunWhich(str, Enum):
     both = "both"
@@ -1879,7 +1879,7 @@ def _default_results_dir_for_input_dir(input_dir: Path) -> Path:
 
 
 markers_and_de_app = typer.Typer(
-    help="Discovery markers + DE (cluster-vs-rest and within-cluster contrasts).",
+    help="Deprecated compatibility routes for downstream analyses.",
     invoke_without_command=True,
 )
 enrichment_app = typer.Typer(
@@ -1888,7 +1888,9 @@ enrichment_app = typer.Typer(
 ccc_app = typer.Typer(
     help="Cell-cell communication analysis backends.",
 )
-app.add_typer(markers_and_de_app, name="markers-and-de")
+app.add_typer(enrichment_app, name="enrichment")
+app.add_typer(ccc_app, name="ccc")
+app.add_typer(markers_and_de_app, name="markers-and-de", hidden=True)
 markers_and_de_app.add_typer(enrichment_app, name="enrichment")
 markers_and_de_app.add_typer(ccc_app, name="ccc")
 
@@ -1898,6 +1900,12 @@ def markers_and_de_callback(
     download_gene_models: bool = typer.Option(False, "--download-gene-models"),
     gene_species: str = typer.Option("hsapiens", "--gene-species"),
 ):
+    typer.echo(
+        "Deprecated: 'scomnom markers-and-de ...' is a compatibility alias. "
+        "Use 'scomnom markers', 'scomnom de', 'scomnom da', "
+        "'scomnom enrichment ...', or 'scomnom ccc ...'.",
+        err=True,
+    )
     if download_gene_models:
         from .io_utils import download_gene_models
         download_gene_models(species=str(gene_species))
@@ -1909,6 +1917,7 @@ def _build_cfg(
     input_path: Path,
     output_dir: Optional[Path],
     output_name: str,
+    log_name: str,
     save_h5ad: bool,
     n_jobs: int,
     run: RunWhich,
@@ -1993,7 +2002,7 @@ def _build_cfg(
     out_dir = output_dir or _default_results_dir_for_input(input_path)
     log_dir = out_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "markers-and-de.log"
+    log_path = log_dir / log_name
     init_logging(log_path)
 
     layers = _parse_csv_repeat(pb_counts_layer) or ["counts_cb", "counts_raw"]
@@ -2136,7 +2145,7 @@ def _build_cfg_composition(
     out_dir = output_dir or _default_results_dir_for_input(input_path)
     log_dir = out_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "markers-and-de.composition.log"
+    log_path = log_dir / "da.log"
     init_logging(log_path)
 
     covars = tuple(_parse_csv_repeat(covariates) or ())
@@ -2270,7 +2279,7 @@ def _build_cfg_enrichment_cluster(
     out_dir = output_dir or _default_results_dir_for_input(input_path)
     log_dir = out_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "markers-and-de.enrichment.log"
+    log_path = log_dir / "enrichment.cluster.log"
     init_logging(log_path)
 
     msigdb_sets = list(msigdb_gene_sets) if msigdb_gene_sets else None
@@ -2363,7 +2372,7 @@ def _build_cfg_enrichment_de(
     out_dir = output_dir or _default_results_dir_for_input_dir(input_dir)
     log_dir = out_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "markers-and-de.enrichment-de.log"
+    log_path = log_dir / "enrichment.de.log"
     init_logging(log_path)
 
     msigdb_sets = list(msigdb_gene_sets) if msigdb_gene_sets else None
@@ -2434,7 +2443,7 @@ def _build_cfg_module_score(
     out_dir = output_dir or _default_results_dir_for_input(input_path)
     log_dir = out_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "markers-and-de.module-score.log"
+    log_path = log_dir / "enrichment.module-score.log"
     init_logging(log_path)
 
     return MarkersAndDEConfig(
@@ -2500,7 +2509,7 @@ def _build_cfg_ccc_liana(
     out_dir = output_dir or _default_results_dir_for_input(input_path)
     log_dir = out_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "markers-and-de.ccc.liana.log"
+    log_path = log_dir / "ccc.liana.log"
     init_logging(log_path)
 
     cond_keys = tuple(_parse_csv_repeat(condition_keys) or ())
@@ -2580,7 +2589,7 @@ def _build_cfg_ccc_nichenet(
     out_dir = output_dir or _default_results_dir_for_input(input_path)
     log_dir = out_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "markers-and-de.ccc.nichenet.log"
+    log_path = log_dir / "ccc.nichenet.log"
     init_logging(log_path)
 
     cond_keys = tuple(_parse_csv_repeat(condition_keys) or ())
@@ -2656,7 +2665,7 @@ def _build_cfg_ccc_mebocost(
     out_dir = output_dir or _default_results_dir_for_input(input_path)
     log_dir = out_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "markers-and-de.ccc.mebocost.log"
+    log_path = log_dir / "ccc.mebocost.log"
     init_logging(log_path)
 
     cond_keys = tuple(_parse_csv_repeat(condition_keys) or ())
@@ -2737,7 +2746,7 @@ def _build_cfg_ccc_mebocost_paired(
     out_dir = output_dir or _default_results_dir_for_input(input_path)
     log_dir = out_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "markers-and-de.ccc.mebocost.paired.log"
+    log_path = log_dir / "ccc.mebocost.paired.log"
     init_logging(log_path)
 
     cond_keys = tuple(_parse_csv_repeat(condition_keys) or ())
@@ -2822,7 +2831,7 @@ def _build_cfg_ccc_liana_paired(
     out_dir = output_dir or _default_results_dir_for_input(input_path)
     log_dir = out_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "markers-and-de.ccc.liana.paired.log"
+    log_path = log_dir / "ccc.liana.paired.log"
     init_logging(log_path)
 
     cond_keys = tuple(_parse_csv_repeat(condition_keys) or ())
@@ -3503,6 +3512,10 @@ def ccc_nichenet(
     run_nichenet_ccc(cfg)
 
 
+@app.command(
+    "markers",
+    help="Markers: Define marker genes for each cluster (vs all others.)",
+)
 @markers_and_de_app.command(
     "markers",
     help="Markers: Define marker genes for each cluster (vs all others.)",
@@ -3657,6 +3670,7 @@ def cluster_vs_rest(
         input_path=input_path,
         output_dir=output_dir,
         output_name=str(output_name),
+        log_name="markers.log",
         save_h5ad=save_h5ad,
         n_jobs=n_jobs,
         run=run,
@@ -4065,6 +4079,10 @@ def enrichment_module_score(
     run_module_score(cfg)
 
 
+@app.command(
+    "da",
+    help="DA: differential abundance vs condition (compositional models).",
+)
 @markers_and_de_app.command(
     "da",
     help="DA: differential abundance vs condition (compositional models).",
@@ -4279,6 +4297,10 @@ def composition(
     run_composition(cfg)
 
 
+@app.command(
+    "de",
+    help="DE: within-cluster condition contrasts.",
+)
 @markers_and_de_app.command(
     "de",
     help="Within-cluster contrasts: compare condition levels within each group.",
@@ -4451,6 +4473,7 @@ def within_cluster(
         input_path=input_path,
         output_dir=output_dir,
         output_name=str(output_name),
+        log_name="de.log",
         save_h5ad=save_h5ad,
         n_jobs=n_jobs,
         run=run,

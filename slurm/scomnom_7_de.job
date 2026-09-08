@@ -1,5 +1,5 @@
 #!/bin/bash
-# scOmnom module example: 7) markers-and-de de
+# scOmnom module example: 7) de
 
 #SBATCH --job-name=scomnom_de
 #SBATCH --nodes=1
@@ -50,7 +50,7 @@ export VECLIB_MAXIMUM_THREADS=1
 export IGRAPH_OPENMP_NUM_THREADS=1
 
 echo "Running scomnom..."
-scomnom markers-and-de de \
+scomnom de \
   --run pseudobulk \
   -i "$(basename "$INPUT_ARCHIVE")" \
   -o "$RESULTS_DIR_NAME" \

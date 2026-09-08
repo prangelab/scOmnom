@@ -1,9 +1,9 @@
 # NicheNet CCC
 
-`scomnom markers-and-de ccc nichenet` runs sender-focused NicheNet ligand activity analysis for one receiver cluster or, by default, every receiver cluster. It complements LIANA: LIANA proposes sender-receiver ligand-receptor structure, while NicheNet prioritizes ligands that best explain a receiver transcriptional program.
+`scomnom ccc nichenet` runs sender-focused NicheNet ligand activity analysis for one receiver cluster or, by default, every receiver cluster. It complements LIANA: LIANA proposes sender-receiver ligand-receptor structure, while NicheNet prioritizes ligands that best explain a receiver transcriptional program.
 
 ```bash
-scomnom markers-and-de ccc nichenet \
+scomnom ccc nichenet \
   --input-path results/adata.clustered.annotated.zarr.tar.zst \
   --condition-key treatment \
   --compare-level treated \
@@ -36,7 +36,7 @@ scomnom markers-and-de ccc nichenet \
 | `--signal-scope` | `all` | `all` or `secreted` for downstream ligand-receptor interpretation. |
 
 ```bash
-scomnom markers-and-de ccc nichenet \
+scomnom ccc nichenet \
   --input-path results/adata.merged_dataset_A_dataset_B.zarr.tar.zst \
   --dataset-key dataset \
   --source-level dataset_A \

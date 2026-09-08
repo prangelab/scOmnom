@@ -24,8 +24,8 @@ Interpret them as exploratory or supporting evidence. Cell-level tests use cells
 `--run both` is useful when you want pseudobulk as the primary evidence layer and cell-level results as a sensitive companion. For very large jobs, or when memory pressure/native-thread failures make a combined run unstable, run two separate commands instead:
 
 ```bash
-scomnom markers-and-de de ... --run pseudobulk
-scomnom markers-and-de de ... --run cell
+scomnom de ... --run pseudobulk
+scomnom de ... --run cell
 ```
 
 Write those runs to separate output folders and combine the interpretation afterward.

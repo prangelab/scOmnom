@@ -1,28 +1,26 @@
-# Markers And DE
+# Downstream Analyses
 
-The `markers-and-de` command group covers downstream biological interpretation after clustering and annotation. It includes marker discovery, within-cluster differential expression, differential abundance, enrichment, module scoring, and cell-cell communication workflows.
-
-The subcommands are intentionally grouped together because they share round selection, label handling, plotting/reporting conventions, and output provenance.
+After clustering and annotation, scOmnom exposes marker discovery, within-cluster differential expression, differential abundance, enrichment, module scoring, and cell-cell communication as independent commands. They share round selection, label handling, plotting/reporting conventions, and output provenance without requiring an umbrella command.
 
 ## Quick Entry Points
 
 ```bash
 # Marker discovery
-scomnom markers-and-de markers \
+scomnom markers \
   --input-path results/adata.clustered.annotated.zarr
 
 # Within-cluster DE
-scomnom markers-and-de de \
+scomnom de \
   --input-path results/adata.clustered.annotated.markers.zarr \
   --condition-key condition
 
 # Differential abundance
-scomnom markers-and-de da \
+scomnom da \
   --input-path results/adata.clustered.annotated.markers.de.zarr \
   --condition-keys condition
 
 # Cell-cell communication
-scomnom markers-and-de ccc liana \
+scomnom ccc liana \
   --input-path results/adata.clustered.annotated.markers.de.zarr \
   --condition-key condition
 ```

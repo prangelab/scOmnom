@@ -80,7 +80,7 @@ scomnom cluster-and-annotate \
   --figdir-name figures \
   --batch-key donor_id
 
-scomnom markers-and-de markers \
+scomnom markers \
   --input-path results/kang_ifnb.clustered.annotated.zarr.tar.zst \
   --output-dir results \
   --output-name kang_ifnb.markers \
@@ -98,7 +98,7 @@ Validated output:
 ## Run Donor-Aware DE And Enrichment
 
 ```bash
-scomnom markers-and-de de \
+scomnom de \
   --run both \
   --input-path results/kang_ifnb.markers.zarr.tar.zst \
   --output-dir results \
@@ -126,7 +126,7 @@ Condition-aware scOmnom workflow and IFN-beta signal recovery in the Kang PBMC D
 ## Run Differential Abundance
 
 ```bash
-scomnom markers-and-de da \
+scomnom da \
   --input-path results/kang_ifnb.de.zarr.tar.zst \
   --output-dir results \
   --output-name kang_ifnb.da \
@@ -157,7 +157,7 @@ Grouped Milo regions from the stimulated-versus-control contrast. Points show re
 ## Run CCC With LIANA
 
 ```bash
-scomnom markers-and-de ccc liana \
+scomnom ccc liana \
   --input-path results/kang_ifnb.de.zarr.tar.zst \
   --output-dir results \
   --output-name kang_ifnb.ccc_liana \

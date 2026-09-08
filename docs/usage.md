@@ -19,14 +19,14 @@ The standard workflow consists of:
 1. `load-and-filter`
 2. `integrate`
 3. `cluster-and-annotate`
-4. `markers-and-de markers` (recommended before naming/subsetting)
+4. `markers` (recommended before naming/subsetting)
 5. `integrate --annotated-run` (optional refinement)
 6. optional focused subset refinement
 7. `adata-ops rename` (optional but common before DE/DA)
-8. `markers-and-de de`
-9. `markers-and-de da`
-10. `markers-and-de enrichment cluster` (optional)
-11. `markers-and-de ccc ...` for LIANA, NicheNet, or MEBOCOST cell-cell communication analyses (optional)
+8. `de`
+9. `da`
+10. `enrichment cluster` (optional)
+11. `ccc ...` for LIANA, NicheNet, or MEBOCOST cell-cell communication analyses (optional)
 
 Optional branches:
 
@@ -69,21 +69,21 @@ scomnom integrate \
 # If you skip step 4, use results/adata.clustered.annotated.zarr below.
 
 # 5a) Markers (cluster-vs-rest)
-scomnom markers-and-de markers \
+scomnom markers \
   --input-path results/adata.clustered.annotated.projected.zarr
 
 # 5b) DE (within-cluster contrasts)
-scomnom markers-and-de de \
+scomnom de \
   --input-path results/adata.clustered.annotated.projected.markers.zarr \
   --condition-key condition
 
 # 5c) DA (composition)
-scomnom markers-and-de da \
+scomnom da \
   --input-path results/adata.clustered.annotated.projected.markers.de.zarr \
   --condition-keys condition
 
 # 5d) Optional CCC analysis
-scomnom markers-and-de ccc liana \
+scomnom ccc liana \
   --input-path results/adata.clustered.annotated.projected.markers.de.zarr \
   --condition-key condition
 ```

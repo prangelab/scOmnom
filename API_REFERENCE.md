@@ -38,10 +38,10 @@ Parameters:
 Returns:
 - `None`.
 
-## Namespaces `scomnom.adata_ops` and `scomnom.markers_and_de`
+## Namespaces `scomnom.adata_ops` and `scomnom.enrichment`
 
 `scomnom.adata_ops` remains the compatibility namespace for AnnData-oriented helpers.
-The enrichment helpers are also exposed under `scomnom.markers_and_de` for notebook workflows.
+Enrichment helpers are exposed under `scomnom.enrichment` for notebook workflows. The former `scomnom.markers_and_de` namespace remains as a compatibility alias for one release.
 
 ### `rename_idents`
 
@@ -255,7 +255,7 @@ plot_decoupler_payload(payload: dict, net_name: str, heatmap_top_k: int = 30, ba
 ```
 
 What it plots:
-- Cluster-style enrichment payloads returned by `scomnom.markers_and_de.enrichment_cluster(...)`.
+- Cluster-style enrichment payloads returned by `scomnom.enrichment.enrichment_cluster(...)`.
 
 Parameters:
 - `payload`: Either a single network payload (for example `decoupler_payload["msigdb"]`) or the full round decoupler bundle returned by `enrichment_cluster(...)`.
@@ -285,7 +285,7 @@ plot_de_decoupler_payload(payload: dict, net_name: str, heatmap_top_k: int = 30,
 ```
 
 What it plots:
-- DE-derived enrichment payloads returned by `scomnom.markers_and_de.enrichment_de_from_tables(...)`.
+- DE-derived enrichment payloads returned by `scomnom.enrichment.enrichment_de_from_tables(...)`.
 
 Parameters:
 - `payload`: Either a single network payload (for example `source_payload["nets"]["msigdb"]`) or a full source payload containing a `nets` block.
@@ -314,7 +314,7 @@ plot_module_score_summary_heatmap(summary: pd.DataFrame, stem: str = "module_sco
 ```
 
 What it plots:
-- Heatmap of summarized module-score values, typically the `summary_mean_z` block returned by `scomnom.markers_and_de.module_score(...)`.
+- Heatmap of summarized module-score values, typically the `summary_mean_z` block returned by `scomnom.enrichment.module_score(...)`.
 
 Parameters:
 - `summary`: Module-score summary matrix with groups on rows and modules on columns.

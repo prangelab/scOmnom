@@ -16,7 +16,7 @@ Within-cluster DE compares **condition levels inside each cluster**, e.g. `treat
 Single treatment contrast within each cluster:
 
 ```bash
-scomnom markers-and-de de \
+scomnom de \
   --input-path results/adata.clustered.annotated.markers.zarr \
   --condition-key treatment \
   --contrasts treated_vs_vehicle
@@ -27,7 +27,7 @@ This compares `treated` against `vehicle` inside each cluster. In `A_vs_B`, `A` 
 Explicit treatment contrasts within each genotype:
 
 ```bash
-scomnom markers-and-de de \
+scomnom de \
   --input-path results/adata.clustered.annotated.markers.zarr \
   --condition-keys treatment:genotype \
   --contrasts treated.KO_vs_vehicle.KO \
@@ -44,7 +44,7 @@ This first creates composite condition labels from `treatment` and `genotype`, t
 Shorthand for treatment within genotype:
 
 ```bash
-scomnom markers-and-de de \
+scomnom de \
   --input-path results/adata.clustered.annotated.markers.zarr \
   --condition-keys treatment@genotype
 ```
@@ -54,7 +54,7 @@ This runs treatment contrasts within each genotype level. The shorthand uses the
 Treatment-by-genotype interaction:
 
 ```bash
-scomnom markers-and-de de \
+scomnom de \
   --input-path results/adata.clustered.annotated.markers.zarr \
   --condition-keys treatment^genotype \
   --run pseudobulk
@@ -148,7 +148,7 @@ This tests whether the treatment effect differs by genotype inside each cluster.
 * Optional activity inference from DE statistics for each contrast.
 * Sources can be `cell`, `pseudobulk`, `all`, or `auto` (prefer pseudobulk if present).
 * Supports MSigDB, PROGENy, and DoRothEA with configurable methods and target filters.
-* MSigDB GSEA is enabled by default for `markers-and-de de` and writes additional `msigdb_gsea` and `msigdb_joint` outputs alongside the decoupler summaries.
+* MSigDB GSEA is enabled by default for `de` and writes additional `msigdb_gsea` and `msigdb_joint` outputs alongside the decoupler summaries.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
@@ -174,7 +174,7 @@ This tests whether the treatment effect differs by genotype inside each cluster.
 | `--dorothea-confidence` | `A,B,C` | DoRothEA confidence levels to include. |
 | `--dorothea-organism` | `human` | Organism used for DoRothEA resources. |
 
-**GSEA controls for `markers-and-de de`**
+**GSEA controls for `de`**
 
 * `--run-gsea/--no-run-gsea` enables or disables MSigDB preranked GSEA on the DE statistic matrix.
 * `--gsea-min-size`, `--gsea-max-size`, and `--gsea-eps` control pathway-size filtering and numerical tolerance for the Python `gseapy` backend.
@@ -239,7 +239,7 @@ export VECLIB_MAXIMUM_THREADS=1
 Then run DE with:
 
 ```bash
-scomnom markers-and-de de ... --run pseudobulk --max-workers 8
+scomnom de ... --run pseudobulk --max-workers 8
 ```
 
 Notes:

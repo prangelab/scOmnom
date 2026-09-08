@@ -5,7 +5,7 @@ The DA submodule tests whether cluster or neighborhood abundance changes across 
 By default, scOmnom runs all DA methods:
 
 ```bash
-scomnom markers-and-de da \
+scomnom da \
   --input-path adata.clustered.annotated.zarr.tar.zst \
   --condition-keys treatment
 ```
@@ -13,9 +13,9 @@ scomnom markers-and-de da \
 Use `--method` to run a subset. The option is repeatable and also accepts comma-separated values:
 
 ```bash
-scomnom markers-and-de da ... --condition-keys treatment --method milo
-scomnom markers-and-de da ... --condition-keys treatment --method sccoda --method clr
-scomnom markers-and-de da ... --condition-keys treatment --method milo,clr
+scomnom da ... --condition-keys treatment --method milo
+scomnom da ... --condition-keys treatment --method sccoda --method clr
+scomnom da ... --condition-keys treatment --method milo,clr
 ```
 
 ## Method Choice
@@ -42,7 +42,7 @@ DA supports the same condition-key syntax as within-cluster DE, except interacti
 You can repeat `--condition-keys` to run multiple condition definitions in one command. Each condition key, including each expanded `A@B=<level>` run, gets its own tables and figure folder.
 
 ```bash
-scomnom markers-and-de da \
+scomnom da \
   --input-path adata.clustered.annotated.zarr.tar.zst \
   --condition-keys treatment \
   --condition-keys treatment:genotype \

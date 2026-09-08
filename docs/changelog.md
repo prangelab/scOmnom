@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- promoted markers, within-cluster DE, differential abundance, enrichment, and CCC to independent top-level CLI routes (`scomnom markers`, `scomnom de`, `scomnom da`, `scomnom enrichment ...`, and `scomnom ccc ...`); the hidden `scomnom markers-and-de ...` route remains as a deprecated compatibility alias for one release
+- retained the serialized `adata.uns["markers_and_de"]` schema unchanged so existing AnnData objects and downstream readers remain compatible
+- exposed enrichment notebook helpers through `scomnom.enrichment`, with `scomnom.markers_and_de` retained as a compatibility alias
+
 - Hardened cluster compaction with a required one-sided transcriptomic state-divergence veto, strict activity validation, frozen CellTypist eligibility gates, immutable activity floors, deterministic all-pairs grouping, explicit no-op rounds, and native audit tables and review plots. The default veto blocks pairs when more than 2% of eligible nontechnical genes have both absolute log2 fold change at least 1.0 and detection-fraction difference at least 0.20; Pearson concordance remains diagnostic only. The transcriptomic view requires assay-aware count pseudobulks and records complete provenance. Renamed the former `thr_*` controls as adaptive threshold caps while retaining compatibility aliases.
 
 - added typed DataFrame sidecars for Zarr and H5AD round-trips, including nullable Booleans and legacy Boolean-string recovery

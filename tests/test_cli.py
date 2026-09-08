@@ -22,6 +22,9 @@ def test_cli_help():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
     assert "scOmnom CLI" in result.output
+    for command in ("markers", "de", "da", "enrichment", "ccc"):
+        assert command in result.output
+    assert "markers-and-de" not in result.output
 
 
 # ---------------------------------------------------------
@@ -294,19 +297,36 @@ def test_adata_ops_help():
     assert "metadata-import" in result.output
 
 
-def test_markers_and_de_help_includes_enrichment():
+def test_compatibility_group_keeps_legacy_routes():
     result = runner.invoke(app, ["markers-and-de", "--help"])
     assert result.exit_code == 0
     assert "enrichment" in result.output
     assert "ccc" in result.output
 
 
-def test_markers_and_de_da_milo_scale_broad_dispatches_preset(tmp_path):
+@patch("scomnom.cli.run_cluster_vs_rest")
+def test_compatibility_alias_warns_and_dispatches(mock_run, tmp_path):
+    result = runner.invoke(
+        app,
+        [
+            "markers-and-de",
+            "markers",
+            "--input-path", "clustered.h5ad",
+            "--output-dir", str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "deprecated" in result.output.lower()
+    assert "scomnom markers" in result.output
+    mock_run.assert_called_once()
+
+
+def test_da_milo_scale_broad_dispatches_preset(tmp_path):
     with patch("scomnom.cli.run_composition") as mock_run:
         result = runner.invoke(
             app,
             [
-                "markers-and-de",
                 "da",
                 "--input-path",
                 "clustered.h5ad",
@@ -338,14 +358,14 @@ def test_markers_and_de_da_milo_scale_broad_dispatches_preset(tmp_path):
     assert cfg.composition_milo_group_max_lfc_delta is None
     assert cfg.composition_milo_extreme_log2fc == 3.0
     assert cfg.composition_milo_broad_coverage_fraction == 0.5
+    assert cfg.logfile == tmp_path / "logs" / "da.log"
 
 
-def test_markers_and_de_da_defaults_to_milo_m05_values(tmp_path):
+def test_da_defaults_to_milo_m05_values(tmp_path):
     with patch("scomnom.cli.run_composition") as mock_run:
         result = runner.invoke(
             app,
             [
-                "markers-and-de",
                 "da",
                 "--input-path",
                 "clustered.h5ad",
@@ -373,12 +393,11 @@ def test_markers_and_de_da_defaults_to_milo_m05_values(tmp_path):
     assert cfg.composition_milo_group_max_lfc_delta is None
 
 
-def test_markers_and_de_da_dispatches_custom_milo_grouping(tmp_path):
+def test_da_dispatches_custom_milo_grouping(tmp_path):
     with patch("scomnom.cli.run_composition") as mock_run:
         result = runner.invoke(
             app,
             [
-                "markers-and-de",
                 "da",
                 "--input-path",
                 "clustered.h5ad",
@@ -411,12 +430,11 @@ def test_markers_and_de_da_dispatches_custom_milo_grouping(tmp_path):
     assert cfg.composition_milo_broad_coverage_fraction == 0.4
 
 
-def test_markers_and_de_da_normalizes_deprecated_graph_aliases(tmp_path):
+def test_da_normalizes_deprecated_graph_aliases(tmp_path):
     with patch("scomnom.cli.run_composition") as mock_run:
         result = runner.invoke(
             app,
             [
-                "markers-and-de",
                 "da",
                 "--input-path",
                 "clustered.h5ad",
@@ -440,8 +458,8 @@ def test_markers_and_de_da_normalizes_deprecated_graph_aliases(tmp_path):
     assert cfg.composition_milo_solver == "edger"
 
 
-def test_markers_and_de_ccc_help_includes_backends():
-    result = runner.invoke(app, ["markers-and-de", "ccc", "--help"])
+def test_ccc_help_includes_backends():
+    result = runner.invoke(app, ["ccc", "--help"])
     assert result.exit_code == 0
     assert "liana" in result.output
     assert "nichenet" in result.output
@@ -582,7 +600,6 @@ def test_markers_default_output_name_includes_round_id(mock_run):
     result = runner.invoke(
         app,
         [
-            "markers-and-de",
             "markers",
             "--input-path", "adata.zarr.tar.zst",
             "--round-id", "r4_subset_annotation",
@@ -593,6 +610,7 @@ def test_markers_default_output_name_includes_round_id(mock_run):
     cfg = mock_run.call_args[0][0]
     assert cfg.output_name == "adata.markers_r4_subset_annotation"
     assert cfg.output_dir == Path("results")
+    assert cfg.logfile == Path("results/logs/markers.log")
 
 
 @patch("scomnom.cli.run_within_cluster")
@@ -600,7 +618,6 @@ def test_de_default_output_name_includes_round_id(mock_run):
     result = runner.invoke(
         app,
         [
-            "markers-and-de",
             "de",
             "--input-path", "adata.zarr.tar.zst",
             "--round-id", "r5_archetypes",
@@ -612,6 +629,7 @@ def test_de_default_output_name_includes_round_id(mock_run):
     cfg = mock_run.call_args[0][0]
     assert cfg.output_name == "adata.de_r5_archetypes"
     assert cfg.output_dir == Path("results")
+    assert cfg.logfile == Path("results/logs/de.log")
 
 
 @patch("scomnom.cli.run_within_cluster")
@@ -619,7 +637,6 @@ def test_de_default_output_dir_uses_input_results_parent(mock_run):
     result = runner.invoke(
         app,
         [
-            "markers-and-de",
             "de",
             "--input-path", "results/adata.zarr.tar.zst",
             "--condition-keys", "timepoint",
@@ -636,7 +653,6 @@ def test_da_default_output_name_includes_round_id(mock_run):
     result = runner.invoke(
         app,
         [
-            "markers-and-de",
             "da",
             "--input-path", "adata.zarr.tar.zst",
             "--round-id", "r6_myawesomecustomround",
@@ -654,7 +670,6 @@ def test_enrichment_cluster_default_output_name_includes_round_id(mock_run):
     result = runner.invoke(
         app,
         [
-            "markers-and-de",
             "enrichment",
             "cluster",
             "--input-path", "adata.zarr.tar.zst",
@@ -665,6 +680,7 @@ def test_enrichment_cluster_default_output_name_includes_round_id(mock_run):
     mock_run.assert_called_once()
     cfg = mock_run.call_args[0][0]
     assert cfg.output_name == "adata.enrichment_r5_archetypes"
+    assert cfg.logfile == Path("results/logs/enrichment.cluster.log")
 
 
 @patch("scomnom.cli.run_liana_ccc")
@@ -672,7 +688,6 @@ def test_ccc_liana_default_output_name_includes_round_id(mock_run):
     result = runner.invoke(
         app,
         [
-            "markers-and-de",
             "ccc",
             "liana",
             "--input-path", "adata.zarr.tar.zst",
@@ -685,6 +700,7 @@ def test_ccc_liana_default_output_name_includes_round_id(mock_run):
     assert cfg.output_name == "adata.ccc_liana_r5_archetypes"
     assert cfg.output_dir == Path("results")
     assert cfg.liana_input_mode == "lognorm"
+    assert cfg.logfile == Path("results/logs/ccc.liana.log")
 
 
 @patch("scomnom.cli.run_liana_ccc")
@@ -692,7 +708,6 @@ def test_ccc_liana_method_and_resource_propagate_to_config(mock_run):
     result = runner.invoke(
         app,
         [
-            "markers-and-de",
             "ccc",
             "liana",
             "--input-path", "adata.zarr.tar.zst",
@@ -740,7 +755,6 @@ def test_ccc_liana_paired_config_propagates(mock_run):
     result = runner.invoke(
         app,
         [
-            "markers-and-de",
             "ccc",
             "liana-paired",
             "--input-path", "adata.zarr.tar.zst",
@@ -797,7 +811,6 @@ def test_ccc_nichenet_config_propagates(mock_run):
     result = runner.invoke(
         app,
         [
-            "markers-and-de",
             "ccc",
             "nichenet",
             "--input-path", "adata.zarr.tar.zst",
@@ -849,7 +862,6 @@ def test_ccc_mebocost_config_propagates(mock_run):
     result = runner.invoke(
         app,
         [
-            "markers-and-de",
             "ccc",
             "mebocost",
             "--input-path", "adata.zarr.tar.zst",
@@ -898,7 +910,6 @@ def test_ccc_mebocost_paired_config_propagates(mock_run):
     result = runner.invoke(
         app,
         [
-            "markers-and-de",
             "ccc",
             "mebocost-paired",
             "--input-path", "adata.zarr.tar.zst",
@@ -964,7 +975,6 @@ def test_enrichment_cluster_gene_filter_propagates_to_config(mock_run):
     result = runner.invoke(
         app,
         [
-            "markers-and-de",
             "enrichment",
             "cluster",
             "--input-path", "adata.zarr.tar.zst",
@@ -986,7 +996,6 @@ def test_enrichment_cluster_condition_key_propagates_to_config(mock_run):
     result = runner.invoke(
         app,
         [
-            "markers-and-de",
             "enrichment",
             "cluster",
             "--input-path", "adata.zarr.tar.zst",
@@ -1006,7 +1015,6 @@ def test_enrichment_cluster_gsea_flags_propagate_to_config(mock_run):
     result = runner.invoke(
         app,
         [
-            "markers-and-de",
             "enrichment",
             "cluster",
             "--input-path", "adata.zarr.tar.zst",
@@ -1042,7 +1050,6 @@ def test_enrichment_de_default_output_name_uses_input_dir_name(mock_run):
     result = runner.invoke(
         app,
         [
-            "markers-and-de",
             "enrichment",
             "de",
             "--input-dir", "de_r5_archetypes_round1",
@@ -1061,7 +1068,6 @@ def test_enrichment_de_gene_filter_propagates_to_config(mock_run):
     result = runner.invoke(
         app,
         [
-            "markers-and-de",
             "enrichment",
             "de",
             "--input-dir", "de_r5_archetypes_round1",
@@ -1081,7 +1087,6 @@ def test_enrichment_de_default_output_dir_uses_nearest_results_ancestor(mock_run
     result = runner.invoke(
         app,
         [
-            "markers-and-de",
             "enrichment",
             "de",
             "--input-dir", "results/tables/de_r5_archetypes_round1",
@@ -1098,7 +1103,6 @@ def test_enrichment_de_preserves_explicit_input_dir_name(mock_run):
     result = runner.invoke(
         app,
         [
-            "markers-and-de",
             "enrichment",
             "de",
             "--input-dir", "cell_based_clean",
@@ -1118,7 +1122,6 @@ def test_enrichment_module_score_default_output_name_includes_round_and_set_name
     result = runner.invoke(
         app,
         [
-            "markers-and-de",
             "enrichment",
             "module-score",
             "--input-path", "adata.zarr.tar.zst",
@@ -1140,7 +1143,6 @@ def test_enrichment_module_score_method_propagates_to_config(mock_run):
     result = runner.invoke(
         app,
         [
-            "markers-and-de",
             "enrichment",
             "module-score",
             "--input-path", "adata.zarr.tar.zst",
@@ -1164,7 +1166,6 @@ def test_de_gene_filter_propagates_to_config(mock_run):
     result = runner.invoke(
         app,
         [
-            "markers-and-de",
             "de",
             "--input-path", "adata.zarr.tar.zst",
             "--condition-keys", "sex",
@@ -1186,7 +1187,6 @@ def test_de_gsea_flags_propagate_to_config(mock_run):
     result = runner.invoke(
         app,
         [
-            "markers-and-de",
             "de",
             "--input-path", "adata.zarr.tar.zst",
             "--condition-keys", "sex",

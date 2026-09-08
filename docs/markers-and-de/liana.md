@@ -1,9 +1,9 @@
 # LIANA CCC
 
-`scomnom markers-and-de ccc liana` runs LIANA ligand-receptor analysis on cluster labels from a selected scOmnom clustering round. It writes method tables, summary tables, figures, and an `adata.uns["markers_and_de"]["ccc"]["liana"]` payload.
+`scomnom ccc liana` runs LIANA ligand-receptor analysis on cluster labels from a selected scOmnom clustering round. It writes method tables, summary tables, figures, and an `adata.uns["markers_and_de"]["ccc"]["liana"]` payload.
 
 ```bash
-scomnom markers-and-de ccc liana \
+scomnom ccc liana \
   --input-path results/adata.clustered.annotated.zarr.tar.zst \
   --round-id r5_broad_cell_types
 ```
@@ -11,7 +11,7 @@ scomnom markers-and-de ccc liana \
 Use condition keys when you want separate LIANA runs per condition level:
 
 ```bash
-scomnom markers-and-de ccc liana \
+scomnom ccc liana \
   --input-path results/adata.clustered.annotated.zarr.tar.zst \
   --round-id r5_broad_cell_types \
   --condition-key treatment
@@ -58,7 +58,7 @@ Cross-tissue mode is activated only when `--dataset-key` is supplied. In that mo
 | `--signal-scope` | `all` | `all` or `secreted`. `secreted` keeps CellChatDB routes annotated as secreted signaling. |
 
 ```bash
-scomnom markers-and-de ccc liana \
+scomnom ccc liana \
   --input-path results/adata.merged_dataset_A_dataset_B.zarr.tar.zst \
   --dataset-key dataset \
   --source-level dataset_A \
@@ -85,8 +85,8 @@ By default, scOmnom runs LIANA `rank_aggregate`. The aggregate uses a sparse-saf
 Examples:
 
 ```bash
-scomnom markers-and-de ccc liana ... --liana-method rank_aggregate
-scomnom markers-and-de ccc liana ... --liana-method cellphonedb --liana-method natmi
+scomnom ccc liana ... --liana-method rank_aggregate
+scomnom ccc liana ... --liana-method cellphonedb --liana-method natmi
 ```
 
 ## Expression Input
@@ -125,10 +125,10 @@ Key figures include source-target heatmaps, send/receive summaries, circos plots
 
 ## Focused Donor-level Rescoring
 
-`scomnom markers-and-de ccc liana-paired` rescales a focused LIANA candidate table at donor or sample level. Use it after pooled LIANA has identified candidate ligand-receptor edges and you want donor/sample-level effect summaries.
+`scomnom ccc liana-paired` rescales a focused LIANA candidate table at donor or sample level. Use it after pooled LIANA has identified candidate ligand-receptor edges and you want donor/sample-level effect summaries.
 
 ```bash
-scomnom markers-and-de ccc liana-paired \
+scomnom ccc liana-paired \
   --input-path results/adata.merged_dataset_A_dataset_B.zarr.tar.zst \
   --candidate-events results/tables/ccc_liana_r5_round1/liana_rank_aggregate.tsv \
   --dataset-key dataset \

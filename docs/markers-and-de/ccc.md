@@ -1,12 +1,12 @@
 # Cell-cell Communication
 
-The `markers-and-de ccc` command group contains the cell-cell communication backends. These workflows are optional downstream analyses after clustering, annotation, marker/DE review, and final label cleanup.
+The `ccc` command group contains the cell-cell communication backends. These workflows are optional downstream analyses after clustering, annotation, marker/DE review, and final label cleanup.
 
 | Backend | Command | Main question |
 | --- | --- | --- |
-| LIANA | `scomnom markers-and-de ccc liana` | Which ligand-receptor pairs connect sender and receiver populations? |
-| NicheNet | `scomnom markers-and-de ccc nichenet` | Which sender ligands best explain a receiver transcriptional program? |
-| MEBOCOST | `scomnom markers-and-de ccc mebocost` | Which metabolite-sensor routes connect sender and receiver populations? |
+| LIANA | `scomnom ccc liana` | Which ligand-receptor pairs connect sender and receiver populations? |
+| NicheNet | `scomnom ccc nichenet` | Which sender ligands best explain a receiver transcriptional program? |
+| MEBOCOST | `scomnom ccc mebocost` | Which metabolite-sensor routes connect sender and receiver populations? |
 
 LIANA and MEBOCOST also have paired rescoring modes. Those do not rerun full pooled discovery; they take a focused candidate table and score candidate routes per donor or sample.
 

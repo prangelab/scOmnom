@@ -56,7 +56,7 @@ nav:
           - Annotation Merge: adata-ops/annotation-merge.md
           - Manual Renaming: adata-ops/rename.md
           - Multi-adata Merge: adata-ops/merge.md
-      - Markers And DE:
+      - Downstream Analyses:
           - Overview: markers-and-de.md
           - Markers: markers-and-de/markers.md
           - Within-cluster DE: markers-and-de/de.md

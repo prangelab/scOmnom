@@ -127,12 +127,13 @@ Therefore:
 
 ## 3. Public API Cleanup
 
-`scomnom.adata_ops` and `scomnom.markers_and_de` currently have confusing dual identities between public aliases and importable internal modules. Each public name should resolve to one real facade module.
+`scomnom.adata_ops` and the legacy `scomnom.markers_and_de` alias currently have confusing dual identities between public aliases and importable internal modules. Each canonical public name should resolve to one real facade module.
 
 Target behavior:
 
 - `scomnom.adata_ops` is the canonical public adata-operations facade.
-- `scomnom.markers_and_de` is the canonical public marker/DE/DA/enrichment/CCC facade.
+- `scomnom.enrichment` is the canonical public enrichment facade; `scomnom.markers_and_de` remains a temporary compatibility alias.
+- Marker, DE, DA, enrichment, and CCC CLI workflows remain independent top-level routes rather than sharing a public umbrella command.
 - `scomnom.plotting` remains the canonical plotting facade.
 - `scomnom.__init__` exposes real modules and explicit exports, not `SimpleNamespace` substitutes.
 - CLI entry points import workflow implementations directly rather than reaching through public facades.

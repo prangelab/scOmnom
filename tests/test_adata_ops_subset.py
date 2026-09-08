@@ -218,7 +218,14 @@ def test_module_score_runs_on_in_memory_adata(monkeypatch, tmp_path: Path) -> No
     assert payload["round_id"] == "r0"
 
 
-def test_markers_and_de_namespace_exposes_enrichment_helpers() -> None:
+def test_enrichment_namespace_exposes_enrichment_helpers() -> None:
+    assert om.enrichment.enrichment_cluster is om.adata_ops.enrichment_cluster
+    assert om.enrichment.enrichment_de_from_tables is om.adata_ops.enrichment_de_from_tables
+    assert om.enrichment.module_score is om.adata_ops.module_score
+
+
+def test_markers_and_de_namespace_remains_compatibility_alias() -> None:
+    assert om.markers_and_de is om.enrichment
     assert om.markers_and_de.enrichment_cluster is om.adata_ops.enrichment_cluster
     assert om.markers_and_de.enrichment_de_from_tables is om.adata_ops.enrichment_de_from_tables
     assert om.markers_and_de.module_score is om.adata_ops.module_score

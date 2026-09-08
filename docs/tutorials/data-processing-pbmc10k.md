@@ -251,7 +251,7 @@ Global embedding, clustering, compaction, annotation, and marker evidence for th
 ## Run Global Markers
 
 ```bash
-scomnom markers-and-de markers \
+scomnom markers \
   --input-path results/pbmc10k.raw_cellbender.clustered.annotated.zarr.tar.zst \
   --output-dir results \
   --output-name pbmc10k.raw_cellbender.global.markers \
@@ -377,14 +377,14 @@ Validated compartment summary:
 ## Run Final Markers
 
 ```bash
-scomnom markers-and-de markers \
+scomnom markers \
   --input-path results/pbmc10k.raw_cellbender.tnk_refined.custom_annotations.zarr.tar.zst \
   --output-dir results \
   --output-name pbmc10k.raw_cellbender.tnk_refined.markers \
   --figdir-name figures \
   --n-jobs 8
 
-scomnom markers-and-de markers \
+scomnom markers \
   --input-path results/pbmc10k.raw_cellbender.tnk_refined.custom_annotations.zarr.tar.zst \
   --output-dir results \
   --output-name pbmc10k.raw_cellbender.compartment.markers \

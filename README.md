@@ -65,16 +65,16 @@ scomnom cluster-and-annotate \
   --output-dir results/
 
 # 4) Marker discovery
-scomnom markers-and-de markers \
+scomnom markers \
   --input-path results/adata.clustered.annotated.zarr
 
 # 5) Within-cluster differential expression
-scomnom markers-and-de de \
+scomnom de \
   --input-path results/adata.clustered.annotated.markers.zarr \
   --condition-key condition
 
 # 6) Differential abundance
-scomnom markers-and-de da \
+scomnom da \
   --input-path results/adata.clustered.annotated.markers.de.zarr \
   --condition-keys condition
 ```
@@ -116,13 +116,13 @@ The recommended full workflow is:
 1. `load-and-filter`
 2. `integrate`
 3. `cluster-and-annotate`
-4. `markers-and-de markers`
+4. `markers`
 5. optional `integrate --annotated-run`
 6. optional `adata-ops rename`, `adata-ops subset`, or `adata-ops annotation-merge`
-7. `markers-and-de de`
-8. `markers-and-de da`
-9. optional `markers-and-de enrichment cluster`
-10. optional `markers-and-de ccc ...`
+7. `de`
+8. `da`
+9. optional `enrichment cluster`
+10. optional `ccc ...`
 
 Detailed command examples, expected outputs, AnnData conventions, and HPC notes are in the [manual](https://prangelab.org/scOmnom/).
 

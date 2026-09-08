@@ -1,5 +1,5 @@
 #!/bin/bash
-# scOmnom module example: 8) markers-and-de da
+# scOmnom module example: 8) da
 
 #SBATCH --job-name=scomnom_da
 #SBATCH --nodes=1
@@ -50,7 +50,7 @@ export VECLIB_MAXIMUM_THREADS=1
 export IGRAPH_OPENMP_NUM_THREADS=1
 
 echo "Running scomnom..."
-scomnom markers-and-de da \
+scomnom da \
   -i "$(basename "$INPUT_ARCHIVE")" \
   -o "$RESULTS_DIR_NAME" \
   --n-jobs "$SLURM_CPUS_PER_TASK" \

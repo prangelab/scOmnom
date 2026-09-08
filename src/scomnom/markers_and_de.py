@@ -461,7 +461,7 @@ def _choose_counts_layer(
         return None
 
     raise RuntimeError(
-        "markers_and_de (pseudobulk): no candidate counts layer found in adata.layers "
+        "markers (pseudobulk): no candidate counts layer found in adata.layers "
         f"(candidates={list(candidates)!r}) and allow_X_counts=False"
     )
 
@@ -821,7 +821,7 @@ def _resolve_stable_groupby_and_display_map(
     rounds = adata.uns.get("cluster_rounds", {})
     if not rid or not isinstance(rounds, dict) or rid not in rounds:
         raise RuntimeError(
-            "markers-and-de: active cluster round not resolved. "
+            "downstream analysis: active cluster round not resolved. "
             f"Resolved round_id={rid!r}, active_round={adata.uns.get('active_cluster_round', None)!r}."
         )
 
@@ -829,7 +829,7 @@ def _resolve_stable_groupby_and_display_map(
     labels_obs_key = rinfo.get("labels_obs_key", None)
     if not labels_obs_key or str(labels_obs_key) not in adata.obs:
         raise RuntimeError(
-            f"markers-and-de: labels_obs_key not found in adata.obs for round_id={rid!r}."
+            f"downstream analysis: labels_obs_key not found in adata.obs for round_id={rid!r}."
         )
 
     label_source_l = str(label_source or "").lower().strip()
@@ -917,7 +917,7 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
       - This orchestrator does NOT handle within-cluster contrasts; that is split out.
     """
     init_logging(getattr(cfg, "logfile", None))
-    LOGGER.info("Starting markers-and-de (cluster-vs-rest)...")
+    LOGGER.info("Starting markers (cluster-vs-rest)...")
     if not bool(getattr(cfg, "prune_uns_de", True)):
         LOGGER.warning(
             "prune_uns_de is disabled; adata.uns may become very large. "
@@ -1337,13 +1337,13 @@ def run_cluster_vs_rest(cfg) -> ad.AnnData:
             LOGGER.warning("Writing additional H5AD output (loads full matrix into RAM): %s", out_h5ad)
             io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
 
-    LOGGER.info("Finished markers-and-de (cluster-vs-rest).")
+    LOGGER.info("Finished markers (cluster-vs-rest).")
     return adata
 
 
 def run_enrichment(cfg) -> ad.AnnData:
     init_logging(getattr(cfg, "logfile", None))
-    LOGGER.info("Starting markers-and-de (enrichment)...")
+    LOGGER.info("Starting enrichment (cluster)...")
 
     output_dir = Path(getattr(cfg, "output_dir"))
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1472,7 +1472,7 @@ def run_enrichment(cfg) -> ad.AnnData:
             LOGGER.warning("Writing additional H5AD output (loads full matrix into RAM): %s", out_h5ad)
             io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
 
-    LOGGER.info("Finished markers-and-de (enrichment).")
+    LOGGER.info("Finished enrichment (cluster).")
     return adata
 
 
@@ -1887,7 +1887,7 @@ def _compute_module_score_on_adata(
 
 def run_module_score(cfg) -> ad.AnnData:
     init_logging(getattr(cfg, "logfile", None))
-    LOGGER.info("Starting markers-and-de (module-score)...")
+    LOGGER.info("Starting enrichment (module-score)...")
 
     output_dir = Path(getattr(cfg, "output_dir"))
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1978,7 +1978,7 @@ def run_module_score(cfg) -> ad.AnnData:
         io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
 
     LOGGER.info(
-        "Finished markers-and-de (module-score); modules=%d retained=%d.",
+        "Finished enrichment (module-score); modules=%d retained=%d.",
         int(len(payload["module_meta"])),
         int(len(score_keys)),
     )
@@ -2349,7 +2349,7 @@ def _compute_de_enrichment_from_dir(
 
 def run_enrichment_de(cfg) -> None:
     init_logging(getattr(cfg, "logfile", None))
-    LOGGER.info("Starting markers-and-de (DE enrichment)...")
+    LOGGER.info("Starting enrichment (DE tables)...")
 
     output_dir = Path(getattr(cfg, "output_dir"))
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -2484,7 +2484,7 @@ def run_enrichment_de(cfg) -> None:
         except Exception as e:
             LOGGER.warning("Failed to generate enrichment de report: %s", e)
 
-    LOGGER.info("Finished markers-and-de (DE enrichment); runs=%d", int(total_runs))
+    LOGGER.info("Finished enrichment (DE tables); runs=%d", int(total_runs))
     return None
 
 
@@ -2493,7 +2493,7 @@ def _import_liana_module() -> Any:
         import liana as li
     except ImportError as exc:
         raise RuntimeError(
-            "markers-and-de ccc liana requires the Python package `liana`. "
+            "scomnom ccc liana requires the Python package `liana`. "
             "Install it in the scOmnom environment before running this command."
         ) from exc
     return li
@@ -3250,7 +3250,7 @@ def _import_mebocost_api(*, install_missing: bool) -> Any:
     install_hint = f"{sys.executable} -m pip install '{_MEBOCOST_GIT_SPEC}'"
     if not install_missing:
         raise RuntimeError(
-            "markers-and-de ccc mebocost requires the Python package `MEBOCOST`.\n"
+            "scomnom ccc mebocost requires the Python package `MEBOCOST`.\n"
             "Install it into the active environment, or rerun with `--install-missing-python-deps`.\n"
             f"Suggested install command:\n{install_hint}"
             + (f"\nImport attempts:\n" + "\n".join(import_errors) if import_errors else "")
@@ -3383,7 +3383,7 @@ def _ensure_mebocost_resource_config(*, install_missing: bool) -> Path:
     )
     if not install_missing:
         raise RuntimeError(
-            "markers-and-de ccc mebocost requires the upstream MEBOCOST resource database and config files.\n"
+            "scomnom ccc mebocost requires the upstream MEBOCOST resource database and config files.\n"
             "Install them into the local cache by rerunning with `--install-missing-python-deps`, or bootstrap them manually.\n"
             f"Suggested bootstrap command:\n{clone_hint}"
         )
@@ -5254,7 +5254,7 @@ def _build_liana_condition_run_specs(
 
 def run_liana_ccc(cfg) -> ad.AnnData:
     init_logging(getattr(cfg, "logfile", None))
-    LOGGER.info("Starting markers-and-de (ccc liana)...")
+    LOGGER.info("Starting ccc liana...")
 
     li = _import_liana_module()
     output_dir = Path(getattr(cfg, "output_dir"))
@@ -5800,13 +5800,13 @@ def run_liana_ccc(cfg) -> ad.AnnData:
         LOGGER.warning("Writing additional H5AD output (loads full matrix into RAM): %s", out_h5ad)
         io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
 
-    LOGGER.info("Finished markers-and-de (ccc liana).")
+    LOGGER.info("Finished ccc liana.")
     return adata
 
 
 def run_nichenet_ccc(cfg) -> ad.AnnData:
     init_logging(getattr(cfg, "logfile", None))
-    LOGGER.info("Starting markers-and-de (ccc nichenet)...")
+    LOGGER.info("Starting ccc nichenet...")
     nichenet_r_lib_dir = _ensure_nichenet_r_runtime(
         install_missing=bool(getattr(cfg, "nichenet_install_missing_r_deps", False))
     )
@@ -6053,13 +6053,13 @@ def run_nichenet_ccc(cfg) -> ad.AnnData:
         out_h5ad = output_dir / (str(getattr(cfg, "output_name", "adata.ccc_nichenet")) + ".h5ad")
         LOGGER.warning("Writing additional H5AD output (loads full matrix into RAM): %s", out_h5ad)
         io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
-    LOGGER.info("Finished markers-and-de (ccc nichenet).")
+    LOGGER.info("Finished ccc nichenet.")
     return adata
 
 
 def run_mebocost_ccc(cfg) -> ad.AnnData:
     init_logging(getattr(cfg, "logfile", None))
-    LOGGER.info("Starting markers-and-de (ccc mebocost)...")
+    LOGGER.info("Starting ccc mebocost...")
     install_missing = bool(getattr(cfg, "mebocost_install_missing_python_deps", False))
     mebocost_api = _import_mebocost_api(
         install_missing=install_missing
@@ -6543,13 +6543,13 @@ def run_mebocost_ccc(cfg) -> ad.AnnData:
         out_h5ad = output_dir / (str(getattr(cfg, "output_name", "adata.ccc_mebocost")) + ".h5ad")
         LOGGER.warning("Writing additional H5AD output (loads full matrix into RAM): %s", out_h5ad)
         io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
-    LOGGER.info("Finished markers-and-de (ccc mebocost).")
+    LOGGER.info("Finished ccc mebocost.")
     return adata
 
 
 def run_liana_paired_rescore(cfg) -> ad.AnnData:
     init_logging(getattr(cfg, "logfile", None))
-    LOGGER.info("Starting markers-and-de (ccc liana paired-rescore)...")
+    LOGGER.info("Starting ccc liana paired-rescore...")
 
     output_dir = Path(getattr(cfg, "output_dir"))
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -6769,13 +6769,13 @@ def run_liana_paired_rescore(cfg) -> ad.AnnData:
         out_h5ad = output_dir / (str(getattr(cfg, "output_name", "adata.ccc_liana_paired")) + ".h5ad")
         LOGGER.warning("Writing additional H5AD output (loads full matrix into RAM): %s", out_h5ad)
         io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
-    LOGGER.info("Finished markers-and-de (ccc liana paired-rescore).")
+    LOGGER.info("Finished ccc liana paired-rescore.")
     return adata
 
 
 def run_mebocost_paired_rescore(cfg) -> ad.AnnData:
     init_logging(getattr(cfg, "logfile", None))
-    LOGGER.info("Starting markers-and-de (ccc mebocost paired-rescore)...")
+    LOGGER.info("Starting ccc mebocost paired-rescore...")
     install_missing = bool(getattr(cfg, "mebocost_install_missing_python_deps", False))
     mebocost_api = _import_mebocost_api(install_missing=install_missing)
     mebocost_config_path = _ensure_mebocost_resource_config(install_missing=install_missing)
@@ -6983,13 +6983,13 @@ def run_mebocost_paired_rescore(cfg) -> ad.AnnData:
         out_h5ad = output_dir / (str(getattr(cfg, "output_name", "adata.ccc_mebocost_paired")) + ".h5ad")
         LOGGER.warning("Writing additional H5AD output (loads full matrix into RAM): %s", out_h5ad)
         io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
-    LOGGER.info("Finished markers-and-de (ccc mebocost paired-rescore).")
+    LOGGER.info("Finished ccc mebocost paired-rescore.")
     return adata
 
 
 def run_composition(cfg) -> ad.AnnData:
     init_logging(getattr(cfg, "logfile", None))
-    LOGGER.info("Starting markers-and-de (composition)...")
+    LOGGER.info("Starting differential abundance...")
 
     output_dir = Path(getattr(cfg, "output_dir"))
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -7906,7 +7906,7 @@ def run_composition(cfg) -> ad.AnnData:
             LOGGER.warning("Writing additional H5AD output (loads full matrix into RAM): %s", out_h5ad)
             io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
 
-    LOGGER.info("Finished markers-and-de (composition).")
+    LOGGER.info("Finished differential abundance.")
     return adata
 
 
@@ -7927,7 +7927,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
       - records provenance without referencing undefined locals
     """
     init_logging(getattr(cfg, "logfile", None))
-    LOGGER.info("Starting markers-and-de (within-cluster)...")
+    LOGGER.info("Starting within-cluster differential expression...")
     if not bool(getattr(cfg, "prune_uns_de", True)):
         LOGGER.warning(
             "prune_uns_de is disabled; adata.uns may become very large. "
@@ -9353,6 +9353,6 @@ def run_within_cluster(cfg) -> ad.AnnData:
             LOGGER.warning("Writing additional H5AD output (loads full matrix into RAM): %s", out_h5ad)
             io_utils.save_dataset(adata, out_h5ad, fmt="h5ad")
 
-    LOGGER.info("Finished markers-and-de (within-cluster).")
+    LOGGER.info("Finished within-cluster differential expression.")
     return adata
     install_env = _nichenet_r_env(r_lib_dir, install_only=True)

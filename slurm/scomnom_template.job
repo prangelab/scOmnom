@@ -22,7 +22,7 @@ FIGURES_SOURCE_DIR="results/figures"
 
 # Fill this with the actual command before submission.
 # Example:
-# SCOMNOM_CMD=(scomnom markers-and-de de -i "$SCRATCH_INPUT_NAME" -o "$RESULTS_DIR_NAME" --n-jobs "$SLURM_CPUS_PER_TASK")
+# SCOMNOM_CMD=(scomnom de -i "$SCRATCH_INPUT_NAME" -o "$RESULTS_DIR_NAME" --n-jobs "$SLURM_CPUS_PER_TASK")
 SCOMNOM_CMD=()
 # --------------------------------------
 

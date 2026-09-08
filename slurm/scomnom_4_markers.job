@@ -1,5 +1,5 @@
 #!/bin/bash
-# scOmnom workflow step: 4) markers-and-de markers
+# scOmnom workflow step: 4) markers
 # Run before rename/subset so marker outputs can guide naming decisions.
 
 #SBATCH --job-name=scomnom_markers
@@ -49,7 +49,7 @@ export VECLIB_MAXIMUM_THREADS=1
 export IGRAPH_OPENMP_NUM_THREADS=1
 
 echo "Running scomnom..."
-scomnom markers-and-de markers \
+scomnom markers \
   -i "$(basename "$INPUT_ARCHIVE")" \
   -o "$RESULTS_DIR_NAME" \
   --n-jobs "$SLURM_CPUS_PER_TASK"

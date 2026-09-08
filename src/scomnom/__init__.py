@@ -6,8 +6,11 @@ from .io_utils import load_dataset, save_dataset  # noqa: F401
 from . import plotting  # noqa: F401
 from . import adata_public as adata_ops  # noqa: F401
 
-markers_and_de = SimpleNamespace(
+enrichment = SimpleNamespace(
     enrichment_cluster=adata_ops.enrichment_cluster,
     enrichment_de_from_tables=adata_ops.enrichment_de_from_tables,
     module_score=adata_ops.module_score,
 )
+
+# Compatibility alias retained for existing notebook code.
+markers_and_de = enrichment

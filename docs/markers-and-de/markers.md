@@ -5,7 +5,7 @@ Markers are computed per cluster against all other cells. The module supports **
 By default, `markers` runs both engines:
 
 ```bash
-scomnom markers-and-de markers \
+scomnom markers \
   --input-path results/adata.clustered.annotated.zarr \
   --run both
 ```

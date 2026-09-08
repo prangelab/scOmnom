@@ -100,8 +100,22 @@ Imported external AnnData objects can also receive an imported clustering round.
 * `adata.uns["cluster_rounds"]`: all clustering rounds and their settings
 * `adata.uns["active_cluster_round"]`: the currently active clustering round id
 * `adata.uns["cluster_and_annotate"]`: compatibility pointers to the active CellTypist and pretty-label keys
-* `adata.uns["markers_and_de"]`: provenance for markers, DE, and DA runs
+* `adata.uns["markers_and_de"]`: stable compatibility namespace for marker/DE provenance, DA runs, and CCC runs
 * `adata.uns["scomnom_de"]`: detailed DE tables and summaries (pseudobulk and cell-level contrasts)
+
+The serialized `markers_and_de` name predates the independent top-level CLI commands and is retained to preserve compatibility with existing AnnData objects and downstream readers. Its current contents are:
+
+| Location | Contents |
+| --- | --- |
+| `adata.uns["markers_and_de"]` | Latest marker or within-cluster DE run provenance. |
+| `adata.uns["markers_and_de"]["composition"]["runs"][condition]` | DA settings, sample-by-cluster counts, method outputs, consensus summaries, Milo regions, and coverage diagnostics. |
+| `adata.uns["markers_and_de"]["ccc"]["liana"]["runs"]` | Pooled LIANA runs and provenance. |
+| `adata.uns["markers_and_de"]["ccc"]["nichenet"]["runs"]` | NicheNet runs and provenance. |
+| `adata.uns["markers_and_de"]["ccc"]["mebocost"]["runs"]` | Pooled MEBOCOST runs and provenance. |
+| `adata.uns["markers_and_de"]["ccc"]["liana_paired_rescore"]` | Donor/sample-level LIANA rescoring results. |
+| `adata.uns["markers_and_de"]["ccc"]["mebocost_paired_rescore"]` | Donor/sample-level MEBOCOST rescoring results. |
+
+Detailed DE results remain under `adata.uns["scomnom_de"]`. Cluster enrichment and module-score payloads remain round-scoped under `adata.uns["cluster_rounds"][round_id]["decoupler"]` and `adata.uns["cluster_rounds"][round_id]["module_scores"]`; DE-derived enrichment is stored under `adata.uns["scomnom_de"]["de_decoupler"]`.
 
 ---
 
@@ -111,7 +125,7 @@ When accessing a scOmnom AnnData object in a Python session, always load and sav
 
 For large Zarr saves with heavy `adata.uns` payloads, `save_dataset()` now stores heavy payloads via sidecar serialization under `__scomnom_payloads__/v1` inside the same store, which reduces save-time memory spikes while keeping `load_dataset()` round-trip behavior.
 
-See also: the [API reference](api-reference.md) for the current Python API namespaces (`scomnom.plotting`, `scomnom.adata_ops`).
+See also: the [API reference](api-reference.md) for the current Python API namespaces (`scomnom.plotting`, `scomnom.adata_ops`, and `scomnom.enrichment`).
 
 ```python
 from pathlib import Path

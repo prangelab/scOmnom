@@ -1,5 +1,5 @@
 #!/bin/bash
-# scOmnom module example: 10) markers-and-de ccc
+# scOmnom module example: 10) ccc
 
 #SBATCH --job-name=scomnom_ccc
 #SBATCH --nodes=1
@@ -21,7 +21,7 @@ FIGURES_SOURCE_DIR="results/figures"
 
 # Default pooled LIANA CCC run. Adapt condition/cross-tissue options per dataset.
 SCOMNOM_CMD=(
-  scomnom markers-and-de ccc liana
+  scomnom ccc liana
   -i "$SCRATCH_INPUT_NAME"
   -o "$RESULTS_DIR_NAME"
   --n-jobs "$SLURM_CPUS_PER_TASK"
@@ -32,7 +32,7 @@ SCOMNOM_CMD=(
 
 # NicheNet example:
 # SCOMNOM_CMD=(
-#   scomnom markers-and-de ccc nichenet
+#   scomnom ccc nichenet
 #   -i "$SCRATCH_INPUT_NAME"
 #   -o "$RESULTS_DIR_NAME"
 #   --n-jobs "$SLURM_CPUS_PER_TASK"
@@ -43,7 +43,7 @@ SCOMNOM_CMD=(
 
 # MEBOCOST example:
 # SCOMNOM_CMD=(
-#   scomnom markers-and-de ccc mebocost
+#   scomnom ccc mebocost
 #   -i "$SCRATCH_INPUT_NAME"
 #   -o "$RESULTS_DIR_NAME"
 #   --n-jobs "$SLURM_CPUS_PER_TASK"

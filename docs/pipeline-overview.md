@@ -55,7 +55,7 @@
                 │
                 ▼
 ┌────────────────────────────────────────────────────────────┐
-│                    markers-and-de                          │
+│            independent downstream commands               │
 │                                                            │
 │  • markers (cluster-vs-rest)                               │
 │  • de (within-cluster contrasts)                           │

@@ -4,9 +4,9 @@ The enrichment submodule has three entry points:
 
 | Entry point | Input | Main use |
 | --- | --- | --- |
-| `scomnom markers-and-de enrichment cluster` | AnnData with a clustering round | Run MSigDB, PROGENy, and DoRothEA on round-native pseudobulk expression. |
-| `scomnom markers-and-de enrichment de` | Exported DE result tables | Run the same pathway/TF activity backends from DE statistics, without loading AnnData. |
-| `scomnom markers-and-de enrichment module-score` | AnnData plus user gene modules | Score custom gene programs per cell, then summarize by cluster or cluster-condition. |
+| `scomnom enrichment cluster` | AnnData with a clustering round | Run MSigDB, PROGENy, and DoRothEA on round-native pseudobulk expression. |
+| `scomnom enrichment de` | Exported DE result tables | Run the same pathway/TF activity backends from DE statistics, without loading AnnData. |
+| `scomnom enrichment module-score` | AnnData plus user gene modules | Score custom gene programs per cell, then summarize by cluster or cluster-condition. |
 
 For decoupler-based enrichment, the default resource set is MSigDB HALLMARK + REACTOME, PROGENy, and DoRothEA. MSigDB can also use custom `.gmt` files.
 
@@ -15,7 +15,7 @@ For decoupler-based enrichment, the default resource set is MSigDB HALLMARK + RE
 `enrichment cluster` recomputes round-native pseudobulk expression for the selected clustering round, then runs decoupler resources on that expression matrix.
 
 ```bash
-scomnom markers-and-de enrichment cluster \
+scomnom enrichment cluster \
   --input-path adata.clustered.annotated.zarr.tar.zst \
   --round-id r5_broad_cell_types
 ```
@@ -23,7 +23,7 @@ scomnom markers-and-de enrichment cluster \
 Add `--condition-key` when you want enrichment profiles for `cluster x condition` groups instead of one profile per cluster:
 
 ```bash
-scomnom markers-and-de enrichment cluster \
+scomnom enrichment cluster \
   --input-path adata.clustered.annotated.zarr.tar.zst \
   --round-id r5_broad_cell_types \
   --condition-key treatment
@@ -37,7 +37,7 @@ scomnom markers-and-de enrichment cluster \
 | `--output-dir`, `-o` | inferred `results/` location | Output root. If omitted, scOmnom uses the standard results-location logic. |
 | `--output-name` | inferred from input, module, and round | Saved AnnData name. |
 | `--save-h5ad` / `--no-save-h5ad` | `--no-save-h5ad` | Also write h5ad output. |
-| `--n-jobs` | `1` | Reserved for consistency with other markers-and-de commands. |
+| `--n-jobs` | `1` | Reserved for consistency with other downstream commands. |
 | `--round-id` | active clustering round | Selects which clustering round supplies the population labels. |
 | `--condition-key` | none | Optional condition key for cluster-by-condition pseudobulk. |
 | `--gene-filter` | none | Repeatable pandas-query expressions against `adata.var`; applied before enrichment. |
@@ -55,9 +55,9 @@ Round-native enrichment stores results back into the selected round. It does not
 Examples:
 
 ```bash
-scomnom markers-and-de enrichment cluster ... --round-id r5_broad_cell_types
-scomnom markers-and-de enrichment cluster ... --round-id r5_broad_cell_types --condition-key treatment
-scomnom markers-and-de enrichment cluster ... --round-id r5_broad_cell_types --condition-key treatment:genotype
+scomnom enrichment cluster ... --round-id r5_broad_cell_types
+scomnom enrichment cluster ... --round-id r5_broad_cell_types --condition-key treatment
+scomnom enrichment cluster ... --round-id r5_broad_cell_types --condition-key treatment:genotype
 ```
 
 ### Pseudobulk Source
@@ -94,7 +94,7 @@ MSigDB runs by default with HALLMARK and REACTOME gene sets.
 Example with a custom GMT:
 
 ```bash
-scomnom markers-and-de enrichment cluster ... \
+scomnom enrichment cluster ... \
   --msigdb-gene-sets HALLMARK,REACTOME,/path/to/custom_programs.gmt
 ```
 
@@ -131,7 +131,7 @@ For non-human organisms, scOmnom first tries the requested decoupler DoRothEA re
 `--gene-filter` filters genes before decoupler activity inference. Filters are evaluated as pandas-query expressions against `adata.var`, and repeated filters are combined with logical AND.
 
 ```bash
-scomnom markers-and-de enrichment cluster ... \
+scomnom enrichment cluster ... \
   --gene-filter "not gene.str.startswith('MT-')" \
   --gene-filter "not gene.str.startswith('RPL')" \
   --gene-filter "not gene.str.startswith('RPS')"
@@ -160,7 +160,7 @@ Cluster enrichment writes:
 `enrichment de` reads exported DE tables and computes pathway/TF activity from the DE statistic column. It does not load or modify AnnData.
 
 ```bash
-scomnom markers-and-de enrichment de \
+scomnom enrichment de \
   --input-dir results/tables/de_r5_broad_cell_types_round1 \
   --de-decoupler-source pseudobulk
 ```
@@ -223,7 +223,7 @@ DE-table enrichment writes:
 `enrichment module-score` scores custom gene modules per cell, then summarizes those scores by cluster or by cluster-condition group.
 
 ```bash
-scomnom markers-and-de enrichment module-score \
+scomnom enrichment module-score \
   --input-path adata.clustered.annotated.zarr.tar.zst \
   --round-id r5_broad_cell_types \
   --module-file gene_programs.tsv \
