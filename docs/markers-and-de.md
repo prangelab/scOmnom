@@ -19,7 +19,7 @@ scomnom markers-and-de de \
 # Differential abundance
 scomnom markers-and-de da \
   --input-path results/adata.clustered.annotated.markers.de.zarr \
-  --condition-key condition
+  --condition-keys condition
 
 # Cell-cell communication
 scomnom markers-and-de ccc liana \

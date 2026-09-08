@@ -6,7 +6,7 @@
 scomnom --help
 ```
 
-This page is a compact route map rather than a full tutorial. Validation-backed tutorials can be added once example runs are finalized.
+This page is a compact route map rather than a full tutorial. For worked examples, see the [PBMC10k data-processing tutorial](tutorials/data-processing-pbmc10k.md) and the [Kang IFN-beta downstream-analysis tutorial](tutorials/kang-ifnb-de.md).
 
 Each subcommand provides detailed help:
 
@@ -80,7 +80,7 @@ scomnom markers-and-de de \
 # 5c) DA (composition)
 scomnom markers-and-de da \
   --input-path results/adata.clustered.annotated.projected.markers.de.zarr \
-  --condition-key condition
+  --condition-keys condition
 
 # 5d) Optional CCC analysis
 scomnom markers-and-de ccc liana \

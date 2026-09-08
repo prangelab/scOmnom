@@ -141,11 +141,18 @@ Validated DA interpretation:
 
 * GLM: 17 condition rows, 13 FDR-significant stim-versus-ctrl cluster effects, 0 nonfinite coefficients, and 3 warning-flagged rows.
 * CLR: 16 of 17 clusters significant at FDR <= 0.05, consistent with broad IFN-beta composition shifts.
-* Milo: revalidation is pending after replacement of the former experimental GraphDA engine with pertpy Milo. Legacy GraphDA counts are intentionally not reported as Milo evidence.
-* scOmnom groups significant overlapping, direction-concordant Milo neighbourhoods into DA regions by default. Interpret `composition_milo_regions.tsv`, `composition_milo_region_sample_counts.tsv`, and `milo_coverage.tsv` before using raw neighbourhood effects.
-* Treat Milo regions as local evidence alongside, rather than as a replacement for, broad cluster-level composition tests. Extreme raw neighbourhood effects are retained but flagged for review.
+* Milo with the balanced M05 defaults retained 656 neighbourhoods, tested 90, and identified 87 significant neighbourhoods. Because neighbourhoods overlap, these calls were consolidated into five direction-concordant regions covering 3,535 unique cells (31.6% of the dataset).
+* C03, C06, C09, and C13 were supported at both global and local scales. C08 had local Milo evidence only; the remaining clusters had global evidence only.
+* Seventy-seven tested neighbourhoods met an effect-review trigger for an extreme effect, minimum sample support, or both. These flags retain the estimates for review; they are not additional significance calls or automatic exclusions.
+* Interpret `composition_milo_regions.tsv`, `composition_milo_region_sample_counts.tsv`, and `milo_coverage.tsv` before using raw neighbourhood effects. Milo regions provide local evidence alongside, rather than as a replacement for, broad cluster-level composition tests.
 
-The differential-abundance panel will be regenerated after the Milo defaults are calibrated and the Kang validation is rerun. The existing GraphDA panel is not valid evidence for the repaired method.
+![Kang DA evidence across analysis scales](panels/de_figure2_da_milo_consensus.png)
+
+Agreement between global cluster-level GLM and CLR analyses and local Milo regions. Colors encode effect direction and significance within each method; effect magnitudes are not compared across methods. White Milo cells indicate clusters without a representative significant local region.
+
+![Grouped Kang Milo regions](panels/de_figure2_da_milo_regions.png)
+
+Grouped Milo regions from the stimulated-versus-control contrast. Points show regional median log2 fold changes, horizontal lines show interquartile ranges across constituent neighbourhoods, and labels report unique-cell and neighbourhood counts. Overlapping neighbourhoods are not independent biological findings.
 
 ## Run CCC With LIANA
 
@@ -181,7 +188,7 @@ The validated DE tutorial evidence supports:
 * active compacted round `r1_scANVI_compacted`;
 * IFN-beta biology recovered through DE genes, MSigDB GSEA, PROGENy, and DoRothEA;
 * broad composition shifts identified with CLR and GLM;
-* Milo local-neighbourhood testing integrated into the same DA command, with Kang biological results pending revalidation;
+* five grouped Milo regions, including four clusters with concordant global and local evidence and one cluster with local-only evidence;
 * condition-split LIANA summaries for `ctrl` and `stim`.
 
 ## Troubleshooting

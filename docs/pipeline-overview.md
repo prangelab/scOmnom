@@ -60,6 +60,8 @@
 │  • markers (cluster-vs-rest)                               │
 │  • de (within-cluster contrasts)                           │
 │  • da (composition)                                        │
+│  • enrichment (pathways, TFs, and gene modules)            │
+│  • ccc (LIANA, NicheNet, and MEBOCOST)                     │
 │                                                            │
 │  → tables + reports + updated AnnData                      │
 └────────────────────────────────────────────────────────────┘
