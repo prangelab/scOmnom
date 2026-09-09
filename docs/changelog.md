@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## Unreleased
 
 - promoted markers, within-cluster DE, differential abundance, enrichment, and CCC to independent top-level CLI routes (`scomnom markers`, `scomnom de`, `scomnom da`, `scomnom enrichment ...`, and `scomnom ccc ...`); the hidden `scomnom markers-and-de ...` route remains as a deprecated compatibility alias for one release
+- fixed `scomnom enrichment de` discovery of pseudobulk CSV files in the nested directory layout emitted by `scomnom de`; duplicate exports for the same condition, contrast, and cluster now fail closed
 - retained the serialized `adata.uns["markers_and_de"]` schema unchanged so existing AnnData objects and downstream readers remain compatible
 - exposed enrichment notebook helpers through `scomnom.enrichment`, with `scomnom.markers_and_de` retained as a compatibility alias
 

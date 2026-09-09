@@ -2061,7 +2061,8 @@ def _collect_pseudobulk_de_tables_from_dir(
     input_dir: Path,
 ) -> dict[str, dict[str, dict[str, pd.DataFrame]]]:
     out: dict[str, dict[str, dict[str, pd.DataFrame]]] = {}
-    for cond_dir in sorted(input_dir.glob("condition_within_cluster__*")):
+    seen: dict[tuple[str, str, str], Path] = {}
+    for cond_dir in sorted(input_dir.rglob("condition_within_cluster__*")):
         if not cond_dir.is_dir():
             continue
         condition_key = cond_dir.name.removeprefix("condition_within_cluster__")
@@ -2073,7 +2074,18 @@ def _collect_pseudobulk_de_tables_from_dir(
                 cluster_label, contrast = stem.split("__", 1)
             else:
                 cluster_label, contrast = stem, "contrast"
-            out.setdefault(str(condition_key), {}).setdefault(str(contrast), {})[str(cluster_label)] = pd.read_csv(csv_path)
+            table_key = (str(condition_key), str(contrast), str(cluster_label))
+            previous_path = seen.get(table_key)
+            if previous_path is not None:
+                raise RuntimeError(
+                    "Duplicate pseudobulk DE table for "
+                    f"condition={condition_key!r}, contrast={contrast!r}, "
+                    f"cluster={cluster_label!r}: {previous_path} and {csv_path}"
+                )
+            seen[table_key] = csv_path
+            out.setdefault(str(condition_key), {}).setdefault(str(contrast), {})[
+                str(cluster_label)
+            ] = pd.read_csv(csv_path)
     return out
 
 

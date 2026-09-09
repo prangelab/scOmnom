@@ -540,6 +540,43 @@ def test_collect_pseudobulk_de_tables_from_dir_reads_exported_csvs(tmp_path: Pat
     assert sorted(got["sex"]["female_vs_male"].keys()) == ["C00"]
 
 
+def test_collect_pseudobulk_de_tables_from_current_nested_export_layout(
+    tmp_path: Path,
+) -> None:
+    cond_dir = (
+        tmp_path
+        / "pseudobulk_based"
+        / "condition_within_cluster__condition"
+    )
+    cond_dir.mkdir(parents=True)
+    pd.DataFrame({"gene": ["ISG15"], "stat": [4.0]}).to_csv(
+        cond_dir / "condition_within_cluster__C08__ctrl_vs_stim.csv",
+        index=False,
+    )
+
+    got = _collect_pseudobulk_de_tables_from_dir(tmp_path)
+
+    assert sorted(got.keys()) == ["condition"]
+    assert sorted(got["condition"].keys()) == ["ctrl_vs_stim"]
+    assert sorted(got["condition"]["ctrl_vs_stim"].keys()) == ["C08"]
+
+
+def test_collect_pseudobulk_de_tables_rejects_duplicate_nested_exports(
+    tmp_path: Path,
+) -> None:
+    filename = "condition_within_cluster__C08__ctrl_vs_stim.csv"
+    for parent in ("first", "second"):
+        cond_dir = tmp_path / parent / "condition_within_cluster__condition"
+        cond_dir.mkdir(parents=True)
+        pd.DataFrame({"gene": ["ISG15"], "stat": [4.0]}).to_csv(
+            cond_dir / filename,
+            index=False,
+        )
+
+    with pytest.raises(RuntimeError, match="Duplicate pseudobulk DE table"):
+        _collect_pseudobulk_de_tables_from_dir(tmp_path)
+
+
 def test_collect_cell_contrast_tables_from_dir_prefers_combined_csv(tmp_path: Path) -> None:
     pair_dir = tmp_path / "sex_female_vs_male_DE" / "cluster__C00__female_vs_male"
     pair_dir.mkdir(parents=True)
