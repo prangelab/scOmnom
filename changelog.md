@@ -4,11 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
-- Hardened cluster compaction with strict activity validation, frozen CellTypist eligibility gates, immutable evidence floors, deterministic all-pairs grouping, explicit no-op rounds, and native audit tables and review plots. Renamed the former `thr_*` controls as adaptive threshold caps while retaining compatibility aliases.
+- promoted markers, within-cluster DE, differential abundance, enrichment, and CCC to independent top-level CLI routes (`scomnom markers`, `scomnom de`, `scomnom da`, `scomnom enrichment ...`, and `scomnom ccc ...`); the hidden `scomnom markers-and-de ...` route remains as a deprecated compatibility alias for one release
+- fixed `scomnom enrichment de` discovery of pseudobulk CSV files in the nested directory layout emitted by `scomnom de`; duplicate exports for the same condition, contrast, and cluster now fail closed
+- retained the serialized `adata.uns["markers_and_de"]` schema unchanged so existing AnnData objects and downstream readers remain compatible
+- exposed enrichment notebook helpers through `scomnom.enrichment`, with `scomnom.markers_and_de` retained as a compatibility alias
+- hardened focused LIANA rescoring by separating sample and subject identifiers, adding explicit independent Mann-Whitney and complete-pair Wilcoxon designs, preserving arbitrary condition/context columns, and rejecting ambiguous repeated-measures layouts
+- changed focused LIANA complex handling to require every ligand and receptor subunit; incomplete complexes are retained as explicitly unscored rows rather than being evaluated from partial complexes
+- corrected focused LIANA effect plots so significance outlines encode FDR rather than unadjusted p-values, and separated the route-support legend from the effect-size color scale
+- hardened automatic scIB embedding selection with a required aggregate improvement over `Unintegrated` while preserving the Pareto-aware biology-and-batch tier hierarchy; selection tiers, deltas, tolerance, and the complete decision table are now persisted
+- Hardened cluster compaction with a required one-sided transcriptomic state-divergence veto, strict activity validation, frozen CellTypist eligibility gates, immutable activity floors, deterministic all-pairs grouping, explicit no-op rounds, and native audit tables and review plots. The default veto blocks pairs when more than 2% of eligible nontechnical genes have both absolute log2 fold change at least 1.0 and detection-fraction difference at least 0.20; Pearson concordance remains diagnostic only. The transcriptomic view requires assay-aware count pseudobulks and records complete provenance. Renamed the former `thr_*` controls as adaptive threshold caps while retaining compatibility aliases.
 - Added `load-and-filter --skip-doublet-detection` for documented upstream-curated inputs, with explicit skip provenance and no synthetic doublet rate or scores.
-
 - added typed DataFrame sidecars for Zarr and H5AD round-trips, including nullable Booleans and legacy Boolean-string recovery
 - corrected CellTypist confidence entropy to operate on row-normalized logistic scores while retaining the raw score margin
+- changed pooled and paired LIANA defaults to library-normalized log1p expression, made explicit missing-layer and missing-raw requests fail closed, added route-family provenance, and aligned the pooled settings filename with the documented `liana_settings.tsv` contract
 - added confidence coverage and strict-majority purity gates with a stored per-cluster CellTypist label audit
 - replaced raw-score decoupler averaging with decoupler's signed per-method z-score consensus, restored `wsum` through WAGGR, propagated target-count filters, and stored method provenance
 
