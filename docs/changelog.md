@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 - exposed enrichment notebook helpers through `scomnom.enrichment`, with `scomnom.markers_and_de` retained as a compatibility alias
 - hardened focused LIANA rescoring by separating sample and subject identifiers, adding explicit independent Mann-Whitney and complete-pair Wilcoxon designs, preserving arbitrary condition/context columns, and rejecting ambiguous repeated-measures layouts
 - changed focused LIANA complex handling to require every ligand and receptor subunit; incomplete complexes are retained as explicitly unscored rows rather than being evaluated from partial complexes
+- corrected focused LIANA effect plots so significance outlines encode FDR rather than unadjusted p-values, and separated the route-support legend from the effect-size color scale
 
 - Hardened cluster compaction with a required one-sided transcriptomic state-divergence veto, strict activity validation, frozen CellTypist eligibility gates, immutable activity floors, deterministic all-pairs grouping, explicit no-op rounds, and native audit tables and review plots. The default veto blocks pairs when more than 2% of eligible nontechnical genes have both absolute log2 fold change at least 1.0 and detection-fraction difference at least 0.20; Pearson concordance remains diagnostic only. The transcriptomic view requires assay-aware count pseudobulks and records complete provenance. Renamed the former `thr_*` controls as adaptive threshold caps while retaining compatibility aliases.
 

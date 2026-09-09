@@ -8408,11 +8408,8 @@ def plot_liana_paired_route_dotplot(
             plot_df = plot_df.sort_values(["branch_pair", "route_family"], kind="mergesort")
             size_vals = plot_df["n_edges_scored_median"].fillna(1.0).clip(lower=1.0).to_numpy(dtype=float)
             dot_size = 45.0 + 22.0 * np.minimum(size_vals, 8.0)
-            edge_colors = np.where(
-                (plot_df["fdr"].to_numpy(dtype=float) <= 0.05) | (plot_df["_pvalue"].to_numpy(dtype=float) <= 0.05),
-                "#202522",
-                "white",
-            )
+            significant = plot_df["fdr"].to_numpy(dtype=float) <= 0.05
+            edge_colors = np.where(significant, "#202522", "white")
             linewidths = np.where(edge_colors == "#202522", 1.2, 0.7)
 
             fig_w = max(8.0, 0.55 * len(route_order) + 4.0)
@@ -8441,10 +8438,10 @@ def plot_liana_paired_route_dotplot(
             handles = [
                 plt.Line2D([0], [0], marker="o", color="none", markerfacecolor="#bfc6c1", markeredgecolor="white", markersize=6, label="1 edge"),
                 plt.Line2D([0], [0], marker="o", color="none", markerfacecolor="#bfc6c1", markeredgecolor="white", markersize=10, label="4+ edges"),
-                plt.Line2D([0], [0], marker="o", color="none", markerfacecolor="#bfc6c1", markeredgecolor="#202522", markersize=8, label="FDR ≤ 0.05"),
+                plt.Line2D([0], [0], marker="o", color="none", markerfacecolor="#bfc6c1", markeredgecolor="#202522", markersize=8, label="FDR <= 0.05"),
             ]
-            ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(1.01, 1.0), frameon=True, title="Support")
-            fig.tight_layout()
+            fig.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, 0.0), ncol=3, frameon=True, title="Support")
+            fig.tight_layout(rect=(0.0, 0.13, 1.0, 1.0))
             contrast_token = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(contrast)).strip("_") or "contrast"
             record_plot_artifact(f"{stem_prefix}__{contrast_token}{context_token}", figdir, fig)
             close_plot(fig)
@@ -8509,14 +8506,15 @@ def plot_liana_paired_edge_strip(
             y = np.arange(len(plot_df), dtype=float)
             vals = plot_df["_effect_size"].to_numpy(dtype=float)
             colors = [palette.get(str(source), "#8d99ae") for source in plot_df.get("source_label", "").astype(str)]
+            significant = plot_df["fdr"].to_numpy(dtype=float) <= 0.05
             ax.axvline(0.0, color="#202522", linewidth=1.0)
             ax.scatter(
                 vals,
                 y,
                 s=88,
                 c=colors,
-                edgecolor=np.where((plot_df["fdr"].to_numpy(dtype=float) <= 0.05) | (plot_df["_pvalue"].to_numpy(dtype=float) <= 0.05), "#202522", "white"),
-                linewidth=np.where((plot_df["fdr"].to_numpy(dtype=float) <= 0.05) | (plot_df["_pvalue"].to_numpy(dtype=float) <= 0.05), 1.2, 0.7),
+                edgecolor=np.where(significant, "#202522", "white"),
+                linewidth=np.where(significant, 1.2, 0.7),
                 zorder=2,
             )
             ax.set_yticks(y)
@@ -8532,6 +8530,18 @@ def plot_liana_paired_edge_strip(
                     for label in source_levels
                     if label in set(plot_df.get("source_label", "").astype(str))
                 ]
+                handles.append(
+                    plt.Line2D(
+                        [0],
+                        [0],
+                        marker="o",
+                        color="none",
+                        markerfacecolor="#bfc6c1",
+                        markeredgecolor="#202522",
+                        markersize=8,
+                        label="FDR <= 0.05",
+                    )
+                )
                 if handles:
                     ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.14), ncol=min(3, len(handles)), frameon=True, title="Source cluster")
             fig.tight_layout()

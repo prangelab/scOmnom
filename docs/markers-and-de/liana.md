@@ -174,6 +174,8 @@ Each sample must map to one level of every selected condition or context column.
 
 Rescoring defaults to the same log-normalized expression contract as pooled discovery. Candidate route families retain their recorded source; a route family supplied without provenance is marked `provided_unverified`. Candidate selection precedes these focused tests, so their p-values describe the supplied candidate set rather than a new genome-wide discovery screen.
 
+Candidate discovery does not guarantee replicate-level support. An edge is testable only when both its sender and receiver populations meet their cell-count thresholds in enough independent samples or complete subject pairs. Review the missingness tables and the reported sample or pair counts before interpreting an empty or sparse effect table; do not lower support thresholds solely to recover significance.
+
 ### Rescoring Outputs
 
 Focused LIANA rescoring writes:

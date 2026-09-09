@@ -160,6 +160,32 @@ def test_liana_paired_plots_accept_paired_effect_and_generic_context():
     ]
     assert artifacts[0].fig.axes[1].get_ylabel() == "Effect size (group A minus group B)"
     assert artifacts[1].fig.axes[0].get_xlabel() == "Effect size (group A minus group B)"
+    assert len(artifacts[0].fig.legends) == 1
+
+
+def test_liana_paired_route_plot_uses_fdr_not_raw_pvalue_for_outlines():
+    effects = pd.DataFrame(
+        {
+            "contrast": ["A_vs_B", "A_vs_B"],
+            "branch_pair": ["Sender 1 -> Receiver", "Sender 2 -> Receiver"],
+            "route_family": ["Route 1", "Route 2"],
+            "effect_size": [-0.9, 0.6],
+            "pvalue": [0.001, 0.8],
+            "fdr": [0.2, 0.01],
+            "n_edges_scored_median": [2.0, 2.0],
+        }
+    )
+
+    with pu.capture_plot_artifacts() as artifacts:
+        pu.plot_liana_paired_route_dotplot(
+            effects,
+            figdir=Path("ccc"),
+            stem_prefix="route",
+        )
+
+    edge_colors = artifacts[0].fig.axes[0].collections[0].get_edgecolors()
+    assert any(np.allclose(color, mpl.colors.to_rgba("white")) for color in edge_colors)
+    assert any(np.allclose(color, mpl.colors.to_rgba("#202522")) for color in edge_colors)
 
 
 def test_plot_milo_regions_emits_grouped_region_artifact():
