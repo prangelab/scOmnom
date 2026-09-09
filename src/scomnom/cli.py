@@ -2815,7 +2815,9 @@ def _build_cfg_ccc_liana_paired(
     dataset_key: Optional[str],
     source_levels: Optional[List[str]],
     target_levels: Optional[List[str]],
-    pairing_key: str,
+    sample_key: str,
+    subject_key: Optional[str],
+    design: str,
     input_mode: str,
     lognorm_target_sum: float,
     source_filter: Optional[List[str]],
@@ -2827,6 +2829,7 @@ def _build_cfg_ccc_liana_paired(
     min_sender_cells: int,
     min_receiver_cells: int,
     min_scored_donors_per_group: int,
+    min_complete_pairs: int,
 ) -> MarkersAndDEConfig:
     out_dir = output_dir or _default_results_dir_for_input(input_path)
     log_dir = out_dir / "logs"
@@ -2860,7 +2863,10 @@ def _build_cfg_ccc_liana_paired(
         ccc_source_levels=tuple(_parse_csv_repeat(source_levels) or ()),
         ccc_target_levels=tuple(_parse_csv_repeat(target_levels) or ()),
         liana_candidate_events=str(candidate_events),
-        liana_pairing_key=str(pairing_key).strip(),
+        liana_pairing_key=str(sample_key).strip(),
+        liana_sample_key=str(sample_key).strip(),
+        liana_subject_key=(str(subject_key).strip() if subject_key else None),
+        liana_rescore_design=str(design).strip().lower(),
         liana_input_mode=str(input_mode).strip().lower(),
         liana_lognorm_target_sum=float(lognorm_target_sum),
         liana_source_filter=tuple(_parse_csv_repeat(source_filter) or ()),
@@ -2872,6 +2878,7 @@ def _build_cfg_ccc_liana_paired(
         liana_min_sender_cells=int(min_sender_cells),
         liana_min_receiver_cells=int(min_receiver_cells),
         liana_min_scored_donors_per_group=int(min_scored_donors_per_group),
+        liana_min_complete_pairs=int(min_complete_pairs),
     )
 
 
@@ -3026,7 +3033,7 @@ def ccc_liana(
 
 @ccc_app.command(
     "liana-paired",
-    help="Run donor/sample-level focused LIANA rescoring on a candidate LR table.",
+    help="Run sample-level focused LIANA rescoring with an independent or paired design.",
 )
 def ccc_liana_paired(
     input_path: Path = typer.Option(..., "--input-path", "-i"),
@@ -3054,7 +3061,7 @@ def ccc_liana_paired(
     compare_levels: List[str] = typer.Option(
         [],
         "--compare-level",
-        help="Optional levels of the A-side condition variable to keep when using A@B specs.",
+        help="Optional levels of the primary condition variable to keep.",
     ),
     dataset_key: Optional[str] = typer.Option(
         None,
@@ -3071,11 +3078,26 @@ def ccc_liana_paired(
         "--target-level",
         help="Allowed receiver dataset/tissue levels in cross-tissue mode (repeatable/comma-separated).",
     ),
-    pairing_key: str = typer.Option("sample_id", "--pairing-key"),
+    sample_key: str = typer.Option(
+        "sample_id",
+        "--sample-key",
+        "--pairing-key",
+        help="Sample-condition unit used to calculate each edge score. --pairing-key remains a compatibility alias.",
+    ),
+    subject_key: Optional[str] = typer.Option(
+        None,
+        "--subject-key",
+        help="Subject/donor identifier used to match observations when --design paired.",
+    ),
+    design: str = typer.Option(
+        "independent",
+        "--design",
+        help="Group-comparison design: independent (Mann-Whitney) or paired (complete-pair Wilcoxon).",
+    ),
     input_mode: str = typer.Option(
         "lognorm",
         "--input-mode",
-        help="LIANA paired expression input mode. 'lognorm' builds and reuses a library-normalized log1p layer from counts_cb/counts_raw; 'counts' is an explicit expert opt-in.",
+        help="LIANA rescoring expression mode. 'lognorm' builds and reuses a library-normalized log1p layer from counts_cb/counts_raw; 'counts' is an explicit expert opt-in.",
     ),
     lognorm_target_sum: float = typer.Option(
         1e4,
@@ -3090,12 +3112,35 @@ def ccc_liana_paired(
     max_edges: int = typer.Option(200, "--max-edges"),
     min_sender_cells: int = typer.Option(5, "--min-sender-cells"),
     min_receiver_cells: int = typer.Option(5, "--min-receiver-cells"),
-    min_scored_donors_per_group: int = typer.Option(3, "--min-scored-donors-per-group"),
+    min_scored_donors_per_group: int = typer.Option(
+        3,
+        "--min-scored-samples-per-group",
+        "--min-scored-donors-per-group",
+        help="Minimum scored samples per group for --design independent. The donor-named flag is a compatibility alias.",
+    ),
+    min_complete_pairs: int = typer.Option(
+        3,
+        "--min-complete-pairs",
+        help="Minimum complete subject pairs required per edge or route when --design paired.",
+    ),
 ):
     if str(input_mode).strip().lower() not in {"counts", "lognorm"}:
         raise typer.BadParameter("--input-mode must be one of: counts, lognorm.")
     if dataset_key and (not source_levels or not target_levels):
         raise typer.BadParameter("--dataset-key requires at least one --source-level and one --target-level.")
+    design = str(design).strip().lower()
+    if design not in {"independent", "paired"}:
+        raise typer.BadParameter("--design must be one of: independent, paired.")
+    if design == "paired" and not subject_key:
+        raise typer.BadParameter("--design paired requires --subject-key.")
+    if design == "paired" and str(sample_key).strip() == str(subject_key).strip():
+        raise typer.BadParameter("--design paired requires distinct --sample-key and --subject-key values.")
+    if design == "paired" and not condition_keys:
+        raise typer.BadParameter("--design paired requires --condition-key.")
+    if int(min_scored_donors_per_group) < 1:
+        raise typer.BadParameter("--min-scored-samples-per-group must be at least 1.")
+    if int(min_complete_pairs) < 1:
+        raise typer.BadParameter("--min-complete-pairs must be at least 1.")
     if output_name is None:
         output_name = _default_output_name(input_path, "ccc_liana_paired", round_id=round_id)
 
@@ -3118,7 +3163,9 @@ def ccc_liana_paired(
         dataset_key=dataset_key,
         source_levels=source_levels,
         target_levels=target_levels,
-        pairing_key=pairing_key,
+        sample_key=sample_key,
+        subject_key=subject_key,
+        design=design,
         input_mode=input_mode,
         lognorm_target_sum=lognorm_target_sum,
         source_filter=source_filter,
@@ -3130,6 +3177,7 @@ def ccc_liana_paired(
         min_sender_cells=min_sender_cells,
         min_receiver_cells=min_receiver_cells,
         min_scored_donors_per_group=min_scored_donors_per_group,
+        min_complete_pairs=min_complete_pairs,
     )
 
     run_liana_paired_rescore(cfg)

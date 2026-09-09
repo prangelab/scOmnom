@@ -3877,7 +3877,8 @@ def _score_liana_paired_edges(
     *,
     candidate_df: pd.DataFrame,
     groupby: str,
-    pairing_key: str,
+    sample_key: str,
+    subject_key: Optional[str],
     condition_cols: Sequence[str],
     dataset_key: Optional[str],
     source_levels: Sequence[str],
@@ -3887,15 +3888,17 @@ def _score_liana_paired_edges(
     min_sender_cells: int,
     min_receiver_cells: int,
 ) -> pd.DataFrame:
-    if pairing_key not in adata.obs:
-        raise RuntimeError(f"ccc liana paired-rescore: pairing_key={pairing_key!r} not found in adata.obs.")
+    if sample_key not in adata.obs:
+        raise RuntimeError(f"ccc liana paired-rescore: sample_key={sample_key!r} not found in adata.obs.")
+    if subject_key and subject_key not in adata.obs:
+        raise RuntimeError(f"ccc liana paired-rescore: subject_key={subject_key!r} not found in adata.obs.")
     matrix = adata.layers[layer] if layer else adata.X
     gene_to_idx = {str(g): i for i, g in enumerate(adata.var_names.astype(str))}
     rows: list[dict[str, Any]] = []
     source_level_set = {str(x) for x in source_levels if str(x)}
     target_level_set = {str(x) for x in target_levels if str(x)}
 
-    for sample_id, sample_cells in adata.obs.groupby(str(pairing_key), observed=False).groups.items():
+    for sample_id, sample_cells in adata.obs.groupby(str(sample_key), observed=False).groups.items():
         sample_pos = adata.obs_names.get_indexer(list(sample_cells))
         if sample_pos.size == 0:
             continue
@@ -3904,10 +3907,25 @@ def _score_liana_paired_edges(
         sample_datasets = sample_obs[str(dataset_key)].astype(str) if dataset_key else None
         sample_counts = sample_clusters.value_counts()
         meta_row: dict[str, Any] = {"sample_id": str(sample_id)}
+        if subject_key:
+            subject_values = sample_obs[str(subject_key)].dropna().astype(str).unique().tolist()
+            if len(subject_values) != 1:
+                raise RuntimeError(
+                    "ccc liana paired-rescore: each sample must map to exactly one subject. "
+                    f"sample_key={sample_key!r}, sample={sample_id!r}, subject_key={subject_key!r}, "
+                    f"observed_values={subject_values}."
+                )
+            meta_row["subject_id"] = subject_values[0]
         for col in condition_cols:
             if col in sample_obs.columns:
-                vals = sample_obs[col].astype(str).dropna().unique().tolist()
-                meta_row[str(col)] = vals[0] if vals else ""
+                vals = sample_obs[col].dropna().astype(str).unique().tolist()
+                if len(vals) != 1:
+                    raise RuntimeError(
+                        "ccc liana paired-rescore: each sample must map to exactly one condition/context level. "
+                        f"sample_key={sample_key!r}, sample={sample_id!r}, column={col!r}, "
+                        f"observed_values={vals}. Use a sample-condition key rather than a donor-only key."
+                    )
+                meta_row[str(col)] = vals[0]
 
         for _, event in candidate_df.iterrows():
             row = dict(meta_row)
@@ -3951,18 +3969,20 @@ def _score_liana_paired_edges(
                 rows.append(row)
                 continue
 
-            ligand_genes = [gene for gene in _split_liana_complex_genes(event["ligand_complex"]) if gene in gene_to_idx]
-            receptor_genes = [gene for gene in _split_liana_complex_genes(event["receptor_complex"]) if gene in gene_to_idx]
-            row["n_ligand_genes_total"] = len(_split_liana_complex_genes(event["ligand_complex"]))
-            row["n_receptor_genes_total"] = len(_split_liana_complex_genes(event["receptor_complex"]))
+            ligand_genes_total = _split_liana_complex_genes(event["ligand_complex"])
+            receptor_genes_total = _split_liana_complex_genes(event["receptor_complex"])
+            ligand_genes = [gene for gene in ligand_genes_total if gene in gene_to_idx]
+            receptor_genes = [gene for gene in receptor_genes_total if gene in gene_to_idx]
+            row["n_ligand_genes_total"] = len(ligand_genes_total)
+            row["n_receptor_genes_total"] = len(receptor_genes_total)
             row["n_ligand_genes_detected"] = len(ligand_genes)
             row["n_receptor_genes_detected"] = len(receptor_genes)
-            if not ligand_genes:
-                row["missing_reason"] = "ligand_genes_absent"
+            if len(ligand_genes) != len(ligand_genes_total):
+                row["missing_reason"] = "ligand_complex_incomplete"
                 rows.append(row)
                 continue
-            if not receptor_genes:
-                row["missing_reason"] = "receptor_genes_absent"
+            if len(receptor_genes) != len(receptor_genes_total):
+                row["missing_reason"] = "receptor_complex_incomplete"
                 rows.append(row)
                 continue
 
@@ -3997,10 +4017,20 @@ def _score_liana_paired_edges(
     return pd.DataFrame(rows)
 
 
-def _summarize_liana_paired_routes(event_scores: pd.DataFrame) -> pd.DataFrame:
+def _summarize_liana_paired_routes(
+    event_scores: pd.DataFrame,
+    *,
+    metadata_cols: Sequence[str] = (),
+) -> pd.DataFrame:
     if event_scores is None or getattr(event_scores, "empty", True):
         return pd.DataFrame()
     group_cols = ["sample_id"]
+    if "subject_id" in event_scores.columns:
+        group_cols.append("subject_id")
+    for col in metadata_cols:
+        col = str(col)
+        if col in event_scores.columns and col not in group_cols:
+            group_cols.append(col)
     for col in (
         "source_token",
         "target_token",
@@ -4008,11 +4038,8 @@ def _summarize_liana_paired_routes(event_scores: pd.DataFrame) -> pd.DataFrame:
         "target_label",
         "branch_pair",
         "route_family",
-        "sex",
-        "MASLD",
-        "timepoint",
     ):
-        if col in event_scores.columns:
+        if col in event_scores.columns and col not in group_cols:
             group_cols.append(col)
     out = (
         event_scores.groupby(group_cols, observed=False)
@@ -4075,6 +4102,20 @@ def _summarize_paired_missingness(
     return out
 
 
+def _paired_rank_biserial(x: np.ndarray, y: np.ndarray) -> float:
+    differences = np.asarray(x, dtype=float) - np.asarray(y, dtype=float)
+    differences = differences[np.isfinite(differences) & ~np.isclose(differences, 0.0)]
+    if differences.size == 0:
+        return 0.0
+    ranks = sstats.rankdata(np.abs(differences), method="average")
+    rank_sum = float(np.sum(ranks))
+    if rank_sum <= 0:
+        return 0.0
+    positive = float(np.sum(ranks[differences > 0]))
+    negative = float(np.sum(ranks[differences < 0]))
+    return (positive - negative) / rank_sum
+
+
 def _summarize_liana_paired_effects(
     scores_df: pd.DataFrame,
     *,
@@ -4083,8 +4124,11 @@ def _summarize_liana_paired_effects(
     compare_levels: Sequence[str],
     value_col: str,
     group_by: Sequence[str],
+    design: str = "independent",
+    subject_col: Optional[str] = None,
     median_support_cols: Sequence[str] = (),
     min_scored_donors_per_group: int = 1,
+    min_complete_pairs: int = 1,
 ) -> pd.DataFrame:
     if (
         scores_df is None
@@ -4094,6 +4138,12 @@ def _summarize_liana_paired_effects(
         or value_col not in scores_df.columns
     ):
         return pd.DataFrame()
+    design = str(design).strip().lower()
+    if design not in {"independent", "paired"}:
+        raise RuntimeError("ccc liana paired-rescore: design must be one of {'independent', 'paired'}.")
+    if design == "paired" and (not subject_col or subject_col not in scores_df.columns):
+        raise RuntimeError("ccc liana paired-rescore: paired design requires subject identifiers in scored rows.")
+
     df = scores_df.copy()
     df = df[df[value_col].notna()].copy()
     if df.empty:
@@ -4123,32 +4173,91 @@ def _summarize_liana_paired_effects(
                     keys = (keys,)
                 row = {col: val for col, val in zip(group_by, keys, strict=False)}
                 row.update(context_map)
-                x = sub.loc[sub[primary_condition_key].astype(str) == str(pair_a), value_col].dropna().to_numpy(dtype=float)
-                y = sub.loc[sub[primary_condition_key].astype(str) == str(pair_b), value_col].dropna().to_numpy(dtype=float)
+                x_all = sub.loc[sub[primary_condition_key].astype(str) == str(pair_a), value_col].dropna().to_numpy(dtype=float)
+                y_all = sub.loc[sub[primary_condition_key].astype(str) == str(pair_b), value_col].dropna().to_numpy(dtype=float)
                 row["contrast"] = f"{pair_a}_vs_{pair_b}"
                 row["group_a"] = str(pair_a)
                 row["group_b"] = str(pair_b)
-                row["n_group_a"] = int(x.size)
-                row["n_group_b"] = int(y.size)
+                row["design"] = design
+                row["n_group_a"] = int(x_all.size)
+                row["n_group_b"] = int(y_all.size)
+                row["n_complete_pairs"] = np.nan
+                row["n_unmatched_group_a"] = np.nan
+                row["n_unmatched_group_b"] = np.nan
+                row["min_scored_samples_per_group"] = int(max(1, min_scored_donors_per_group))
+                row["min_scored_donors_per_group"] = int(max(1, min_scored_donors_per_group))
+                row["min_complete_pairs"] = int(max(1, min_complete_pairs))
+                row["mannwhitney_pval"] = np.nan
+                row["paired_wilcoxon_pval"] = np.nan
+                row["cliffs_delta"] = np.nan
+                row["paired_rank_biserial"] = np.nan
+                row["mean_paired_difference"] = np.nan
+                row["median_paired_difference"] = np.nan
+
+                if design == "paired":
+                    pair_df = sub[[str(subject_col), str(primary_condition_key), value_col]].dropna(subset=[str(subject_col), value_col]).copy()
+                    pair_df[str(subject_col)] = pair_df[str(subject_col)].astype(str)
+                    pair_df[str(primary_condition_key)] = pair_df[str(primary_condition_key)].astype(str)
+                    pair_df = pair_df[pair_df[str(primary_condition_key)].isin([str(pair_a), str(pair_b)])]
+                    duplicate_counts = pair_df.groupby([str(subject_col), str(primary_condition_key)], observed=False).size()
+                    duplicates = duplicate_counts[duplicate_counts > 1]
+                    if not duplicates.empty:
+                        examples = [f"{subject}/{condition}" for subject, condition in duplicates.index.tolist()[:5]]
+                        raise RuntimeError(
+                            "ccc liana paired-rescore: paired design requires one scored sample per subject-condition "
+                            f"for each edge or route; duplicate observations found for {examples}."
+                        )
+                    wide = pair_df.pivot(index=str(subject_col), columns=str(primary_condition_key), values=value_col)
+                    if str(pair_a) not in wide.columns:
+                        wide[str(pair_a)] = np.nan
+                    if str(pair_b) not in wide.columns:
+                        wide[str(pair_b)] = np.nan
+                    complete = wide[[str(pair_a), str(pair_b)]].dropna()
+                    x = complete[str(pair_a)].to_numpy(dtype=float)
+                    y = complete[str(pair_b)].to_numpy(dtype=float)
+                    row["n_complete_pairs"] = int(len(complete))
+                    row["n_unmatched_group_a"] = int(wide[str(pair_a)].notna().sum() - len(complete))
+                    row["n_unmatched_group_b"] = int(wide[str(pair_b)].notna().sum() - len(complete))
+                    insufficient = len(complete) < int(max(1, min_complete_pairs))
+                    row["test"] = "wilcoxon_signed_rank"
+                    row["effect_size_name"] = "paired_rank_biserial"
+                else:
+                    x = x_all
+                    y = y_all
+                    insufficient = x.size < int(max(1, min_scored_donors_per_group)) or y.size < int(max(1, min_scored_donors_per_group))
+                    row["test"] = "mannwhitneyu"
+                    row["effect_size_name"] = "cliffs_delta"
+
                 row["mean_group_a"] = float(np.mean(x)) if x.size else np.nan
                 row["mean_group_b"] = float(np.mean(y)) if y.size else np.nan
                 row["median_group_a"] = float(np.median(x)) if x.size else np.nan
                 row["median_group_b"] = float(np.median(y)) if y.size else np.nan
-                row["min_scored_donors_per_group"] = int(max(1, min_scored_donors_per_group))
-                if x.size < int(max(1, min_scored_donors_per_group)) or y.size < int(max(1, min_scored_donors_per_group)):
+                if insufficient:
                     row["cliffs_delta"] = np.nan
-                    row["mannwhitney_pval"] = np.nan
                     row["insufficient_scored_donors"] = True
                     for support_col in median_support_cols:
                         if support_col in sub.columns:
                             row[f"{support_col}_median"] = float(pd.to_numeric(sub[support_col], errors="coerce").median())
                     rows.append(row)
                     continue
-                row["cliffs_delta"] = _cliffs_delta(x, y)
-                if x.size and y.size:
-                    row["mannwhitney_pval"] = float(sstats.mannwhitneyu(x, y, alternative="two-sided").pvalue)
+                if design == "paired":
+                    differences = x - y
+                    row["paired_rank_biserial"] = _paired_rank_biserial(x, y)
+                    row["effect_size"] = row["paired_rank_biserial"]
+                    row["mean_paired_difference"] = float(np.mean(differences))
+                    row["median_paired_difference"] = float(np.median(differences))
+                    if np.all(np.isclose(differences, 0.0)):
+                        row["paired_wilcoxon_pval"] = 1.0
+                    else:
+                        row["paired_wilcoxon_pval"] = float(
+                            sstats.wilcoxon(x, y, alternative="two-sided", zero_method="wilcox").pvalue
+                        )
+                    row["pvalue"] = row["paired_wilcoxon_pval"]
                 else:
-                    row["mannwhitney_pval"] = np.nan
+                    row["cliffs_delta"] = _cliffs_delta(x, y)
+                    row["effect_size"] = row["cliffs_delta"]
+                    row["mannwhitney_pval"] = float(sstats.mannwhitneyu(x, y, alternative="two-sided").pvalue)
+                    row["pvalue"] = row["mannwhitney_pval"]
                 row["insufficient_scored_donors"] = False
                 for support_col in median_support_cols:
                     if support_col in sub.columns:
@@ -4160,7 +4269,7 @@ def _summarize_liana_paired_effects(
     out = out[out["insufficient_scored_donors"].astype(bool) == False].copy()
     if out.empty:
         return out
-    pvals = pd.to_numeric(out["mannwhitney_pval"], errors="coerce").to_numpy(dtype=float)
+    pvals = pd.to_numeric(out["pvalue"], errors="coerce").to_numpy(dtype=float)
     valid = np.isfinite(pvals)
     fdr = np.full_like(pvals, np.nan, dtype=float)
     if valid.any():
@@ -6588,7 +6697,17 @@ def run_liana_paired_rescore(cfg) -> ad.AnnData:
         input_mode=liana_input_mode,
         lognorm_target_sum=float(getattr(cfg, "liana_lognorm_target_sum", 1e4)),
     )
-    pairing_key = str(getattr(cfg, "liana_pairing_key", None) or "sample_id").strip()
+    sample_key = str(
+        getattr(cfg, "liana_sample_key", None)
+        or getattr(cfg, "liana_pairing_key", None)
+        or "sample_id"
+    ).strip()
+    subject_key = str(getattr(cfg, "liana_subject_key", None) or "").strip() or None
+    design = str(getattr(cfg, "liana_rescore_design", "independent")).strip().lower()
+    if design not in {"independent", "paired"}:
+        raise RuntimeError("ccc liana paired-rescore: design must be one of {'independent', 'paired'}.")
+    if design == "paired" and subject_key and sample_key == subject_key:
+        raise RuntimeError("ccc liana paired-rescore: paired design requires distinct sample and subject keys.")
     filtered_adata, primary_condition_key, condition_cols, condition_label = _resolve_condition_filter_context(
         adata,
         condition_spec=getattr(cfg, "ccc_condition_key", None),
@@ -6602,7 +6721,7 @@ def run_liana_paired_rescore(cfg) -> ad.AnnData:
     if liana_input_mode == "counts":
         LOGGER.warning(
             "ccc liana paired-rescore: running on explicit raw count-like input. This expert mode "
-            "can change donor-level edge scores through library-depth effects; the release default is lognorm."
+            "can change sample-level edge scores through library-depth effects; the release default is lognorm."
         )
     values_logged = requested_layer is not None and str(requested_layer).startswith("lognorm_")
     expression_provenance = _liana_expression_provenance(
@@ -6633,7 +6752,8 @@ def run_liana_paired_rescore(cfg) -> ad.AnnData:
         filtered_adata,
         candidate_df=candidate_df,
         groupby=str(groupby),
-        pairing_key=pairing_key,
+        sample_key=sample_key,
+        subject_key=subject_key,
         condition_cols=condition_cols,
         dataset_key=str(dataset_key) if dataset_key else None,
         source_levels=source_levels,
@@ -6643,7 +6763,7 @@ def run_liana_paired_rescore(cfg) -> ad.AnnData:
         min_sender_cells=int(getattr(cfg, "liana_min_sender_cells", 5)),
         min_receiver_cells=int(getattr(cfg, "liana_min_receiver_cells", 5)),
     )
-    route_scores = _summarize_liana_paired_routes(edge_scores)
+    route_scores = _summarize_liana_paired_routes(edge_scores, metadata_cols=condition_cols)
     edge_missingness = _summarize_paired_missingness(
         edge_scores,
         group_by=("source_token", "target_token", "source_label", "target_label", "branch_pair", "route_family", "ligand_complex", "receptor_complex"),
@@ -6657,6 +6777,11 @@ def run_liana_paired_rescore(cfg) -> ad.AnnData:
         primary_condition_key=primary_condition_key,
     )
     compare_levels = tuple(str(x) for x in (getattr(cfg, "ccc_compare_levels", ()) or ()) if str(x))
+    if design == "paired":
+        if not subject_key:
+            raise RuntimeError("ccc liana paired-rescore: paired design requires a subject key.")
+        if not primary_condition_key:
+            raise RuntimeError("ccc liana paired-rescore: paired design requires a condition key.")
     edge_effects = _summarize_liana_paired_effects(
         edge_scores,
         primary_condition_key=primary_condition_key,
@@ -6673,8 +6798,11 @@ def run_liana_paired_rescore(cfg) -> ad.AnnData:
             "ligand_complex",
             "receptor_complex",
         ),
+        design=design,
+        subject_col="subject_id" if subject_key else None,
         median_support_cols=("sender_n_cells", "receiver_n_cells"),
         min_scored_donors_per_group=int(getattr(cfg, "liana_min_scored_donors_per_group", 3)),
+        min_complete_pairs=int(getattr(cfg, "liana_min_complete_pairs", 3)),
     )
     route_effects = _summarize_liana_paired_effects(
         route_scores,
@@ -6683,8 +6811,11 @@ def run_liana_paired_rescore(cfg) -> ad.AnnData:
         compare_levels=compare_levels,
         value_col="mean_edge_score",
         group_by=("source_token", "target_token", "source_label", "target_label", "branch_pair", "route_family"),
+        design=design,
+        subject_col="subject_id" if subject_key else None,
         median_support_cols=("n_edges_scored",),
         min_scored_donors_per_group=int(getattr(cfg, "liana_min_scored_donors_per_group", 3)),
+        min_complete_pairs=int(getattr(cfg, "liana_min_complete_pairs", 3)),
     )
 
     run_namespace = _run_namespace_for_round(
@@ -6704,9 +6835,9 @@ def run_liana_paired_rescore(cfg) -> ad.AnnData:
     if edge_effects.empty and route_effects.empty:
         n_scored = int(pd.to_numeric(edge_scores.get("edge_score", pd.Series(dtype=float)), errors="coerce").notna().sum())
         LOGGER.warning(
-            "ccc liana paired-rescore: no group effects were produced for %s. Scored donor-level edges=%d. "
-            "This usually reflects donor-level sparsity or scored-donor thresholds rather than absence of biology. "
-            "Inspect liana_paired_lr_edge_missingness.tsv and consider relaxing --min-sender-cells, --min-receiver-cells, or --min-scored-donors-per-group.",
+            "ccc liana paired-rescore: no group effects were produced for %s. Scored sample-level edges=%d. "
+            "This usually reflects sample-level sparsity or the configured support threshold rather than absence of biology. "
+            "Inspect liana_paired_lr_edge_missingness.tsv and the settings table before changing thresholds.",
             str(condition_label),
             n_scored,
         )
@@ -6719,8 +6850,9 @@ def run_liana_paired_rescore(cfg) -> ad.AnnData:
                 route_effects,
                 figdir=fig_rel,
                 stem_prefix="liana_paired_route_dotplot",
-                title_prefix="LIANA paired route effects",
+                title_prefix=f"LIANA {design} sample-level route effects",
                 top_n=min(int(getattr(cfg, "liana_plot_top_n", 60)), 20),
+                context_cols=tuple(c for c in condition_cols if c != primary_condition_key),
             )
         )
         artifacts.extend(
@@ -6728,8 +6860,9 @@ def run_liana_paired_rescore(cfg) -> ad.AnnData:
                 edge_effects,
                 figdir=fig_rel,
                 stem_prefix="liana_paired_lr_edge_strip",
-                title_prefix="LIANA paired LR edge effects",
+                title_prefix=f"LIANA {design} sample-level LR edge effects",
                 top_n=min(int(getattr(cfg, "liana_plot_top_n", 60)), 16),
+                context_cols=tuple(c for c in condition_cols if c != primary_condition_key),
             )
         )
         plot_utils.persist_plot_artifacts(artifacts)
@@ -6738,7 +6871,10 @@ def run_liana_paired_rescore(cfg) -> ad.AnnData:
         f"input_path\t{getattr(cfg, 'input_path')}",
         f"candidate_events\t{getattr(cfg, 'liana_candidate_events')}",
         f"groupby\t{groupby}",
-        f"pairing_key\t{pairing_key}",
+        f"sample_key\t{sample_key}",
+        f"pairing_key_compat\t{sample_key}",
+        f"subject_key\t{subject_key or ''}",
+        f"design\t{design}",
         f"condition_key\t{getattr(cfg, 'ccc_condition_key', None)}",
         f"condition_values\t{','.join(str(x) for x in getattr(cfg, 'ccc_condition_values', ()) or ())}",
         f"compare_levels\t{','.join(compare_levels)}",
@@ -6754,7 +6890,9 @@ def run_liana_paired_rescore(cfg) -> ad.AnnData:
         "edge_score_formula\tsqrt(ligand_expr * receptor_expr)",
         f"min_sender_cells\t{int(getattr(cfg, 'liana_min_sender_cells', 5))}",
         f"min_receiver_cells\t{int(getattr(cfg, 'liana_min_receiver_cells', 5))}",
+        f"min_scored_samples_per_group\t{int(getattr(cfg, 'liana_min_scored_donors_per_group', 3))}",
         f"min_scored_donors_per_group\t{int(getattr(cfg, 'liana_min_scored_donors_per_group', 3))}",
+        f"min_complete_pairs\t{int(getattr(cfg, 'liana_min_complete_pairs', 3))}",
     ]
     (tables_root / "liana_paired_settings.tsv").write_text("\n".join(settings_lines) + "\n")
 
@@ -6772,7 +6910,10 @@ def run_liana_paired_rescore(cfg) -> ad.AnnData:
         "input_mode": liana_input_mode,
         "expression_layer": requested_layer,
         **expression_provenance,
-        "pairing_key": pairing_key,
+        "pairing_key": sample_key,
+        "sample_key": sample_key,
+        "subject_key": subject_key,
+        "design": design,
     }
     out_zarr = output_dir / (str(getattr(cfg, "output_name", "adata.ccc_liana_paired")) + ".zarr")
     LOGGER.info("Saving dataset → %s", out_zarr)

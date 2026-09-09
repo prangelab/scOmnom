@@ -1190,6 +1190,9 @@ class MarkersAndDEConfig(BaseModel):
     liana_plot_top_n: int = 60
     liana_candidate_events: Optional[str] = None
     liana_pairing_key: Optional[str] = None
+    liana_sample_key: Optional[str] = None
+    liana_subject_key: Optional[str] = None
+    liana_rescore_design: str = "independent"
     liana_source_filter: Tuple[str, ...] = ()
     liana_target_filter: Tuple[str, ...] = ()
     liana_ligand_filter: Tuple[str, ...] = ()
@@ -1199,6 +1202,7 @@ class MarkersAndDEConfig(BaseModel):
     liana_min_sender_cells: int = 5
     liana_min_receiver_cells: int = 5
     liana_min_scored_donors_per_group: int = 3
+    liana_min_complete_pairs: int = 3
     nichenet_receiver_cluster: Optional[str] = None
     nichenet_sender_clusters: Tuple[str, ...] = ()
     nichenet_gene_list_file: Optional[str] = None

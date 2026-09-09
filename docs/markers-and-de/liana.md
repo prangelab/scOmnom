@@ -123,9 +123,9 @@ Key tables:
 
 Key figures include source-target heatmaps, send/receive summaries, circos plots, top interaction plots, route-family plots, target-cluster plots, and condition-split comparison plots when multiple comparable condition runs are present.
 
-## Focused Donor-level Rescoring
+## Focused Sample-level Rescoring
 
-`scomnom ccc liana-paired` rescales a focused LIANA candidate table at donor or sample level. Use it after pooled LIANA has identified candidate ligand-receptor edges and you want donor/sample-level effect summaries.
+`scomnom ccc liana-paired` rescores a focused LIANA candidate table at the sample level. Use it after pooled LIANA has identified candidate ligand-receptor edges and you want replicate-level effect summaries. The command name is retained for compatibility; the statistical design is selected explicitly with `--design independent` or `--design paired`.
 
 ```bash
 scomnom ccc liana-paired \
@@ -134,19 +134,24 @@ scomnom ccc liana-paired \
   --dataset-key dataset \
   --source-level dataset_A \
   --target-level dataset_B \
-  --pairing-key sample_id \
+  --sample-key sample_id \
+  --subject-key donor_id \
+  --design paired \
   --condition-key treatment \
   --compare-level treated \
   --compare-level vehicle \
+  --min-complete-pairs 3 \
   --input-mode lognorm
 ```
 
-### Paired Rescoring Knobs
+### Rescoring Knobs
 
 | Option | Default | Notes |
 | --- | --- | --- |
 | `--candidate-events` | required | Candidate LIANA table, usually `liana_rank_aggregate.tsv` or a filtered derivative. |
-| `--pairing-key` | `sample_id` | Donor/sample key for paired scoring. |
+| `--sample-key` | `sample_id` | Independent scoring unit. Each value must map to exactly one condition/context combination and, when supplied, one subject. `--pairing-key` is retained as a compatibility alias. |
+| `--subject-key` | none | Subject identifier used to match repeated measurements. Required for `--design paired`. |
+| `--design` | `independent` | `independent` uses Mann-Whitney inference; `paired` uses complete-pair Wilcoxon inference. |
 | `--condition-key` | none | Repeatable/comma-separated. Supports `A` and `A@B`. |
 | `--condition-value` | none | Restrict context levels for `A@B`. |
 | `--compare-level` | none | Optional levels of the primary condition variable to keep. |
@@ -158,15 +163,20 @@ scomnom ccc liana-paired \
 | `--receptor-filter` | none | Filter candidate receptor complexes. |
 | `--route-family-filter` | none | Filter candidate route families. |
 | `--max-edges` | `200` | Maximum candidate edges retained for scoring. |
-| `--min-sender-cells` | `5` | Minimum sender cells per donor/sample. |
-| `--min-receiver-cells` | `5` | Minimum receiver cells per donor/sample. |
-| `--min-scored-donors-per-group` | `3` | Minimum scored donors per group for effect summaries. |
+| `--min-sender-cells` | `5` | Minimum sender cells per sample. |
+| `--min-receiver-cells` | `5` | Minimum receiver cells per sample. |
+| `--min-scored-samples-per-group` | `3` | Minimum scored samples per group for independent effects. `--min-scored-donors-per-group` is retained as a compatibility alias. |
+| `--min-complete-pairs` | `3` | Minimum subjects with scores in both groups for paired effects. |
 
-Paired LIANA scores each candidate edge as `sqrt(ligand_expr * receptor_expr)` per donor/sample, then summarizes edge scores into route-family scores and group-effect tables. It defaults to the same log-normalized expression contract as pooled discovery. Candidate route families retain their recorded source; a route family supplied without provenance is marked `provided_unverified`.
+The workflow scores each candidate edge as `sqrt(ligand_expr * receptor_expr)` per sample, then summarizes edge scores into route-family scores and group-effect tables. Independent designs report a two-sided Mann-Whitney p-value and Cliff's delta. Paired designs match samples by `--subject-key`, retain complete subject pairs, and report a two-sided Wilcoxon signed-rank p-value and paired rank-biserial effect size. Benjamini-Hochberg correction is applied across the emitted hypothesis family.
 
-### Paired Outputs
+Each sample must map to one level of every selected condition or context column. A donor identifier that spans multiple conditions is therefore not a valid `--sample-key`; provide separate sample and subject columns instead. Paired mode also rejects duplicate sample observations for the same subject-condition combination. Ligand and receptor complexes are scored only when every named subunit is present; incomplete complexes remain unscored with an explicit missingness reason.
 
-Paired LIANA writes:
+Rescoring defaults to the same log-normalized expression contract as pooled discovery. Candidate route families retain their recorded source; a route family supplied without provenance is marked `provided_unverified`. Candidate selection precedes these focused tests, so their p-values describe the supplied candidate set rather than a new genome-wide discovery screen.
+
+### Rescoring Outputs
+
+Focused LIANA rescoring writes:
 
 * figures: `figures/<fmt>/ccc_liana_paired_<round>_roundN/`;
 * tables: `tables/ccc_liana_paired_<round>_roundN/`;

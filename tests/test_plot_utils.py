@@ -115,6 +115,53 @@ def test_persist_plot_artifacts_clears_figure_reference(monkeypatch):
     assert artifact.fig is None
 
 
+def test_liana_paired_plots_accept_paired_effect_and_generic_context():
+    shared = {
+        "contrast": ["treated_vs_control"],
+        "branch_pair": ["T cell -> Monocyte"],
+        "source_label": ["T cell"],
+        "effect_size": [-0.75],
+        "pvalue": [0.01],
+        "fdr": [0.02],
+        "cohort": ["validation"],
+    }
+    route_effects = pd.DataFrame(
+        {
+            **shared,
+            "route_family": ["CXCL signaling"],
+            "n_edges_scored_median": [3.0],
+        }
+    )
+    edge_effects = pd.DataFrame(
+        {
+            **shared,
+            "ligand_complex": ["CXCL10"],
+            "receptor_complex": ["CXCR3"],
+        }
+    )
+
+    with pu.capture_plot_artifacts() as artifacts:
+        pu.plot_liana_paired_route_dotplot(
+            route_effects,
+            figdir=Path("ccc"),
+            stem_prefix="route",
+            context_cols=("cohort",),
+        )
+        pu.plot_liana_paired_edge_strip(
+            edge_effects,
+            figdir=Path("ccc"),
+            stem_prefix="edge",
+            context_cols=("cohort",),
+        )
+
+    assert [artifact.stem for artifact in artifacts] == [
+        "route__treated_vs_control__cohort_validation",
+        "edge__treated_vs_control__cohort_validation",
+    ]
+    assert artifacts[0].fig.axes[1].get_ylabel() == "Effect size (group A minus group B)"
+    assert artifacts[1].fig.axes[0].get_xlabel() == "Effect size (group A minus group B)"
+
+
 def test_plot_milo_regions_emits_grouped_region_artifact():
     regions = pd.DataFrame(
         {

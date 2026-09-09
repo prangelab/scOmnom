@@ -8,7 +8,7 @@ The `ccc` command group contains the cell-cell communication backends. These wor
 | NicheNet | `scomnom ccc nichenet` | Which sender ligands best explain a receiver transcriptional program? |
 | MEBOCOST | `scomnom ccc mebocost` | Which metabolite-sensor routes connect sender and receiver populations? |
 
-LIANA and MEBOCOST also have paired rescoring modes. Those do not rerun full pooled discovery; they take a focused candidate table and score candidate routes per donor or sample.
+LIANA and MEBOCOST also have focused rescoring modes. Those do not rerun full pooled discovery; they take a candidate table and score candidate routes per sample. LIANA supports explicit independent-group and matched-subject designs.
 
 ## Shared Concepts
 
@@ -30,7 +30,7 @@ CCC commands use the selected clustering round to resolve cell population labels
 
 Condition syntax differs slightly by backend.
 
-| Syntax | LIANA pooled | NicheNet | MEBOCOST pooled | Paired rescoring |
+| Syntax | LIANA pooled | NicheNet | MEBOCOST pooled | Focused rescoring |
 | --- | --- | --- | --- | --- |
 | omitted | one full-object run | requires `--gene-list-file` if no condition is supplied | one full-object run | one run over the filtered object |
 | `A` | one run per level of `A` | compare two levels of `A` | one run per level of `A` | subset/effect grouping by `A` |
@@ -54,7 +54,7 @@ LIANA defaults to `--input-mode lognorm`, using the preferred count layer as the
 
 ## Backend Choice
 
-Use LIANA first for broad ligand-receptor candidate discovery. Use NicheNet when the receiver transcriptional response is the focus and you either have a receiver gene list or a clean two-level receiver DE contrast. Use MEBOCOST for metabolite-sensor communication. Use paired rescoring after pooled discovery when donor/sample-level evidence matters.
+Use LIANA first for broad ligand-receptor candidate discovery. Use NicheNet when the receiver transcriptional response is the focus and you either have a receiver gene list or a clean two-level receiver DE contrast. Use MEBOCOST for metabolite-sensor communication. Use focused rescoring after pooled discovery when replicate-level evidence matters; choose a matched design only when the same subjects occur in both groups.
 
 Detailed pages:
 

@@ -8351,34 +8351,41 @@ def plot_liana_paired_route_dotplot(
     stem_prefix: str,
     title_prefix: str | None = None,
     top_n: int = 20,
+    context_cols: Sequence[str] = (),
 ):
     if route_effects is None or getattr(route_effects, "empty", True):
         return []
-    required = {"contrast", "branch_pair", "route_family", "cliffs_delta"}
+    required = {"contrast", "branch_pair", "route_family"}
     if not required.issubset(route_effects.columns):
         return []
     df = route_effects.copy()
-    df["cliffs_delta"] = pd.to_numeric(df["cliffs_delta"], errors="coerce")
+    effect_col = "effect_size" if "effect_size" in df.columns else "cliffs_delta"
+    if effect_col not in df.columns:
+        return []
+    df["_effect_size"] = pd.to_numeric(df[effect_col], errors="coerce")
     df["fdr"] = pd.to_numeric(df.get("fdr", np.nan), errors="coerce")
-    df["mannwhitney_pval"] = pd.to_numeric(df.get("mannwhitney_pval", np.nan), errors="coerce")
+    pvalue_source = df["pvalue"] if "pvalue" in df.columns else df.get("mannwhitney_pval", np.nan)
+    df["_pvalue"] = pd.to_numeric(pvalue_source, errors="coerce")
     df["n_edges_scored_median"] = pd.to_numeric(df.get("n_edges_scored_median", np.nan), errors="coerce")
-    df = df.dropna(subset=["cliffs_delta"]).copy()
+    df = df.dropna(subset=["_effect_size"]).copy()
     if df.empty:
         return []
-    context_cols = [c for c in ("MASLD", "timepoint") if c in df.columns]
-    context_groups = [([], df)] if not context_cols else list(df.groupby(context_cols, observed=False))
+    resolved_context_cols = [str(c) for c in context_cols if str(c) in df.columns]
+    if not resolved_context_cols:
+        resolved_context_cols = [c for c in ("MASLD", "timepoint") if c in df.columns]
+    context_groups = [([], df)] if not resolved_context_cols else list(df.groupby(resolved_context_cols, observed=False))
     for context_key, context_df in context_groups:
         context_token = ""
         context_title = ""
-        if context_cols:
+        if resolved_context_cols:
             if not isinstance(context_key, tuple):
                 context_key = (context_key,)
-            parts = [f"{col}={val}" for col, val in zip(context_cols, context_key, strict=False)]
+            parts = [f"{col}={val}" for col, val in zip(resolved_context_cols, context_key, strict=False)]
             context_token = "__" + "__".join((re.sub(r"[^A-Za-z0-9_.-]+", "_", str(x)).strip("_") or "context") for x in parts)
             context_title = " [" + ", ".join(parts) + "]"
         for contrast, sub in context_df.groupby("contrast", observed=False, sort=False):
             plot_df = sub.copy()
-            plot_df["_abs_effect"] = plot_df["cliffs_delta"].abs()
+            plot_df["_abs_effect"] = plot_df["_effect_size"].abs()
             plot_df = plot_df.sort_values(["_abs_effect", "n_edges_scored_median"], ascending=[False, False], kind="mergesort").head(int(max(1, top_n))).copy()
             if plot_df.empty:
                 continue
@@ -8402,7 +8409,7 @@ def plot_liana_paired_route_dotplot(
             size_vals = plot_df["n_edges_scored_median"].fillna(1.0).clip(lower=1.0).to_numpy(dtype=float)
             dot_size = 45.0 + 22.0 * np.minimum(size_vals, 8.0)
             edge_colors = np.where(
-                (plot_df["fdr"].to_numpy(dtype=float) <= 0.05) | (plot_df["mannwhitney_pval"].to_numpy(dtype=float) <= 0.05),
+                (plot_df["fdr"].to_numpy(dtype=float) <= 0.05) | (plot_df["_pvalue"].to_numpy(dtype=float) <= 0.05),
                 "#202522",
                 "white",
             )
@@ -8414,7 +8421,7 @@ def plot_liana_paired_route_dotplot(
             scatter = ax.scatter(
                 plot_df["route_family"].cat.codes,
                 plot_df["branch_pair"].cat.codes,
-                c=plot_df["cliffs_delta"],
+                c=plot_df["_effect_size"],
                 s=dot_size,
                 cmap="vlag",
                 vmin=-1.0,
@@ -8430,7 +8437,7 @@ def plot_liana_paired_route_dotplot(
             ax.set_ylabel("Source -> target")
             ax.set_title(f"{title_prefix or 'LIANA paired route effects'} [{contrast}]{context_title}")
             cbar = fig.colorbar(scatter, ax=ax, pad=0.02)
-            cbar.set_label("Cliff's delta")
+            cbar.set_label("Effect size (group A minus group B)")
             handles = [
                 plt.Line2D([0], [0], marker="o", color="none", markerfacecolor="#bfc6c1", markeredgecolor="white", markersize=6, label="1 edge"),
                 plt.Line2D([0], [0], marker="o", color="none", markerfacecolor="#bfc6c1", markeredgecolor="white", markersize=10, label="4+ edges"),
@@ -8451,35 +8458,42 @@ def plot_liana_paired_edge_strip(
     stem_prefix: str,
     title_prefix: str | None = None,
     top_n: int = 16,
+    context_cols: Sequence[str] = (),
 ):
     if edge_effects is None or getattr(edge_effects, "empty", True):
         return []
-    required = {"contrast", "cliffs_delta", "ligand_complex", "receptor_complex", "branch_pair"}
+    required = {"contrast", "ligand_complex", "receptor_complex", "branch_pair"}
     if not required.issubset(edge_effects.columns):
         return []
     df = edge_effects.copy()
-    df["cliffs_delta"] = pd.to_numeric(df["cliffs_delta"], errors="coerce")
+    effect_col = "effect_size" if "effect_size" in df.columns else "cliffs_delta"
+    if effect_col not in df.columns:
+        return []
+    df["_effect_size"] = pd.to_numeric(df[effect_col], errors="coerce")
     df["fdr"] = pd.to_numeric(df.get("fdr", np.nan), errors="coerce")
-    df["mannwhitney_pval"] = pd.to_numeric(df.get("mannwhitney_pval", np.nan), errors="coerce")
-    df = df.dropna(subset=["cliffs_delta"]).copy()
+    pvalue_source = df["pvalue"] if "pvalue" in df.columns else df.get("mannwhitney_pval", np.nan)
+    df["_pvalue"] = pd.to_numeric(pvalue_source, errors="coerce")
+    df = df.dropna(subset=["_effect_size"]).copy()
     if df.empty:
         return []
     source_levels = sorted(df.get("source_label", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
     palette = {label: color for label, color in zip(source_levels, sns.color_palette("tab10", n_colors=max(3, len(source_levels))))}
-    context_cols = [c for c in ("MASLD", "timepoint") if c in df.columns]
-    context_groups = [([], df)] if not context_cols else list(df.groupby(context_cols, observed=False))
+    resolved_context_cols = [str(c) for c in context_cols if str(c) in df.columns]
+    if not resolved_context_cols:
+        resolved_context_cols = [c for c in ("MASLD", "timepoint") if c in df.columns]
+    context_groups = [([], df)] if not resolved_context_cols else list(df.groupby(resolved_context_cols, observed=False))
     for context_key, context_df in context_groups:
         context_token = ""
         context_title = ""
-        if context_cols:
+        if resolved_context_cols:
             if not isinstance(context_key, tuple):
                 context_key = (context_key,)
-            parts = [f"{col}={val}" for col, val in zip(context_cols, context_key, strict=False)]
+            parts = [f"{col}={val}" for col, val in zip(resolved_context_cols, context_key, strict=False)]
             context_token = "__" + "__".join((re.sub(r"[^A-Za-z0-9_.-]+", "_", str(x)).strip("_") or "context") for x in parts)
             context_title = " [" + ", ".join(parts) + "]"
         for contrast, sub in context_df.groupby("contrast", observed=False, sort=False):
             plot_df = sub.copy()
-            plot_df["_abs_effect"] = plot_df["cliffs_delta"].abs()
+            plot_df["_abs_effect"] = plot_df["_effect_size"].abs()
             plot_df = plot_df.sort_values("_abs_effect", ascending=False, kind="mergesort").head(int(max(1, top_n))).copy()
             if plot_df.empty:
                 continue
@@ -8490,10 +8504,10 @@ def plot_liana_paired_edge_strip(
                 + " | "
                 + plot_df["branch_pair"].astype(str)
             )
-            plot_df = plot_df.sort_values("cliffs_delta", kind="mergesort")
+            plot_df = plot_df.sort_values("_effect_size", kind="mergesort")
             fig, ax = plt.subplots(figsize=(11.5, max(4.8, 0.42 * len(plot_df) + 1.8)))
             y = np.arange(len(plot_df), dtype=float)
-            vals = plot_df["cliffs_delta"].to_numpy(dtype=float)
+            vals = plot_df["_effect_size"].to_numpy(dtype=float)
             colors = [palette.get(str(source), "#8d99ae") for source in plot_df.get("source_label", "").astype(str)]
             ax.axvline(0.0, color="#202522", linewidth=1.0)
             ax.scatter(
@@ -8501,13 +8515,13 @@ def plot_liana_paired_edge_strip(
                 y,
                 s=88,
                 c=colors,
-                edgecolor=np.where((plot_df["fdr"].to_numpy(dtype=float) <= 0.05) | (plot_df["mannwhitney_pval"].to_numpy(dtype=float) <= 0.05), "#202522", "white"),
-                linewidth=np.where((plot_df["fdr"].to_numpy(dtype=float) <= 0.05) | (plot_df["mannwhitney_pval"].to_numpy(dtype=float) <= 0.05), 1.2, 0.7),
+                edgecolor=np.where((plot_df["fdr"].to_numpy(dtype=float) <= 0.05) | (plot_df["_pvalue"].to_numpy(dtype=float) <= 0.05), "#202522", "white"),
+                linewidth=np.where((plot_df["fdr"].to_numpy(dtype=float) <= 0.05) | (plot_df["_pvalue"].to_numpy(dtype=float) <= 0.05), 1.2, 0.7),
                 zorder=2,
             )
             ax.set_yticks(y)
             ax.set_yticklabels(_wrap_labels(plot_df["edge_label"].astype(str).tolist(), wrap_at=62), fontsize=9.0)
-            ax.set_xlabel("Cliff's delta")
+            ax.set_xlabel("Effect size (group A minus group B)")
             ax.set_ylabel("Ligand -> receptor route")
             ax.set_title(f"{title_prefix or 'LIANA paired LR edge effects'} [{contrast}]{context_title}")
             ax.grid(axis="x", alpha=0.22, linestyle=":")

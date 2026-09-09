@@ -2174,6 +2174,167 @@ def test_run_mebocost_paired_rescore_lognorm(monkeypatch, tmp_path: Path) -> Non
     assert "min_scored_donors_per_group\t1" in settings_paths[0].read_text()
 
 
+def _paired_liana_candidate(ligand: str = "L1", receptor: str = "R1") -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "source_token": ["S"],
+            "target_token": ["R"],
+            "source_label": ["Sender"],
+            "target_label": ["Receiver"],
+            "source": ["S"],
+            "target": ["R"],
+            "branch_pair": ["Sender -> Receiver"],
+            "route_family": ["Synthetic"],
+            "ligand_complex": [ligand],
+            "receptor_complex": [receptor],
+        }
+    )
+
+
+def _paired_liana_score_rows() -> pd.DataFrame:
+    rows = []
+    for donor_idx in range(6):
+        for condition, score in (("A", 1.0 + donor_idx), ("B", 2.0 + donor_idx)):
+            rows.append(
+                {
+                    "sample_id": f"D{donor_idx}_{condition}",
+                    "subject_id": f"D{donor_idx}",
+                    "condition": condition,
+                    "source_token": "S",
+                    "target_token": "R",
+                    "source_label": "Sender",
+                    "target_label": "Receiver",
+                    "branch_pair": "Sender -> Receiver",
+                    "route_family": "Synthetic",
+                    "ligand_complex": "L1",
+                    "receptor_complex": "R1",
+                    "edge_score": score,
+                    "sender_n_cells": 10,
+                    "receiver_n_cells": 10,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def test_liana_paired_effects_use_complete_matched_subjects() -> None:
+    effects = md_mod._summarize_liana_paired_effects(
+        _paired_liana_score_rows(),
+        primary_condition_key="condition",
+        condition_cols=("condition",),
+        compare_levels=("A", "B"),
+        value_col="edge_score",
+        group_by=(
+            "source_token",
+            "target_token",
+            "source_label",
+            "target_label",
+            "branch_pair",
+            "route_family",
+            "ligand_complex",
+            "receptor_complex",
+        ),
+        design="paired",
+        subject_col="subject_id",
+        min_complete_pairs=4,
+    )
+
+    assert len(effects) == 1
+    row = effects.iloc[0]
+    assert row["test"] == "wilcoxon_signed_rank"
+    assert row["n_complete_pairs"] == 6
+    assert row["paired_rank_biserial"] == pytest.approx(-1.0)
+    assert row["mean_paired_difference"] == pytest.approx(-1.0)
+    assert row["paired_wilcoxon_pval"] == pytest.approx(0.03125)
+    assert row["pvalue"] == pytest.approx(row["paired_wilcoxon_pval"])
+    assert row["fdr"] == pytest.approx(row["pvalue"])
+    assert np.isnan(row["mannwhitney_pval"])
+
+
+def test_liana_paired_effects_reject_duplicate_subject_condition_scores() -> None:
+    scores = pd.concat([_paired_liana_score_rows(), _paired_liana_score_rows().iloc[[0]]], ignore_index=True)
+    with pytest.raises(RuntimeError, match="one scored sample per subject-condition"):
+        md_mod._summarize_liana_paired_effects(
+            scores,
+            primary_condition_key="condition",
+            condition_cols=("condition",),
+            compare_levels=("A", "B"),
+            value_col="edge_score",
+            group_by=("source_token", "target_token", "ligand_complex", "receptor_complex"),
+            design="paired",
+            subject_col="subject_id",
+            min_complete_pairs=3,
+        )
+
+
+def test_liana_paired_scoring_rejects_mixed_condition_sample() -> None:
+    adata = ad.AnnData(X=np.ones((8, 2), dtype=np.float32))
+    adata.var_names = ["L1", "R1"]
+    adata.obs["cluster"] = ["S"] * 4 + ["R"] * 4
+    adata.obs["sample_id"] = ["D1"] * 8
+    adata.obs["subject"] = ["D1"] * 8
+    adata.obs["condition"] = ["A", "A", "B", "B", "A", "A", "B", "B"]
+
+    with pytest.raises(RuntimeError, match="sample-condition key rather than a donor-only key"):
+        md_mod._score_liana_paired_edges(
+            adata,
+            candidate_df=_paired_liana_candidate(),
+            groupby="cluster",
+            sample_key="sample_id",
+            subject_key="subject",
+            condition_cols=("condition",),
+            dataset_key=None,
+            source_levels=(),
+            target_levels=(),
+            layer=None,
+            values_logged=True,
+            min_sender_cells=1,
+            min_receiver_cells=1,
+        )
+
+
+def test_liana_paired_scoring_rejects_incomplete_complex() -> None:
+    adata = ad.AnnData(X=np.ones((8, 2), dtype=np.float32))
+    adata.var_names = ["L1", "R1"]
+    adata.obs["cluster"] = ["S"] * 4 + ["R"] * 4
+    adata.obs["sample_id"] = ["S1"] * 8
+    adata.obs["condition"] = ["A"] * 8
+
+    scores = md_mod._score_liana_paired_edges(
+        adata,
+        candidate_df=_paired_liana_candidate(ligand="L1_L2"),
+        groupby="cluster",
+        sample_key="sample_id",
+        subject_key=None,
+        condition_cols=("condition",),
+        dataset_key=None,
+        source_levels=(),
+        target_levels=(),
+        layer=None,
+        values_logged=True,
+        min_sender_cells=1,
+        min_receiver_cells=1,
+    )
+
+    assert len(scores) == 1
+    assert pd.isna(scores.iloc[0]["edge_score"])
+    assert scores.iloc[0]["missing_reason"] == "ligand_complex_incomplete"
+    assert scores.iloc[0]["n_ligand_genes_total"] == 2
+    assert scores.iloc[0]["n_ligand_genes_detected"] == 1
+
+
+def test_liana_route_summary_preserves_arbitrary_metadata_columns() -> None:
+    scores = _paired_liana_score_rows()
+    scores["ligand_expr"] = scores["edge_score"]
+    scores["receptor_expr"] = scores["edge_score"]
+    scores["edge_score_log1p"] = np.log1p(scores["edge_score"])
+
+    routes = md_mod._summarize_liana_paired_routes(scores, metadata_cols=("condition",))
+
+    assert "condition" in routes.columns
+    assert "subject_id" in routes.columns
+    assert len(routes) == 12
+
+
 def test_run_liana_paired_rescore_lognorm(monkeypatch, tmp_path: Path) -> None:
     adata = ad.AnnData(X=np.ones((6, 4)))
     adata.layers["counts_cb"] = np.array(
@@ -2238,7 +2399,8 @@ def test_run_liana_paired_rescore_lognorm(monkeypatch, tmp_path: Path) -> None:
         *,
         candidate_df,
         groupby,
-        pairing_key,
+        sample_key,
+        subject_key,
         condition_cols,
         dataset_key,
         source_levels,
@@ -2250,6 +2412,8 @@ def test_run_liana_paired_rescore_lognorm(monkeypatch, tmp_path: Path) -> None:
     ):
         captured["layer"] = layer
         captured["values_logged"] = values_logged
+        captured["sample_key"] = sample_key
+        captured["subject_key"] = subject_key
         return pd.DataFrame(
             {
                 "sample_id": ["S1", "S2"],
@@ -2297,6 +2461,9 @@ def test_run_liana_paired_rescore_lognorm(monkeypatch, tmp_path: Path) -> None:
         ccc_target_levels=("liv",),
         liana_candidate_events=str(candidate_path),
         liana_pairing_key="sample_id",
+        liana_sample_key="sample_id",
+        liana_subject_key=None,
+        liana_rescore_design="independent",
         liana_input_mode="lognorm",
         liana_lognorm_target_sum=5000.0,
         liana_source_filter=(),
@@ -2308,6 +2475,7 @@ def test_run_liana_paired_rescore_lognorm(monkeypatch, tmp_path: Path) -> None:
         liana_min_sender_cells=1,
         liana_min_receiver_cells=1,
         liana_min_scored_donors_per_group=1,
+        liana_min_complete_pairs=1,
         liana_plot_top_n=10,
     )
 
@@ -2316,6 +2484,8 @@ def test_run_liana_paired_rescore_lognorm(monkeypatch, tmp_path: Path) -> None:
     assert out is adata
     assert captured["layer"] == "lognorm_counts_cb"
     assert captured["values_logged"] is True
+    assert captured["sample_key"] == "sample_id"
+    assert captured["subject_key"] is None
     assert "lognorm_counts_cb" in adata.layers
     assert adata.layers["lognorm_counts_cb"].dtype == np.float32
     np.testing.assert_allclose(
@@ -2344,6 +2514,7 @@ def test_run_liana_paired_rescore_lognorm(monkeypatch, tmp_path: Path) -> None:
     settings_paths = list((tmp_path / "out" / "tables").glob("**/liana_paired_settings.tsv"))
     assert settings_paths
     assert "min_scored_donors_per_group\t1" in settings_paths[0].read_text()
+    assert "design\tindependent" in settings_paths[0].read_text()
 
 
 def test_prepare_liana_plot_df_uses_cnn_tokens_from_display_map() -> None:

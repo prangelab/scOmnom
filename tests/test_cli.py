@@ -792,6 +792,9 @@ def test_ccc_liana_paired_config_propagates(mock_run):
     assert cfg.ccc_target_levels == ("liv",)
     assert cfg.liana_candidate_events == "liana_rank_aggregate.tsv"
     assert cfg.liana_pairing_key == "sample_id"
+    assert cfg.liana_sample_key == "sample_id"
+    assert cfg.liana_subject_key is None
+    assert cfg.liana_rescore_design == "independent"
     assert cfg.liana_input_mode == "lognorm"
     assert cfg.liana_lognorm_target_sum == pytest.approx(7000.0)
     assert cfg.liana_source_filter == ("C05",)
@@ -803,7 +806,53 @@ def test_ccc_liana_paired_config_propagates(mock_run):
     assert cfg.liana_min_sender_cells == 4
     assert cfg.liana_min_receiver_cells == 6
     assert cfg.liana_min_scored_donors_per_group == 2
+    assert cfg.liana_min_complete_pairs == 3
     assert cfg.output_dir == Path("results")
+
+
+@patch("scomnom.cli.run_liana_paired_rescore")
+def test_ccc_liana_paired_matched_design_config_propagates(mock_run):
+    result = runner.invoke(
+        app,
+        [
+            "ccc",
+            "liana-paired",
+            "--input-path", "adata.zarr.tar.zst",
+            "--candidate-events", "liana_rank_aggregate.tsv",
+            "--condition-key", "condition",
+            "--compare-level", "ctrl",
+            "--compare-level", "stim",
+            "--sample-key", "sample_id",
+            "--subject-key", "donor_id",
+            "--design", "paired",
+            "--min-scored-samples-per-group", "4",
+            "--min-complete-pairs", "4",
+        ],
+    )
+    assert result.exit_code == 0
+    cfg = mock_run.call_args[0][0]
+    assert cfg.liana_sample_key == "sample_id"
+    assert cfg.liana_pairing_key == "sample_id"
+    assert cfg.liana_subject_key == "donor_id"
+    assert cfg.liana_rescore_design == "paired"
+    assert cfg.liana_min_scored_donors_per_group == 4
+    assert cfg.liana_min_complete_pairs == 4
+
+
+def test_ccc_liana_paired_matched_design_requires_subject_key():
+    result = runner.invoke(
+        app,
+        [
+            "ccc",
+            "liana-paired",
+            "--input-path", "adata.zarr.tar.zst",
+            "--candidate-events", "liana_rank_aggregate.tsv",
+            "--condition-key", "condition",
+            "--design", "paired",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "--design paired requires --subject-key" in result.output
 
 
 @patch("scomnom.cli.run_nichenet_ccc")
