@@ -25,6 +25,18 @@ from .clustering_utils import run_BISC
 torch.set_float32_matmul_precision("high")
 LOGGER = logging.getLogger(__name__)
 
+_SCIB_TOTAL_IMPROVEMENT_TOLERANCE = 1e-9
+_SCIB_SELECTION_POLICY = "pareto_tiers_with_total_guard"
+_INTEGRATION_METHOD_CLASS = {
+    "Unintegrated": "baseline",
+    "BBKNN": "baseline",
+    "Harmony": "unsupervised",
+    "Scanorama": "unsupervised",
+    "scVI": "unsupervised",
+    "scANVI": "supervised",
+    "scPoli": "supervised",
+}
+
 
 # ---------------------------------------------------------------------
 # Helpers
@@ -973,6 +985,143 @@ def _run_bbknn(adata: ad.AnnData, batch_key: str) -> None:
 # scIB selection
 # ---------------------------------------------------------------------
 
+
+@dataclass(frozen=True)
+class _ScibSelectionDecision:
+    selected_embedding: str
+    reason: str
+    tier: str
+    total_tolerance: float
+    decision_table: pd.DataFrame
+
+
+def _select_embedding_from_scib_metrics(
+    metrics: pd.DataFrame,
+    *,
+    total_tolerance: float = _SCIB_TOTAL_IMPROVEMENT_TOLERANCE,
+) -> _ScibSelectionDecision:
+    """Apply the Pareto-aware selector to an already scaled scIB metric table."""
+    tolerance = float(total_tolerance)
+    if not np.isfinite(tolerance) or tolerance < 0:
+        raise ValueError("scIB selection total_tolerance must be finite and non-negative.")
+    if metrics is None or getattr(metrics, "empty", True):
+        raise RuntimeError("scIB results table has no numeric rows; cannot select best embedding.")
+
+    numeric = metrics.copy()
+    numeric.index = numeric.index.astype(str)
+    if numeric.index.duplicated().any():
+        duplicates = numeric.index[numeric.index.duplicated()].unique().tolist()
+        raise RuntimeError(f"scIB results table has duplicate embedding names: {duplicates}.")
+    required = ["Bio conservation", "Batch correction", "Total"]
+    missing = [column for column in required if column not in numeric.columns]
+    if missing:
+        raise RuntimeError(
+            f"scIB results table missing required selector column(s) {missing}; cannot select best embedding."
+        )
+    if "Unintegrated" not in numeric.index:
+        raise RuntimeError(
+            "Unintegrated baseline missing from scIB table; cannot select best embedding."
+        )
+
+    numeric.loc[:, required] = numeric.loc[:, required].apply(pd.to_numeric, errors="coerce")
+    required_values = numeric.loc[:, required].to_numpy(dtype=float)
+    if not np.isfinite(required_values).all():
+        bad = numeric.loc[~np.isfinite(required_values).all(axis=1), required].index.tolist()
+        raise RuntimeError(
+            f"scIB results table contains non-finite selector values for embedding(s) {bad}."
+        )
+
+    baseline = numeric.loc["Unintegrated", required]
+    decision = numeric.loc[:, required].copy()
+    decision.insert(
+        0,
+        "method_class",
+        [_INTEGRATION_METHOD_CLASS.get(name, "unknown") for name in decision.index],
+    )
+    decision["delta_bio"] = decision["Bio conservation"] - float(baseline["Bio conservation"])
+    decision["delta_batch"] = decision["Batch correction"] - float(baseline["Batch correction"])
+    decision["delta_total"] = decision["Total"] - float(baseline["Total"])
+    decision["improves_bio"] = decision["delta_bio"] > 0.0
+    decision["improves_batch"] = decision["delta_batch"] > 0.0
+    decision["improves_total"] = decision["delta_total"] > tolerance
+    decision["tier"] = "ineligible_no_total_improvement"
+    decision.loc["Unintegrated", "tier"] = "baseline"
+
+    candidates = decision.index != "Unintegrated"
+    eligible = candidates & decision["improves_total"]
+    tier1 = eligible & decision["improves_bio"] & decision["improves_batch"]
+    tier2 = eligible & decision["improves_bio"] & ~decision["improves_batch"]
+    tier3 = eligible & ~decision["improves_bio"] & decision["improves_batch"]
+    decision.loc[tier1, "tier"] = "tier1_bio_and_batch"
+    decision.loc[tier2, "tier"] = "tier2_bio"
+    decision.loc[tier3, "tier"] = "tier3_batch"
+    inconsistent = eligible & ~decision["improves_bio"] & ~decision["improves_batch"]
+    decision.loc[inconsistent, "tier"] = "ineligible_inconsistent_total"
+
+    tier_order = (
+        (
+            "tier1_bio_and_batch",
+            "bio > baseline AND batch > baseline AND Total > baseline",
+        ),
+        ("tier2_bio", "bio > baseline AND Total > baseline"),
+        ("tier3_batch", "batch > baseline AND Total > baseline"),
+    )
+    selected = "Unintegrated"
+    selected_tier = "baseline"
+    reason = "no eligible candidate improved scaled scIB Total beyond tolerance"
+    for tier, tier_reason in tier_order:
+        tier_frame = decision.loc[decision["tier"] == tier].copy()
+        if tier_frame.empty:
+            continue
+        tier_frame["embedding"] = tier_frame.index.astype(str)
+        tier_frame = tier_frame.sort_values(
+            ["Total", "Bio conservation", "Batch correction", "embedding"],
+            ascending=[False, False, False, True],
+            kind="mergesort",
+        )
+        selected = str(tier_frame.index[0])
+        selected_tier = tier
+        reason = tier_reason
+        break
+
+    valid_tiers = {tier for tier, _ in tier_order}
+    decision["eligible"] = decision["tier"].isin(valid_tiers)
+    decision["selected"] = decision.index == selected
+    decision["selection_policy"] = _SCIB_SELECTION_POLICY
+    decision["selection_reason"] = reason
+    decision["total_improvement_tolerance"] = tolerance
+    decision.index.name = "embedding"
+    return _ScibSelectionDecision(
+        selected_embedding=selected,
+        reason=reason,
+        tier=selected_tier,
+        total_tolerance=tolerance,
+        decision_table=decision.reset_index(),
+    )
+
+
+def _store_scib_selection_decision(
+    adata: ad.AnnData,
+    decision: _ScibSelectionDecision,
+) -> None:
+    selected_row = decision.decision_table.loc[
+        decision.decision_table["selected"].astype(bool)
+    ].iloc[0]
+    adata.uns.setdefault("integration", {})
+    adata.uns["integration"].update(
+        {
+            "selection_policy": _SCIB_SELECTION_POLICY,
+            "selection_reason": decision.reason,
+            "selection_tier": decision.tier,
+            "selection_total_tolerance": decision.total_tolerance,
+            "selection_delta_bio": float(selected_row["delta_bio"]),
+            "selection_delta_batch": float(selected_row["delta_batch"]),
+            "selection_delta_total": float(selected_row["delta_total"]),
+            "selection_decision_table": decision.decision_table.copy(),
+        }
+    )
+
+
 def _select_best_embedding(
     adata: ad.AnnData,
     embedding_keys: Sequence[str],
@@ -990,16 +1139,6 @@ def _select_best_embedding(
     from scib_metrics.benchmark import Benchmarker, BioConservation, BatchCorrection
 
     _ensure_label_key(adata, label_key)
-
-    METHOD_CLASS = {
-        "Unintegrated": "baseline",
-        "BBKNN": "baseline",
-        "Harmony": "unsupervised",
-        "Scanorama": "unsupervised",
-        "scVI": "unsupervised",
-        "scANVI": "supervised",
-        "scPoli": "supervised",
-    }
 
     created = [str(e) for e in (embedding_keys or [])]
     created_set = set(created)
@@ -1077,7 +1216,7 @@ def _select_best_embedding(
         metrics_dir = Path(output_dir) / "integration_metrics"
         metrics_dir.mkdir(parents=True, exist_ok=True)
         selection_path = metrics_dir / f"integration_single_batch_selection{tag_part}.tsv"
-        pd.DataFrame(
+        single_batch_table = pd.DataFrame(
             [
                 {
                     "selected_embedding": selected,
@@ -1087,7 +1226,18 @@ def _select_best_embedding(
                     "available_embeddings": ",".join(benchmark_embeddings),
                 }
             ]
-        ).to_csv(selection_path, sep="\t", index=False)
+        )
+        single_batch_table.to_csv(selection_path, sep="\t", index=False)
+        adata.uns.setdefault("integration", {})
+        adata.uns["integration"].update(
+            {
+                "selection_policy": "single_batch_baseline",
+                "selection_reason": "scIB batch metrics require at least two batch levels",
+                "selection_tier": "single_batch",
+                "selection_total_tolerance": _SCIB_TOTAL_IMPROVEMENT_TOLERANCE,
+                "selection_decision_table": single_batch_table.copy(),
+            }
+        )
         LOGGER.info("Wrote single-batch integration selection table: %s", selection_path.name)
         return selected
 
@@ -1246,24 +1396,15 @@ def _select_best_embedding(
             "scIB results table has no numeric rows after parsing; cannot select best embedding."
         )
 
-    if "Total" not in numeric.columns:
-        raise RuntimeError(
-            "scIB results table missing 'Total' column; cannot select best embedding."
-        )
+    decision = _select_embedding_from_scib_metrics(numeric)
+    best = decision.selected_embedding
+    decision_path = metrics_dir / f"integration_selection_decision{tag_part}.tsv"
+    decision.decision_table.to_csv(decision_path, sep="\t", index=False)
+    _store_scib_selection_decision(adata, decision)
+    LOGGER.info("Wrote integration selection decision table: %s", decision_path.name)
 
-    if "Unintegrated" not in numeric.index:
-        raise RuntimeError(
-            "Unintegrated baseline missing from scIB table; cannot select best embedding."
-        )
-
-    baseline = numeric.loc["Unintegrated"]
-
-    bio_ok = numeric["Bio conservation"] > baseline["Bio conservation"]
-    batch_ok = numeric["Batch correction"] > baseline["Batch correction"]
-
-    candidates = numeric.index != "Unintegrated"
-    if not np.any(candidates):
-        audit_path = Path(plot_utils.figdir).parent / f"integration_no_candidate_selection{tag_part}.tsv"
+    if numeric.index.equals(pd.Index(["Unintegrated"])):
+        audit_path = metrics_dir / f"integration_no_candidate_selection{tag_part}.tsv"
         pd.DataFrame(
             [
                 {
@@ -1280,34 +1421,17 @@ def _select_best_embedding(
         )
         return "Unintegrated"
 
-    tier1 = numeric.loc[candidates & bio_ok & batch_ok]
-    tier2 = numeric.loc[candidates & bio_ok]
-    tier3 = numeric.loc[candidates & batch_ok]
-
-    if not tier1.empty:
-        best = tier1["Total"].idxmax()
-        reason = "bio > baseline AND batch > baseline"
-    elif not tier2.empty:
-        best = tier2["Total"].idxmax()
-        reason = "bio > baseline"
-    elif not tier3.empty:
-        best = tier3["Total"].idxmax()
-        reason = "batch > baseline"
-    else:
-        best = numeric.loc[candidates, "Total"].idxmax()
-        reason = "fallback (highest Total)"
-
-    method_class = METHOD_CLASS.get(str(best), "unknown")
+    method_class = _INTEGRATION_METHOD_CLASS.get(str(best), "unknown")
 
     LOGGER.info(
         "Selected best embedding: '%s' (%s) — reason: %s",
         str(best),
         method_class,
-        reason,
+        decision.reason,
     )
 
     if method_class == "supervised":
-        unsup = [m for m in numeric.index if METHOD_CLASS.get(m) == "unsupervised"]
+        unsup = [m for m in numeric.index if _INTEGRATION_METHOD_CLASS.get(m) == "unsupervised"]
         if unsup:
             best_unsup = numeric.loc[unsup, "Total"].idxmax()
             LOGGER.info(

@@ -96,7 +96,7 @@ Imported external AnnData objects can also receive an imported clustering round.
 
 ### Where to look
 
-* `adata.uns["integration"]`: integration metadata, including the selected best embedding (if available)
+* `adata.uns["integration"]`: integration metadata, including the selected best embedding, Pareto-aware selection policy, tier and reason, baseline deltas, numerical tolerance, and full decision table (if available)
 * `adata.uns["cluster_rounds"]`: all clustering rounds and their settings
 * `adata.uns["active_cluster_round"]`: the currently active clustering round id
 * `adata.uns["cluster_and_annotate"]`: compatibility pointers to the active CellTypist and pretty-label keys

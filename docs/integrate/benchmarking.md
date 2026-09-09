@@ -36,6 +36,29 @@ Valid options include:
 
 This choice affects **benchmarking only** and does not influence integration itself.
 
+## Embedding Selection
+
+scOmnom applies a Pareto-aware hierarchy to the scaled scIB aggregate columns.
+Every candidate must first improve scIB's scaled `Total` over `Unintegrated` by
+more than a numerical tolerance. Eligible candidates are then considered in
+this order:
+
+1. embeddings that improve both `Bio conservation` and `Batch correction`;
+2. embeddings that improve `Bio conservation` while accepting a batch trade-off;
+3. embeddings that improve `Batch correction` while accepting a biological trade-off.
+
+Within the first non-empty tier, scOmnom selects the highest `Total`, followed
+by biological conservation, batch correction, and embedding name as
+deterministic tie-breakers. `Unintegrated` is retained when no candidate
+improves the aggregate score. This keeps the intended preference for balanced
+improvement while preventing an integration with a net-worse scIB aggregate
+from replacing the baseline.
+
+The full decision table records each embedding's tier, component deltas,
+aggregate delta, eligibility, selected status, policy, and tolerance. The
+selector uses the scaled table produced by the current benchmark; raw and
+scaled scIB aggregates are not interchangeable selection inputs.
+
 ## Edge Cases
 
 scIB batch-correction metrics require at least two non-empty batch levels. If the selected `--batch-key` has only one level, scOmnom skips scIB batch benchmarking, selects `Unintegrated` when available (otherwise the first valid embedding), and writes an audit table under `integration_metrics/integration_single_batch_selection*.tsv`.
