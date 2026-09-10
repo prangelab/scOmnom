@@ -36,6 +36,8 @@ from .de_utils import (
     PseudobulkSpec,
     CellLevelMarkerSpec,
     PseudobulkDEOptions,
+    _pseudobulk_condition_design_factors,
+    _pseudobulk_interaction_design_factors,
     _set_blas_threads,
     compute_markers_celllevel,
     de_cluster_vs_rest_pseudobulk,
@@ -9115,10 +9117,14 @@ def run_within_cluster(cfg) -> ad.AnnData:
                 display_map=display_map,
                 tables_root=de_pb_dir,
             )
-            design_terms = ["sample", *covariates, str(condition_key)]
+            design_terms = _pseudobulk_condition_design_factors(str(condition_key), covariates)
             interaction_parts = interaction_by_key.get(str(condition_key))
             if interaction_parts:
-                design_terms = ["sample", *covariates, str(interaction_parts[0]), str(interaction_parts[1]), f"{interaction_parts[0]}:{interaction_parts[1]}"]
+                design_terms = _pseudobulk_interaction_design_factors(
+                    str(interaction_parts[0]),
+                    str(interaction_parts[1]),
+                    covariates,
+                )
 
             settings_name = "de_settings.txt"
             if len(condition_keys) > 1:

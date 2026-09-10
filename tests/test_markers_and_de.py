@@ -14,6 +14,10 @@ import scomnom.annotation_utils as au
 md_mod = importlib.import_module("scomnom.markers_and_de")
 
 from scomnom.composition_utils import _resolve_active_cluster_key, run_glm_composition
+from scomnom.de_utils import (
+    _pseudobulk_condition_design_factors,
+    _pseudobulk_interaction_design_factors,
+)
 from scomnom.markers_and_de import (
     _run_namespace_for_round,
     _collect_pseudobulk_de_tables_from_dir,
@@ -43,6 +47,22 @@ from scomnom.annotation_utils import (
 )
 from scomnom.reporting import _de_report_summary_rows
 from scomnom import reporting
+
+
+def test_pseudobulk_condition_design_uses_only_declared_covariates() -> None:
+    assert _pseudobulk_condition_design_factors("condition") == ["condition"]
+    assert _pseudobulk_condition_design_factors("condition", ("donor_id",)) == [
+        "donor_id",
+        "condition",
+    ]
+
+
+def test_pseudobulk_interaction_design_uses_only_declared_covariates() -> None:
+    assert _pseudobulk_interaction_design_factors(
+        "treatment",
+        "genotype",
+        ("donor_id",),
+    ) == ["donor_id", "treatment", "genotype", "treatment:genotype"]
 
 
 def test_run_msigdb_gsea_from_stats_returns_long_results(monkeypatch, tmp_path: Path) -> None:

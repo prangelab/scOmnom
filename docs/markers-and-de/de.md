@@ -70,7 +70,7 @@ This tests whether the treatment effect differs by genotype inside each cluster.
 | `--group-key` | active round labels | Explicit `adata.obs` grouping column. If omitted, scOmnom resolves the active clustering round. |
 | `--label-source` | `pretty` | Label display source when resolving round labels. |
 | `--round-id` | active round | Cluster round used for grouping. |
-| `--replicate-key` | `adata.uns["batch_key"]` | Sample/replicate column for pseudobulk. Required for pseudobulk if no batch key is stored. |
+| `--replicate-key` | `adata.uns["batch_key"]` | Sample-level aggregation unit for pseudobulk. Required if no batch key is stored. It is not automatically included as a model term. |
 | `--condition-key` | none | Single condition key. Either this or `--condition-keys` is required. |
 | `--condition-keys` | none | Repeatable/comma-separated condition specs, including `A`, `A:B`, `A@B`, and `A^B`. |
 | `--contrasts` | all available pairs or reference-vs-other pairs | Explicit contrast(s), such as `treated_vs_vehicle`. Ignored for `A@B`. |
@@ -105,6 +105,8 @@ This tests whether the treatment effect differs by genotype inside each cluster.
 * Supports sample-level covariates and minimum cells per sample-cluster.
 * Usually substantially slower than cell-level mode, but more rigorous for replicate-aware inference.
 
+The replicate key identifies the sample-level pseudobulk library and is not added to the DESeq2 design automatically. For a repeated-measures experiment, use a sample identifier that is unique to each subject-condition combination as `--replicate-key`, then provide the subject identifier through `--pb-covariates`. For example, `--replicate-key sample_id --pb-covariates donor_id` fits `~ donor_id + condition`. Without covariates, a condition contrast fits `~ condition`.
+
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--run pseudobulk` | off unless selected | Run only the pseudobulk engine. |
@@ -116,7 +118,7 @@ This tests whether the treatment effect differs by genotype inside each cluster.
 | `--pb-max-genes` | none | Optional cap on exported pseudobulk DE genes. |
 | `--pb-min-counts-per-lib` | `0` | Minimum counts required for a pseudobulk library at the CLI layer. |
 | `--pb-min-lib-pct` | `0.0` | Minimum fraction of pseudobulk libraries where a gene must pass count filtering. |
-| `--pb-covariates` | none | Sample-level covariates for the DESeq2 design. Repeat or comma-separate. |
+| `--pb-covariates` | none | Sample-level covariates for the DESeq2 design. Use a subject identifier here for paired designs. Repeat or comma-separate. |
 | `--prune-uns-de` / `--no-prune-uns-de` | enabled | Prune bulky DE payloads before saving the output AnnData. |
 
 **Target populations**

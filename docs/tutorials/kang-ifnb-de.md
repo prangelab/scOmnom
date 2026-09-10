@@ -105,7 +105,8 @@ scomnom de \
   --output-name kang_ifnb.de \
   --figdir-name figures \
   --condition-keys condition \
-  --replicate-key donor_id \
+  --replicate-key sample_id \
+  --pb-covariates donor_id \
   --plot-sample-annotation-keys condition \
   --plot-sample-annotation-keys donor_id \
   --n-jobs 16 \
@@ -116,7 +117,8 @@ Interpretation notes:
 
 * The validated contrast convention is `ctrl_vs_stim`.
 * Negative log2 fold changes, negative NES values, and negative activity scores indicate `stim`-enriched signal under that convention.
-* Per-cluster donor-aware DE is limited by condition imbalance after clustering. In Snellius validation, only clusters `C06` and `C11` had enough cells in both `ctrl` and `stim`; most cluster-level contrasts were skipped for `min_cells_per_level_in_cluster`.
+* Pseudobulk libraries are formed per donor-condition sample and the paired DESeq2 model is `~ donor_id + condition`.
+* Per-cluster donor-aware DE is limited by condition imbalance after clustering. In the original validation, only clusters `C06` and `C11` had enough cells in both `ctrl` and `stim`; most cluster-level contrasts were skipped for `min_cells_per_level_in_cluster`.
 * This is not a failure. It is the correct statistical guard for this dataset.
 
 ![Kang IFN-beta workflow and signal recovery](panels/de_figure1_ifn_signal_draft.png)

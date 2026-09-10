@@ -623,6 +623,26 @@ def pydeseq2_supports_interaction_by_name() -> bool:
     return ("name" in sig.parameters) or ("results_name" in sig.parameters)
 
 
+def _pseudobulk_condition_design_factors(
+    condition_key: str,
+    covariates: Sequence[str] = (),
+) -> list[str]:
+    return [*[str(c) for c in covariates], str(condition_key)]
+
+
+def _pseudobulk_interaction_design_factors(
+    factor_a: str,
+    factor_b: str,
+    covariates: Sequence[str] = (),
+) -> list[str]:
+    return [
+        *[str(c) for c in covariates],
+        str(factor_a),
+        str(factor_b),
+        f"{factor_a}:{factor_b}",
+    ]
+
+
 def _run_pydeseq2(
     counts: pd.DataFrame,
     metadata: pd.DataFrame,
@@ -791,7 +811,11 @@ def _run_pydeseq2_interaction(
     counts = counts.loc[metadata.index]
     counts_i = counts.round().astype(np.int64)
 
-    design_factors = [*covariates, str(factor_a), str(factor_b), f"{factor_a}:{factor_b}"]
+    design_factors = _pseudobulk_interaction_design_factors(
+        factor_a,
+        factor_b,
+        covariates,
+    )
     dds = DeseqDataSet(
         counts=counts_i,
         metadata=metadata.copy(),
@@ -1820,7 +1844,7 @@ def de_condition_within_group_pseudobulk(
         res, meta = _run_pydeseq2(
             counts,
             metadata.rename(columns={sample_key: "sample"}),
-            design_factors=[*covariates, condition_key],
+            design_factors=_pseudobulk_condition_design_factors(condition_key, covariates),
             contrast=(condition_key, str(test), str(reference)),
             alpha=opts.alpha,
             shrink_lfc=opts.shrink_lfc,
