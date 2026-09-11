@@ -107,6 +107,8 @@ This tests whether the treatment effect differs by genotype inside each cluster.
 
 The replicate key identifies the sample-level pseudobulk library and is not added to the DESeq2 design automatically. For a repeated-measures experiment, use a sample identifier that is unique to each subject-condition combination as `--replicate-key`, then provide the subject identifier through `--pb-covariates`. For example, `--replicate-key sample_id --pb-covariates donor_id` fits `~ donor_id + condition`. Without covariates, a condition contrast fits `~ condition`.
 
+When LFC shrinkage is enabled, scOmnom makes the requested contrast denominator the fitted reference level and shrinks the matching PyDESeq2 coefficient. Requested shrinkage is fail-closed: a coefficient-resolution or shrinkage error stops that contrast instead of silently returning unshrunk estimates. The requested coefficient and application status are retained in the per-contrast fit metadata.
+
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--run pseudobulk` | off unless selected | Run only the pseudobulk engine. |

@@ -8587,6 +8587,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                                     "level_a": meta.get("level_a") if meta else None,
                                     "level_b": meta.get("level_b") if meta else None,
                                     "coef_name": meta.get("coef_name") if meta else None,
+                                    "fit_meta": dict(meta or {}),
                                     "results": res,
                                     "options": {
                                         "min_cells_per_sample_group": int(pb_opts.min_cells_per_sample_group),
@@ -8608,6 +8609,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                                         "condition_key": str(cond_key),
                                         "test": str(A2),
                                         "reference": str(B2),
+                                        "fit_meta": dict(df.attrs.get("pydeseq2_meta", {})),
                                         "results": df,
                                         "options": {
                                             "min_cells_per_sample_group": int(pb_opts.min_cells_per_sample_group),
@@ -8686,6 +8688,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                             "level_a": meta.get("level_a") if meta else None,
                             "level_b": meta.get("level_b") if meta else None,
                             "coef_name": meta.get("coef_name") if meta else None,
+                            "fit_meta": dict(meta or {}),
                             "results": res,
                             "options": {
                                 "min_cells_per_sample_group": int(pb_opts.min_cells_per_sample_group),
@@ -8707,6 +8710,7 @@ def run_within_cluster(cfg) -> ad.AnnData:
                                 "condition_key": str(cond_key),
                                 "test": str(A2),
                                 "reference": str(B2),
+                                "fit_meta": dict(df.attrs.get("pydeseq2_meta", {})),
                                 "results": df,
                                 "options": {
                                     "min_cells_per_sample_group": int(pb_opts.min_cells_per_sample_group),

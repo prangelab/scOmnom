@@ -244,6 +244,10 @@ def _pydeseq2_cluster_worker(payload: dict) -> tuple[str, pd.DataFrame, dict]:
             "sf_forced": meta.get("sf_forced"),
             "warn_iterative_size_factors": meta.get("warn_iterative_size_factors"),
             "warn_low_df_dispersion": meta.get("warn_low_df_dispersion"),
+            "lfc_shrink_requested": meta.get("lfc_shrink_requested"),
+            "lfc_shrink_applied": meta.get("lfc_shrink_applied"),
+            "lfc_shrink_coefficient": meta.get("lfc_shrink_coefficient"),
+            "lfc_shrink_error": meta.get("lfc_shrink_error"),
         }
 
     except Exception as e:
@@ -643,6 +647,95 @@ def _pseudobulk_interaction_design_factors(
     ]
 
 
+def _prepare_pydeseq2_contrast_metadata(
+    metadata: pd.DataFrame,
+    contrast: Tuple[str, str, str],
+) -> pd.DataFrame:
+    """Return metadata with the requested contrast denominator as reference."""
+    factor, numerator, denominator = (str(value) for value in contrast)
+    if factor not in metadata.columns:
+        raise KeyError(f"Contrast factor {factor!r} is absent from pseudobulk metadata.")
+
+    values = metadata[factor].dropna().astype(str)
+    observed = list(pd.unique(values))
+    missing = [level for level in (numerator, denominator) if level not in observed]
+    if missing:
+        raise ValueError(
+            f"Contrast levels {missing!r} are absent from pseudobulk factor {factor!r}."
+        )
+
+    categories = [denominator, *[level for level in observed if level != denominator]]
+    prepared = metadata.copy()
+    prepared[factor] = pd.Categorical(
+        prepared[factor].astype(str),
+        categories=categories,
+        ordered=True,
+    )
+    return prepared
+
+
+def _pick_main_effect_coef_name(
+    columns: Sequence[str],
+    *,
+    factor: str,
+    numerator: str,
+    denominator: str,
+) -> Optional[str]:
+    """Resolve the fitted main-effect coefficient for one requested contrast."""
+    names = [str(column) for column in columns]
+    exact = (
+        f"{factor}[T.{numerator}]",
+        f"{factor}_{numerator}_vs_{denominator}",
+    )
+    for candidate in exact:
+        if candidate in names:
+            return candidate
+
+    matches = [
+        name
+        for name in names
+        if ":" not in name and str(factor) in name and str(numerator) in name
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _apply_pydeseq2_lfc_shrinkage(
+    stat: Any,
+    *,
+    requested: bool,
+    coeff_name: Optional[str],
+    meta: Dict[str, Any],
+) -> None:
+    """Apply LFC shrinkage with explicit provenance or fail closed."""
+    meta["lfc_shrink_requested"] = bool(requested)
+    meta["lfc_shrink_applied"] = False
+    meta["lfc_shrink_coefficient"] = str(coeff_name) if coeff_name else None
+    meta["lfc_shrink_error"] = None
+    if not requested:
+        return
+
+    try:
+        shrink_fn = stat.lfc_shrink
+        parameters = inspect.signature(shrink_fn).parameters
+        if "coeff" in parameters:
+            if not coeff_name:
+                raise RuntimeError("Could not resolve the fitted coefficient to shrink.")
+            shrink_fn(coeff=str(coeff_name))
+        else:
+            shrink_fn()
+    except Exception as exc:
+        meta["lfc_shrink_error"] = f"{type(exc).__name__}: {exc}"
+        raise RuntimeError(
+            "PyDESeq2 LFC shrinkage was requested but could not be applied: "
+            f"{meta['lfc_shrink_error']}"
+        ) from exc
+
+    meta["lfc_shrink_applied"] = bool(getattr(stat, "shrunk_LFCs", True))
+    if not meta["lfc_shrink_applied"]:
+        meta["lfc_shrink_error"] = "PyDESeq2 returned without confirming shrinkage."
+        raise RuntimeError(meta["lfc_shrink_error"])
+
+
 def _run_pydeseq2(
     counts: pd.DataFrame,
     metadata: pd.DataFrame,
@@ -666,11 +759,12 @@ def _run_pydeseq2(
 
     # Defensive copies, ensure alignment
     counts = counts.loc[metadata.index]
+    metadata = _prepare_pydeseq2_contrast_metadata(metadata, contrast)
     counts_i = counts.round().astype(np.int64)
 
     dds = DeseqDataSet(
         counts=counts_i,
-        metadata=metadata.copy(),
+        metadata=metadata,
         design_factors=list(design_factors),
         ref_level={contrast[0]: contrast[2]},
         n_cpus=int(n_cpus),
@@ -732,12 +826,19 @@ def _run_pydeseq2(
         )
         stat.summary(print_result=False)
 
-        # Best-effort LFC shrinkage
-        if shrink_lfc:
-            try:
-                stat.lfc_shrink()
-            except Exception:
-                pass
+        lfc_columns = list(getattr(getattr(stat, "LFC", None), "columns", []))
+        coeff_name = _pick_main_effect_coef_name(
+            lfc_columns,
+            factor=str(contrast[0]),
+            numerator=str(contrast[1]),
+            denominator=str(contrast[2]),
+        )
+        _apply_pydeseq2_lfc_shrinkage(
+            stat,
+            requested=bool(shrink_lfc),
+            coeff_name=coeff_name,
+            meta=meta,
+        )
 
     # Process warnings after run
     for ww in wrec:
@@ -757,6 +858,7 @@ def _run_pydeseq2(
 
     cols = [c for c in ["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"] if c in res.columns]
     res = res[cols].sort_values("padj", na_position="last")
+    res.attrs["pydeseq2_meta"] = dict(meta)
 
     return res, meta
 
@@ -1035,11 +1137,12 @@ def _run_pydeseq2_interaction(
 
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         stat.summary(print_result=False)
-        if shrink_lfc:
-            try:
-                stat.lfc_shrink()
-            except Exception:
-                pass
+        _apply_pydeseq2_lfc_shrinkage(
+            stat,
+            requested=bool(shrink_lfc),
+            coeff_name=str(meta.get("contrast_col") or coef_name),
+            meta=meta,
+        )
 
     for ww in wrec:
         msg = str(getattr(ww, "message", ww))
@@ -1055,6 +1158,7 @@ def _run_pydeseq2_interaction(
     cols = [c for c in ["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"] if c in res.columns]
     res = res[cols].sort_values("padj", na_position="last")
     meta["coef_name"] = str(meta.get("contrast_col") or coef_name)
+    res.attrs["pydeseq2_meta"] = dict(meta)
     return res, meta
 
 
@@ -1854,14 +1958,19 @@ def de_condition_within_group_pseudobulk(
     except Exception as e:
         LOGGER.warning("PyDESeq2 failed for condition DE within %s=%s: %s", group_key, group_value, e)
         res = pd.DataFrame(columns=["gene", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"])
-        meta_df = {
+        meta = {
             "sf_policy": str(getattr(opts, "size_factors", "poscounts")),
             "sf_used": None,
             "sf_forced": False,
             "warn_iterative_size_factors": False,
             "warn_low_df_dispersion": False,
             "warnings": [str(e)],
+            "lfc_shrink_requested": bool(opts.shrink_lfc),
+            "lfc_shrink_applied": False,
+            "lfc_shrink_coefficient": None,
+            "lfc_shrink_error": f"{type(e).__name__}: {e}",
         }
+        res.attrs["pydeseq2_meta"] = dict(meta)
 
     if store and store_key:
             adata.uns.setdefault(store_key, {})
@@ -1888,6 +1997,7 @@ def de_condition_within_group_pseudobulk(
                     "max_genes": (int(getattr(opts, "max_genes", 0)) if getattr(opts, "max_genes", None) else None),
                 },
                 "meta": meta_df,
+                "fit_meta": dict(meta),
                 "results": res,
             }
 
@@ -3775,6 +3885,7 @@ def de_condition_within_group_pseudobulk_multi(
                 "condition_key": str(condition_key),
                 "test": str(A),
                 "reference": str(B),
+                "fit_meta": dict(res.attrs.get("pydeseq2_meta", {})),
                 "results": res,
                 "options": {
                     "min_cells_per_sample_group": int(opts.min_cells_per_sample_group),

@@ -15,6 +15,9 @@ md_mod = importlib.import_module("scomnom.markers_and_de")
 
 from scomnom.composition_utils import _resolve_active_cluster_key, run_glm_composition
 from scomnom.de_utils import (
+    _apply_pydeseq2_lfc_shrinkage,
+    _pick_main_effect_coef_name,
+    _prepare_pydeseq2_contrast_metadata,
     _pseudobulk_condition_design_factors,
     _pseudobulk_interaction_design_factors,
 )
@@ -63,6 +66,79 @@ def test_pseudobulk_interaction_design_uses_only_declared_covariates() -> None:
         "genotype",
         ("donor_id",),
     ) == ["donor_id", "treatment", "genotype", "treatment:genotype"]
+
+
+def test_prepare_pydeseq2_contrast_metadata_sets_requested_reference() -> None:
+    metadata = pd.DataFrame(
+        {"condition": ["ctrl", "stim", "ctrl"], "donor_id": ["d1", "d1", "d2"]}
+    )
+
+    got = _prepare_pydeseq2_contrast_metadata(
+        metadata,
+        ("condition", "ctrl", "stim"),
+    )
+
+    assert list(got["condition"].cat.categories) == ["stim", "ctrl"]
+    assert got["condition"].astype(str).tolist() == metadata["condition"].tolist()
+    assert metadata["condition"].dtype == object
+
+
+def test_pick_main_effect_coef_name_supports_formulaic_and_legacy_names() -> None:
+    assert _pick_main_effect_coef_name(
+        ["Intercept", "condition[T.ctrl]"],
+        factor="condition",
+        numerator="ctrl",
+        denominator="stim",
+    ) == "condition[T.ctrl]"
+    assert _pick_main_effect_coef_name(
+        ["Intercept", "condition_ctrl_vs_stim"],
+        factor="condition",
+        numerator="ctrl",
+        denominator="stim",
+    ) == "condition_ctrl_vs_stim"
+
+
+def test_apply_pydeseq2_lfc_shrinkage_records_coefficient() -> None:
+    class _FakeStats:
+        shrunk_LFCs = False
+
+        def lfc_shrink(self, coeff: str, adapt: bool = True) -> None:
+            self.coeff = coeff
+            self.shrunk_LFCs = True
+
+    stat = _FakeStats()
+    meta = {}
+
+    _apply_pydeseq2_lfc_shrinkage(
+        stat,
+        requested=True,
+        coeff_name="condition[T.ctrl]",
+        meta=meta,
+    )
+
+    assert stat.coeff == "condition[T.ctrl]"
+    assert meta["lfc_shrink_requested"] is True
+    assert meta["lfc_shrink_applied"] is True
+    assert meta["lfc_shrink_coefficient"] == "condition[T.ctrl]"
+    assert meta["lfc_shrink_error"] is None
+
+
+def test_apply_pydeseq2_lfc_shrinkage_fails_closed() -> None:
+    class _FakeStats:
+        def lfc_shrink(self, coeff: str) -> None:
+            raise KeyError(coeff)
+
+    meta = {}
+    with pytest.raises(RuntimeError, match="could not be applied"):
+        _apply_pydeseq2_lfc_shrinkage(
+            _FakeStats(),
+            requested=True,
+            coeff_name="condition[T.ctrl]",
+            meta=meta,
+        )
+
+    assert meta["lfc_shrink_applied"] is False
+    assert "KeyError" in meta["lfc_shrink_error"]
 
 
 def test_run_msigdb_gsea_from_stats_returns_long_results(monkeypatch, tmp_path: Path) -> None:
