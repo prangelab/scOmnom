@@ -7,6 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 from typing import Any, Sequence
+import warnings
 
 import anndata as ad
 import numpy as np
@@ -414,4 +415,257 @@ def _prepare_sample_inputs(
     }
     provenance["round_id"] = selection.round_id
     provenance["cells_outside_round"] = int((~selection.round_cell_mask).sum())
+    _resolve_contrasts(prepared.qc, cfg)
     return selection, replace(prepared, expression=expression, provenance=provenance)
+
+
+def _resolve_contrasts(qc: pd.DataFrame, cfg: SampleEnrichmentConfig) -> tuple[tuple[str, str], ...]:
+    if not cfg.condition_key:
+        return ()
+    if cfg.condition_key not in qc:
+        raise ValueError(f"Condition column {cfg.condition_key!r} is missing.")
+    levels = set(_identifier_values(qc[cfg.condition_key], name=cfg.condition_key))
+    if not cfg.contrasts:
+        if len(levels) != 2 or not cfg.reference:
+            raise ValueError("Specify explicit TEST:REFERENCE contrasts, or an explicit reference for two levels.")
+        if cfg.reference not in levels:
+            raise ValueError(f"Requested reference {cfg.reference!r} is absent from the data.")
+        resolved = [(next(iter(levels - {cfg.reference})), cfg.reference)]
+    else:
+        resolved = []
+    for value in cfg.contrasts:
+        parts = [part.strip() for part in value.split(":")]
+        if len(parts) != 2 or not all(parts) or parts[0] == parts[1]:
+            raise ValueError(f"Malformed contrast {value!r}; use TEST:REFERENCE.")
+        if set(parts) - levels:
+            raise ValueError(f"Requested contrast {value!r} contains a level absent from the data.")
+        resolved.append(tuple(parts))
+    if cfg.subject_key:
+        if cfg.subject_key not in qc:
+            raise ValueError(f"Subject column {cfg.subject_key!r} is missing.")
+        libraries = qc[["replicate_id", cfg.subject_key, cfg.condition_key]].drop_duplicates("replicate_id")
+        libraries = libraries.loc[libraries[cfg.subject_key].notna() & libraries[cfg.subject_key].astype(str).str.strip().ne("")]
+        _identifier_values(libraries[cfg.subject_key], name=cfg.subject_key)
+        for test, reference in resolved:
+            paired = libraries.loc[libraries[cfg.condition_key].astype(str).isin([test, reference])]
+            if paired.duplicated([cfg.subject_key, cfg.condition_key]).any():
+                raise ValueError("Paired sample enrichment does not support multiple replicate libraries per subject-condition.")
+    return tuple(dict.fromkeys(resolved))
+
+
+@dataclass(frozen=True)
+class _ActivityDesign:
+    matrix: pd.DataFrame
+    audit: dict[str, Any]
+    exclusions: pd.DataFrame
+
+
+def _build_activity_design(
+    qc: pd.DataFrame, *, test: str, reference: str, cfg: SampleEnrichmentConfig,
+) -> _ActivityDesign:
+    condition = qc[cfg.condition_key].astype(str)
+    in_contrast = condition.isin([test, reference])
+    reasons = pd.Series("", index=qc.index, dtype=object)
+    reasons.loc[~in_contrast] = "outside_contrast"
+    failed_qc = in_contrast & ~qc["included"]
+    reasons.loc[failed_qc] = qc.loc[failed_qc, "exclusion_reason"].replace("", "pseudobulk_qc")
+
+    for field in cfg.covariates:
+        if field not in qc:
+            raise ValueError(f"Requested covariate {field!r} is missing.")
+        values = qc[field]
+        missing = values.isna() | values.astype(str).str.strip().eq("")
+        if pd.api.types.is_numeric_dtype(values) and field != cfg.subject_key:
+            missing |= ~np.isfinite(values.to_numpy(dtype=float, na_value=np.nan))
+        for pb_id in qc.index[in_contrast & missing]:
+            reasons.loc[pb_id] = ";".join(filter(None, [reasons.loc[pb_id], f"missing_covariate:{field}"]))
+
+    n_subjects = 0
+    if cfg.subject_key:
+        subjects = qc[cfg.subject_key]
+        identified = subjects.notna() & subjects.astype(str).str.strip().ne("")
+        _identifier_values(subjects.loc[identified], name=cfg.subject_key)
+        pair_rows = qc.loc[in_contrast & identified, [cfg.subject_key, cfg.condition_key]]
+        if pair_rows.duplicated().any():
+            raise ValueError("Paired sample enrichment does not support multiple replicate libraries per subject-condition.")
+        complete = qc.loc[reasons.eq("")].groupby(cfg.subject_key, observed=True)[cfg.condition_key].nunique()
+        complete_subjects = complete.index[complete == 2]
+        incomplete = reasons.eq("") & ~subjects.isin(complete_subjects)
+        reasons.loc[incomplete] = "incomplete_pair"
+        n_subjects = len(complete_subjects)
+
+    included = reasons.eq("")
+    rows = qc.loc[included]
+    n_test = int((condition.loc[included] == test).sum())
+    n_reference = int((condition.loc[included] == reference).sum())
+    exclusions = qc[["replicate_id", "population_id"]].copy()
+    exclusions.insert(0, "pb_id", qc.index)
+    exclusions["contrast"] = f"{test}:{reference}"
+    exclusions["condition"] = condition
+    exclusions["included"] = included
+    exclusions["exclusion_reason"] = reasons
+    if cfg.subject_key:
+        exclusions["subject_id"] = qc[cfg.subject_key]
+    exclusions = exclusions.reset_index(drop=True)
+
+    matrix = pd.DataFrame({"intercept": np.ones(len(rows))}, index=rows.index)
+    terms: list[dict[str, Any]] = [{"column": "intercept", "field": "intercept", "kind": "intercept"}]
+    constant = []
+    formula_terms = []
+    for number, field in enumerate(cfg.covariates):
+        values = rows[field]
+        numeric = pd.api.types.is_numeric_dtype(values) and not pd.api.types.is_bool_dtype(values) and field != cfg.subject_key
+        if values.nunique() <= 1:
+            constant.append(field)
+        if numeric:
+            column = f"covariate_{number}"
+            matrix[column] = values.astype(float)
+            terms.append({"column": column, "field": field, "kind": "numeric"})
+            formula_terms.append(f"Q({json.dumps(field)})")
+        else:
+            labels = _identifier_values(values, name=field)
+            levels = sorted(labels.unique())
+            for index, level in enumerate(levels[1:], start=1):
+                column = f"covariate_{number}_level_{index}"
+                matrix[column] = labels.eq(level).astype(float)
+                terms.append({"column": column, "field": field, "kind": "categorical", "level": level, "reference": levels[0]})
+            formula_terms.append(f"C(Q({json.dumps(field)}))")
+    matrix["condition_test"] = condition.loc[included].eq(test).astype(float)
+    terms.append({"column": "condition_test", "field": cfg.condition_key, "kind": "condition", "level": test, "reference": reference})
+    formula_terms.append(f"C(Q({json.dumps(cfg.condition_key)}), Treatment(reference={json.dumps(reference)}))")
+    rank = int(np.linalg.matrix_rank(matrix.to_numpy())) if len(matrix) else 0
+    df_resid = len(matrix) - rank
+    status = "ok"
+    if not {test, reference}.issubset(set(condition)):
+        status = "absent_contrast_level"
+    elif cfg.subject_key and n_subjects < cfg.min_complete_subjects:
+        status = "insufficient_complete_pairs"
+    elif min(n_test, n_reference) < cfg.min_replicates_per_level or (not cfg.subject_key and len(rows) < cfg.min_replicates_total):
+        status = "insufficient_replicates"
+    elif constant:
+        status = "covariate_no_variation"
+    elif rank < matrix.shape[1]:
+        status = "rank_deficient"
+    elif df_resid <= 0:
+        status = "zero_residual_degrees_of_freedom"
+    audit = {
+        "design_status": status, "formula": "activity_score ~ " + " + ".join(formula_terms),
+        "design_columns": json.dumps(matrix.columns.tolist()), "design_terms": json.dumps(terms),
+        "constant_covariates": json.dumps(constant), "rank": rank, "df_resid": df_resid,
+        "n_included": len(rows), "n_excluded": len(qc) - len(rows),
+        "n_test": n_test, "n_reference": n_reference, "n_subjects": n_subjects,
+        "n_outside_contrast": int((~in_contrast).sum()), "covariance": "HC3",
+        "inference_distribution": "t", "outcome_sd_ddof": 1,
+    }
+    return _ActivityDesign(matrix, audit, exclusions)
+
+
+@dataclass(frozen=True)
+class _ActivityModels:
+    contrasts: pd.DataFrame
+    audit: pd.DataFrame
+    exclusions: pd.DataFrame
+
+
+_MODEL_ESTIMATE_COLUMNS = [
+    "effect_raw", "se_raw", "ci_low_raw", "ci_high_raw", "outcome_sd",
+    "effect_standardized", "ci_low_standardized", "ci_high_standardized", "pvalue", "fdr",
+]
+_MODEL_ID_COLUMNS = ["population_id", "population_label", "resource", "activity", "contrast", "test", "reference"]
+
+
+def _fit_activity_contrasts(
+    prepared: _PreparedPseudobulks, scored: _ScoredActivities, cfg: SampleEnrichmentConfig,
+) -> _ActivityModels:
+    import statsmodels.api as sm
+    from statsmodels.stats.multitest import multipletests
+
+    contrasts = _resolve_contrasts(prepared.qc, cfg)
+    estimates, audits, exclusions = [], [], []
+    designs: dict[tuple[str, str, str], _ActivityDesign] = {}
+    grouping = ["population_id", "resource", "activity"]
+    if scored.audit.duplicated(grouping).any():
+        raise ValueError("Activity audit contains duplicate population-resource-activity rows.")
+    if scored.scores.duplicated([*grouping, "pb_id"]).any():
+        raise ValueError("Activity scores contain duplicate library observations.")
+    score_groups = {key: table.set_index("pb_id")["score"] for key, table in scored.scores.groupby(grouping, sort=False)}
+    for activity in scored.audit.to_dict("records"):
+        population = activity["population_id"]
+        for test, reference in contrasts:
+            design_key = (population, test, reference)
+            if design_key not in designs:
+                design = _build_activity_design(
+                    prepared.qc.loc[prepared.qc["population_id"].eq(population)],
+                    test=test, reference=reference, cfg=cfg,
+                )
+                designs[design_key] = design
+                exclusions.append(design.exclusions)
+            design = designs[design_key]
+            identity = {key: activity[key] for key in _MODEL_ID_COLUMNS[:4]}
+            identity.update({"contrast": f"{test}:{reference}", "test": test, "reference": reference})
+            result = {
+                **identity, **{key: np.nan for key in _MODEL_ESTIMATE_COLUMNS},
+                **{key: design.audit[key] for key in ("formula", "n_included", "n_excluded", "n_test", "n_reference", "n_subjects")},
+                "status": design.audit["design_status"] if activity["status"] == "ok" else activity["status"],
+                "fdr_family_id": json.dumps([population, activity["resource"], test, reference]),
+                "fdr_family_size": 0,
+            }
+            model_warnings = []
+            if result["status"] == "ok":
+                scores = score_groups.get((population, activity["resource"], activity["activity"]), pd.Series(dtype=float))
+                y = pd.to_numeric(scores.reindex(design.matrix.index), errors="raise").to_numpy(dtype=float)
+                if not np.isfinite(y).all():
+                    result["status"] = "nonfinite_activity"
+                else:
+                    sd = float(np.std(y, ddof=1))
+                    result["outcome_sd"] = sd
+                    if not np.isfinite(sd):
+                        result["status"] = "nonfinite_activity_variance"
+                    elif sd == 0:
+                        result["status"] = "zero_variance_activity"
+                    else:
+                        x = design.matrix.to_numpy(dtype=float)
+                        leverage = np.square(np.linalg.qr(x, mode="reduced")[0]).sum(axis=1)
+                        if np.any(1 - leverage <= 10 * np.finfo(float).eps):
+                            result["status"] = "hc3_undefined_leverage"
+                        else:
+                            with warnings.catch_warnings(record=True) as caught:
+                                warnings.simplefilter("always")
+                                try:
+                                    fitted = sm.OLS(y, design.matrix, missing="raise").fit(cov_type="HC3", use_t=True)
+                                    tolerance = 100 * np.finfo(float).eps * max(1., np.linalg.norm(y))
+                                    if np.linalg.norm(fitted.resid) <= tolerance:
+                                        result["status"] = "zero_residual_variance"
+                                    else:
+                                        effect = float(fitted.params["condition_test"])
+                                        se = float(fitted.bse["condition_test"])
+                                        low, high = fitted.conf_int(alpha=.05).loc["condition_test"].to_numpy(dtype=float)
+                                        pvalue = float(fitted.pvalues["condition_test"])
+                                        if not np.isfinite([effect, se, low, high, pvalue]).all() or se <= 0 or not 0 <= pvalue <= 1:
+                                            result["status"] = "nonfinite_inference"
+                                        else:
+                                            result.update({
+                                                "effect_raw": effect, "se_raw": se, "ci_low_raw": low, "ci_high_raw": high,
+                                                "effect_standardized": effect / sd, "ci_low_standardized": low / sd,
+                                                "ci_high_standardized": high / sd, "pvalue": pvalue,
+                                            })
+                                except (ValueError, np.linalg.LinAlgError, FloatingPointError) as exc:
+                                    result["status"] = "fit_failed"
+                                    model_warnings.append(f"{type(exc).__name__}: {exc}")
+                                model_warnings.extend(str(item.message) for item in caught)
+            estimates.append(result)
+            audits.append({**identity, **design.audit, "status": result["status"], "warnings": json.dumps(model_warnings)})
+
+    result_table = pd.DataFrame(estimates)
+    if not result_table.empty:
+        for _, family in result_table.groupby("fdr_family_id", sort=False):
+            tested = family.index[family["status"].eq("ok") & family["pvalue"].notna()]
+            result_table.loc[family.index, "fdr_family_size"] = len(tested)
+            if len(tested):
+                result_table.loc[tested, "fdr"] = multipletests(result_table.loc[tested, "pvalue"], method="fdr_bh")[1]
+    else:
+        result_table = pd.DataFrame(columns=[*_MODEL_ID_COLUMNS, *_MODEL_ESTIMATE_COLUMNS, "status", "fdr_family_id", "fdr_family_size"])
+    return _ActivityModels(
+        contrasts=result_table, audit=pd.DataFrame(audits),
+        exclusions=pd.concat(exclusions, ignore_index=True) if exclusions else pd.DataFrame(),
+    )
