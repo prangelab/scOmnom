@@ -135,9 +135,18 @@ scomnom da \
   --figdir-name figures \
   --round-id r1_scANVI_compacted \
   --condition-keys condition \
-  --replicate-key donor_id \
+  --replicate-key sample_id \
+  --covariates donor_id \
+  --method glm \
+  --method clr \
+  --method milo \
+  --milo-scale balanced \
   --n-jobs 16
 ```
+
+scOmnom offers four independent DA backends: scCODA for joint Bayesian compositional inference, GLM for covariate-adjusted per-cluster effects, CLR for a simple nonparametric screen, and Milo for local changes in the integrated manifold. This validated Kang run explicitly uses GLM, CLR, and Milo. scCODA remains a full supported backend and was validated separately with the synthetic composition controls.
+
+The balanced Milo setting uses 75 graph neighbours, 1,000 initial seeds, and a minimum neighbourhood size of 50 cells. Use `local` (30, 2,000, and 20) when fine within-population localization is the priority, or `broad` (150, 300, and 100) for diffuse shifts and greater coverage. These presets change neighbourhood geometry and sampling density; they retain the same sample-support rule, count model, spatial-FDR threshold, and region grouping.
 
 Validated DA interpretation:
 

@@ -4720,7 +4720,7 @@ def plot_stability_curves(
       - silhouette (centroid-based)
       - adjacent-resolution stability (smoothed ARI)
       - composite score (actual one used for selection)
-      - tiny-cluster penalty
+      - small-cluster safeguard score
     """
     res_sorted = _sorted_resolutions(resolutions)
 
@@ -4769,7 +4769,7 @@ def plot_stability_curves(
             marker="o",
             markersize=3,
         )
-    ax.plot(res_sorted, tiny, label="Tiny-cluster penalty", color="tab:orange")
+    ax.plot(res_sorted, tiny, label="Small-cluster safeguard score", color="tab:orange")
     if not np.allclose(structural_values, comp, equal_nan=True):
         ax.plot(
             res_sorted,

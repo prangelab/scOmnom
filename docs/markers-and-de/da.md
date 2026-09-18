@@ -27,6 +27,8 @@ scomnom da ... --condition-keys treatment --method milo,clr
 | `clr` | yes | Simple pairwise screening across condition levels | CLR-transformed proportions, Mann-Whitney tests, pairwise FDR |
 | `milo` | yes | Local abundance shifts in the integrated embedding | Refined neighbourhood count models and spatial FDR |
 
+These methods are complementary, not fallbacks or a voting hierarchy. scCODA asks whether the complete annotated composition changes relative to a reference population. GLM asks whether one cluster changes relative to the remainder while accommodating covariates. CLR provides a simple nonparametric screen of transformed sample proportions. Milo asks where abundance changes locally in the integrated manifold, including changes that need not align with cluster boundaries.
+
 For most routine runs, leave the default method set on. Use a subset when you want a faster exploratory pass (`--method clr,milo`), a Milo-only neighbourhood analysis (`--method milo`), or a compact global-composition run without neighbourhood testing (`--method sccoda,clr,glm`). The legacy selector `--method graph` is accepted as a deprecated alias and is normalized to `milo` before execution.
 
 ## Conditions
@@ -148,10 +150,12 @@ The former active `--graph-*` names remain deprecated aliases for their `--milo-
 
 | `--milo-scale` | Initial vertices | Graph neighbours | Minimum size | Use when |
 | --- | --- | --- | --- | --- |
-| `custom` | `1000` | `75` | `50` | Routine M05 defaults, with direct control through the three numeric options. |
-| `local` | `2000` | `30` | `20` | Fine local neighbourhoods and higher spatial detail. |
-| `balanced` | `1000` | `75` | `50` | Middle ground for routine DA runs. |
-| `broad` | `300` | `150` | `100` | Broader neighbourhoods and fewer tests. |
+| `custom` | `1000` | `75` | `50` | Effective balanced defaults while preserving direct numeric overrides. |
+| `local` | `2000` | `30` | `20` | Dense sampling of small neighbourhoods for fine within-population localization. |
+| `balanced` | `1000` | `75` | `50` | Routine compromise between localization, coverage, and test burden. |
+| `broad` | `300` | `150` | `100` | Sparse sampling of large neighbourhoods for diffuse shifts and greater cell coverage. |
+
+The three named presets change the scale of the biological question. `local` produces many small, overlapping tests and favors spatial precision, but can miss a compensatory or diffuse region. `broad` produces fewer, larger tests and is more sensitive to distributed changes, but a significant region can cover more cells and mix local states. `balanced` is the validated routine setting between those extremes. The presets do not change the count model, minimum nonzero sample support, spatial-FDR threshold, effect-review rules, or region grouping. Use `custom` when overriding `--milo-n-seeds`, `--milo-k-ref`, or `--milo-min-size` directly; without overrides it is numerically identical to `balanced`.
 
 Milo uses `adata.obsm["X_integrated"]` when present. If it is missing, it falls back to `adata.uns["integration"]["best_embedding"]` when that embedding exists.
 

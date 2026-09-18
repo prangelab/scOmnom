@@ -624,12 +624,6 @@ def run_clustering(cfg: ClusterAnnotateConfig) -> ad.AnnData:
                     transcriptomic_source=str(
                         getattr(cfg, "compact_transcriptomic_source", "auto") or "auto"
                     ),
-                    transcriptomic_n_features=int(
-                        getattr(cfg, "compact_transcriptomic_n_features", 2000)
-                    ),
-                    transcriptomic_threshold_cap=float(
-                        getattr(cfg, "compact_transcriptomic_threshold_cap", 0.99)
-                    ),
                     state_divergence_log2fc_threshold=float(
                         getattr(cfg, "compact_state_divergence_log2fc_threshold", 1.0)
                     ),

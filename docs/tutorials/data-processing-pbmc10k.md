@@ -397,6 +397,24 @@ scomnom markers \
 
 Final marker outputs after refinement and merge-back. The final object can be inspected through marker heatmaps, dotplots, and UMAP marker-expression panels for refined labels and broader annotation layers.
 
+## CellBender-Only Alternative
+
+Use this route when CellBender-corrected matrices are available but their source raw matrices are not. scOmnom stores the corrected counts as `counts_cb`; it does not fabricate a `counts_raw` layer, and raw-versus-CellBender diagnostic figures are skipped. The downstream workflow is unchanged after substituting the resulting archive path.
+
+```bash
+scomnom load-and-filter \
+  --cellbender-dir input/cellbender \
+  --cellbender-pattern "pbmc_10k_v3.cellbender_filtered.output" \
+  --metadata-tsv input/metadata/pbmc_10k_v3.metadata.tsv \
+  --batch-key sample_id \
+  --out results/cellbender_only \
+  --output-name pbmc_10k_v3.cellbender_only \
+  --figdir-name figures \
+  --n-jobs 8 \
+  --min-genes 200 \
+  --max-pct-mt 30
+```
+
 ## Filtered Matrix Fallback
 
 Use this path when CellBender output is unavailable. The downstream workflow is identical after `load-and-filter`; only the initial input mode and output prefix change.

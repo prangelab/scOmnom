@@ -21,7 +21,7 @@ def tmpfile(tmp_path, name="x.txt", content=""):
 # -------------------------------------------------------------------------
 # LoadAndFilterConfig
 # -------------------------------------------------------------------------
-def test_loadandqc_requires_exactly_one_input(tmp_path):
+def test_loadandqc_accepts_supported_input_modes(tmp_path):
     out = tmp_path
 
     # 0 inputs -> error
@@ -44,7 +44,7 @@ def test_loadandqc_requires_exactly_one_input(tmp_path):
             output_dir=out,
         )
 
-    # 1 valid input -> OK
+    # Raw-only input -> OK
     cfg = LoadAndFilterConfig(
         raw_sample_dir="raw",
         filtered_sample_dir=None,
@@ -53,6 +53,32 @@ def test_loadandqc_requires_exactly_one_input(tmp_path):
         output_dir=out,
     )
     assert cfg.raw_sample_dir == Path("raw")
+    assert cfg.resolved_input_mode == "raw_only"
+
+
+def test_loadandqc_accepts_cellbender_with_or_without_matching_raw(tmp_path):
+    metadata = tmpfile(tmp_path, "meta_cb.tsv")
+
+    cb_only = LoadAndFilterConfig(
+        raw_sample_dir=None,
+        filtered_sample_dir=None,
+        cellbender_dir="cellbender",
+        metadata_tsv=metadata,
+        output_dir=tmp_path,
+    )
+    assert cb_only.cellbender_dir == Path("cellbender")
+    assert cb_only.resolved_input_mode == "cellbender_only"
+
+    matched = LoadAndFilterConfig(
+        raw_sample_dir="raw",
+        filtered_sample_dir=None,
+        cellbender_dir="cellbender",
+        metadata_tsv=metadata,
+        output_dir=tmp_path,
+    )
+    assert matched.raw_sample_dir == Path("raw")
+    assert matched.cellbender_dir == Path("cellbender")
+    assert matched.resolved_input_mode == "raw_plus_cellbender"
 
 
 def test_loadandqc_output_name_coerced_to_h5ad(tmp_path):
@@ -264,8 +290,8 @@ def test_clusterannotate_defaults(tmp_path):
     assert cfg.compact_grouping == "complete_link"
     assert cfg.compact_adaptive_quantile == pytest.approx(0.90)
     assert cfg.compact_transcriptomic_source == "auto"
-    assert cfg.compact_transcriptomic_n_features == 2000
-    assert cfg.compact_transcriptomic_threshold_cap == pytest.approx(0.99)
+    assert not hasattr(cfg, "compact_transcriptomic_n_features")
+    assert not hasattr(cfg, "compact_transcriptomic_threshold_cap")
     assert cfg.compact_state_divergence_log2fc_threshold == pytest.approx(1.0)
     assert cfg.compact_state_divergence_detection_delta_threshold == pytest.approx(0.20)
     assert cfg.compact_state_divergence_max_fraction == pytest.approx(0.02)
@@ -307,12 +333,19 @@ def test_clusterannotate_compaction_caps_respect_floors(tmp_path):
     with pytest.raises(ValueError):
         ClusterAnnotateConfig(
             input_path=tmp_path / "a.h5ad",
-            compact_transcriptomic_threshold_cap=0.89,
+            compact_state_divergence_max_fraction=1.01,
         )
-    with pytest.raises(ValueError):
+
+
+@pytest.mark.parametrize(
+    "removed_option",
+    ["compact_transcriptomic_n_features", "compact_transcriptomic_threshold_cap"],
+)
+def test_clusterannotate_rejects_removed_pearson_options(tmp_path, removed_option):
+    with pytest.raises(ValueError, match="Removed obsolete Pearson compaction options"):
         ClusterAnnotateConfig(
             input_path=tmp_path / "a.h5ad",
-            compact_state_divergence_max_fraction=1.01,
+            **{removed_option: 1000 if removed_option.endswith("n_features") else 0.95},
         )
 
 

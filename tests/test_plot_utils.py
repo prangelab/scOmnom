@@ -933,6 +933,7 @@ def test_plot_stability_curves_structural_only(tmp_path, reset_root_figdir, mock
     labels = [line.get_label() for line in artifacts[0].fig.axes[0].lines]
     assert "Adjacent-resolution stability (smoothed ARI)" in labels
     assert "Raw adjacent ARI (plateau edges)" in labels
+    assert "Small-cluster safeguard score" in labels
     assert "Structural score (probe selection)" in labels
     assert "Full composite (final selection)" in labels
 

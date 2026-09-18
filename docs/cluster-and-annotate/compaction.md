@@ -15,7 +15,7 @@ Compaction uses the round-specific CellTypist cluster-label audit and decoupler 
 
 The CellTypist gate is inherited from the annotation step. Compaction does not replace it with an unmasked vote over cell-level predictions.
 
-With `compact_transcriptomic_source=auto`, the transcriptomic view uses `counts_cb` when available and otherwise `counts_raw`. Compaction stops if neither authoritative count layer is present. `adata.X` can be selected explicitly only when it contains nonnegative counts. Counts are summed by parent cluster and normalized to 10,000 counts. scOmnom also retains the 2,000 genes with the largest variance across log-transformed parent-cluster pseudobulks for diagnostic Pearson concordance and stores the selected gene names and their SHA-256 digest in the round provenance.
+With `compact_transcriptomic_source=auto`, the transcriptomic view uses `counts_cb` when available and otherwise `counts_raw`. Compaction stops if neither authoritative count layer is present. `adata.X` can be selected explicitly only when it contains nonnegative counts. Counts are summed by parent cluster and normalized to 10,000 counts.
 
 Each numeric view is checked for duplicate axes, non-finite values, missing cluster rows, constant features, and inadequate dimensionality. A wholly unavailable required view stops compaction. A cluster missing required evidence remains a singleton.
 
@@ -23,7 +23,7 @@ Each numeric view is checked for duplicate axes, non-finite values, missing clus
 
 For each candidate pair, scOmnom calculates gene-wise absolute log2 fold changes and absolute detection-fraction differences from the count pseudobulks. A gene is eligible when it is detected in at least 5% of cells in either cluster and is not mitochondrial, ribosomal, `MTRNR*`, or `MALAT1`. The default medium envelope counts genes with both absolute log2 fold change at least 1.0 and detection-fraction difference at least 0.20. If more than 2% of eligible genes meet both criteria, the pair is vetoed. Exactly 2% passes. This is a one-sided safeguard: it can block a merge supported by the annotation and activity views, but it cannot create a merge.
 
-Loose (0.75/0.15) and strict (1.50/0.25) envelopes are recorded as diagnostics. Pearson correlation over the frozen variable-gene set is also retained as a diagnostic and does not enter the merge decision. The default medium-envelope boundary was calibrated on development datasets and independently stress-tested; it is configurable rather than presented as a universal biological constant.
+Loose (0.75/0.15) and strict (1.50/0.25) envelopes are recorded as diagnostics. The default medium-envelope boundary was calibrated on development datasets and independently stress-tested; it is configurable rather than presented as a universal biological constant.
 
 Valid activity features are z-scored across all clusters with complete evidence for that view. PROGENy and DoRothEA pairs are compared by cosine similarity.
 
@@ -31,11 +31,10 @@ For each MSigDB GMT block, scOmnom takes the union of the 25 features with the l
 
 ## Threshold policy
 
-Each activity view has an immutable evidence floor. Pearson retains its historical diagnostic floor for audit continuity:
+Each activity view has an immutable evidence floor:
 
 | View | Floor |
 |---|---:|
-| Transcriptome Pearson (diagnostic only) | 0.90 |
 | PROGENy | 0.70 |
 | DoRothEA | 0.60 |
 | MSigDB HALLMARK | 0.60 |
@@ -55,8 +54,6 @@ The cap limits how strict the adaptive threshold can become; it cannot lower the
 * `compact_msigdb_threshold_cap=0.98`;
 * `compact_msigdb_threshold_cap_by_gmt` for per-GMT overrides;
 * `compact_transcriptomic_source=auto`;
-* `compact_transcriptomic_n_features=2000`;
-* `compact_transcriptomic_threshold_cap=0.99` for the diagnostic Pearson threshold;
 * `compact_state_divergence_log2fc_threshold=1.0`;
 * `compact_state_divergence_detection_delta_threshold=0.20`;
 * `compact_state_divergence_max_fraction=0.02`;
@@ -77,12 +74,12 @@ Compaction always creates and activates an explicit child round, including when 
 The child round stores:
 
 * the compaction method identity and full configuration snapshot;
-* transcriptomic source, normalization, state-divergence thresholds, diagnostic feature selection, selected genes, and feature-set digest;
+* transcriptomic source, normalization, and state-divergence thresholds;
 * upstream activity-method provenance;
 * activity-view validation results;
 * one eligibility record for every parent cluster;
 * per-label floors, adaptive values, caps, and effective thresholds;
-* all state-divergence envelopes, diagnostic similarities, vetoes, and pass decisions;
+* all state-divergence envelopes, activity similarities, vetoes, and pass decisions;
 * complete-link components, parent-to-child membership, and reverse mappings.
 
 The CLI writes `view_audit.tsv`, `cluster_eligibility.tsv`, `thresholds_by_label.tsv`, `pairwise_evidence.tsv`, and `group_membership.tsv` under the round-specific `tables/cluster_and_annotate/` tree. The `compaction_review` figure summarizes candidate confidence and the pairs nearest the decision boundary; `compaction_flow` shows the parent-to-child mapping.

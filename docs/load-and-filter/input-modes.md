@@ -11,22 +11,22 @@ Default patterns used by `load-and-filter`:
     - `.cellbender_out_filtered.h5`
     - `.cellbender_out_cell_barcodes.csv`
 
-> **Important:** `scOmnom` only performs *de novo* identification of droplets containing real cells when **only raw counts** are provided. In all other modes, droplets are taken directly from **Cell Ranger** or **CellBender**.
+> **Important:** `scOmnom` only performs *de novo* identification of droplets containing real cells when **only raw counts** are provided. Filtered mode uses Cell Ranger cell calls. Both CellBender modes use CellBender cell calls; matched mode requires raw and CellBender inputs from the same samples.
 
 ### Preferred mode: raw counts + CellBender
 
 - `--raw-sample-dir` points to a directory containing multiple per-sample folders matching `*.raw_feature_bc_matrix/`
 - `--cellbender-dir` points to a directory containing multiple per-sample CellBender outputs matching `*.cellbender_filtered.output*`
 
-Droplets containing real cells are taken from **CellBender**, while raw counts are used for QC comparisons and diagnostics.
+Denoised counts and retained barcodes are taken from **CellBender**. The matching raw matrices are aligned to the retained cells and stored for QC comparisons, diagnostics, and count-assay provenance.
 
 ### Alternative modes
 
-#### CellBender-corrected counts only
+#### CellBender-corrected matrices without matched raw input
 
-- `--cellbender-dir`
+- `--cellbender-dir` points to a directory containing multiple per-sample CellBender outputs matching `*.cellbender_filtered.output*`
 
-Droplets containing real cells are taken directly from **CellBender**.
+The corrected matrix is stored as `counts_cb` and used by downstream count-based methods. `counts_raw` and raw-versus-CellBender diagnostic plots are unavailable in this mode.
 
 #### Cell Ranger filtered matrices
 

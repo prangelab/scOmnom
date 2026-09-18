@@ -131,11 +131,10 @@ def test_compaction_merges_only_supported_pair():
     pair = result.edges.set_index(["a", "b"]).loc[("A", "B")]
     assert bool(pair["pass_all"])
     assert bool(pair["pass_state_divergence"])
-    assert bool(pair["pass_transcriptome"])
-    assert pair["sim_transcriptome"] >= 0.90
+    assert not any("transcriptome" in column for column in result.edges.columns)
     thresholds = result.thresholds_by_label.query("celltypist_label == 'Myeloid'")
     assert not thresholds["adaptive_used"].any()
-    assert set(thresholds["effective_threshold"]) == {0.90, 0.70, 0.60}
+    assert set(thresholds["effective_threshold"]) == {0.70, 0.60}
 
 
 def test_state_divergence_vetoes_activity_supported_pair():
@@ -160,23 +159,6 @@ def test_state_divergence_vetoes_activity_supported_pair():
     assert result.cluster_id_map["A"] != result.cluster_id_map["B"]
 
 
-def test_diagnostic_pearson_cannot_veto_state_supported_pair():
-    labels = {"A": "Pair", "B": "Pair", "C": "Other C", "D": "Other D"}
-    adata, snapshot = _make_adata(labels=labels)
-    cluster_b = adata.obs["clusters__r0"].astype(str).to_numpy() == "B"
-    reversed_profile = np.array([5.0, 10.0, 20.0, 30.0, 40.0, 50.0])
-    adata.layers["counts_raw"][cluster_b] = sparse.csr_matrix(
-        np.tile(reversed_profile, (10, 1))
-    )
-
-    result = _run(adata, snapshot)
-    pair = result.edges.set_index(["a", "b"]).loc[("A", "B")]
-
-    assert not bool(pair["pass_transcriptome_diagnostic"])
-    assert bool(pair["pass_state_divergence"])
-    assert bool(pair["pass_all"])
-
-
 def test_transcriptomic_auto_source_prefers_cellbender_counts():
     adata, snapshot = _make_adata()
     adata.layers["counts_raw"] = sparse.csr_matrix(np.rint(adata.X * 10.0))
@@ -189,9 +171,9 @@ def test_transcriptomic_auto_source_prefers_cellbender_counts():
     assert provenance["resolved_source"] == "counts_cb"
     assert provenance["aggregation"] == "cluster_sum_target_10000"
     assert provenance["decision_rule"] == "one_sided_state_divergence_veto"
-    assert provenance["pearson_role"] == "diagnostic_only"
-    assert provenance["n_selected_features"] == adata.n_vars
-    assert len(provenance["selected_feature_sha256"]) == 64
+    assert provenance["n_input_features"] == adata.n_vars
+    assert "pearson_role" not in provenance
+    assert "selected_features" not in provenance
 
 
 def test_missing_required_activity_row_is_ineligible_without_imputation():
@@ -292,8 +274,6 @@ def test_threshold_caps_cannot_undercut_floors():
         _run(adata, snapshot, msigdb_threshold_cap_by_gmt={"HALLMARK": 0.59})
     with pytest.raises(ValueError, match="msigdb_threshold_cap"):
         _run(adata, snapshot, msigdb_threshold_cap=0.59)
-    with pytest.raises(ValueError, match="transcriptomic_threshold_cap"):
-        _run(adata, snapshot, transcriptomic_threshold_cap=0.89)
     with pytest.raises(ValueError, match="state_divergence_log2fc_threshold"):
         _run(adata, snapshot, state_divergence_log2fc_threshold=0.0)
     with pytest.raises(ValueError, match="state_divergence_detection_delta_threshold"):
@@ -354,8 +334,8 @@ def test_no_op_child_is_active_and_persists_review_tables(tmp_path):
     assert child["compacting"]["did_merge"] is False
     assert child["compacting"]["method_identity"] == "multiview_all_pairs_with_state_divergence_veto"
     assert child["compacting"]["transcriptomic_provenance"]["resolved_source"] == "counts_raw"
-    assert child["compacting"]["threshold_policy"]["transcriptomic_floor"] == pytest.approx(0.90)
-    assert child["compacting"]["threshold_policy"]["transcriptomic_pearson_role"] == "diagnostic_only"
+    assert "transcriptomic_similarity_metric" not in child["compacting"]
+    assert "transcriptomic_floor" not in child["compacting"]["threshold_policy"]
     assert child["compacting"]["threshold_policy"]["state_divergence_max_fraction"] == pytest.approx(0.02)
     assert child["compacting"]["components"]
     assert child["cfg"]["compact_grouping"] == "complete_link"

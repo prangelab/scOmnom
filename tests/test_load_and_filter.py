@@ -115,11 +115,12 @@ def mock_io(monkeypatch):
         "infer_batch_key_from_metadata_tsv",
         lambda m, k: "sample",  # always use .obs["sample"]
     )
-    monkeypatch.setattr(
-        io,
-        "merge_samples",
-        lambda sm, batch_key="sample", input_layer_name=None: sc.concat(sm, label=batch_key, merge="same"),
-    )
+    def fake_merge_samples(sm, batch_key="sample", input_layer_name=None):
+        merged = sc.concat(sm, label=batch_key, merge="same")
+        merged.layers[input_layer_name] = merged.X.copy()
+        return merged
+
+    monkeypatch.setattr(io, "merge_samples", fake_merge_samples)
     monkeypatch.setattr(
         io,
         "save_dataset",
@@ -676,6 +677,57 @@ def test_run_load_and_filter_skips_doublet_detection(
     assert "predicted_doublet" not in out.obs
     assert (tmp_path / "doublet_detection_status.tsv").exists()
     assert not (tmp_path / "doublets_per_sample.tsv").exists()
+
+
+def test_run_load_and_filter_cellbender_only_preserves_count_semantics(
+    tmp_path,
+    mock_io,
+    mock_plots,
+    monkeypatch,
+):
+    metadata_path = tmp_path / "meta_cb.tsv"
+    pd.DataFrame({"sample": ["A"], "donor": ["P1"]}).to_csv(
+        metadata_path,
+        sep="\t",
+        index=False,
+    )
+    cellbender_dir = tmp_path / "cellbender"
+    cellbender_dir.mkdir()
+
+    def fail_if_raw_attached(*_args, **_kwargs):
+        raise AssertionError("CellBender-only mode must not fabricate counts_raw")
+
+    monkeypatch.setattr(
+        "scomnom.io_utils.attach_raw_counts_postfilter",
+        fail_if_raw_attached,
+    )
+
+    cfg = LoadAndFilterConfig(
+        metadata_tsv=metadata_path,
+        batch_key="sample",
+        cellbender_dir=cellbender_dir,
+        output_dir=tmp_path,
+        output_name="cellbender_only",
+        skip_doublet_detection=True,
+        make_figures=False,
+        n_top_genes=60,
+        min_genes=1,
+        min_cells=1,
+        min_cells_per_sample=0,
+        max_pct_mt=100,
+        n_jobs=1,
+    )
+
+    out = run_load_and_filter(cfg)
+
+    assert "counts_cb" in out.layers
+    assert "counts_raw" not in out.layers
+    assert out.uns["load_and_filter"] == {
+        "input_mode": "cellbender_only",
+        "primary_count_layer": "counts_cb",
+        "count_layers": ["counts_cb"],
+        "raw_cellbender_comparison_available": False,
+    }
 
 
 def test_run_load_and_filter(

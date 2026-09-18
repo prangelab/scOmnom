@@ -1,6 +1,6 @@
 # Load And Filter
 
-The `load-and-filter` module builds the initial merged AnnData object from raw, filtered, and/or CellBender-corrected 10x inputs.
+The `load-and-filter` module builds the initial merged AnnData object from raw matrices, filtered matrices, CellBender-corrected matrices, or matched raw plus CellBender 10x inputs.
 
 Its scope is:
 

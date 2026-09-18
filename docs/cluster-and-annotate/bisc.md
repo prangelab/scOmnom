@@ -38,10 +38,10 @@ For each resolution, BISC records:
 * number of clusters
 * cluster size distribution
 * centroid-based silhouette separation
-* tiny-cluster burden
+* small-cluster burden
 * agreement between adjacent resolutions
 
-BISC does not subtract a global cluster-count penalty. Complexity is controlled by the tiny-cluster term, plateau constraints, biological fragmentation when available, and the parsimonious selection rule described below.
+BISC does not subtract a global cluster-count penalty. Complexity is controlled by the small-cluster safeguard score, plateau constraints, biological fragmentation when available, and the parsimonious selection rule described below.
 
 ---
 
@@ -54,7 +54,7 @@ BISC measures adjacent-resolution stability using the **Adjusted Rand Index (ARI
 
 Raw adjacent ARI edges define stable plateaus. Contiguous strong edges at or above the stability threshold form a plateau core. A shorter core may recruit the strongest neighboring support edge until it reaches the minimum span; an already qualified core is not expanded. Rescued candidates that touch or overlap are merged because no transition remains between them. Candidates separated by an unused edge remain distinct. Plateaus are therefore disjoint, while support edges cannot cause unrestricted growth across a resolution sweep.
 
-The two-sided smoothed stability curve remains part of the structural score and diagnostic output, but it no longer defines plateau membership or boundaries.
+For an interior resolution, the two-sided smoothed stability score is the mean ARI with the partitions at the immediately lower and higher resolutions. Endpoint resolutions use their single available comparison. This score remains part of the structural score and diagnostic output, but it does not define plateau membership or boundaries.
 
 **Key defaults:**
 
@@ -113,13 +113,13 @@ All metrics are normalized and combined into a single composite score:
 
 * adjacent-resolution stability (`w_stab = 0.50`)
 * silhouette separation (`w_sil = 0.35`)
-* tiny cluster penalty (`w_tiny = 0.15`)
+* small-cluster safeguard score (`w_tiny = 0.15`)
 * optional biological metrics (weights above)
 
 Selection proceeds in four ordered stages:
 
 1. BISC identifies raw-edge structural plateaus.
-2. It chooses one exact structural probe per plateau using plateau-local stability, silhouette separation, and the tiny-cluster term. The 3% parsimony tolerance is not used here.
+2. It chooses one exact structural probe per plateau using plateau-local stability, silhouette separation, and the small-cluster safeguard score. The 3% parsimony tolerance is not used here.
 3. Every candidate resolution is rebuilt on the same repeated cell subsamples. For each full-data plateau, BISC measures fixed-resolution probe reproducibility, the fraction of subsamples in which all internal edges retain support, and the persistence of its local boundary valleys. It does not redetect or select plateaus recursively within each subsample. The plateau persistence score is the weakest of the mean probe, internal-edge, and boundary persistence values. The plateau with the highest persistence score is selected; exact ties prefer the less complex probe.
 4. Within the selected plateau, BISC ranks every feasible resolution using the complete structural and biological composite. It applies the 3% parsimony tolerance once, at this final stage, and chooses the near-best resolution with the fewest clusters.
 
@@ -135,7 +135,7 @@ Five fixed safeguards define the validated selector behavior:
 | Biological cluster-count limit | 2.5x | Limits the final within-plateau candidates to 2.5 times the number of confident biological reference labels when biological guidance is active; it does not remove structural plateaus from cross-plateau comparison. |
 | Absolute minimum cluster size | 5 cells | Excludes pathological partitions from selection without changing raw-edge plateau geometry. |
 
-These safeguards are fixed properties of the current BISC selector rather than command-line tuning parameters. Their values and selector identity are stored with every new BISC sweep. Use the resolution lens (`res_min`, `res_max`, and `n_resolutions`) as the primary control over the biological granularity under evaluation.
+These safeguards are fixed properties of the current BISC selector rather than command-line tuning parameters. Their values and selector identity are stored with every new BISC sweep. Use the tested resolution range (`res_min`, `res_max`, and `n_resolutions`) as the primary control over the biological granularity under evaluation.
 
 #### Subsampling reproducibility
 

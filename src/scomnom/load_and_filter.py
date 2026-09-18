@@ -1384,23 +1384,28 @@ def run_load_and_filter(
         # ---------------------------------------------------------
         # raw only
         # filtered only
-        # cellbender
-        # raw + cellbender
+        # CellBender only
+        # raw + CellBender
 
         if cfg.filtered_sample_dir is not None:
             if cfg.raw_sample_dir or cfg.cellbender_dir:
                 raise RuntimeError("--filtered-sample-dir cannot be combined with other inputs")
 
-        elif cfg.cellbender_dir is not None:
-            if cfg.raw_sample_dir is None:
-                raise RuntimeError("--cellbender-dir requires --raw-sample-dir")
-
-        elif cfg.raw_sample_dir is None:
+        elif cfg.raw_sample_dir is None and cfg.cellbender_dir is None:
             raise RuntimeError(
                 "You must provide one of:\n"
                 "  --raw-sample-dir\n"
                 "  --filtered-sample-dir\n"
+                "  --cellbender-dir\n"
                 "  --raw-sample-dir + --cellbender-dir"
+            )
+
+        input_mode = cfg.resolved_input_mode
+        LOGGER.info("Resolved input mode: %s", input_mode)
+        if input_mode == "cellbender_only":
+            LOGGER.warning(
+                "CellBender-only input: counts_cb will be retained, but counts_raw "
+                "and raw-versus-CellBender diagnostics will be unavailable."
             )
 
         if cfg.filtered_sample_dir is not None:
@@ -1484,6 +1489,17 @@ def run_load_and_filter(
         if "barcode" not in adata.obs:
             adata.obs["barcode"] = adata.obs_names.astype(str)
 
+        adata.uns["load_and_filter"] = {
+            "input_mode": input_mode,
+            "primary_count_layer": input_layer_name,
+            "count_layers": [
+                layer for layer in ("counts_cb", "counts_raw") if layer in adata.layers
+            ],
+            "raw_cellbender_comparison_available": bool(
+                "counts_cb" in adata.layers and "counts_raw" in adata.layers
+            ),
+        }
+
         # Write QC fitlers
         if qc_filter_rows:
             adata.uns["qc_filter_stats"] = pd.DataFrame(qc_filter_rows)
@@ -1557,6 +1573,14 @@ def run_load_and_filter(
     # ---------------------------------------------------------
     if cfg.raw_sample_dir is not None and "counts_raw" not in adata.layers:
         adata = io_utils.attach_raw_counts_postfilter(cfg, adata)
+
+    if cfg.apply_doublet_score is not True and "load_and_filter" in adata.uns:
+        adata.uns["load_and_filter"]["count_layers"] = [
+            layer for layer in ("counts_cb", "counts_raw") if layer in adata.layers
+        ]
+        adata.uns["load_and_filter"]["raw_cellbender_comparison_available"] = bool(
+            "counts_cb" in adata.layers and "counts_raw" in adata.layers
+        )
 
     # ---------------------------------------------------------
     # Global QC on merged filtered data (for post-filter plots ONLY)

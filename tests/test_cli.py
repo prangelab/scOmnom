@@ -32,8 +32,17 @@ def test_cli_help():
 # ---------------------------------------------------------
 def test_load_and_filter_help():
     result = runner.invoke(app, ["load-and-filter", "--help"])
+    help_text = " ".join(result.output.replace("│", " ").split())
     assert result.exit_code == 0
-    assert "preprocessing pipeline" in result.output
+    assert "preprocessing pipeline" in help_text
+    assert "CellBender-only" not in help_text
+    assert "Used alone" in help_text
+    assert "raw-count diagnostics" in help_text
+    assert "Combine with" in help_text
+    assert "--raw-sample-dir" in help_text
+    assert "from the same" in help_text
+    assert "counts_cb" in help_text
+    assert "counts_raw" in help_text
 
 
 def test_load_and_filter_requires_output_and_metadata():
@@ -228,8 +237,6 @@ def test_cluster_dispatch_compaction_caps_and_legacy_aliases(mock_run):
             "--compact-msigdb-threshold-cap", "0.89",
             "--thr-msigdb-by-gmt", "HALLMARK=0.88,REACTOME=0.80",
             "--compact-transcriptomic-source", "counts_raw",
-            "--compact-transcriptomic-n-features", "1500",
-            "--compact-transcriptomic-threshold-cap", "0.97",
             "--compact-state-divergence-log2fc-threshold", "1.2",
             "--compact-state-divergence-detection-delta-threshold", "0.25",
             "--compact-state-divergence-max-fraction", "0.03",
@@ -246,12 +253,32 @@ def test_cluster_dispatch_compaction_caps_and_legacy_aliases(mock_run):
         "REACTOME": pytest.approx(0.80),
     }
     assert cfg.compact_transcriptomic_source == "counts_raw"
-    assert cfg.compact_transcriptomic_n_features == 1500
-    assert cfg.compact_transcriptomic_threshold_cap == pytest.approx(0.97)
+    assert not hasattr(cfg, "compact_transcriptomic_n_features")
+    assert not hasattr(cfg, "compact_transcriptomic_threshold_cap")
     assert cfg.compact_state_divergence_log2fc_threshold == pytest.approx(1.2)
     assert cfg.compact_state_divergence_detection_delta_threshold == pytest.approx(0.25)
     assert cfg.compact_state_divergence_max_fraction == pytest.approx(0.03)
     assert cfg.compact_adaptive_quantile == pytest.approx(0.85)
+
+
+@pytest.mark.parametrize(
+    "option,value",
+    [
+        ("--compact-transcriptomic-n-features", "1500"),
+        ("--compact-transcriptomic-threshold-cap", "0.97"),
+    ],
+)
+def test_cluster_dispatch_rejects_removed_pearson_compaction_options(option, value):
+    result = runner.invoke(
+        app,
+        [
+            "cluster-and-annotate",
+            "--input-path", "integrated.h5ad",
+            option, value,
+        ],
+    )
+    assert result.exit_code != 0
+    assert "No such option" in result.output
 
 
 @patch("scomnom.cli.run_clustering")

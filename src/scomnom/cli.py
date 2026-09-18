@@ -279,9 +279,10 @@ def load_and_filter(
     cellbender_dir: Optional[Path] = typer.Option(
         None, "--cellbender-dir", "-c",
         help=(
-            "[I/O] Path with CellBender filtered outputs.\n"
-            "Used alone: CellBender-only mode (no raw counts).\n"
-            "Used with --raw-sample-dir: enables raw vs CellBender QC comparison."
+            "[I/O] Path with per-sample CellBender filtered outputs.\n"
+            "Used alone, retains denoised counts_cb without raw-count diagnostics.\n"
+            "Combine with --raw-sample-dir from the same run to retain matched "
+            "counts_cb and counts_raw assays."
         ),
     ),
     output_dir: Path = typer.Option(
@@ -1611,16 +1612,6 @@ def cluster_and_annotate(
             "counts_cb or counts_raw."
         ),
     ),
-    compact_transcriptomic_n_features: int = typer.Option(
-        2000,
-        "--compact-transcriptomic-n-features",
-        help="[Compaction] Number of variable genes used for diagnostic Pearson concordance.",
-    ),
-    compact_transcriptomic_threshold_cap: float = typer.Option(
-        0.99,
-        "--compact-transcriptomic-threshold-cap",
-        help="[Compaction] Upper cap on the diagnostic adaptive Pearson threshold.",
-    ),
     compact_state_divergence_log2fc_threshold: float = typer.Option(
         1.0,
         "--compact-state-divergence-log2fc-threshold",
@@ -1804,8 +1795,6 @@ def cluster_and_annotate(
         compact_msigdb_threshold_cap=compact_msigdb_threshold_cap,
         compact_msigdb_threshold_cap_by_gmt=compact_msigdb_threshold_cap_by_gmt_dict,
         compact_transcriptomic_source=compact_transcriptomic_source,
-        compact_transcriptomic_n_features=compact_transcriptomic_n_features,
-        compact_transcriptomic_threshold_cap=compact_transcriptomic_threshold_cap,
         compact_state_divergence_log2fc_threshold=(
             compact_state_divergence_log2fc_threshold
         ),
@@ -4184,7 +4173,8 @@ def composition(
         help=(
             "Named Milo scale preset. Custom defaults to the balanced M05 values and keeps "
             "explicit neighbourhood parameters; "
-            "local=30-cell neighborhoods/2000 seeds, balanced=75/1000, broad=150/300."
+            "local=k30/seeds2000/min-size20, balanced=k75/seeds1000/min-size50, "
+            "broad=k150/seeds300/min-size100."
         ),
     ),
     milo_random_state: int = typer.Option(42, "--milo-random-state"),

@@ -190,6 +190,18 @@ class LoadAndFilterConfig(BaseModel):
     def figdir(self) -> Path:
         return self.output_dir / self.figdir_name
 
+    @property
+    def resolved_input_mode(self) -> str:
+        if self.apply_doublet_score is True:
+            return "doublet_score_resume"
+        if self.filtered_sample_dir is not None:
+            return "cellranger_filtered"
+        if self.cellbender_dir is not None:
+            if self.raw_sample_dir is not None:
+                return "raw_plus_cellbender"
+            return "cellbender_only"
+        return "raw_only"
+
     # ---- Validators ----
     @field_validator("figure_formats", mode="before")
     @classmethod
@@ -218,8 +230,14 @@ class LoadAndFilterConfig(BaseModel):
             if self.raw_sample_dir or self.cellbender_dir:
                 raise ValueError("filtered cannot be combined with raw or cellbender")
 
-        if self.raw_sample_dir is None and self.filtered_sample_dir is None:
-            raise ValueError("Must provide raw_sample_dir or filtered_sample_dir")
+        if (
+            self.raw_sample_dir is None
+            and self.filtered_sample_dir is None
+            and self.cellbender_dir is None
+        ):
+            raise ValueError(
+                "Must provide raw_sample_dir, filtered_sample_dir, or cellbender_dir"
+            )
 
         return self
 
@@ -766,25 +784,6 @@ class ClusterAnnotateConfig(BaseModel):
         ),
     )
 
-    compact_transcriptomic_n_features: int = Field(
-        2000,
-        ge=2,
-        description=(
-            "Number of variable genes retained across parent-cluster pseudobulks for "
-            "diagnostic transcriptomic Pearson concordance."
-        ),
-    )
-
-    compact_transcriptomic_threshold_cap: float = Field(
-        0.99,
-        ge=0.90,
-        le=1.0,
-        description=(
-            "Upper cap on the diagnostic adaptive transcriptomic Pearson threshold; the "
-            "diagnostic floor is 0.90."
-        ),
-    )
-
     compact_state_divergence_log2fc_threshold: float = Field(
         1.0,
         gt=0.0,
@@ -859,6 +858,16 @@ class ClusterAnnotateConfig(BaseModel):
         if not isinstance(values, dict):
             return values
         values = dict(values)
+        removed_compaction_options = {
+            "compact_transcriptomic_n_features",
+            "compact_transcriptomic_threshold_cap",
+        }
+        present_removed = sorted(removed_compaction_options.intersection(values))
+        if present_removed:
+            raise ValueError(
+                "Removed obsolete Pearson compaction options: "
+                f"{', '.join(present_removed)}"
+            )
         if "max_cluster_jump_frac" in values:
             raise ValueError(
                 "max_cluster_jump_frac was removed because it did not affect BISC selection; "
