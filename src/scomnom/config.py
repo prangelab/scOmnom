@@ -89,7 +89,7 @@ class SampleEnrichmentConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
     input_path: Path
-    output_dir: Path = Path("results")
+    output_dir: Optional[Path] = None
     output_name: Optional[str] = None
     save_h5ad: bool = False
     round_id: Optional[str] = None

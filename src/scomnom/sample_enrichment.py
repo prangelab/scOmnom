@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 import hashlib
+from importlib.metadata import PackageNotFoundError, version
 import json
+import logging
 from pathlib import Path
+import shlex
 from typing import Any, Sequence
 import warnings
 
@@ -18,6 +22,10 @@ from .de_utils import pseudobulk_aggregate
 from . import annotation_utils as au
 from .composition_utils import _resolve_active_cluster_key
 from .config import SampleEnrichmentConfig
+from . import io_utils
+from .logging_utils import init_logging
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -669,3 +677,226 @@ def _fit_activity_contrasts(
         contrasts=result_table, audit=pd.DataFrame(audits),
         exclusions=pd.concat(exclusions, ignore_index=True) if exclusions else pd.DataFrame(),
     )
+
+
+_TABLE_COLUMNS = {
+    "pseudobulk_qc": [
+        "pb_id", "replicate_id", "population_id", "population_label", "n_cells",
+        "library_size", "detected_genes", "included", "exclusion_reason",
+        "selected_population", "included_for_scoring",
+    ],
+    "activity_scores": ["pb_id", "replicate_id", "population_id", "population_label", "resource", "activity", "score"],
+    "activity_contrasts": [
+        *_MODEL_ID_COLUMNS, *_MODEL_ESTIMATE_COLUMNS, "formula", "n_included", "n_excluded",
+        "n_test", "n_reference", "n_subjects", "status", "fdr_family_id", "fdr_family_size",
+    ],
+    "model_audit": [
+        *_MODEL_ID_COLUMNS, "design_status", "formula", "design_columns", "design_terms",
+        "constant_covariates", "rank", "df_resid", "n_included", "n_excluded", "n_test",
+        "n_reference", "n_subjects", "n_outside_contrast", "covariance", "inference_distribution",
+        "outcome_sd_ddof", "status", "warnings",
+    ],
+    "model_exclusions": ["pb_id", "replicate_id", "population_id", "contrast", "condition", "subject_id", "included", "exclusion_reason"],
+    "resource_provenance": [
+        "population_id", "population_label", "resource", "activity", "status", "target_overlap",
+        "min_targets", "n_libraries", "n_genes", "requested_method", "method_provenance",
+        "resource_version", "organism", "network_sha256", "resource_provenance",
+    ],
+}
+_TABLE_UNITS = {
+    "score": "method-specific activity units", "effect_raw": "activity units (test minus reference)",
+    "se_raw": "activity units", "ci_low_raw": "activity units", "ci_high_raw": "activity units",
+    "outcome_sd": "activity units", "effect_standardized": "outcome SD",
+    "ci_low_standardized": "outcome SD", "ci_high_standardized": "outcome SD",
+    "pvalue": "probability", "fdr": "BH-adjusted p-value", "n_cells": "cells",
+    "library_size": "counts before gene filtering", "detected_genes": "genes",
+    "n_included": "replicate libraries", "n_excluded": "replicate libraries (including outside contrast)",
+    "n_test": "replicate libraries", "n_reference": "replicate libraries", "n_subjects": "complete subjects",
+}
+
+
+def _sample_output_dir(cfg: SampleEnrichmentConfig) -> Path:
+    if cfg.output_dir is not None:
+        return Path(cfg.output_dir)
+    parent = cfg.input_path.parent
+    for candidate in (parent, *parent.parents):
+        if candidate.name == "results":
+            return candidate
+    return parent / "results"
+
+
+def _sample_output_stem(cfg: SampleEnrichmentConfig, round_id: str) -> str:
+    if cfg.output_name is None:
+        return f"adata.enrichment_sample_{io_utils.sanitize_identifier(round_id, allow_spaces=False)}"
+    stem = cfg.output_name.strip()
+    for suffix in (".zarr.tar.zst", ".zarr", ".h5ad"):
+        if stem.endswith(suffix):
+            stem = stem[:-len(suffix)]
+            break
+    if not stem or stem in {".", ".."} or Path(stem).name != stem:
+        raise ValueError("output_name must be a dataset filename, without directories.")
+    return stem
+
+
+def _reserve_sample_directory(
+    output_dir: Path, round_id: str, stored: dict, formats: Sequence[str],
+) -> tuple[str, Path]:
+    namespace = f"enrichment_sample_{io_utils.sanitize_identifier(round_id, allow_spaces=False)}"
+    root = output_dir / "tables"
+    root.mkdir(parents=True, exist_ok=True)
+    number = 1
+    while True:
+        analysis_id = f"{namespace}_round{number}"
+        folder = root / analysis_id
+        if analysis_id in stored or any((output_dir / "figures" / fmt / analysis_id).exists() for fmt in formats):
+            number += 1
+            continue
+        try:
+            folder.mkdir()
+            return analysis_id, folder
+        except FileExistsError:
+            number += 1
+
+
+def _sample_tables(
+    prepared: _PreparedPseudobulks, selection: _PopulationSelection,
+    scored: _ScoredActivities, models: _ActivityModels, cfg: SampleEnrichmentConfig,
+) -> dict[str, pd.DataFrame]:
+    qc = prepared.qc.reset_index()
+    qc["population_label"] = qc["population_id"].map(selection.mapping.set_index("population_id")["population_label"])
+    qc["selected_population"] = qc["population_id"].isin(selection.selected_ids)
+    qc["included_for_scoring"] = qc["included"] & qc["selected_population"]
+    scores = scored.scores.copy()
+    metadata_columns = list(dict.fromkeys([*([cfg.condition_key] if cfg.condition_key else []), *cfg.covariates]))
+    for key in metadata_columns:
+        if key in _TABLE_COLUMNS["activity_scores"]:
+            raise ValueError(f"Metadata column {key!r} conflicts with an activity-score output column.")
+        scores[key] = scores["pb_id"].map(prepared.qc[key])
+    if cfg.replicate_key not in {"replicate_id", *metadata_columns}:
+        if cfg.replicate_key in _TABLE_COLUMNS["activity_scores"]:
+            raise ValueError(f"Replicate key {cfg.replicate_key!r} conflicts with an activity-score output column.")
+        qc[cfg.replicate_key] = qc["replicate_id"]
+        scores[cfg.replicate_key] = scores["replicate_id"]
+    tables = {
+        "pseudobulk_qc": qc, "activity_scores": scores, "activity_contrasts": models.contrasts,
+        "model_audit": models.audit, "model_exclusions": models.exclusions,
+        "resource_provenance": scored.audit,
+    }
+    for name, frame in tables.items():
+        columns = _TABLE_COLUMNS[name]
+        extras = [column for column in frame if column not in columns]
+        tables[name] = frame.reindex(columns=[*columns, *extras]).reset_index(drop=True)
+        # String row indices are stable across both H5AD and Zarr serialization.
+        tables[name].index = tables[name].index.astype(str)
+    return tables
+
+
+def _write_sample_manifest(path: Path, manifest: dict[str, Any]) -> None:
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def _sample_software_versions() -> dict[str, str]:
+    from . import __version__
+
+    versions = {"scomnom": __version__}
+    for package in ("numpy", "pandas", "scipy", "statsmodels", "decoupler", "anndata"):
+        try:
+            versions[package] = version(package)
+        except PackageNotFoundError:
+            versions[package] = "unavailable"
+    return versions
+
+
+def run_sample_enrichment(
+    cfg: SampleEnrichmentConfig, *, command: Sequence[str] | None = None,
+) -> ad.AnnData:
+    """Internal orchestration for sample enrichment tables and round-native storage."""
+    output_dir = _sample_output_dir(cfg).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    init_logging(output_dir / "logs" / "enrichment.sample.log")
+    LOGGER.info("Starting sample enrichment from %s", cfg.input_path)
+    adata = io_utils.load_dataset(cfg.input_path)
+    selection, prepared = _prepare_sample_inputs(adata, cfg)
+    stem = _sample_output_stem(cfg, selection.round_id)
+    zarr_path = output_dir / f"{stem}.zarr"
+    archive_path = output_dir / f"{stem}.zarr.tar.zst"
+    h5ad_path = output_dir / f"{stem}.h5ad"
+    if cfg.input_path.resolve() in {zarr_path.resolve(), archive_path.resolve(), h5ad_path.resolve()}:
+        raise ValueError("Sample enrichment output would replace the input dataset; choose another output_name.")
+    round_info = adata.uns["cluster_rounds"][selection.round_id]
+    previous = round_info.get("sample_enrichment", {})
+    if not isinstance(previous, dict):
+        raise ValueError("The round's sample_enrichment namespace is malformed.")
+    analysis_id, table_dir = _reserve_sample_directory(output_dir, selection.round_id, previous, cfg.figure_formats)
+    resolved = cfg.model_dump(mode="json")
+    resolved.update({"round_id": selection.round_id, "output_dir": str(output_dir), "output_name": stem})
+    input_path = cfg.input_path.resolve()
+    input_stat = input_path.stat() if input_path.exists() else None
+    input_provenance = {
+        **prepared.provenance, "path": str(input_path), "n_obs": adata.n_obs, "n_vars": adata.n_vars,
+        "size_bytes": input_stat.st_size if input_stat and input_path.is_file() else None,
+        "mtime_ns": input_stat.st_mtime_ns if input_stat else None,
+    }
+    software = _sample_software_versions()
+    manifest = {
+        "schema_version": 1, "analysis_id": analysis_id, "status": "running",
+        "started_at": datetime.now(timezone.utc).isoformat(), "resolved_config": resolved,
+        "command": list(command) if command is not None else None,
+        "command_shell": shlex.join(command) if command is not None else None,
+        "input_provenance": input_provenance, "software_versions": software,
+        "completed_outputs": [],
+    }
+    manifest_path = table_dir / "settings.json"
+    _write_sample_manifest(manifest_path, manifest)
+    try:
+        resources = _load_activity_resources(cfg)
+        scored = _score_populations(prepared, selection, resources, cfg)
+        models = _fit_activity_contrasts(prepared, scored, cfg)
+        tables = _sample_tables(prepared, selection, scored, models, cfg)
+        table_paths = {name: str(table_dir / f"{name}.tsv") for name in tables}
+        schema = {
+            name: {"columns": frame.columns.tolist(), "units": {column: _TABLE_UNITS[column] for column in frame if column in _TABLE_UNITS}}
+            for name, frame in tables.items()
+        }
+        manifest["table_schema"] = schema
+        manifest["table_paths"] = table_paths
+        _write_sample_manifest(manifest_path, manifest)
+        for name, frame in tables.items():
+            destination = Path(table_paths[name])
+            temporary = destination.with_suffix(".tsv.tmp")
+            frame.to_csv(temporary, sep="\t", index=False, na_rep="NA")
+            temporary.replace(destination)
+        payload = {
+            "schema_version": 1, "analysis_id": analysis_id, "resolved_config": resolved,
+            "input_provenance": input_provenance, "normalization": prepared.provenance["normalization"],
+            "population_mapping": selection.mapping.assign(selected=selection.mapping["population_id"].isin(selection.selected_ids)).rename(index=str),
+            "tables": tables, "table_schema": schema, "software_versions": software,
+            "artifacts": {"tables": table_paths, "manifest": str(manifest_path), "figures": []},
+        }
+        round_info.setdefault("sample_enrichment", {})[analysis_id] = payload
+        io_utils.save_dataset(adata, zarr_path, fmt="zarr")
+        if not archive_path.is_file():
+            raise OSError(f"Dataset serialization did not create {archive_path}.")
+        manifest["completed_outputs"].append(str(archive_path))
+        if cfg.save_h5ad:
+            io_utils.save_dataset(adata, h5ad_path, fmt="h5ad")
+            if not h5ad_path.is_file():
+                raise OSError(f"Dataset serialization did not create {h5ad_path}.")
+            manifest["completed_outputs"].append(str(h5ad_path))
+        manifest["status"] = "complete"
+        manifest["finished_at"] = datetime.now(timezone.utc).isoformat()
+        _write_sample_manifest(manifest_path, manifest)
+    except Exception as exc:
+        manifest["status"] = "failed"
+        manifest["finished_at"] = datetime.now(timezone.utc).isoformat()
+        manifest["error"] = {"type": type(exc).__name__, "message": str(exc)}
+        try:
+            _write_sample_manifest(manifest_path, manifest)
+        except OSError:
+            LOGGER.exception("Could not update the failed-run manifest at %s", manifest_path)
+        LOGGER.exception("Sample enrichment failed for %s", analysis_id)
+        raise
+    LOGGER.info("Finished sample enrichment: %s (%d activity observations)", analysis_id, len(tables["activity_scores"]))
+    return adata
