@@ -83,6 +83,103 @@ def _normalize_figure_formats(value: object) -> list[str]:
     return deduped
 
 
+class SampleEnrichmentConfig(BaseModel):
+    """Configuration for internal replicate-level activity orchestration."""
+
+    model_config = {"extra": "forbid"}
+
+    input_path: Path
+    output_dir: Path = Path("results")
+    output_name: Optional[str] = None
+    save_h5ad: bool = False
+    round_id: Optional[str] = None
+    replicate_key: str = Field(min_length=1)
+    condition_key: Optional[str] = None
+    contrasts: Tuple[str, ...] = ()
+    reference: Optional[str] = None
+    covariates: Tuple[str, ...] = ()
+    subject_key: Optional[str] = None
+    target_groups: Tuple[str, ...] = ()
+    counts_layer: Literal["auto", "counts_cb", "counts_raw", "X"] = "auto"
+    min_cells_per_replicate_group: int = Field(default=20, ge=1, strict=True)
+    min_replicates_per_level: int = Field(default=3, ge=1, strict=True)
+    min_replicates_total: int = Field(default=6, ge=1, strict=True)
+    min_complete_subjects: int = Field(default=3, ge=1, strict=True)
+    gene_filter: Tuple[str, ...] = ()
+
+    decoupler_method: str = "consensus"
+    decoupler_consensus_methods: List[str] = Field(default_factory=lambda: ["ulm", "mlm", "wsum"])
+    decoupler_min_n_targets: int = Field(default=5, ge=1, strict=True)
+    run_msigdb: bool = True
+    msigdb_gene_sets: List[str] = Field(default_factory=lambda: ["HALLMARK", "REACTOME"])
+    msigdb_method: Optional[str] = None
+    msigdb_min_n_targets: Optional[int] = Field(default=None, ge=1, strict=True)
+    run_progeny: bool = True
+    progeny_method: Optional[str] = None
+    progeny_min_n_targets: Optional[int] = Field(default=None, ge=1, strict=True)
+    progeny_top_n: int = Field(default=100, ge=1, strict=True)
+    progeny_organism: str = "human"
+    run_dorothea: bool = True
+    dorothea_method: Optional[str] = None
+    dorothea_min_n_targets: Optional[int] = Field(default=None, ge=1, strict=True)
+    dorothea_confidence: List[str] = Field(default_factory=lambda: ["A", "B", "C"])
+    dorothea_organism: str = "human"
+    plot_activity: Tuple[str, ...] = ()
+    figure_formats: List[str] = Field(default_factory=lambda: ["png", "pdf"])
+
+    @field_validator("contrasts", "covariates", "target_groups", "plot_activity", "msigdb_gene_sets", "dorothea_confidence", mode="before")
+    @classmethod
+    def _parse_lists(cls, value):
+        items = [value] if isinstance(value, str) else (value or [])
+        return list(dict.fromkeys(part.strip() for item in items for part in str(item).split(",") if part.strip()))
+
+    @field_validator("decoupler_consensus_methods", mode="before")
+    @classmethod
+    def _consensus_methods(cls, value):
+        return _normalize_decoupler_consensus_methods(value)
+
+    @field_validator("decoupler_method", "msigdb_method", "progeny_method", "dorothea_method")
+    @classmethod
+    def _method(cls, value):
+        if value is None:
+            return None
+        value = value.strip().lower()
+        if not value:
+            raise ValueError("Activity scoring method cannot be empty.")
+        return value
+
+    @field_validator("dorothea_confidence")
+    @classmethod
+    def _confidence(cls, value):
+        value = list(dict.fromkeys(item.upper() for item in value))
+        if not value or set(value) - set("ABCDE"):
+            raise ValueError("DoRothEA confidence must contain levels A, B, C, D, or E.")
+        return value
+
+    @field_validator("figure_formats", mode="before")
+    @classmethod
+    def _formats(cls, value):
+        return _normalize_figure_formats(value)
+
+    @model_validator(mode="after")
+    def _design(self):
+        if self.subject_key and (self.subject_key not in self.covariates or not self.condition_key):
+            raise ValueError("subject_key requires a condition_key and must also be included in covariates.")
+        if (self.contrasts or self.reference) and not self.condition_key:
+            raise ValueError("Contrasts and reference require condition_key.")
+        for contrast in self.contrasts:
+            parts = contrast.split(":")
+            if len(parts) != 2 or any(not part.strip() for part in parts) or parts[0].strip() == parts[1].strip():
+                raise ValueError(f"Malformed contrast {contrast!r}; use TEST:REFERENCE with different levels.")
+        if self.replicate_key in self.covariates or (self.condition_key and self.condition_key in self.covariates):
+            raise ValueError("Replicate and condition keys cannot also be covariates.")
+        if not any((self.run_msigdb, self.run_progeny, self.run_dorothea)):
+            raise ValueError("At least one activity resource must be enabled.")
+        if self.run_msigdb and not self.msigdb_gene_sets:
+            raise ValueError("MSigDB requires at least one gene-set collection.")
+        return self
+
+
 class LoadAndFilterConfig(BaseModel):
 
     # ---- Input ----
