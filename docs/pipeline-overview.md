@@ -76,6 +76,16 @@ See [Output Organization](output-organization.md) for the distinction between fi
 
 Reports are part of the same pipeline output layer: modules write self-contained HTML reports alongside figures and tables. See [Reporting](reporting.md) for the general report convention.
 
+## Enrichment analysis units
+
+Choose the [enrichment mode](markers-and-de/enrichment.md) according to the observation being analysed:
+
+* `enrichment cluster` produces descriptive cluster or cluster-condition profiles used for annotation and compaction. It does not provide biological-replicate inference.
+* `enrichment de` scores a gene-level DE contrast for mechanism discovery.
+* `enrichment sample` scores each replicate-population count pseudobulk and fits covariate-adjusted activity contrasts across libraries. Explicit subject pairing retains complete donor pairs. This pre-release mode has separate tables, figures, and round-native storage; biological validation is pending.
+
+Sample enrichment can run on an annotated count-containing object without a preceding DE run. Its outputs do not feed BISC or compaction. The selected round defines the comparison populations, so a state-cluster comparison and a broad-lineage comparison answer different questions even when they use the same cells. Custom per-cell gene modules remain available through `enrichment module-score`.
+
 ## Optional loops
 
 The straight-through path above is the default route. Two loops are common once first-pass clusters exist:
