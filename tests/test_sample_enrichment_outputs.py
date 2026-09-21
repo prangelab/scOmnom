@@ -154,3 +154,23 @@ def test_default_output_does_not_replace_input(output_case):
     cfg = cfg.model_copy(update={"output_dir": cfg.input_path.parent, "output_name": "input"})
     with pytest.raises(ValueError, match="input dataset"):
         se.run_sample_enrichment(cfg)
+
+
+def test_sample_cli_executes_and_records_real_argument_tokens(output_case):
+    from typer.testing import CliRunner
+    from scomnom.cli import app
+
+    _, cfg = output_case
+    args = [
+        "enrichment", "sample", "-i", str(cfg.input_path), "--replicate-key", "sample",
+        "--condition-key", "condition", "--contrast", "stim:ctrl", "--covariates", "age",
+        "--min-cells-per-replicate-group", "1", "--no-run-msigdb", "--no-run-progeny",
+        "--dorothea-method", "ulm", "--decoupler-min-n-targets", "3",
+    ]
+    result = CliRunner().invoke(app, args)
+    assert result.exit_code == 0, result.output
+    folder = cfg.input_path.parent.parent / "tables" / "enrichment_sample_r1_round1"
+    manifest = json.loads((folder / "settings.json").read_text())
+    assert manifest["command"] == ["scomnom", *args]
+    assert manifest["status"] == "complete"
+    assert len(pd.read_csv(folder / "activity_scores.tsv", sep="\t")) == 36

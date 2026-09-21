@@ -117,6 +117,8 @@ The serialized `markers_and_de` name predates the independent top-level CLI comm
 
 Detailed DE results remain under `adata.uns["scomnom_de"]`. Cluster enrichment and module-score payloads remain round-scoped under `adata.uns["cluster_rounds"][round_id]["decoupler"]` and `adata.uns["cluster_rounds"][round_id]["module_scores"]`; DE-derived enrichment is stored under `adata.uns["scomnom_de"]["de_decoupler"]`.
 
+Pre-release replicate-aware enrichment is stored separately under `adata.uns["cluster_rounds"][round_id]["sample_enrichment"][analysis_id]`. Each payload contains configuration, input/count/normalization provenance, population mapping, activity and contrast tables, QC and model/resource audits, schemas and units, artifact locations, and software versions. It does not replace cluster-level compatibility keys or affect compaction. Objects without this additive namespace remain valid.
+
 ---
 
 ## Using scOmnom AnnData in notebooks/scripts

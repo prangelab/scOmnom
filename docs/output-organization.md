@@ -30,6 +30,8 @@ results/
 
 The trailing `roundN` in these folder names is an **output run counter**. It is there so a second plotting, integration, DE, enrichment, or CCC run can write a new result folder instead of silently overwriting an earlier one.
 
+Pre-release sample enrichment writes six TSV tables and a run manifest to `tables/enrichment_sample_<round>_roundN/`, logs to `logs/enrichment.sample.log`, and an `adata.enrichment_sample_<round>.zarr.tar.zst` dataset. Optional H5AD output uses the same stem. Each stored analysis has its own round-native identifier. Figure generation is pending; see the [sample command reference](markers-and-de/enrichment.md#sample-enrichment-pre-release).
+
 Use output rounds to answer:
 
 * Which command run produced these files?

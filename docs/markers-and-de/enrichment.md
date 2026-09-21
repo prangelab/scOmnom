@@ -1,11 +1,12 @@
 # Enrichment
 
-The enrichment submodule has three entry points:
+The enrichment submodule has three decoupler modes and a custom module-scoring command:
 
 | Entry point | Input | Main use |
 | --- | --- | --- |
-| `scomnom enrichment cluster` | AnnData with a clustering round | Run MSigDB, PROGENy, and DoRothEA on round-native pseudobulk expression. |
+| `scomnom enrichment cluster` | AnnData with a clustering round | Descriptive MSigDB, PROGENy, and DoRothEA profiles for clusters or cluster-condition groups. |
 | `scomnom enrichment de` | Exported DE result tables | Run the same pathway/TF activity backends from DE statistics, without loading AnnData. |
+| `scomnom enrichment sample` | AnnData with a clustering round and replicate metadata | Infer activities per replicate-population count pseudobulk and fit covariate-adjusted activity contrasts. |
 | `scomnom enrichment module-score` | AnnData plus user gene modules | Score custom gene programs per cell, then summarize by cluster or cluster-condition. |
 
 For decoupler-based enrichment, the default resource set is MSigDB HALLMARK + REACTOME, PROGENy, and DoRothEA. MSigDB can also use custom `.gmt` files.
@@ -13,6 +14,8 @@ For decoupler-based enrichment, the default resource set is MSigDB HALLMARK + RE
 ## Cluster Enrichment
 
 `enrichment cluster` recomputes round-native pseudobulk expression for the selected clustering round, then runs decoupler resources on that expression matrix.
+
+Cluster and cluster-condition aggregates are descriptive profiles. They do not provide biological-replicate effect estimates or confidence intervals; use `enrichment sample` for those quantities.
 
 ```bash
 scomnom enrichment cluster \
@@ -217,6 +220,96 @@ DE-table enrichment writes:
 * figures: `figures/<fmt>/enrichment_de_<inputdir>_roundN/`;
 * tables: `tables/enrichment_de_<inputdir>_roundN/`;
 * report: `figures/<fmt>/enrichment_de_<inputdir>_roundN/enrichment_de_report.html`.
+
+## Sample Enrichment (Pre-release)
+
+`scomnom enrichment sample` produces one activity observation per eligible replicate-population library. The current pre-release implementation provides scoring, inference, tables, and AnnData output. Figure generation and Kang biological validation remain pending; the feature is not yet release-ready. No new public Python function is exposed, and the deprecated `markers-and-de enrichment` route retains only its existing commands.
+
+Independent libraries:
+
+```bash
+scomnom enrichment sample \
+  --input-path results/adata.clustered.annotated.zarr.tar.zst \
+  --round-id r1_scANVI_compacted \
+  --replicate-key donor_id \
+  --condition-key sex \
+  --contrast female:male \
+  --covariates age,BMI \
+  --target-groups C03 \
+  --dorothea-method ulm
+```
+
+Paired libraries:
+
+```bash
+scomnom enrichment sample \
+  --input-path results/kang.clustered.annotated.zarr.tar.zst \
+  --replicate-key sample_id \
+  --condition-key condition \
+  --contrast stimulated:control \
+  --covariates donor_id \
+  --subject-key donor_id
+```
+
+`replicate_key` identifies one sample library. `subject_key` identifies the donor contributing libraries in both compared conditions and must also appear in `--covariates`. Numeric subject IDs are categorical fixed effects. Complete pairs are retained after library QC and complete-case filtering; every excluded library is recorded. Multiple libraries for the same subject-condition combination are rejected. A donor identifier should not be included as a covariate when every donor contributes only one library.
+
+### Sample Inputs And Models
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--input-path`, `-i` | required | AnnData loaded through scOmnom I/O. |
+| `--replicate-key` | required | Sample-library identifier in `obs`. |
+| `--output-dir`, `-o` | nearest `results/` ancestor, otherwise `results/` beside input | Output root. |
+| `--output-name` | `adata.enrichment_sample_<round>` | Dataset stem. |
+| `--save-h5ad` / `--no-save-h5ad` | off | Additional H5AD output. |
+| `--round-id` | active round | Round supplying stable population IDs and display labels. |
+| `--condition-key` | none | Condition column; omit for scoring without inference. |
+| `--contrast` | none | `TEST:REFERENCE`; repeatable or comma-separated. |
+| `--reference` | none | Explicit denominator for exactly two observed levels when no contrast is supplied. |
+| `--covariates` | none | Numeric or categorical covariates; repeatable or comma-separated. |
+| `--subject-key` | none | Explicit pairing identifier, also included in `--covariates`. |
+| `--target-groups` | all round populations | Stable IDs, `Cnn` codes, or complete display labels; repeatable or comma-separated. |
+| `--counts-layer` | `auto` | `auto`, `counts_cb`, `counts_raw`, or `X`. |
+| `--min-cells-per-replicate-group` | `20` | Minimum cells per library-population pseudobulk. |
+| `--min-replicates-per-level` | `3` | Minimum included libraries in each contrast level. |
+| `--min-replicates-total` | `6` | Minimum total included libraries for independent designs. |
+| `--min-complete-subjects` | `3` | Minimum complete subjects for paired designs. |
+| `--gene-filter` | none | Repeatable `adata.var` query expressions; commas inside a query are preserved. |
+
+Count selection prefers `counts_cb`, then `counts_raw`, then validated `X`; it never selects `adata.raw`. The selected matrix must contain finite, nonnegative, integer-like counts. An unavailable or invalid explicitly selected assay is fatal. Counts are summed by replicate and population and normalized as `log1p(counts / library_size * 1,000,000)`. Library sizes are calculated before gene filtering. By default, only genes with zero total counts across eligible round pseudobulks are removed. Population selection does not alter this shared gene universe.
+
+The model is `activity ~ covariates + condition`, with OLS, HC3 standard errors, Student t inference, and 95% confidence intervals. Raw effects represent test minus reference. Standardized effects divide the coefficient and interval by the activity outcome's sample SD on included model rows (`ddof=1`); the binary condition indicator is not standardized. HC3 permits unequal residual variances but does not guarantee reliable inference with very small samples.
+
+BH correction includes all successfully tested activities separately within each population-resource-contrast family. Plot selectors do not restrict this family. Missing covariates, incomplete pairs, insufficient support, constant activities, and unidentifiable designs are audited; covariates are never silently removed to obtain a fit. Globally absent contrast levels and ambiguous replicate metadata are fatal.
+
+### Sample Resources
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--decoupler-method` | `consensus` | Default scoring method for all enabled resources. |
+| `--decoupler-consensus-methods` | `ulm,mlm,wsum` | Repeatable or comma-separated; at least two successful constituents are required. Failures are recorded. |
+| `--decoupler-min-n-targets` | `5` | Default minimum target overlap. |
+| `--run-msigdb` / `--no-run-msigdb` | on | Enable MSigDB. |
+| `--msigdb-gene-sets` | `HALLMARK,REACTOME` | Repeatable/comma-separated collections or GMT paths; every requested collection must resolve and load. |
+| `--msigdb-method`, `--msigdb-min-n-targets` | inherit general defaults | MSigDB overrides. |
+| `--run-progeny` / `--no-run-progeny` | on | Enable PROGENy. |
+| `--progeny-method`, `--progeny-min-n-targets` | inherit general defaults | PROGENy overrides. |
+| `--progeny-top-n` | `100` | Targets per pathway. |
+| `--progeny-organism` | `human` | Resource organism. |
+| `--run-dorothea` / `--no-run-dorothea` | on | Enable DoRothEA. |
+| `--dorothea-method`, `--dorothea-min-n-targets` | inherit general defaults | DoRothEA overrides. |
+| `--dorothea-confidence` | `A,B,C` | Repeatable/comma-separated confidence levels. |
+| `--dorothea-organism` | `human` | Resource organism. |
+| `--plot-activity` | none | Recorded selectors for upcoming figures; repeatable/comma-separated. Currently does not generate figures. |
+| `--figure-formats`, `-F` | `png,pdf` | Recorded formats for upcoming figures; repeatable/comma-separated. |
+
+Each population is scored separately with the existing decoupler backend. Scores are not assumed comparable across populations. Selecting `--dorothea-method ulm` runs ULM alone for that resource; a failure does not trigger a substitute method.
+
+### Sample Outputs
+
+Tables live under `tables/enrichment_sample_<round>_roundN/`: `pseudobulk_qc.tsv`, `activity_scores.tsv`, `activity_contrasts.tsv`, `model_audit.tsv`, `model_exclusions.tsv`, and `resource_provenance.tsv`. `settings.json` records the command tokens, resolved settings, provenance, units, and run status. The QC table distinguishes eligibility from selection for scoring. `n_excluded` includes libraries outside a requested contrast as well as QC and model exclusions; reasons appear in `model_exclusions.tsv`.
+
+The archived output is `adata.enrichment_sample_<round>.zarr.tar.zst`, with optional H5AD. Tables and audit payloads are stored under `adata.uns["cluster_rounds"][round_id]["sample_enrichment"][analysis_id]`. Existing cluster enrichment and DE payloads remain separate. Older objects without `sample_enrichment` remain valid. Output naming that would replace the input dataset is rejected.
 
 ## Module Score
 
