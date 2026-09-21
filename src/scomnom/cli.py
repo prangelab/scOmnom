@@ -3814,7 +3814,7 @@ def _build_cfg_enrichment_sample(
         output_dir=output_dir if output_dir is not None else _default_results_dir_for_input(input_path),
         **options,
     )
-    if cfg.round_id is not None and cfg.output_name is None:
+    if cfg.round_id is not None and cfg.output_name is None and not cfg.regenerate_figures:
         cfg.output_name = _sample_output_stem(cfg, cfg.round_id)
     return cfg
 
@@ -3827,13 +3827,13 @@ def _build_cfg_enrichment_sample(
         "Independent example: --replicate-key donor_id --condition-key sex --contrast female:male --covariates age. "
         "Paired example: --replicate-key sample_id --condition-key condition --contrast stimulated:control "
         "--covariates donor_id --subject-key donor_id. "
-        "Pre-release: tables and datasets are available; figures and biological validation are pending."
+        "Pre-release: biological validation is pending. Figures can be regenerated from saved results."
     ),
 )
 def enrichment_sample(
     ctx: typer.Context,
     input_path: Path = typer.Option(..., "--input-path", "-i", help="AnnData loaded through scOmnom I/O."),
-    replicate_key: str = typer.Option(..., "--replicate-key", help="obs column identifying one independently measured sample library."),
+    replicate_key: Optional[str] = typer.Option(None, "--replicate-key", help="Required for analysis: obs column identifying one independently measured sample library."),
     output_dir: Optional[Path] = typer.Option(None, "--output-dir", "-o", help="Nearest results/ ancestor, otherwise a results/ directory beside the input."),
     output_name: Optional[str] = typer.Option(None, "--output-name", help="Dataset stem; defaults to adata.enrichment_sample_<round>."),
     save_h5ad: bool = typer.Option(False, "--save-h5ad/--no-save-h5ad", help="Write H5AD in addition to archived Zarr."),
@@ -3867,11 +3867,19 @@ def enrichment_sample(
     dorothea_min_n_targets: Optional[int] = typer.Option(None, "--dorothea-min-n-targets", min=1),
     dorothea_confidence: List[str] = typer.Option(["A", "B", "C"], "--dorothea-confidence", help="Confidence levels; repeat or separate by commas."),
     dorothea_organism: str = typer.Option("human", "--dorothea-organism"),
-    plot_activity: List[str] = typer.Option([], "--plot-activity", help="Record selectors for upcoming figures; does not limit scoring or FDR. Repeat or use commas."),
-    figure_formats: List[str] = typer.Option(["png", "pdf"], "--figure-formats", "-F", help="Record formats for upcoming figures; repeat or use commas."),
+    plot_activity: List[str] = typer.Option([], "--plot-activity", help="Activity names for forest and sample plots; does not limit scoring or FDR. Repeat or use commas."),
+    figure_formats: List[str] = typer.Option(["png", "pdf"], "--figure-formats", "-F", help="Figure formats; repeat or use commas."),
+    make_figures: bool = typer.Option(True, "--make-figures/--no-make-figures"),
+    regenerate_figures: bool = typer.Option(False, "--regenerate-figures", help="Render saved sample-enrichment tables without recomputation or rewriting the dataset."),
+    analysis_id: Optional[str] = typer.Option(None, "--analysis-id", help="Saved analysis to regenerate; required when the round contains multiple analyses."),
 ):
     try:
-        cfg = _build_cfg_enrichment_sample(**ctx.params)
+        options = ctx.params
+        if regenerate_figures:
+            from click.core import ParameterSource
+            options = {key: value for key, value in ctx.params.items()
+                       if ctx.get_parameter_source(key) != ParameterSource.DEFAULT}
+        cfg = _build_cfg_enrichment_sample(**options)
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
     try:

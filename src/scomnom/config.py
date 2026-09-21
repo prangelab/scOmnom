@@ -93,7 +93,7 @@ class SampleEnrichmentConfig(BaseModel):
     output_name: Optional[str] = None
     save_h5ad: bool = False
     round_id: Optional[str] = None
-    replicate_key: str = Field(min_length=1)
+    replicate_key: Optional[str] = Field(default=None, min_length=1)
     condition_key: Optional[str] = None
     contrasts: Tuple[str, ...] = ()
     reference: Optional[str] = None
@@ -126,6 +126,9 @@ class SampleEnrichmentConfig(BaseModel):
     dorothea_organism: str = "human"
     plot_activity: Tuple[str, ...] = ()
     figure_formats: List[str] = Field(default_factory=lambda: ["png", "pdf"])
+    make_figures: bool = True
+    regenerate_figures: bool = False
+    analysis_id: Optional[str] = None
 
     @field_validator("contrasts", "covariates", "target_groups", "plot_activity", "msigdb_gene_sets", "dorothea_confidence", mode="before")
     @classmethod
@@ -163,6 +166,19 @@ class SampleEnrichmentConfig(BaseModel):
 
     @model_validator(mode="after")
     def _design(self):
+        if self.regenerate_figures:
+            allowed = {"input_path", "output_dir", "round_id", "analysis_id", "regenerate_figures",
+                       "make_figures", "plot_activity", "figure_formats"}
+            overrides = self.model_fields_set - allowed
+            if overrides:
+                raise ValueError(f"Figure regeneration uses stored analysis settings; remove overrides: {sorted(overrides)}")
+            if not self.make_figures:
+                raise ValueError("Figure regeneration requires make_figures.")
+            return self
+        if not self.replicate_key:
+            raise ValueError("replicate_key is required for sample enrichment.")
+        if self.analysis_id:
+            raise ValueError("analysis_id is only used with regenerate_figures.")
         if self.subject_key and (self.subject_key not in self.covariates or not self.condition_key):
             raise ValueError("subject_key requires a condition_key and must also be included in covariates.")
         if (self.contrasts or self.reference) and not self.condition_key:

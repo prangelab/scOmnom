@@ -45,6 +45,7 @@ def output_case(tmp_path, monkeypatch):
         input_path=input_path, replicate_key="sample", condition_key="condition",
         contrasts=("stim:ctrl",), covariates=("age",), min_cells_per_replicate_group=1,
         run_msigdb=False, run_progeny=False, dorothea_method="ulm", decoupler_min_n_targets=3,
+        make_figures=False,
     )
     return obj, cfg
 
@@ -165,7 +166,7 @@ def test_sample_cli_executes_and_records_real_argument_tokens(output_case):
         "enrichment", "sample", "-i", str(cfg.input_path), "--replicate-key", "sample",
         "--condition-key", "condition", "--contrast", "stim:ctrl", "--covariates", "age",
         "--min-cells-per-replicate-group", "1", "--no-run-msigdb", "--no-run-progeny",
-        "--dorothea-method", "ulm", "--decoupler-min-n-targets", "3",
+        "--dorothea-method", "ulm", "--decoupler-min-n-targets", "3", "--no-make-figures",
     ]
     result = CliRunner().invoke(app, args)
     assert result.exit_code == 0, result.output
@@ -174,3 +175,40 @@ def test_sample_cli_executes_and_records_real_argument_tokens(output_case):
     assert manifest["command"] == ["scomnom", *args]
     assert manifest["status"] == "complete"
     assert len(pd.read_csv(folder / "activity_scores.tsv", sep="\t")) == 36
+
+
+def test_figures_and_regeneration_use_saved_tables_only(output_case, monkeypatch):
+    from typer.testing import CliRunner
+    from scomnom.cli import app
+
+    _, cfg = output_case
+    cfg = cfg.model_copy(update={"make_figures": True, "figure_formats": ["png", "pdf"], "plot_activity": ("TF1",)})
+    result = se.run_sample_enrichment(cfg)
+    root = cfg.input_path.parent.parent
+    analysis_id = "enrichment_sample_r1_round1"
+    payload = result.uns["cluster_rounds"]["r1"]["sample_enrichment"][analysis_id]
+    assert len(payload["artifacts"]["figures"]) == 8
+    assert all(Path(path).stat().st_size > 1000 for path in payload["artifacts"]["figures"])
+    assert all(Path(path).parent.name == analysis_id for path in payload["artifacts"]["figures"])
+    archive = root / "adata.enrichment_sample_r1.zarr.tar.zst"
+    before = archive.stat()
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Regeneration must not recompute or save a dataset")
+    for name in ("_prepare_sample_inputs", "_load_activity_resources", "_score_populations", "_fit_activity_contrasts"):
+        monkeypatch.setattr(se, name, forbidden)
+    monkeypatch.setattr(io_utils, "save_dataset", forbidden)
+    args = ["enrichment", "sample", "-i", str(archive), "--regenerate-figures", "--plot-activity", "TF2", "-F", "png"]
+    run = CliRunner().invoke(app, args)
+    assert run.exit_code == 0, run.output
+    assert archive.stat().st_mtime_ns == before.st_mtime_ns
+    manifests = list((root / "figures" / "regeneration").glob("*/settings.json"))
+    assert len(manifests) == 1
+    manifest = json.loads(manifests[0].read_text())
+    assert manifest["status"] == "complete"
+    assert manifest["source_analysis_id"] == analysis_id
+    assert manifest["command"] == ["scomnom", *args]
+    assert len(manifest["figure_paths"]) == 4
+    loaded = io_utils.load_dataset(archive)
+    restored = loaded.uns["cluster_rounds"]["r1"]["sample_enrichment"][analysis_id]
+    for table in payload["tables"]:
+        pd.testing.assert_frame_equal(restored["tables"][table], payload["tables"][table])

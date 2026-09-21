@@ -47,6 +47,23 @@ def test_sample_requires_input_and_replicate_key(args, dispatch):
     dispatch.assert_not_called()
 
 
+def test_regeneration_uses_only_rendering_options(dispatch):
+    result = runner.invoke(cli.app, ["enrichment", "sample", "-i", "saved.zarr", "--regenerate-figures",
+                                     "--round-id", "r1", "--analysis-id", "enrichment_sample_r1_round2", "-F", "png"])
+    assert result.exit_code == 0, result.output
+    cfg = dispatch.call_args.args[0]
+    assert cfg.regenerate_figures and cfg.replicate_key is None and cfg.output_name is None
+    assert cfg.analysis_id == "enrichment_sample_r1_round2"
+
+
+@pytest.mark.parametrize("extra", [["--covariates", "age"], ["--replicate-key", "sample"],
+                                  ["--no-make-figures"], ["--save-h5ad"], ["--counts-layer", "auto"]])
+def test_regeneration_rejects_analysis_overrides(extra, dispatch):
+    result = runner.invoke(cli.app, ["enrichment", "sample", "-i", "saved.zarr", "--regenerate-figures", *extra])
+    assert result.exit_code == 2, result.output
+    dispatch.assert_not_called()
+
+
 def test_independent_dispatch_records_exact_option_tokens(dispatch, tmp_path):
     path = tmp_path / "results" / "nested" / "input.zarr"
     args = [

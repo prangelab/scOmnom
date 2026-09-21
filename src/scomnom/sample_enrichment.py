@@ -809,6 +809,80 @@ def _sample_software_versions() -> dict[str, str]:
     return versions
 
 
+def _persist_sample_figures(payload, output_dir, run_id, formats, activities):
+    from . import plot_utils as pu
+    from .sample_enrichment_plot_utils import sample_enrichment_artifacts
+
+    previous = (pu.ROOT_FIGDIR, pu.RUN_FIG_SUBDIR, pu.RUN_KEY, pu.FIGURE_FORMATS)
+    paths = []
+    try:
+        pu.setup_scanpy_figs(output_dir / "figures", formats=formats)
+        pu.RUN_KEY = run_id
+        pu.RUN_FIG_SUBDIR = Path(run_id)
+        for artifact in sample_enrichment_artifacts(payload, figdir=Path(run_id), activities=activities):
+            try:
+                pu.persist_plot_artifacts([artifact])
+            finally:
+                if artifact.fig is not None:
+                    pu.close_plot(artifact.fig)
+            paths.extend(str(output_dir / "figures" / fmt / run_id / f"{artifact.stem}.{fmt}") for fmt in formats)
+    finally:
+        pu.ROOT_FIGDIR, pu.RUN_FIG_SUBDIR, pu.RUN_KEY, pu.FIGURE_FORMATS = previous
+    return paths
+
+
+def _regenerate_sample_figures(adata, cfg, output_dir, command):
+    round_id = cfg.round_id or adata.uns.get("active_cluster_round")
+    rounds = adata.uns.get("cluster_rounds", {})
+    if round_id not in rounds:
+        raise ValueError("Figure regeneration requires an existing clustering round.")
+    stored = rounds[round_id].get("sample_enrichment", {})
+    analysis_id = cfg.analysis_id
+    if analysis_id is None:
+        if len(stored) != 1:
+            raise ValueError(f"Choose --analysis-id from the stored sample analyses: {sorted(stored)}")
+        analysis_id = next(iter(stored))
+    if analysis_id not in stored:
+        raise ValueError(f"Unknown sample analysis_id: {analysis_id!r}")
+    payload = stored[analysis_id]
+    if payload.get("schema_version") != 1:
+        raise ValueError("Unsupported sample-enrichment schema version for regeneration.")
+    safe_id = io_utils.sanitize_identifier(analysis_id, allow_spaces=False)
+    root = output_dir / "figures" / "regeneration"
+    root.mkdir(parents=True, exist_ok=True)
+    number = 1
+    while True:
+        run_id = f"{safe_id}_regeneration_round{number}"
+        folder = root / run_id
+        if any((output_dir / "figures" / fmt / run_id).exists() for fmt in cfg.figure_formats):
+            number += 1
+            continue
+        try:
+            folder.mkdir()
+            break
+        except FileExistsError:
+            number += 1
+    manifest = {"schema_version": 1, "status": "running", "source_analysis_id": analysis_id,
+                "round_id": round_id, "input_path": str(cfg.input_path.resolve()),
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "command": list(command) if command is not None else None,
+                "software_versions": _sample_software_versions(),
+                "figure_formats": cfg.figure_formats, "plot_activity": list(cfg.plot_activity)}
+    manifest_path = folder / "settings.json"
+    _write_sample_manifest(manifest_path, manifest)
+    try:
+        manifest["figure_paths"] = _persist_sample_figures(payload, output_dir, run_id, cfg.figure_formats, cfg.plot_activity)
+        manifest["status"] = "complete"
+    except Exception as exc:
+        manifest["status"] = "failed"
+        manifest["error"] = {"type": type(exc).__name__, "message": str(exc)}
+        raise
+    finally:
+        manifest["finished_at"] = datetime.now(timezone.utc).isoformat()
+        _write_sample_manifest(manifest_path, manifest)
+    LOGGER.info("Regenerated %d sample figures from %s; manifest: %s", len(manifest["figure_paths"]), analysis_id, manifest_path)
+
+
 def run_sample_enrichment(
     cfg: SampleEnrichmentConfig, *, command: Sequence[str] | None = None,
 ) -> ad.AnnData:
@@ -818,6 +892,9 @@ def run_sample_enrichment(
     init_logging(output_dir / "logs" / "enrichment.sample.log")
     LOGGER.info("Starting sample enrichment from %s", cfg.input_path)
     adata = io_utils.load_dataset(cfg.input_path)
+    if cfg.regenerate_figures:
+        _regenerate_sample_figures(adata, cfg, output_dir, command)
+        return adata
     selection, prepared = _prepare_sample_inputs(adata, cfg)
     stem = _sample_output_stem(cfg, selection.round_id)
     zarr_path = output_dir / f"{stem}.zarr"
@@ -875,6 +952,11 @@ def run_sample_enrichment(
             "tables": tables, "table_schema": schema, "software_versions": software,
             "artifacts": {"tables": table_paths, "manifest": str(manifest_path), "figures": []},
         }
+        if cfg.make_figures:
+            payload["artifacts"]["figures"] = _persist_sample_figures(
+                payload, output_dir, analysis_id, cfg.figure_formats, cfg.plot_activity,
+            )
+        manifest["figure_paths"] = payload["artifacts"]["figures"]
         round_info.setdefault("sample_enrichment", {})[analysis_id] = payload
         io_utils.save_dataset(adata, zarr_path, fmt="zarr")
         if not archive_path.is_file():

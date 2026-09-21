@@ -223,7 +223,7 @@ DE-table enrichment writes:
 
 ## Sample Enrichment (Pre-release)
 
-`scomnom enrichment sample` produces one activity observation per eligible replicate-population library. The current pre-release implementation provides scoring, inference, tables, and AnnData output. Figure generation and Kang biological validation remain pending; the feature is not yet release-ready. No new public Python function is exposed, and the deprecated `markers-and-de enrichment` route retains only its existing commands.
+`scomnom enrichment sample` produces one activity observation per eligible replicate-population library. The current pre-release implementation provides scoring, inference, tables, figures, and AnnData output. Kang biological validation remains pending; the feature is not yet release-ready. No new public Python function is exposed, and the deprecated `markers-and-de enrichment` route retains only its existing commands.
 
 Independent libraries:
 
@@ -258,7 +258,7 @@ scomnom enrichment sample \
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--input-path`, `-i` | required | AnnData loaded through scOmnom I/O. |
-| `--replicate-key` | required | Sample-library identifier in `obs`. |
+| `--replicate-key` | required for analysis | Sample-library identifier in `obs`; omit for figure regeneration. |
 | `--output-dir`, `-o` | nearest `results/` ancestor, otherwise `results/` beside input | Output root. |
 | `--output-name` | `adata.enrichment_sample_<round>` | Dataset stem. |
 | `--save-h5ad` / `--no-save-h5ad` | off | Additional H5AD output. |
@@ -300,8 +300,11 @@ BH correction includes all successfully tested activities separately within each
 | `--dorothea-method`, `--dorothea-min-n-targets` | inherit general defaults | DoRothEA overrides. |
 | `--dorothea-confidence` | `A,B,C` | Repeatable/comma-separated confidence levels. |
 | `--dorothea-organism` | `human` | Resource organism. |
-| `--plot-activity` | none | Recorded selectors for upcoming figures; repeatable/comma-separated. Currently does not generate figures. |
-| `--figure-formats`, `-F` | `png,pdf` | Recorded formats for upcoming figures; repeatable/comma-separated. |
+| `--plot-activity` | leading activities | Exact activity names for forest and sample plots; repeatable/comma-separated. Does not restrict inference or the overview. |
+| `--figure-formats`, `-F` | `png,pdf` | Figure formats; repeatable/comma-separated. |
+| `--make-figures` / `--no-make-figures` | on | Generate figures alongside analysis tables. |
+| `--regenerate-figures` | off | Render stored tables without recomputing scores or models, or rewriting the dataset. |
+| `--analysis-id` | sole stored analysis | Regeneration selector; required when the selected round contains multiple sample analyses. |
 
 Each population is scored separately with the existing decoupler backend. Scores are not assumed comparable across populations. Selecting `--dorothea-method ulm` runs ULM alone for that resource; a failure does not trigger a substitute method.
 
@@ -310,6 +313,26 @@ Each population is scored separately with the existing decoupler backend. Scores
 Tables live under `tables/enrichment_sample_<round>_roundN/`: `pseudobulk_qc.tsv`, `activity_scores.tsv`, `activity_contrasts.tsv`, `model_audit.tsv`, `model_exclusions.tsv`, and `resource_provenance.tsv`. `settings.json` records the command tokens, resolved settings, provenance, units, and run status. The QC table distinguishes eligibility from selection for scoring. `n_excluded` includes libraries outside a requested contrast as well as QC and model exclusions; reasons appear in `model_exclusions.tsv`.
 
 The archived output is `adata.enrichment_sample_<round>.zarr.tar.zst`, with optional H5AD. Tables and audit payloads are stored under `adata.uns["cluster_rounds"][round_id]["sample_enrichment"][analysis_id]`. Existing cluster enrichment and DE payloads remain separate. Older objects without `sample_enrichment` remain valid. Output naming that would replace the input dataset is rejected.
+
+### Sample Figures And Regeneration
+
+Figures are saved under `figures/<format>/enrichment_sample_<round>_roundN/`. Each population has a cell-count/library-size QC plot, including excluded libraries. Each successfully tested population-resource-contrast family has an overview of all standardized effects versus `-log10(FDR)`, a forest plot with 95% intervals and numeric FDR labels, and individual-library plots. Defaults show up to ten forest estimates and three sample activities, ranked by FDR, then absolute standardized effect, then name. `--plot-activity` replaces these selections without changing the tested family. Unknown activity names are rejected.
+
+Sample plots show unadjusted scores and a separately labelled adjusted effect and interval. Crosses mark scored libraries excluded from the model. Connecting lines require explicit pairing and two model-included libraries from the same subject. Scoring-only runs show QC and up to three activities per population-resource, chosen alphabetically unless explicitly selected; they do not show inferential estimates.
+
+Regeneration reads saved configuration and result tables, so count assays, resource downloads, and model fits are unnecessary:
+
+```bash
+scomnom enrichment sample \
+  --input-path results/adata.enrichment_sample_r1.zarr.tar.zst \
+  --regenerate-figures \
+  --round-id r1 \
+  --analysis-id enrichment_sample_r1_round1 \
+  --plot-activity STAT2,IRF9 \
+  --figure-formats png,pdf
+```
+
+Only input/output location, round/analysis selection, and rendering options are accepted during regeneration; analysis overrides are rejected. Regenerated figures receive a new `<analysis_id>_regeneration_roundN` folder, with a separate manifest under `figures/regeneration/`. The source dataset and original tables remain unchanged.
 
 ## Module Score
 
