@@ -312,6 +312,8 @@ Each population is scored separately with the existing decoupler backend. Scores
 
 Tables live under `tables/enrichment_sample_<round>_roundN/`: `pseudobulk_qc.tsv`, `activity_scores.tsv`, `activity_contrasts.tsv`, `model_audit.tsv`, `model_exclusions.tsv`, and `resource_provenance.tsv`. `settings.json` records the command tokens, resolved settings, provenance, units, and run status. The QC table distinguishes eligibility from selection for scoring. `n_excluded` includes libraries outside a requested contrast as well as QC and model exclusions; reasons appear in `model_exclusions.tsv`.
 
+In `resource_provenance.tsv`, `n_genes` is the dataset-wide filtered gene count and `n_scoring_genes` counts genes with nonzero expression in that population's eligible libraries. `target_overlap` uses the latter gene set, matching decoupler's handling of empty features; activities below the minimum are marked `insufficient_target_overlap`.
+
 The archived output is `adata.enrichment_sample_<round>.zarr.tar.zst`, with optional H5AD. Tables and audit payloads are stored under `adata.uns["cluster_rounds"][round_id]["sample_enrichment"][analysis_id]`. Existing cluster enrichment and DE payloads remain separate. Older objects without `sample_enrichment` remain valid. Output naming that would replace the input dataset is rejected.
 
 ### Sample Figures And Regeneration

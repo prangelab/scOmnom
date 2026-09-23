@@ -348,16 +348,16 @@ def _score_populations(
     for population in selection.selected_ids:
         rows = prepared.qc.index[prepared.qc["population_id"].eq(population) & prepared.qc["included"]]
         expression = prepared.expression.loc[rows]
+        matrix = expression.sparse.to_dense().T
+        scoring_genes = matrix.index[matrix.ne(0).any(axis=1)]
         for resource in resources:
-            overlap = resource.net.loc[resource.net["target"].isin(expression.columns)].groupby("source")["target"].nunique()
+            overlap = resource.net.loc[resource.net["target"].isin(scoring_genes)].groupby("source")["target"].nunique()
             sources = resource.net["source"].drop_duplicates().sort_values().tolist()
             overlap = overlap.reindex(sources, fill_value=0)
             retained = overlap.index[overlap >= resource.min_targets].tolist()
             retained_set = set(retained)
             method_info: dict[str, Any] = {"requested_method": resource.method}
             if len(rows) and retained:
-                # Dense materialization is limited to one population at a time.
-                matrix = expression.sparse.to_dense().T
                 estimate = au._dc_run_method(
                     method=resource.method, mat=matrix, net=resource.net,
                     min_n=resource.min_targets, consensus_methods=cfg.decoupler_consensus_methods,
@@ -389,6 +389,7 @@ def _score_populations(
                     "resource": resource.name, "activity": source, "status": status,
                     "target_overlap": int(overlap[source]), "min_targets": resource.min_targets,
                     "n_libraries": len(rows), "n_genes": expression.shape[1],
+                    "n_scoring_genes": len(scoring_genes),
                     "requested_method": resource.method,
                     "method_provenance": json.dumps(method_info, sort_keys=True),
                     "resource_version": resource.provenance["resource_version"],
@@ -699,7 +700,7 @@ _TABLE_COLUMNS = {
     "model_exclusions": ["pb_id", "replicate_id", "population_id", "contrast", "condition", "subject_id", "included", "exclusion_reason"],
     "resource_provenance": [
         "population_id", "population_label", "resource", "activity", "status", "target_overlap",
-        "min_targets", "n_libraries", "n_genes", "requested_method", "method_provenance",
+        "min_targets", "n_libraries", "n_genes", "n_scoring_genes", "requested_method", "method_provenance",
         "resource_version", "organism", "network_sha256", "resource_provenance",
     ],
 }

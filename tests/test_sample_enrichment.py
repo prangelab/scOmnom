@@ -368,6 +368,41 @@ def test_scoring_is_population_local_and_audits_target_overlap(sample_adata, mon
     assert "dorothea" not in sample_adata.uns
 
 
+def test_scoring_overlap_excludes_genes_zero_within_population(sample_adata, monkeypatch):
+    _add_rounds(sample_adata)
+    counts = sample_adata.layers["counts_cb"].tolil()
+    counts[2, 2] = 1
+    sample_adata.layers["counts_cb"] = counts.tocsr()
+    net = _fake_resources(monkeypatch)
+    net.loc[net["source"].eq("TF2"), "target"] = "G1"
+    net.loc[len(net)] = ["TF2", "G0", 1.0]
+    cfg = SampleEnrichmentConfig(
+        input_path="input.zarr", replicate_key="sample", run_msigdb=False, run_progeny=False,
+        dorothea_method="ulm", decoupler_min_n_targets=2,
+    )
+    resources = _load_activity_resources(cfg)
+    prepared = _prepare_pseudobulks(
+        sample_adata, replicate_key="sample", population_key="population", min_cells_per_replicate_group=1,
+    )
+
+    def score(**kwargs):
+        result = pd.DataFrame(
+            [np.arange(kwargs["mat"].shape[1], dtype=float)],
+            index=["TF1"], columns=kwargs["mat"].columns,
+        )
+        result.attrs["method_provenance"] = {"requested_method": "ulm", "successful_constituents": ["ulm"]}
+        return result
+
+    monkeypatch.setattr(au, "_dc_run_method", score)
+    scored = _score_populations(prepared, _resolve_populations(sample_adata, target_groups=("0",)), resources, cfg)
+    tf2 = scored.audit.set_index("activity").loc["TF2"]
+    assert tf2["status"] == "insufficient_target_overlap"
+    assert tf2["target_overlap"] == 1
+    assert tf2["n_genes"] == 3
+    assert tf2["n_scoring_genes"] == 2
+    assert set(scored.scores["activity"]) == {"TF1"}
+
+
 def test_failed_requested_resource_is_fatal(monkeypatch):
     def fail(*args, **kwargs):
         raise RuntimeError("resource unavailable")
