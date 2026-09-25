@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
-- added the pre-release `scomnom enrichment sample` command for replicate-population count pseudobulks, covariate-adjusted HC3 activity contrasts, standardized effects, BH FDR, audited exclusions, separate round-native output, and sample/effect/QC figures with regeneration from stored tables; frozen Kang validation and controls are complete
+- added the `scomnom enrichment sample` command for replicate-population count pseudobulks, covariate-adjusted HC3 activity contrasts, standardized effects, BH FDR, audited exclusions, separate round-native output, and sample/effect/QC figures with regeneration from stored tables; frozen Kang validation and controls are complete
 - corrected pseudobulk DE provenance so exported design formulas match the fitted DESeq2 terms, and documented paired designs using distinct sample-level aggregation and subject covariates
 - corrected PyDESeq2 LFC shrinkage by explicitly setting the requested contrast reference, passing the fitted coefficient required by current PyDESeq2, recording per-contrast shrinkage provenance, and failing closed when requested shrinkage cannot be applied
 - promoted markers, within-cluster DE, differential abundance, enrichment, and CCC to independent top-level CLI routes (`scomnom markers`, `scomnom de`, `scomnom da`, `scomnom enrichment ...`, and `scomnom ccc ...`); the hidden `scomnom markers-and-de ...` route remains as a deprecated compatibility alias for one release

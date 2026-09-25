@@ -121,7 +121,7 @@ The recommended full workflow is:
 6. optional `adata-ops rename`, `adata-ops subset`, or `adata-ops annotation-merge`
 7. `de`
 8. `da`
-9. optional `enrichment cluster` (descriptive profiles), `enrichment de` (DE-statistic enrichment), or pre-release `enrichment sample` (replicate-level activity contrasts; Kang validation complete)
+9. optional `enrichment cluster` (descriptive profiles), `enrichment de` (DE-statistic enrichment), or `enrichment sample` (replicate-level activity contrasts)
 10. optional `ccc ...`
 
 Detailed command examples, expected outputs, AnnData conventions, and HPC notes are in the [manual](https://prangelab.org/scOmnom/).

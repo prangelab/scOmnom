@@ -221,9 +221,9 @@ DE-table enrichment writes:
 * tables: `tables/enrichment_de_<inputdir>_roundN/`;
 * report: `figures/<fmt>/enrichment_de_<inputdir>_roundN/enrichment_de_report.html`.
 
-## Sample Enrichment (Pre-release)
+## Sample Enrichment
 
-`scomnom enrichment sample` produces one activity observation per eligible replicate-population library. The current pre-release implementation provides scoring, inference, tables, figures, and AnnData output. The prespecified Kang validation and controls are complete. No new public Python function is exposed, and the deprecated `markers-and-de enrichment` route retains only its existing commands.
+`scomnom enrichment sample` produces one activity observation per eligible replicate-population library and provides scoring, inference, tables, figures, and AnnData output. The prespecified Kang validation and controls are complete. No new public Python function is exposed, and the deprecated `markers-and-de enrichment` route retains only its existing commands.
 
 Independent libraries:
 
