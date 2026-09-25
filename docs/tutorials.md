@@ -9,7 +9,7 @@ These tutorials are companion walkthroughs for running scOmnom on compact public
 | Tutorial | Focus | Continue to |
 | --- | --- | --- |
 | [PBMC10k Data Processing](tutorials/data-processing-pbmc10k.md) | CellBender-aware input handling, load/filter, integration, clustering, subset refinement, merge-back, custom annotation layers, and markers. | Start here for the core processing workflow. |
-| [Kang IFN-beta PBMC DE](tutorials/kang-ifnb-de.md) | Replicate-aware DE, enrichment, differential abundance, condition-split LIANA CCC, and a pre-release paired sample-activity example awaiting biological validation. | Use after the processing tutorial when you want condition-aware downstream analysis. |
+| [Kang IFN-beta PBMC DE](tutorials/kang-ifnb-de.md) | Replicate-aware DE, enrichment, differential abundance, condition-split LIANA CCC, and a pre-release paired sample-activity example. | Use after the processing tutorial when you want condition-aware downstream analysis. |
 
 The PBMC10k tutorial includes small helper scripts under [`tutorials/code/`](tutorials/code/select_tnk_refinement_subset.py). These scripts are intentionally lightweight wrappers around scOmnom AnnData IO and annotation conventions.
 
