@@ -2,7 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
-## Unreleased
+## 0.9.0rc1 [25-09-2026]
+
+Release candidate for the integrated analysis workflow. This prerelease freezes
+the implementation for final release testing; it is not the final 0.9.0 release.
 
 - added the `scomnom enrichment sample` command for replicate-population count pseudobulks, covariate-adjusted HC3 activity contrasts, standardized effects, BH FDR, audited exclusions, separate round-native output, and sample/effect/QC figures with regeneration from stored tables; frozen Kang validation and controls are complete
 - corrected pseudobulk DE provenance so exported design formulas match the fitted DESeq2 terms, and documented paired designs using distinct sample-level aggregation and subject covariates
@@ -15,13 +18,17 @@ All notable changes to this project will be documented in this file.
 - changed focused LIANA complex handling to require every ligand and receptor subunit; incomplete complexes are retained as explicitly unscored rows rather than being evaluated from partial complexes
 - corrected focused LIANA effect plots so significance outlines encode FDR rather than unadjusted p-values, and separated the route-support legend from the effect-size color scale
 - hardened automatic scIB embedding selection with a required aggregate improvement over `Unintegrated` while preserving the Pareto-aware biology-and-batch tier hierarchy; selection tiers, deltas, tolerance, and the complete decision table are now persisted
-- Hardened cluster compaction with a required one-sided transcriptomic state-divergence veto, strict activity validation, frozen CellTypist eligibility gates, immutable activity floors, deterministic all-pairs grouping, explicit no-op rounds, and native audit tables and review plots. The default veto blocks pairs when more than 2% of eligible nontechnical genes have both absolute log2 fold change at least 1.0 and detection-fraction difference at least 0.20; Pearson concordance remains diagnostic only. The transcriptomic view requires assay-aware count pseudobulks and records complete provenance. Renamed the former `thr_*` controls as adaptive threshold caps while retaining compatibility aliases.
+- Hardened cluster compaction with a required one-sided transcriptomic state-divergence veto, strict activity validation, frozen CellTypist eligibility gates, immutable activity floors, deterministic all-pairs grouping, explicit no-op rounds, and native audit tables and review plots. The default veto blocks pairs when more than 2% of eligible nontechnical genes have both absolute log2 fold change at least 1.0 and detection-fraction difference at least 0.20. The transcriptomic view requires assay-aware count pseudobulks and records complete provenance. Obsolete non-gating Pearson diagnostics and their configuration options were removed. Renamed the remaining former `thr_*` controls as adaptive threshold caps while retaining compatibility aliases.
 - Added `load-and-filter --skip-doublet-detection` for documented upstream-curated inputs, with explicit skip provenance and no synthetic doublet rate or scores.
 - added typed DataFrame sidecars for Zarr and H5AD round-trips, including nullable Booleans and legacy Boolean-string recovery
 - corrected CellTypist confidence entropy to operate on row-normalized logistic scores while retaining the raw score margin
 - changed pooled and paired LIANA defaults to library-normalized log1p expression, made explicit missing-layer and missing-raw requests fail closed, added route-family provenance, and aligned the pooled settings filename with the documented `liana_settings.tsv` contract
 - added confidence coverage and strict-majority purity gates with a stored per-cluster CellTypist label audit
 - replaced raw-score decoupler averaging with decoupler's signed per-method z-score consensus, restored `wsum` through WAGGR, propagated target-count filters, and stored method provenance
+- changed the effective routine Milo neighbourhood defaults to the validated balanced M05 setting: 1,000 initial vertices, 75 graph neighbours, and minimum neighbourhood size 50
+- retained `custom` as the default Milo scale label so direct numeric overrides remain backward-compatible; the named `local`, `balanced`, and `broad` presets remain available
+- retained minimum nonzero sample support of three and the existing default Milo region-grouping rule
+- preserved canonical reference/test levels and pair identifiers in GLM composition outputs so GLM, CLR, Milo, and scCODA rows join correctly in consensus summaries
 
 ## 0.7.1 [16-06-2026]
 Load-and-filter QC refinement release:

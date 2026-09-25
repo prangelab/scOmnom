@@ -43,6 +43,8 @@ Returns:
 `scomnom.adata_ops` remains the compatibility namespace for AnnData-oriented helpers.
 Enrichment helpers are exposed under `scomnom.enrichment` for notebook workflows. The former `scomnom.markers_and_de` namespace remains as a compatibility alias for one release.
 
+Sample-level enrichment is currently CLI-only through `scomnom enrichment sample`; no sample-enrichment function is exported in these Python namespaces. See `docs/markers-and-de/enrichment.md` for its options and output contract.
+
 ### `rename_idents`
 
 Signature:

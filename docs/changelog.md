@@ -2,9 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
-## Unreleased
+## 0.9.0rc1 [25-09-2026]
+
+Release candidate for the integrated analysis workflow. This prerelease freezes
+the implementation for final release testing; it is not the final 0.9.0 release.
 
 - added the `scomnom enrichment sample` command for replicate-population count pseudobulks, covariate-adjusted HC3 activity contrasts, standardized effects, BH FDR, audited exclusions, separate round-native output, and sample/effect/QC figures with regeneration from stored tables; frozen Kang validation and controls are complete
+- corrected pseudobulk DE provenance so exported design formulas match the fitted DESeq2 terms, and documented paired designs using distinct sample-level aggregation and subject covariates
+- corrected PyDESeq2 LFC shrinkage by explicitly setting the requested contrast reference, passing the fitted coefficient required by current PyDESeq2, recording per-contrast shrinkage provenance, and failing closed when requested shrinkage cannot be applied
 - promoted markers, within-cluster DE, differential abundance, enrichment, and CCC to independent top-level CLI routes (`scomnom markers`, `scomnom de`, `scomnom da`, `scomnom enrichment ...`, and `scomnom ccc ...`); the hidden `scomnom markers-and-de ...` route remains as a deprecated compatibility alias for one release
 - fixed `scomnom enrichment de` discovery of pseudobulk CSV files in the nested directory layout emitted by `scomnom de`; duplicate exports for the same condition, contrast, and cluster now fail closed
 - retained the serialized `adata.uns["markers_and_de"]` schema unchanged so existing AnnData objects and downstream readers remain compatible
@@ -20,6 +25,25 @@ All notable changes to this project will be documented in this file.
 - changed pooled and paired LIANA defaults to library-normalized log1p expression, made explicit missing-layer and missing-raw requests fail closed, added route-family provenance, and aligned the pooled settings filename with the documented `liana_settings.tsv` contract
 - added confidence coverage and strict-majority purity gates with a stored per-cluster CellTypist label audit
 - replaced raw-score decoupler averaging with decoupler's signed per-method z-score consensus, restored `wsum` through WAGGR, propagated target-count filters, and stored method provenance
+- changed the effective routine Milo neighbourhood defaults to the validated balanced M05 setting: 1,000 initial vertices, 75 graph neighbours, and minimum neighbourhood size 50
+- retained `custom` as the default Milo scale label so direct numeric overrides remain backward-compatible; the named `local`, `balanced`, and `broad` presets remain available
+- retained minimum nonzero sample support of three and the existing default Milo region-grouping rule
+- preserved canonical reference/test levels and pair identifiers in GLM composition outputs so GLM, CLR, Milo, and scCODA rows join correctly in consensus summaries
+
+## 0.7.1 [16-06-2026]
+Load-and-filter QC refinement release:
+- added optional fixed lower-count filtering via `--min-counts`
+- added automatic per-sample lower-count filtering on `total_counts` using a lower MAD rule, with an optional lower quantile component for stricter datasets
+- set default automatic lower-count behavior to:
+  - `--min-counts-mad 5.0`
+  - `--min-counts-quantile none`
+  - activation gate `--min-counts-auto-activate-quantile 0.01`
+  - activation floor `--min-counts-auto-activate-below 1000`
+- kept fixed `--min-counts` and lower quantile filtering off by default, so the pipeline now applies conservative automatic lower-tail cleanup for ordinary datasets while leaving stronger intervention to explicit user choice
+- added prefilter QC diagnostics for the lower-count rule:
+  - per-sample cutoff overlays on the `total_counts` violins
+  - per-sample summary of the fraction of cells below the lower-count cutoff
+- expanded README/manual documentation for the new lower-count QC parameters, defaults, disable patterns, and intended policy
 
 ## 0.1.0: [dec 2025]
 Implemented a working version of the load-and-filter and integrate modules.
@@ -205,25 +229,3 @@ Cluster-and-annotate CellTypist model selection fix:
 - made cached CellTypist reuse model-aware, so stored predictions are only reused when they were generated with the same requested model
 - added model metadata to stored CellTypist outputs and recompute-on-mismatch behavior to prevent stale immune-model predictions from leaking into later clustering runs
 - added focused CLI/runtime tests covering disabled CellTypist mode and recomputation when the requested model changes
-
-## 0.7.1 [16-06-2026]
-Load-and-filter QC refinement release:
-- added optional fixed lower-count filtering via `--min-counts`
-- added automatic per-sample lower-count filtering on `total_counts` using a lower MAD rule, with an optional lower quantile component for stricter datasets
-- set default automatic lower-count behavior to:
-  - `--min-counts-mad 5.0`
-  - `--min-counts-quantile none`
-  - activation gate `--min-counts-auto-activate-quantile 0.01`
-  - activation floor `--min-counts-auto-activate-below 1000`
-- kept fixed `--min-counts` and lower quantile filtering off by default, so the pipeline now applies conservative automatic lower-tail cleanup for ordinary datasets while leaving stronger intervention to explicit user choice
-- added prefilter QC diagnostics for the lower-count rule:
-  - per-sample cutoff overlays on the `total_counts` violins
-  - per-sample summary of the fraction of cells below the lower-count cutoff
-- expanded README/manual documentation for the new lower-count QC parameters, defaults, disable patterns, and intended policy
-
-## Unreleased
-Milo differential-abundance calibration:
-- changed the effective routine Milo neighbourhood defaults to the validated balanced M05 setting: 1,000 initial vertices, 75 graph neighbours, and minimum neighbourhood size 50
-- retained `custom` as the default scale label so direct numeric overrides remain backward-compatible; the named `local`, `balanced`, and `broad` presets remain available
-- retained minimum nonzero sample support of three and the existing default region-grouping rule
-- preserved canonical reference/test levels and pair identifiers in GLM composition outputs so GLM, CLR, Milo, and scCODA rows join correctly in consensus summaries
