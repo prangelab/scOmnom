@@ -3827,7 +3827,7 @@ def _build_cfg_enrichment_sample(
         "Independent example: --replicate-key donor_id --condition-key sex --contrast female:male --covariates age. "
         "Paired example: --replicate-key sample_id --condition-key condition --contrast stimulated:control "
         "--covariates donor_id --subject-key donor_id. "
-        "Pre-release: biological validation is pending. Figures can be regenerated from saved results."
+        "Pre-release: Kang validation is complete. Figures can be regenerated from saved results."
     ),
 )
 def enrichment_sample(

@@ -223,7 +223,7 @@ DE-table enrichment writes:
 
 ## Sample Enrichment (Pre-release)
 
-`scomnom enrichment sample` produces one activity observation per eligible replicate-population library. The current pre-release implementation provides scoring, inference, tables, figures, and AnnData output. Kang biological validation remains pending; the feature is not yet release-ready. No new public Python function is exposed, and the deprecated `markers-and-de enrichment` route retains only its existing commands.
+`scomnom enrichment sample` produces one activity observation per eligible replicate-population library. The current pre-release implementation provides scoring, inference, tables, figures, and AnnData output. The prespecified Kang validation and controls are complete; the feature remains on its review branch until release. No new public Python function is exposed, and the deprecated `markers-and-de enrichment` route retains only its existing commands.
 
 Independent libraries:
 
