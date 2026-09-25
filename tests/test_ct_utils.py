@@ -4,10 +4,33 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
+from scipy import sparse
 
 import scomnom.ct_utils as ct_utils
 from scomnom.config import ClusterAnnotateConfig
 from scomnom.clustering_utils import _run_celltypist_annotation
+
+
+@pytest.mark.parametrize("layer", ["counts_raw", "counts_cb"])
+@pytest.mark.parametrize("as_sparse", [False, True])
+def test_celltypist_normalization_preserves_source_counts(monkeypatch, layer, as_sparse):
+    counts = np.array([[1, 2, 0], [0, 3, 5]], dtype=np.float32)
+    matrix = sparse.csr_matrix(counts) if as_sparse else counts.copy()
+    adata = ad.AnnData(X=matrix.copy(), layers={layer: matrix})
+    captured = []
+
+    def stop_before_model_download(name):
+        captured.append(True)
+        raise RuntimeError("Stop after normalization")
+
+    monkeypatch.setattr(ct_utils, "get_celltypist_model", stop_before_model_download)
+    cfg = ClusterAnnotateConfig(input_path=Path("dummy.h5ad"), celltypist_model="test.pkl")
+    ct_utils.ensure_celltypist(adata, cfg, reuse=False)
+    assert captured
+    actual = adata.layers[layer].toarray() if as_sparse else adata.layers[layer]
+    np.testing.assert_array_equal(actual, counts)
+    actual_x = adata.X.toarray() if as_sparse else adata.X
+    np.testing.assert_array_equal(actual_x, counts)
 
 
 def _synthetic_adata(n_cells: int = 12, n_genes: int = 6) -> ad.AnnData:

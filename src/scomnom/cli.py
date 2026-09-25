@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Optional, List, Literal, Dict, Sequence, Tuple
 import typer
+from typer.core import TyperCommand
 from pathlib import Path
 import warnings
 import re
@@ -11,6 +12,7 @@ from .load_and_filter import run_load_and_filter
 from .integrate import run_integrate
 from .adata_ops import run_adata_ops
 from .cluster_and_annotate import run_clustering
+from .sample_enrichment import run_sample_enrichment, _sample_output_stem
 from .markers_and_de import (
     run_cluster_vs_rest,
     run_within_cluster,
@@ -31,6 +33,7 @@ from .config import (
     AdataOpsConfig,
     ClusterAnnotateConfig,
     MarkersAndDEConfig,
+    SampleEnrichmentConfig,
 )
 import logging
 from .logging_utils import init_logging
@@ -1872,6 +1875,9 @@ markers_and_de_app = typer.Typer(
     invoke_without_command=True,
 )
 enrichment_app = typer.Typer(
+    help="Pathway and TF enrichment from clustering rounds, DE statistics, or biological-replicate activities.",
+)
+legacy_enrichment_app = typer.Typer(
     help="Pathway and TF enrichment from either clustering rounds or DE result tables.",
 )
 ccc_app = typer.Typer(
@@ -1880,8 +1886,17 @@ ccc_app = typer.Typer(
 app.add_typer(enrichment_app, name="enrichment")
 app.add_typer(ccc_app, name="ccc")
 app.add_typer(markers_and_de_app, name="markers-and-de", hidden=True)
-markers_and_de_app.add_typer(enrichment_app, name="enrichment")
+markers_and_de_app.add_typer(legacy_enrichment_app, name="enrichment")
 markers_and_de_app.add_typer(ccc_app, name="ccc")
+
+
+def _shared_enrichment_command(name: str, **kwargs):
+    """Register existing commands on canonical and compatibility routes."""
+    def register(function):
+        enrichment_app.command(name, **kwargs)(function)
+        legacy_enrichment_app.command(name, **kwargs)(function)
+        return function
+    return register
 
 
 @markers_and_de_app.callback()
@@ -3784,7 +3799,99 @@ def cluster_vs_rest(
     run_cluster_vs_rest(cfg)
 
 
+class _SampleEnrichmentCommand(TyperCommand):
+    def parse_args(self, ctx, args):
+        ctx.meta["sample_enrichment_command"] = ["scomnom", "enrichment", "sample", *args]
+        return super().parse_args(ctx, args)
+
+
+def _build_cfg_enrichment_sample(
+    *, input_path: Path, output_dir: Optional[Path] = None, **options,
+) -> SampleEnrichmentConfig:
+    input_path = Path(input_path)
+    cfg = SampleEnrichmentConfig(
+        input_path=input_path,
+        output_dir=output_dir if output_dir is not None else _default_results_dir_for_input(input_path),
+        **options,
+    )
+    if cfg.round_id is not None and cfg.output_name is None and not cfg.regenerate_figures:
+        cfg.output_name = _sample_output_stem(cfg, cfg.round_id)
+    return cfg
+
+
 @enrichment_app.command(
+    "sample",
+    cls=_SampleEnrichmentCommand,
+    help=(
+        "Infer activities for each replicate-population count pseudobulk and fit covariate-adjusted contrasts. "
+        "Independent example: --replicate-key donor_id --condition-key sex --contrast female:male --covariates age. "
+        "Paired example: --replicate-key sample_id --condition-key condition --contrast stimulated:control "
+        "--covariates donor_id --subject-key donor_id. "
+        "Pre-release: Kang validation is complete. Figures can be regenerated from saved results."
+    ),
+)
+def enrichment_sample(
+    ctx: typer.Context,
+    input_path: Path = typer.Option(..., "--input-path", "-i", help="AnnData loaded through scOmnom I/O."),
+    replicate_key: Optional[str] = typer.Option(None, "--replicate-key", help="Required for analysis: obs column identifying one independently measured sample library."),
+    output_dir: Optional[Path] = typer.Option(None, "--output-dir", "-o", help="Nearest results/ ancestor, otherwise a results/ directory beside the input."),
+    output_name: Optional[str] = typer.Option(None, "--output-name", help="Dataset stem; defaults to adata.enrichment_sample_<round>."),
+    save_h5ad: bool = typer.Option(False, "--save-h5ad/--no-save-h5ad", help="Write H5AD in addition to archived Zarr."),
+    round_id: Optional[str] = typer.Option(None, "--round-id", help="Clustering round; defaults to the active round."),
+    condition_key: Optional[str] = typer.Option(None, "--condition-key", help="obs column containing contrast levels. Omit for scoring only."),
+    contrasts: List[str] = typer.Option([], "--contrast", help="TEST:REFERENCE; repeat or separate by commas."),
+    reference: Optional[str] = typer.Option(None, "--reference", help="Explicit denominator when exactly two levels are present and no contrast is supplied."),
+    covariates: List[str] = typer.Option([], "--covariates", help="Model covariates; repeat or separate by commas."),
+    subject_key: Optional[str] = typer.Option(None, "--subject-key", help="Repeated-subject identifier, also required in --covariates. Retains complete pairs."),
+    target_groups: List[str] = typer.Option([], "--target-groups", help="Round-native IDs, Cnn codes, or full display labels; repeat or separate by commas."),
+    counts_layer: str = typer.Option("auto", "--counts-layer", help="auto|counts_cb|counts_raw|X. Auto validates counts in that priority order."),
+    min_cells_per_replicate_group: int = typer.Option(20, "--min-cells-per-replicate-group", min=1),
+    min_replicates_per_level: int = typer.Option(3, "--min-replicates-per-level", min=1),
+    min_replicates_total: int = typer.Option(6, "--min-replicates-total", min=1, help="Minimum libraries in an independent two-level model."),
+    min_complete_subjects: int = typer.Option(3, "--min-complete-subjects", min=1),
+    gene_filter: List[str] = typer.Option([], "--gene-filter", help="Repeatable pandas-query expressions against adata.var. Queries are not split on commas."),
+    decoupler_method: str = typer.Option("consensus", "--decoupler-method"),
+    decoupler_consensus_methods: List[str] = typer.Option(["ulm", "mlm", "wsum"], "--decoupler-consensus-methods", help="At least two distinct methods; repeat or separate by commas."),
+    decoupler_min_n_targets: int = typer.Option(5, "--decoupler-min-n-targets", min=1),
+    run_msigdb: bool = typer.Option(True, "--run-msigdb/--no-run-msigdb"),
+    msigdb_gene_sets: List[str] = typer.Option(["HALLMARK", "REACTOME"], "--msigdb-gene-sets", help="MSigDB collections or GMT paths; repeat or separate by commas."),
+    msigdb_method: Optional[str] = typer.Option(None, "--msigdb-method", help="Override --decoupler-method for MSigDB."),
+    msigdb_min_n_targets: Optional[int] = typer.Option(None, "--msigdb-min-n-targets", min=1),
+    run_progeny: bool = typer.Option(True, "--run-progeny/--no-run-progeny"),
+    progeny_method: Optional[str] = typer.Option(None, "--progeny-method", help="Override --decoupler-method for PROGENy."),
+    progeny_min_n_targets: Optional[int] = typer.Option(None, "--progeny-min-n-targets", min=1),
+    progeny_top_n: int = typer.Option(100, "--progeny-top-n", min=1),
+    progeny_organism: str = typer.Option("human", "--progeny-organism"),
+    run_dorothea: bool = typer.Option(True, "--run-dorothea/--no-run-dorothea"),
+    dorothea_method: Optional[str] = typer.Option(None, "--dorothea-method", help="Override --decoupler-method for DoRothEA."),
+    dorothea_min_n_targets: Optional[int] = typer.Option(None, "--dorothea-min-n-targets", min=1),
+    dorothea_confidence: List[str] = typer.Option(["A", "B", "C"], "--dorothea-confidence", help="Confidence levels; repeat or separate by commas."),
+    dorothea_organism: str = typer.Option("human", "--dorothea-organism"),
+    plot_activity: List[str] = typer.Option([], "--plot-activity", help="Activity names for forest and sample plots; does not limit scoring or FDR. Repeat or use commas."),
+    figure_formats: List[str] = typer.Option(["png", "pdf"], "--figure-formats", "-F", help="Figure formats; repeat or use commas."),
+    make_figures: bool = typer.Option(True, "--make-figures/--no-make-figures"),
+    regenerate_figures: bool = typer.Option(False, "--regenerate-figures", help="Render saved sample-enrichment tables without recomputation or rewriting the dataset."),
+    analysis_id: Optional[str] = typer.Option(None, "--analysis-id", help="Saved analysis to regenerate; required when the round contains multiple analyses."),
+):
+    try:
+        options = ctx.params
+        if regenerate_figures:
+            from click.core import ParameterSource
+            options = {key: value for key, value in ctx.params.items()
+                       if ctx.get_parameter_source(key) != ParameterSource.DEFAULT}
+        cfg = _build_cfg_enrichment_sample(**options)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    try:
+        run_sample_enrichment(cfg, command=ctx.meta["sample_enrichment_command"])
+    except (ValueError, KeyError, FileNotFoundError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    except (RuntimeError, OSError) as exc:
+        typer.echo(f"Sample enrichment failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+@_shared_enrichment_command(
     "cluster",
     help="Run round-native enrichment scoring (MSigDB, PROGENy, DoRothEA) on an existing AnnData.",
 )
@@ -3932,7 +4039,7 @@ def enrichment_cluster(
     run_enrichment_cluster(cfg)
 
 
-@enrichment_app.command(
+@_shared_enrichment_command(
     "de",
     help="Run pathway and TF enrichment from exported DE result tables without loading AnnData.",
 )
@@ -4031,7 +4138,7 @@ def enrichment_de(
     run_enrichment_de_from_tables(cfg)
 
 
-@enrichment_app.command(
+@_shared_enrichment_command(
     "module-score",
     help="Score user-defined gene modules per cell, then summarize by cluster or cluster-condition.",
 )

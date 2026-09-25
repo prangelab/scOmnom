@@ -156,7 +156,7 @@ def ensure_celltypist(
         if picked_layer is not None:
             LOGGER.info("CellTypist input: using counts-like layer adata.layers[%r].", picked_layer)
             adata_ct = ad.AnnData(
-                X=X_src,
+                X=X_src.copy(),
                 obs=adata.obs.copy(),
                 var=adata.var.copy(),
             )
@@ -170,7 +170,7 @@ def ensure_celltypist(
                 "Using adata.X as-is (no normalize_total/log1p)."
             )
             adata_ct = ad.AnnData(
-                X=adata.X,
+                X=adata.X.copy(),
                 obs=adata.obs.copy(),
                 var=adata.var.copy(),
             )
