@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+- preserve gene IDs, feature types and genome annotations across sample-specific gene filtering in `load-and-filter`; reconcile nonmissing feature identities before union padding and reject conflicting identities without changing counts, filtering or sample-specific QC statistics
+
 ## 0.9.0rc1 [25-09-2026]
 
 Release candidate for the integrated analysis workflow. This prerelease freezes

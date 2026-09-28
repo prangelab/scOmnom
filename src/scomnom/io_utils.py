@@ -1211,6 +1211,34 @@ def _compute_union_genes(sample_map: Dict[str, ad.AnnData]) -> List[str]:
     return sorted(genes)
 
 
+def _merge_feature_identities(
+    sample_map: Dict[str, ad.AnnData], union_genes: List[str]
+) -> pd.DataFrame:
+    """Reconcile invariant feature identities before padding introduces blanks."""
+    identities = pd.DataFrame(index=union_genes)
+    for sample, adata in sample_map.items():
+        if not adata.var_names.is_unique:
+            raise ValueError(f"[{sample}] adata.var_names are not unique")
+        for column in ("gene_ids", "feature_types", "genome"):
+            if column not in adata.var:
+                continue
+            if column not in identities:
+                identities[column] = ""
+            values = adata.var[column].astype("string").dropna()
+            values = values[values.str.strip().ne("")]
+            existing = identities.loc[values.index, column]
+            conflict = existing.ne("") & existing.ne(values)
+            if conflict.any():
+                gene = conflict.index[conflict][0]
+                raise ValueError(
+                    f"Conflicting {column} for feature {gene!r}: "
+                    f"{existing.loc[gene]!r} vs {values.loc[gene]!r} "
+                    f"(sample {sample!r})"
+                )
+            identities.loc[values.index, column] = values.to_numpy(dtype=object)
+    return identities
+
+
 def _merge_filtered_zarr_simple(padded_dirs: List[Path]) -> ad.AnnData:
     """
     Sequentially merge padded .zarr AnnData stores in-memory using ad.concat.
@@ -1267,6 +1295,9 @@ def merge_samples(
     if not sample_map:
         raise RuntimeError("merge_samples: sample_map is empty.")
 
+    union_genes = _compute_union_genes(sample_map)
+    feature_identities = _merge_feature_identities(sample_map, union_genes)
+
     tmp_dir = Path.cwd() / "tmp_merge"
     padded_dir = tmp_dir / "padded"
     padded_dir.mkdir(parents=True, exist_ok=True)
@@ -1279,7 +1310,6 @@ def merge_samples(
     # --------------------------------------------------------
     # 1. Compute union genes
     # --------------------------------------------------------
-    union_genes = _compute_union_genes(sample_map)
     LOGGER.info("Union gene set contains %d genes", len(union_genes))
 
     # --------------------------------------------------------
@@ -1323,6 +1353,9 @@ def merge_samples(
         len(padded_files)
     )
     merged = _merge_filtered_zarr_simple(padded_files)
+    # Sample-specific QC columns retain the existing merge policy.
+    for column in feature_identities:
+        merged.var[column] = feature_identities[column].reindex(merged.var_names).to_numpy()
 
     LOGGER.info(
         "Merged dataset: %d cells × %d genes",
