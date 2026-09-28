@@ -13,6 +13,10 @@ The Kang tutorial covers:
 
 Use processed count matrices only for this tutorial. Do not download or stage FASTQ, BAM, FASTA, GTF, GFF, SRA, or other raw/reference sequence files.
 
+## Software Version And Evidence
+
+The command reference is scOmnom **0.9.0rc1**, tag `v0.9.0rc1`, commit `607f4ce3369be13072b179b08254954200954394`. Use the [release instructions](https://github.com/prangelab/scOmnom/releases/tag/v0.9.0rc1) with the [platform-specific environment guide](../installation.md). The figures and numerical outcomes come from recorded validation runs with their own commits, including separately reviewed downstream and sample-enrichment runs; they are not claimed as a new end-to-end execution of this candidate.
+
 ## Kang Metadata
 
 Validated metadata columns:
@@ -26,13 +30,37 @@ Validated metadata columns:
 
 ## Input Staging
 
-The validated input was staged from GEO processed supplementary files:
+Use the [Kang staging helper](code/prepare_kang_input.py) in the installed scOmnom environment. Place it in `code/` in your tutorial working directory, then run:
+
+```bash
+python code/prepare_kang_input.py \
+  --source-dir source_geo \
+  --output-dir input \
+  --download
+```
+
+The helper downloads only these three [GEO supplementary files](https://ftp.ncbi.nlm.nih.gov/geo/series/GSE96nnn/GSE96583/suppl/), approximately 77 MB in total, and verifies their pinned byte counts and SHA256 checksums:
 
 * `GSE96583_RAW.tar`;
 * `GSE96583_batch2.genes.tsv.gz`;
 * `GSE96583_batch2.total.tsne.df.tsv.gz`.
 
-The staging step produced 24,366 singlet cells, 35,635 genes, 8 donors, 2 conditions, and 16 donor-by-condition 10x-style sample directories.
+`RAW.tar` is the GEO archive name, not an instruction to use raw-droplet input mode. Its contents are processed matrices and barcode lists, not sequencing reads. The helper uses only the two batch-2 control/stimulation matrices and splits their metadata-matched singlets into donor-condition samples. No CellBender processing, extra QC, normalization, or gene filtering is applied during staging. Use the **filtered** input mode below.
+
+The staged input contains **24,366 singlets, 35,635 genes, 8 donors, 2 conditions, and 16 donor-condition directories**. Its integer-count total is **38,116,097**, with **13,990,043 nonzero entries**.
+
+| Output | Contents |
+| --- | --- |
+| `input/kang_ifnb_10x/` | Sixteen `*.filtered_feature_bc_matrix` directories, each containing `matrix.mtx.gz`, `features.tsv.gz`, and `barcodes.tsv.gz`. |
+| `input/metadata.tsv` | Sample identifiers, donor, condition, and basic study metadata for `load-and-filter`. |
+| `input/cell_identity.tsv` | Barcode-to-sample identities for checking the split; not an annotation input. |
+| `input/sample_counts.tsv` | Cell, count, and nonzero totals per donor-condition sample. |
+| `input/barcode_join_exclusions.tsv` | Unmatched barcodes on both sides of the source-data join. |
+| `input/staging_manifest.json` | Source URLs/checksums, selection counts, and output checksums. |
+
+There is a barcode discrepancy in the published stimulated data: 313 metadata entries and 313 matrix barcodes have no exact counterpart in the other file. The helper retains the exact barcode intersection used in the validated analysis; it does not guess suffix corrections. Of the matched cells, 12,315 control and 12,051 stimulated cells are annotated as singlets and retained. Published cell-type labels, clustering labels, and t-SNE coordinates are not exported into the analysis metadata. Author singlet calls are used for this initial selection; the subsequent scOmnom QC and doublet settings remain unchanged.
+
+The output directory must not already exist. The helper does not overwrite previous inputs. Verified source files can be reused offline by omitting `--download` and choosing a new output directory. A changed checksum or unexpected barcode-join count stops staging. No package installation or download of FASTQ/BAM/reference files is performed.
 
 ## Load And Filter
 
@@ -122,9 +150,114 @@ Interpretation notes:
 * State-cluster DE is limited by condition imbalance after clustering. The later support audit found that C06 and C08 passed the cell-level gate, while only C08 had enough 20-cell pseudobulk libraries in both conditions. These are different support checks; neither establishes complete-pair support for the new sample-activity model.
 * Treat unsupported comparisons as explicit exclusions. A separate marker-reviewed broad-lineage round can answer a cross-condition lineage question while preserving the original state partition; it changes the comparison unit and must be defined before examining the new activity results.
 
-![Kang IFN-beta workflow and signal recovery](panels/de_figure1_ifn_signal_draft.png)
+## Reviewed Broad-Lineage DE
 
-Condition-aware scOmnom workflow and IFN-beta signal recovery in the Kang PBMC DE tutorial. The workflow recovers IFN-beta-associated DE and pathway signal in estimable clusters while retaining practical caveats such as skipped cluster-level contrasts when condition balance is insufficient.
+Stimulation can separate cells of the same broad identity into different transcriptional states. A second annotation layer allows a cross-condition comparison within broad cell types while preserving the original states for other analyses. The reviewed Kang mapping pools the 17 states into seven broad identities; five have sufficient donor-condition support for DE.
+
+### Define The Annotation Layers
+
+Review the marker results before pooling identities. The [manual annotation workflow](../adata-ops/rename.md) first assigns broad names while retaining every state, then creates a second layer that pools states with the same reviewed name. Assigning identical display names alone does not pool statistical groups.
+
+The [reviewed Kang mapping](code/kang_state_to_lineage.tsv) contains two tab-delimited columns without a header. It applies only to the frozen 17-state partition used here. Cluster codes are not transferable identities: a fresh clustering can assign the same code to different cells. For a fresh run, create `input/state_to_lineage.tsv` from its own marker review.
+
+Use the [annotation preflight](code/check_kang_annotation_input.py) to compare `counts_raw` against the filtered checkpoint, verify sample metadata, and check that the mapping covers every state exactly once. Place the helper in `code/` in your tutorial working directory. For a mapping you reviewed on your own clustering:
+
+```bash
+python code/check_kang_annotation_input.py \
+  --input results/kang_ifnb.clustered.annotated.zarr.tar.zst \
+  --filtered results/kang_ifnb.filtered.zarr.tar.zst \
+  --mapping input/state_to_lineage.tsv \
+  --round-id r1_scANVI_compacted \
+  --reviewed-mapping \
+  --report results/annotation_preflight.json
+```
+
+For the frozen mapping supplied above, use its [partition reference](code/kang_annotation_reference.json) and replace `--reviewed-mapping` with `--frozen-reference input/kang_annotation_reference.json`. This checks the exact cell-to-state assignments, not merely the number or names of the clusters. A mismatch requires a new marker review. The helper is read-only and never repairs or rounds a count matrix. Stop if any check fails.
+
+Create both layers after the preflight succeeds:
+
+```bash
+scomnom adata-ops rename \
+  --input-path results/kang_ifnb.clustered.annotated.zarr.tar.zst \
+  --output-dir results \
+  --output-name kang_ifnb.curated_states \
+  --rename-idents-file input/state_to_lineage.tsv \
+  --round-id r1_scANVI_compacted \
+  --rename-round-name curated_states \
+  --no-collapse-same-labels \
+  --no-set-active
+
+scomnom adata-ops rename \
+  --input-path results/kang_ifnb.curated_states.zarr.tar.zst \
+  --output-dir results \
+  --output-name kang_ifnb.lineages \
+  --rename-idents-file input/state_to_lineage.tsv \
+  --round-id r2_curated_states \
+  --rename-round-name broad_cell_types \
+  --collapse-same-labels \
+  --no-set-active
+```
+
+For the frozen example, the first step retains 17 states in `r2_curated_states`; the second creates seven broad groups in `r3_broad_cell_types`. Both retain the original active round, count layers, and embedding. The broad object is saved separately as `results/kang_ifnb.lineages.zarr.tar.zst`. If you already added other rounds, use the actual identifiers reported in the log in subsequent commands. The original state-level DE, DA, and CCC commands continue to use their original objects.
+
+### Compare Broad Cell Types
+
+```bash
+scomnom de \
+  --input-path results/kang_ifnb.lineages.zarr.tar.zst \
+  --output-dir results/lineage_de \
+  --output-name kang_ifnb.de_lineages \
+  --round-id r3_broad_cell_types \
+  --run pseudobulk \
+  --condition-keys condition \
+  --contrasts ctrl_vs_stim \
+  --replicate-key sample_id \
+  --pb-covariates donor_id \
+  --pb-counts-layer counts_raw \
+  --pb-store-key scomnom_de_restored_counts \
+  --de-decoupler-source pseudobulk \
+  --n-jobs 4 \
+  --max-workers 4 \
+  --no-prune-uns-de \
+  --figure-formats png \
+  --figure-formats pdf
+```
+
+The displayed results were generated at commit `a10cad430214d10784435a4e25b29d5e3feb31fb` from verified integer counts and the frozen reviewed mapping. They are separate from the earlier state-level DE results and are not a new end-to-end release-candidate execution. The historical archive required restoring `counts_raw` from the verified filtered checkpoint; do not treat normalized values as counts or attempt to repair them by rounding. A fresh analysis should preserve the original counts throughout.
+
+| Broad identity | Available complete donor pairs | Tested genes | Genes with FDR < 0.05 |
+| --- | ---: | ---: | ---: |
+| T cells | 8 | 537 | 275 |
+| CD14+ monocytes | 8 | 922 | 778 |
+| B cells | 7 | 615 | 225 |
+| NK-enriched cytotoxic lymphocytes | 6 | 540 | 203 |
+| FCGR3A+ monocytes | 4 | 1,035 | 475 |
+
+The model uses eligible donor-condition libraries with donor adjustment; the available complete-pair counts describe support, not an explicit complete-pair-only filter. Dendritic and unresolved myeloid identities lacked supported fits and are not interpreted as null results. All eight prespecified IFN-response genes (`IFIT1`, `IFIT2`, `IFIT3`, `IFI44L`, `MX1`, `IFI6`, `ISG15`, `IRF7`) were stimulation-associated and FDR-significant in all five supported identities.
+
+The following plots are unmodified native scOmnom outputs. Their numeric identifiers refer to the broad-identity round, not the original state codes. Negative effects indicate higher expression after stimulation. Red points meet both **FDR < 0.05 and absolute shrunk log2 fold change > 1**; the table above counts FDR alone.
+
+![T-cell broad-lineage DE](panels/kang_de_t_cells.png)
+
+T cells, broad population 0. [Vector PDF](panels/kang_de_t_cells.pdf).
+
+![CD14-monocyte broad-lineage DE](panels/kang_de_cd14_monocytes.png)
+
+CD14+ monocytes, broad population 1. [Vector PDF](panels/kang_de_cd14_monocytes.pdf).
+
+![B-cell broad-lineage DE](panels/kang_de_b_cells.png)
+
+B cells, broad population 2. [Vector PDF](panels/kang_de_b_cells.pdf).
+
+![NK-enriched broad-lineage DE](panels/kang_de_nk_enriched.png)
+
+NK-enriched cytotoxic lymphocytes, broad population 3. [Vector PDF](panels/kang_de_nk_enriched.pdf).
+
+![FCGR3A-monocyte broad-lineage DE](panels/kang_de_fcgr3a_monocytes.png)
+
+FCGR3A+ monocytes, broad population 4. [Vector PDF](panels/kang_de_fcgr3a_monocytes.pdf).
+
+The associated enrichment outputs recovered stimulation-oriented interferon signals. Their logs record exclusion of the singular MSigDB MLM constituent and substantial ties in GSEA ranking statistics; inspect these diagnostics and do not interpret exported zero GSEA adjusted p-values as exact zero. These pathway summaries and gene-level DE have different statistics. DA and CCC below continue to use the original state round and its output archive.
 
 ## Paired Sample-Level Activities
 
@@ -136,7 +269,7 @@ The three enrichment modes answer different questions:
 | `enrichment de` | Gene-level differential-expression statistics | Activity associated with a contrast, useful for mechanism discovery. |
 | `enrichment sample` | One count pseudobulk per library and population | Library activity scores followed by donor-adjusted condition inference. |
 
-The following example illustrates the design used in the separately reviewed Kang validation; it is not an output produced by the preceding tutorial commands. It requires a separately saved, marker-reviewed broad-lineage round named `r3_broad_cell_types` in `kang_ifnb.lineages.zarr.tar.zst`. The earlier commands in this tutorial do not create that round automatically. Use the [annotation and rename workflow](../adata-ops/rename.md) to preserve state labels and create a distinct round whose grouping actually pools the reviewed lineages; shared display names alone do not change the statistical grouping.
+This separately validated example uses the same count-verified `kang_ifnb.lineages.zarr.tar.zst` input and `r3_broad_cell_types` round described above. It scores library-level expression directly, not the preceding DE table. Create the broad-lineage object with the two annotation steps above before running this extension.
 
 ```bash
 scomnom enrichment sample \
@@ -231,7 +364,7 @@ Condition-split LIANA cell-cell communication analysis for the Kang IFN-beta PBM
 
 ## Expected Outcomes
 
-The separately reviewed sample-level activity validation found stimulation-positive interferon-associated effects for all 25 prespecified targets across five supported broad lineages, with 15 discoveries after full-family FDR correction. Support differed by lineage, and the pooled perturbation and capture effects could not be separated. These results require the marker-reviewed broad-lineage round described above; they are not produced by the preceding tutorial command chain.
+The separately reviewed sample-level activity validation found stimulation-positive interferon-associated effects for all 25 prespecified activity-by-lineage comparisons across five supported broad lineages, with 15 discoveries after full-family FDR correction. Support differed by lineage, and the pooled perturbation and capture effects could not be separated. These results require the marker-reviewed broad-lineage round described above; they are not produced by the preceding tutorial command chain.
 
 The validated DE tutorial evidence supports:
 

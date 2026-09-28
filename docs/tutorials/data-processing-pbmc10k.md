@@ -4,6 +4,10 @@ This tutorial processes a compact 10x Genomics PBMC10k single-cell RNA-seq datas
 
 Condition-aware DE, DA, and CCC are not part of this PBMC10k tutorial because PBMC10k is a single-sample dataset. Continue to the [Kang IFN-beta PBMC DE tutorial](kang-ifnb-de.md) for replicate-aware analyses.
 
+## Software Version And Evidence
+
+The command reference is scOmnom **0.9.0rc1**, tag `v0.9.0rc1`, commit `607f4ce3369be13072b179b08254954200954394`. Install this candidate using the [release instructions](https://github.com/prangelab/scOmnom/releases/tag/v0.9.0rc1) and the [platform-specific environment guide](../installation.md). The illustrated PBMC10k refinement was executed at commit `5cd318d33e4d24d500179968952563faf535ff1e`; input/QC panels retain their original run provenance. These are recorded validation outcomes, not a new end-to-end execution of the release candidate.
+
 ## Workflow Overview
 
 The tutorial demonstrates:
@@ -56,20 +60,27 @@ Critical count-layer convention:
 
 ![Input modes and QC](panels/figure1_input_qc_draft.png)
 
-Input-mode handling and quality control for the PBMC10k data processing tutorial. The panels summarize retained cells, the fraction of counts removed by CellBender, gene-level raw versus CellBender-denoised counts, and QC filter effects for the tutorial sample.
+Input-mode handling and quality control for the PBMC10k data processing tutorial. The panels show retained cells for filtered, raw, and matched raw-plus-CellBender inputs, the fraction of counts removed by CellBender, gene-level raw versus denoised counts, and preserved count layers. All three illustrated modes retain `counts_raw`; standalone CellBender input, not shown here, retains only `counts_cb`.
 
 ## Hardware And Runtime
 
 PBMC10k is intended to run on a laptop or workstation. GPU access is optional if CellBender output is already available. GPU access is required if users generate CellBender output themselves.
 
-Validated Snellius timings for the raw plus CellBender path:
+Recorded HPC wall times for the illustrated raw plus CellBender workflow:
 
-| Step | Runtime | MaxRSS |
-| --- | ---: | ---: |
-| integrate | 00:06:40 | 3017357K |
-| global cluster/markers/subset | 00:11:28 | 5669451K |
-| subset integrate | 00:03:50 | 2893898K |
-| refine/merge/custom/final markers | 00:17:13 | 5720999K |
+| Step | Runtime |
+| --- | ---: |
+| Global clustering and annotation | 09:23:00 |
+| Global markers | 00:09:32 |
+| Subset selection and subset creation | 00:00:37 and 00:03:49 |
+| Subset integration | 00:08:13 |
+| Subset clustering and annotation | 00:10:11 |
+| Unique-label preparation | 00:07:03 |
+| Annotation merge-back | 00:05:34 |
+| Custom annotations | 00:04:15 |
+| Refined-label and compartment markers | 00:12:15 and 00:05:50 |
+
+These measurements include output generation and archive persistence. They are not laptop timing estimates; local wall time remains to be measured.
 
 ## Environment Setup
 
@@ -205,6 +216,7 @@ scomnom load-and-filter \
   --output-name pbmc_10k_v3.raw_cellbender \
   --figdir-name figures \
   --n-jobs 8 \
+  --expected-doublet-rate 0.10 \
   --min-genes 200 \
   --max-pct-mt 30
 ```
@@ -216,6 +228,8 @@ Expected output:
 * count layers containing CellBender-denoised and aligned raw counts.
 
 Validated result: 9,642 cells in the raw plus CellBender input object.
+
+The 0.10 doublet fraction is an explicit, configurable prior for this example, not a prevalence inferred by SOLO. Use an experiment-specific expectation when supported by loading, chemistry, or multiplexing information. The stored scores can be re-thresholded with `--apply-doublet-score` without retraining.
 
 ## Integrate
 
@@ -242,11 +256,11 @@ scomnom cluster-and-annotate \
   --batch-key sample_id
 ```
 
-Validated result: 16 compacted parent clusters with major PBMC compartments represented by automated labels.
+Validated result: BISC selected resolution 1.9; 23 parent clusters were compacted to 18 clusters, with major PBMC compartments represented by automated labels.
 
 ![Integration, BISC, compaction, and global annotation](panels/figure2_global_annotation_draft.png)
 
-Global embedding, clustering, compaction, annotation, and marker evidence for the PBMC10k tutorial. The panels show the selected representation, BISC resolution sweep, compaction flow, compacted global labels, and marker-gene heatmap.
+Global embedding, clustering, compaction, and annotation for the PBMC10k tutorial. Panels A-D show the selected single-sample representation, BISC resolution sweep, compaction flow, and 18 compacted global labels.
 
 ## Run Global Markers
 
@@ -269,17 +283,18 @@ python code/select_tnk_refinement_subset.py \
   --output-dir results/refinement
 ```
 
-Validated result: 4,924 of 9,642 cells selected across 7 parent clusters.
+Validated result: 4,914 of 9,642 cells selected across 8 parent clusters.
 
 | Cluster | Cells | Label |
 | --- | ---: | --- |
-| C00 | 1689 | Tcm/Naive helper T cells |
-| C01 | 1240 | Tcm/Naive helper T cells |
-| C05 | 751 | MAIT cells |
-| C07 | 535 | CD16+ NK cells |
-| C09 | 323 | Tcm/Naive cytotoxic T cells |
-| C11 | 245 | Tem/Temra cytotoxic T cells |
-| C12 | 141 | Tcm/Naive helper T cells |
+| C00 | 1283 | Tcm/Naive helper T cells |
+| C01 | 1210 | Tcm/Naive helper T cells |
+| C05 | 760 | MAIT cells |
+| C07 | 515 | CD16+ NK cells |
+| C08 | 461 | Tcm/Naive helper T cells |
+| C11 | 292 | Tcm/Naive cytotoxic T cells |
+| C13 | 249 | Tem/Temra cytotoxic T cells |
+| C14 | 144 | Tcm/Naive helper T cells |
 
 ## Create The T/NK Subset Object
 
@@ -312,7 +327,7 @@ scomnom cluster-and-annotate \
   --batch-key sample_id
 ```
 
-Validated result: 12 T/NK child clusters.
+Validated result: BISC selected resolution 2.2; 19 candidate clusters were compacted to 17 T/NK child clusters.
 
 Conceptual note: this step recomputes a representation appropriate for the T/NK subset. The purpose is to resolve local structure that may be compressed in the parent embedding.
 
@@ -355,10 +370,8 @@ Subset refinement and merge-back of T/NK annotations. Parent compacted clusters 
 ## Add Custom Annotation Layers
 
 ```bash
-MERGED_ARCHIVE=$(ls results/*annotation_merge*.zarr.tar.zst | sort | tail -n 1)
-
 python code/add_compartment_annotations.py \
-  --input-path "$MERGED_ARCHIVE" \
+  --input-path results/pbmc10k.raw_cellbender.clustered.annotated__annotation_merge_r2_tnk_refined.zarr.tar.zst \
   --output-path results/pbmc10k.raw_cellbender.tnk_refined.custom_annotations.zarr \
   --table-path results/refinement/tables/compartment_annotation_labels.tsv \
   --report-path results/refinement/compartment_annotation_layers.md
@@ -368,11 +381,11 @@ Validated compartment summary:
 
 | Compartment | Supercompartment | Cells |
 | --- | --- | ---: |
-| T/NK | lymphoid | 4924 |
-| myeloid | myeloid | 3125 |
-| B/plasma | lymphoid | 1415 |
-| platelet/megakaryocyte | other | 94 |
-| other immune | other | 84 |
+| T/NK | lymphoid | 4914 |
+| myeloid | myeloid | 3126 |
+| B/plasma | lymphoid | 1394 |
+| platelet/megakaryocyte | other | 91 |
+| other immune | other | 117 |
 
 ## Run Final Markers
 
@@ -433,18 +446,16 @@ scomnom load-and-filter \
   --max-pct-mt 30
 ```
 
-Validated fallback outcomes:
+Validated input and global-clustering outcomes:
 
 | Outcome | Raw plus CellBender | Filtered fallback |
 | --- | ---: | ---: |
 | Cells after load/filter | 9,642 | 9,564 |
-| Parent clusters | 16 | 15 |
-| T/NK subset cells | 4,924 | 4,975 |
-| T/NK parent clusters selected | 7 | 7 |
-| Final custom annotation | completed | completed |
-| Final marker passes | completed | completed |
+| BISC resolution | 1.9 | 0.2 |
+| Parent -> compacted clusters | 23 -> 18 | 8 -> 8 |
+| Illustrated downstream refinement | yes | no |
 
-The goal is not to force exact one-to-one cluster identity between input paths. The goal is to show that both supported input modes produce coherent scOmnom data processing outputs.
+The filtered route was validated through global BISC and compaction. It did not receive a duplicate downstream refinement series. Both assays support the same commands, but cluster granularity can differ; the preferred raw plus CellBender route supplies the coherent refinement and final-marker figures above.
 
 ## Troubleshooting
 
