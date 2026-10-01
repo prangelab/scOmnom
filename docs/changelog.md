@@ -4,7 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.9.0rc2 [01-10-2026]
+
+Second release candidate; not the final 0.9.0 release.
+
 - preserve gene IDs, feature types and genome annotations across sample-specific gene filtering in `load-and-filter`; reconcile nonmissing feature identities before union padding and reject conflicting identities without changing counts, filtering or sample-specific QC statistics
+- refresh Kang tutorial DE evidence and provide reproducible input staging and reviewed, state-preserving and broad-identity annotation commands
+- validate the fresh Kang pipeline through filtering, integration, clustering, markers, annotation, DE, sample enrichment, DA and LIANA, with count preservation and saved-object checks; statistical support exclusions and fit warnings remain explicit
 
 ## 0.9.0rc1 [25-09-2026]
 
