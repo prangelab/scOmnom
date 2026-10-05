@@ -30,17 +30,27 @@ conda env create -f environment_linux.yml
 conda activate scOmnom_env
 
 # macOS
-conda env create -f environment_macos.yml
+CONDA_CHANNEL_PRIORITY=flexible conda env create -f environment_macos.yml
 conda activate scOmnom_env
 ```
 
 Install the package:
 
 ```bash
+# Linux / HPC
 pip install .
+
+# macOS
+pip install -c constraints_macos.txt .
 ```
 
 This registers the `scomnom` command-line interface.
+
+The macOS manifest targets Apple Silicon and selects specific builds from multiple
+channels. The command-local priority setting leaves your global Conda settings
+unchanged. Keep `constraints_macos.txt` beside the YAML; its pip step uses these
+pins for indirect Python dependencies. NicheNet also requires its separate R backend; see
+[installation details](docs/installation.md#nichenet-r-backend).
 
 ## Quick Start
 

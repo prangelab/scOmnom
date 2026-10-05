@@ -5,8 +5,125 @@ from pathlib import Path
 import anndata as ad
 import numpy as np
 import pandas as pd
+import pytest
 
-from scomnom.io_utils import _restore_legacy_dataframe_column, load_dataset, save_dataset
+from scomnom.io_utils import (
+    _decode_structured_array,
+    _encode_structured_array,
+    _restore_legacy_dataframe_column,
+    load_dataset,
+    save_dataset,
+)
+
+
+def test_structured_object_scalar_types_and_corrupt_payloads() -> None:
+    expected = np.empty(10, dtype=[("value", object)])
+    expected["value"] = [True, 2**80, -0.0, float("inf"), "None", "nan",
+                         b"\x00\xff", np.int16(-12), np.datetime64("NaT"), None]
+    payload = _encode_structured_array(expected)
+    actual = _decode_structured_array(payload)
+    for before, after in zip(expected["value"], actual["value"]):
+        assert type(before) is type(after)
+        if isinstance(before, np.datetime64):
+            assert np.isnat(after)
+        else:
+            assert before == after
+    assert np.signbit(actual["value"][2])
+    payload["fields"][0]["values"][0] = ["unsupported"]
+    with pytest.raises(ValueError, match="Unknown structured-array object encoding"):
+        _decode_structured_array(payload)
+
+
+def test_legacy_sidecar_arrays_remain_readable_without_guessing(tmp_path: Path) -> None:
+    import zarr
+
+    adata = ad.AnnData(X=np.eye(2, dtype=np.float32))
+    scores = np.array([(1.0,), (np.nan,)], dtype=[("0", "f8")])
+    adata.uns["scores"] = scores
+    path = tmp_path / "legacy.zarr"
+    save_dataset(adata, path, fmt="zarr", archive=False)
+    root = zarr.open_group(str(path), mode="a", zarr_format=2, use_consolidated=False)
+    payloads = root["__scomnom_payloads__"]["v2"]
+    node = next(payloads[name] for name in payloads.group_keys() if name != "__manifest__")
+    del node["payload_json"]
+    del node.attrs["storage_layout"]
+    node.create_array("data", data=scores)
+    np.testing.assert_array_equal(load_dataset(path).uns["scores"]["0"], scores["0"])
+    del node["data"]
+    old_names = np.array(["('STAT2',)", "(None,)"])
+    node.create_array("data", data=old_names)
+    np.testing.assert_array_equal(load_dataset(path).uns["scores"], old_names)
+
+
+@pytest.mark.parametrize("fmt,archive", [("zarr", False), ("zarr", True), ("h5ad", False)])
+def test_marker_structured_arrays_roundtrip(tmp_path: Path, fmt: str, archive: bool) -> None:
+    names = np.array(
+        [("STAT2", "HOTAIRM1"), (None, np.nan), ("", pd.NA)],
+        dtype=[("0", object), ("T/B cells", object)],
+    ).view(np.recarray)
+    scores = np.array([(3.25, 2.5), (np.nan, np.nan), (-0.0, np.inf)],
+                      dtype=[("0", "<f8"), ("T/B cells", ">f8")])
+    adata = ad.AnnData(X=np.eye(2, dtype=np.float32))
+    adata.uns["rank_genes_groups"] = {"names": names, "scores": scores}
+    path = tmp_path / f"markers.{fmt}"
+    save_dataset(adata, path, fmt=fmt, archive=archive)
+    loaded = load_dataset(Path(str(path) + ".tar.zst") if archive else path)
+    result = loaded.uns["rank_genes_groups"]
+    assert result["names"].dtype == names.dtype
+    assert result["names"].shape == names.shape
+    assert result["names"].dtype.names == ("0", "T/B cells")
+    assert result["names"]["0"].tolist() == ["STAT2", None, ""]
+    assert result["names"]["T/B cells"][0] == "HOTAIRM1"
+    assert np.isnan(result["names"]["T/B cells"][1])
+    assert result["names"]["T/B cells"][2] is pd.NA
+    assert result["scores"].dtype == scores.dtype
+    for field in scores.dtype.names:
+        np.testing.assert_array_equal(result["scores"][field], scores[field])
+    np.testing.assert_array_equal(loaded.X, adata.X)
+    assert adata.uns["rank_genes_groups"]["names"] is names
+    assert names["0"][1] is None
+
+
+@pytest.mark.parametrize("fmt", ["zarr", "h5ad"])
+@pytest.mark.parametrize("shape", [(), (0,), (2, 3)])
+def test_structured_layout_and_object_scalars_roundtrip(tmp_path: Path, fmt: str, shape: tuple) -> None:
+    dtype = np.dtype([(("label title", "label"), object),
+                      ("nested", [("gene", object), ("value", ">f4")]),
+                      ("vector", "<i2", (2,))], align=True)
+    expected = np.empty(shape, dtype=dtype)
+    expected["label"] = b"byte label"
+    expected["nested"]["gene"] = np.float32(np.nan)
+    expected["nested"]["value"] = 1.25
+    expected["vector"] = [1, 2]
+    adata = ad.AnnData(X=np.eye(2, dtype=np.float32))
+    adata.uns["records"] = expected
+    path = tmp_path / f"records.{fmt}"
+    save_dataset(adata, path, fmt=fmt, archive=False)
+    actual = load_dataset(path).uns["records"]
+    assert actual.dtype == expected.dtype
+    assert actual.dtype.isalignedstruct
+    assert actual.shape == shape
+    np.testing.assert_array_equal(actual["label"], expected["label"])
+    np.testing.assert_array_equal(actual["nested"]["value"], expected["nested"]["value"])
+    np.testing.assert_array_equal(actual["vector"], expected["vector"])
+    for value in actual["nested"]["gene"].flat:
+        assert type(value) is np.float32
+        assert np.isnan(value)
+
+
+@pytest.mark.parametrize("fmt", ["zarr", "h5ad"])
+def test_structured_object_values_fail_closed(tmp_path: Path, fmt: str) -> None:
+    adata = ad.AnnData(X=np.eye(2, dtype=np.float32))
+    records = np.empty(1, dtype=[("gene", object)])
+    records["gene"][0] = {"not": "a supported scalar"}
+    adata.uns["records"] = records
+    with pytest.raises((TypeError, RuntimeError)) as exc:
+        save_dataset(adata, tmp_path / f"invalid.{fmt}", fmt=fmt, archive=False)
+    cause = exc.value
+    while cause.__cause__ is not None:
+        cause = cause.__cause__
+    assert "Unsupported structured-array object value: dict" in str(cause)
+    assert adata.uns["records"] is records
 
 
 def _mixed_dataframe() -> pd.DataFrame:

@@ -4822,6 +4822,7 @@ def _ensure_nichenet_r_runtime(*, install_missing: bool) -> Path:
     r_lib_dir = _NICHENET_R_LIB_DIR
     r_lib_dir.mkdir(parents=True, exist_ok=True)
     runtime_env = _nichenet_r_env(r_lib_dir, install_only=False)
+    install_env = _nichenet_r_env(r_lib_dir, install_only=True)
     check_expr = (
         'dir.create(Sys.getenv("R_LIBS_USER"), recursive=TRUE, showWarnings=FALSE); '
         '.libPaths(c(Sys.getenv("R_LIBS_USER"), .Library, .Library.site)); '
@@ -4907,7 +4908,7 @@ def _ensure_nichenet_r_runtime(*, install_missing: bool) -> Path:
             check=False,
             capture_output=True,
             text=True,
-            env=env,
+            env=install_env,
         )
     if install_res.returncode != 0:
         stderr = str(install_res.stderr or "").strip()
@@ -9518,4 +9519,3 @@ def run_within_cluster(cfg) -> ad.AnnData:
 
     LOGGER.info("Finished within-cluster differential expression.")
     return adata
-    install_env = _nichenet_r_env(r_lib_dir, install_only=True)

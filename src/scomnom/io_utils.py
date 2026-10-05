@@ -18,6 +18,15 @@ import subprocess
 import urllib.request
 import urllib.error
 import hashlib
+import csv
+import gzip
+import io
+import base64
+import time
+from http.client import HTTPException
+from datetime import datetime, timezone
+from urllib.parse import urlencode, urlparse
+from xml.etree import ElementTree
 from . import gene_utils
 
 
@@ -26,6 +35,135 @@ LOGGER = logging.getLogger(__name__)
 _SIDECAR_REF_TYPE = "scomnom.ref.v1"
 _SIDECAR_GROUP_ROOT = "__scomnom_payloads__"
 _SIDECAR_GROUP_VERSION = "v2"
+_STRUCTURED_ARRAY_TYPE = "scomnom.structured_array.v1"
+
+
+class _StructuredArrayEncodingError(TypeError):
+    """A structured array cannot be serialized losslessly."""
+
+
+def _structured_array_json(array: np.ndarray) -> str:
+    try:
+        return json.dumps(_encode_structured_array(array), allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise _StructuredArrayEncodingError(str(exc)) from exc
+
+
+def _structured_dtype_payload(dtype: np.dtype) -> dict:
+    if dtype.metadata:
+        raise TypeError("Structured-array dtype metadata is not supported")
+    if dtype.names is not None:
+        return {
+            "names": list(dtype.names),
+            "formats": [_structured_dtype_payload(dtype.fields[n][0]) for n in dtype.names],
+            "offsets": [int(dtype.fields[n][1]) for n in dtype.names],
+            "titles": [dtype.fields[n][2] if len(dtype.fields[n]) == 3 else None for n in dtype.names],
+            "itemsize": int(dtype.itemsize),
+            "aligned": bool(dtype.isalignedstruct),
+        }
+    if dtype.subdtype is not None:
+        base, shape = dtype.subdtype
+        return {"base": _structured_dtype_payload(base), "shape": list(shape)}
+    return {"str": dtype.str}
+
+
+def _restore_structured_dtype(payload: dict) -> np.dtype:
+    if "names" in payload:
+        return np.dtype({
+            "names": payload["names"],
+            "formats": [_restore_structured_dtype(p) for p in payload["formats"]],
+            "offsets": payload["offsets"],
+            "titles": payload["titles"],
+            "itemsize": payload["itemsize"],
+        }, align=payload["aligned"])
+    if "base" in payload:
+        return np.dtype((_restore_structured_dtype(payload["base"]), tuple(payload["shape"])))
+    return np.dtype(payload["str"])
+
+
+def _encode_structured_array(array: np.ndarray) -> dict:
+    """Encode structured fields without pickling or stringifying object values."""
+    array = np.asarray(array)
+    payload = {"dtype": _structured_dtype_payload(array.dtype), "shape": list(array.shape)}
+    if array.dtype.names is not None:
+        payload["fields"] = [_encode_structured_array(array[n]) for n in array.dtype.names]
+    elif array.dtype.hasobject:
+        values = []
+        for value in array.flat:
+            if value is None:
+                encoded = ["none"]
+            elif value is pd.NA:
+                encoded = ["pd.NA"]
+            elif isinstance(value, np.generic):
+                encoded = ["numpy", _encode_structured_array(np.asarray(value))]
+            elif type(value) in (str, bool, int):
+                encoded = [type(value).__name__, value]
+            elif type(value) is float:
+                encoded = ["float", value.hex()]
+            elif type(value) is bytes:
+                encoded = ["bytes", base64.b64encode(value).decode("ascii")]
+            else:
+                raise TypeError(
+                    f"Unsupported structured-array object value: {type(value).__name__}"
+                )
+            values.append(encoded)
+        payload["values"] = values
+    else:
+        payload["bytes"] = base64.b64encode(array.tobytes(order="C")).decode("ascii")
+    return payload
+
+
+def _decode_structured_array(payload: dict) -> np.ndarray:
+    dtype = _restore_structured_dtype(payload["dtype"])
+    shape = tuple(int(n) for n in payload["shape"])
+    if dtype.names is not None:
+        fields = payload["fields"]
+        if len(fields) != len(dtype.names):
+            raise ValueError("Structured-array field count does not match dtype")
+        array = np.empty(shape, dtype=dtype)
+        for name, field in zip(dtype.names, fields):
+            restored = _decode_structured_array(field)
+            if restored.shape != array[name].shape or restored.dtype != array[name].dtype:
+                raise ValueError(f"Structured-array field {name!r} does not match dtype/shape")
+            array[name] = restored
+        return array
+    if dtype.hasobject:
+        array = np.empty(shape, dtype=dtype)
+        values = payload["values"]
+        if len(values) != array.size:
+            raise ValueError("Structured-array object count does not match shape")
+        for i, encoded in enumerate(values):
+            tag = encoded[0]
+            if tag == "none":
+                value = None
+            elif tag == "pd.NA":
+                value = pd.NA
+            elif tag == "numpy":
+                scalar = _decode_structured_array(encoded[1])
+                if scalar.shape != ():
+                    raise ValueError("Expected a NumPy scalar in structured-array object field")
+                value = scalar[()]
+            elif tag in ("str", "bool", "int"):
+                value = {"str": str, "bool": bool, "int": int}[tag](encoded[1])
+            elif tag == "float":
+                value = float.fromhex(encoded[1])
+            elif tag == "bytes":
+                value = base64.b64decode(encoded[1], validate=True)
+            else:
+                raise ValueError(f"Unknown structured-array object encoding: {tag!r}")
+            array.flat[i] = value
+        return array
+    data = base64.b64decode(payload["bytes"], validate=True)
+    size = 1
+    for n in shape:
+        if n < 0:
+            raise ValueError("Negative structured-array dimension")
+        size *= n
+    if len(data) != size * dtype.itemsize:
+        raise ValueError("Structured-array byte count does not match dtype/shape")
+    if dtype.itemsize == 0:
+        return np.empty(shape, dtype=dtype)
+    return np.frombuffer(data, dtype=dtype).reshape(shape).copy()
 
 
 def _encode_sidecar_dataframe_column(series: pd.Series) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
@@ -216,7 +354,7 @@ def _add_gene_type_column(
     gene_map, source_label, chrom_map, chrom_source, gene_id_map = get_gene_type_map(
         adata,
         species="hsapiens",
-        allow_fallback=True,
+        allow_fallback=False,
         force_download=False,
     )
     out = gene_utils.apply_gene_type_map(
@@ -285,8 +423,74 @@ def _fallback_gene_type_map(genes: list[str]) -> dict[str, str]:
         elif upper.startswith(("SNORD", "SNORA", "SCARNA")):
             out[name] = "snorna_inferred"
         else:
-            out[name] = "protein_coding"
+            out[name] = "unknown"
     return out
+
+
+_BIOMART_URL = "https://www.ensembl.org/biomart/martservice"
+_BIOMART_COLUMNS = ("gene", "gene_type", "gene_chrom", "gene_id")
+_BIOMART_ATTRIBUTES = (
+    "external_gene_name", "gene_biotype", "chromosome_name", "ensembl_gene_id",
+)
+
+
+def _parse_biomart_annotations(body: bytes, *, normalized: bool = False) -> pd.DataFrame:
+    """Reject error pages and malformed tables before accepting annotation data."""
+    text = body.decode("utf-8-sig")
+    if re.search(r"<\s*(?:!doctype|html|body)\b|Query ERROR", text, flags=re.I):
+        raise ValueError("BioMart returned an HTML/error response instead of annotations")
+    rows = list(csv.reader(io.StringIO(text), delimiter="\t"))
+    aliases = dict(zip(_BIOMART_ATTRIBUTES, _BIOMART_COLUMNS))
+    aliases.update(dict(zip(
+        ("gene name", "gene type", "chromosome/scaffold name", "gene stable id"),
+        _BIOMART_COLUMNS,
+    )))
+    if not rows:
+        raise ValueError("BioMart returned an empty response")
+    columns = [aliases.get(c.strip().lower(), c.strip().lower()) for c in rows[0]]
+    if tuple(columns) != _BIOMART_COLUMNS or len(rows) < 2:
+        raise ValueError(f"BioMart annotation schema is invalid: {columns!r}")
+    if any(len(row) != 4 for row in rows[1:]):
+        raise ValueError("BioMart annotation table has malformed or truncated rows")
+    df = pd.DataFrame(rows[1:], columns=columns).apply(lambda col: col.str.strip())
+    if (
+        not df["gene_id"].str.fullmatch(r"ENS[A-Z0-9]*G[0-9]+(?:\.[0-9]+)?").all()
+        or not df["gene_type"].str.fullmatch(r"[A-Za-z0-9_]+").all()
+        or (not normalized and not df["gene_chrom"].astype(bool).all())
+    ):
+        raise ValueError("BioMart annotation rows contain missing or invalid identifiers/biotypes")
+    df = df.loc[df["gene"].astype(bool)].copy()
+    if df.empty:
+        raise ValueError("BioMart returned no named genes")
+    if normalized:
+        if df["gene"].duplicated().any():
+            raise ValueError("Cached BioMart table contains duplicate gene names")
+        return df
+    chrom = df["gene_chrom"].str.replace(r"^chr", "", case=False, regex=True)
+    df["__chrom_standard"] = chrom.isin(_STANDARD_CHROMS)
+    df["gene_chrom"] = chrom.where(df["__chrom_standard"], "")
+    return (
+        df.sort_values(["gene", "__chrom_standard"], ascending=[True, False], kind="stable")
+        .drop_duplicates("gene", keep="first")
+        .drop(columns="__chrom_standard")
+        .reset_index(drop=True)
+    )
+
+
+def _biomart_response(query: bytes) -> tuple[bytes, str]:
+    # Use an uncached transport: pybiomart globally caches even HTML HTTP-200 errors.
+    url = _BIOMART_URL + "?" + urlencode({"query": query})
+    request = urllib.request.Request(url, headers={"User-Agent": "scOmnom gene annotation"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        resolved_url = response.geturl()
+        parsed = urlparse(resolved_url)
+        if parsed.scheme != "https" or not (
+            parsed.hostname == "ensembl.org" or (parsed.hostname or "").endswith(".ensembl.org")
+        ):
+            raise ValueError(f"Unexpected BioMart response origin: {resolved_url}")
+        if "html" in response.headers.get("Content-Type", "").lower():
+            raise ValueError("BioMart returned HTML instead of annotations (HTTP 200 possible)")
+        return response.read(), resolved_url
 
 
 def fetch_ensembl_gene_annotations(
@@ -295,61 +499,72 @@ def fetch_ensembl_gene_annotations(
     force: bool = False,
 ) -> pd.DataFrame:
     species = str(species).strip().lower()
+    if not re.fullmatch(r"[a-z][a-z0-9_]*", species):
+        raise ValueError(f"Invalid Ensembl species identifier: {species!r}")
     dataset_name = f"{species}_gene_ensembl"
-    cache_path = GENE_ANNOTATION_CACHE / f"{dataset_name}__gene_annotations.tsv.gz"
-
+    cache_path = GENE_ANNOTATION_CACHE / f"{dataset_name}__gene_annotations.validated.json.gz"
+    query = ElementTree.Element("Query", {
+        "virtualSchemaName": "default", "formatter": "TSV", "header": "1",
+        "uniqueRows": "1", "datasetConfigVersion": "0.6",
+    })
+    dataset = ElementTree.SubElement(query, "Dataset", name=dataset_name, interface="default")
+    for attribute in _BIOMART_ATTRIBUTES:
+        ElementTree.SubElement(dataset, "Attribute", name=attribute)
+    query_bytes = ElementTree.tostring(query)
+    query_hash = hashlib.sha256(query_bytes).hexdigest()
     if cache_path.exists() and not force:
-        return pd.read_csv(cache_path, sep="\t")
+        try:
+            with gzip.open(cache_path, "rt", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            provenance = payload["provenance"]
+            table = payload["table"].encode("utf-8")
+            if (
+                payload["schema_version"] != 1
+                or provenance["dataset"] != dataset_name
+                or provenance["query_sha256"] != query_hash
+                or provenance["table_sha256"] != hashlib.sha256(table).hexdigest()
+            ):
+                raise ValueError("BioMart cache identity/checksum mismatch")
+            df = _parse_biomart_annotations(table, normalized=True)
+            df.attrs["annotation_provenance"] = provenance
+            return df
+        except (OSError, EOFError, ValueError, KeyError, TypeError) as exc:
+            LOGGER.warning("Ignoring invalid BioMart annotation cache %s: %s", cache_path, exc)
 
-    try:
-        from pybiomart import Dataset
-    except Exception as e:
-        raise RuntimeError(f"pybiomart is required for Ensembl gene annotations: {e}") from e
+    for attempt in range(3):
+        try:
+            body, resolved_url = _biomart_response(query_bytes)
+            df = _parse_biomart_annotations(body)
+            break
+        except (OSError, HTTPException, ValueError) as exc:
+            LOGGER.warning("BioMart annotation attempt %d/3 failed: %s", attempt + 1, exc)
+            if attempt == 2:
+                raise RuntimeError(
+                    f"BioMart annotations unavailable for {dataset_name} after 3 attempts: {exc}. "
+                    "No inferred protein-coding annotations were substituted. Retry when Ensembl "
+                    "is available or provide validated gene biotypes in adata.var."
+                ) from exc
+            time.sleep(2 ** attempt)
 
-    ds = Dataset(name=dataset_name, host="http://www.ensembl.org")
-    df = ds.query(attributes=["external_gene_name", "gene_biotype", "chromosome_name", "ensembl_gene_id"])
-    if df is None or df.empty:
-        raise RuntimeError(f"BioMart query returned no results for dataset={dataset_name!r}")
-
-    col_lc = {str(c).strip().lower(): c for c in df.columns}
-    df = df.rename(
-        columns={
-            col_lc.get("external_gene_name", "external_gene_name"): "gene",
-            col_lc.get("gene name", "gene name"): "gene",
-            col_lc.get("gene_biotype", "gene_biotype"): "gene_type",
-            col_lc.get("gene type", "gene type"): "gene_type",
-            col_lc.get("chromosome_name", "chromosome_name"): "gene_chrom",
-            col_lc.get("chromosome/scaffold name", "chromosome/scaffold name"): "gene_chrom",
-            col_lc.get("ensembl_gene_id", "ensembl_gene_id"): "gene_id",
-            col_lc.get("gene stable id", "gene stable id"): "gene_id",
-        }
-    )
-    if "gene" not in df.columns or "gene_type" not in df.columns or "gene_chrom" not in df.columns:
-        raise RuntimeError(
-            f"BioMart columns not found after rename. Available columns: {list(df.columns)}"
-        )
-    if "gene_id" not in df.columns:
-        raise RuntimeError(
-            f"BioMart gene_id column not found after rename. Available columns: {list(df.columns)}"
-        )
-    df["gene"] = df["gene"].astype(str)
-    df["gene_type"] = df["gene_type"].astype(str)
-    df["gene_chrom"] = df["gene_chrom"].astype(str)
-    df["gene_id"] = df["gene_id"].astype(str)
-
-    chrom = df["gene_chrom"].astype(str).str.strip()
-    chrom = chrom.str.replace(r"^chr", "", case=False, regex=True)
-    is_standard = chrom.isin(_STANDARD_CHROMS)
-    chrom = chrom.where(is_standard, "")
-    df["gene_chrom"] = chrom
-    df["__chrom_standard"] = is_standard
-
-    df = df[df["gene"].astype(bool)]
-    df = df.sort_values(["gene", "__chrom_standard"], ascending=[True, False])
-    df = df.drop_duplicates(subset=["gene"], keep="first").drop(columns=["__chrom_standard"])
-
+    table_text = df.to_csv(sep="\t", index=False)
+    provenance = {
+        "dataset": dataset_name, "requested_url": _BIOMART_URL,
+        "resolved_url": resolved_url, "retrieved_at_utc": datetime.now(timezone.utc).isoformat(),
+        "query_sha256": query_hash, "response_sha256": hashlib.sha256(body).hexdigest(),
+        "table_sha256": hashlib.sha256(table_text.encode("utf-8")).hexdigest(),
+    }
+    payload = {"schema_version": 1, "provenance": provenance, "table": table_text}
+    # Table and provenance are replaced together; interrupted writes cannot poison the cache.
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(cache_path, sep="\t", index=False, compression="gzip")
+    fd, temporary = tempfile.mkstemp(dir=cache_path.parent, suffix=".tmp")
+    os.close(fd)
+    try:
+        with gzip.open(temporary, "wt", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+        os.replace(temporary, cache_path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    df.attrs["annotation_provenance"] = provenance
     return df
 
 
@@ -363,6 +578,12 @@ def get_gene_type_map(
     if adata is None:
         return {}, "unknown", {}, "unknown", {}
 
+    input_chrom = next((adata.var[c].dropna().astype(str).to_dict()
+                        for c in ("chromosome", "chrom") if c in adata.var), {})
+    input_ids = next((adata.var[c].dropna().astype(str).to_dict()
+                      for c in ("gene_id", "ensembl_gene_id") if c in adata.var), {})
+    input_chrom = {k: v for k, v in input_chrom.items() if v.strip()}
+    input_ids = {k: v for k, v in input_ids.items() if v.strip()}
     raw_series = None
     for col in _GENE_TYPE_COLS:
         if col in adata.var.columns:
@@ -370,18 +591,8 @@ def get_gene_type_map(
             break
 
     if raw_series is not None:
-        gmap = raw_series.astype(str).to_dict()
-        chrom_map = {}
-        gene_id_map = {}
-        if "chromosome" in adata.var.columns:
-            chrom_map = adata.var["chromosome"].astype(str).to_dict()
-        elif "chrom" in adata.var.columns:
-            chrom_map = adata.var["chrom"].astype(str).to_dict()
-        if "gene_id" in adata.var.columns:
-            gene_id_map = adata.var["gene_id"].astype(str).to_dict()
-        elif "ensembl_gene_id" in adata.var.columns:
-            gene_id_map = adata.var["ensembl_gene_id"].astype(str).to_dict()
-        return gmap, f"adata:{str(raw_series.name)}", chrom_map, "adata", gene_id_map
+        gmap = raw_series.astype("string").fillna("unknown").replace("", "unknown").to_dict()
+        return gmap, f"adata:{str(raw_series.name)}", input_chrom, "adata", input_ids
 
     cache_key = ("biomart", str(species))
     if cache_key in _GENE_TYPE_MAP_CACHE and not force_download:
@@ -394,7 +605,7 @@ def get_gene_type_map(
             _GENE_TYPE_SOURCE_CACHE.get(cache_key, "biomart"),
             chrom_map,
             "biomart",
-            gene_id_map,
+            {**gene_id_map, **input_ids},
         )
 
     try:
@@ -406,39 +617,20 @@ def get_gene_type_map(
         _GENE_TYPE_SOURCE_CACHE[cache_key] = "biomart"
         _GENE_TYPE_MAP_CACHE[("biomart_chrom", str(species))] = chrom_map
         _GENE_TYPE_MAP_CACHE[("biomart_gene_id", str(species))] = gene_id_map
-        return gmap, "biomart", chrom_map, "biomart", gene_id_map
+        return gmap, "biomart", chrom_map, "biomart", {**gene_id_map, **input_ids}
     except Exception as e:
         if not allow_fallback:
             raise
         LOGGER.warning(
-            "Gene annotation lookup failed for species=%r (%s). Falling back to simple pattern rules.",
+            "Gene annotation lookup failed for species=%r (%s). Using explicitly inferred "
+            "pattern labels; other biotypes remain unknown.",
             str(species),
             str(e),
         )
 
-    cache_key = ("fallback", str(species))
-    if cache_key in _GENE_TYPE_MAP_CACHE:
-        chrom_key = ("fallback_chrom", str(species))
-        chrom_map = _GENE_TYPE_MAP_CACHE.get(chrom_key, {})
-        id_key = ("fallback_gene_id", str(species))
-        gene_id_map = _GENE_TYPE_MAP_CACHE.get(id_key, {})
-        return (
-            _GENE_TYPE_MAP_CACHE[cache_key],
-            _GENE_TYPE_SOURCE_CACHE.get(cache_key, "fallback"),
-            chrom_map,
-            "fallback",
-            gene_id_map,
-        )
-
     genes = list(adata.var_names.astype(str))
     gmap = _fallback_gene_type_map(genes)
-    _GENE_TYPE_MAP_CACHE[cache_key] = gmap
-    _GENE_TYPE_SOURCE_CACHE[cache_key] = "fallback"
-    chrom_map = {}
-    gene_id_map = {}
-    _GENE_TYPE_MAP_CACHE[("fallback_chrom", str(species))] = chrom_map
-    _GENE_TYPE_MAP_CACHE[("fallback_gene_id", str(species))] = gene_id_map
-    return gmap, "fallback", chrom_map, "fallback", gene_id_map
+    return gmap, "fallback", input_chrom, "adata" if input_chrom else "unknown", input_ids
 
 
 def download_gene_models(*, species: str = "hsapiens") -> None:
@@ -1827,9 +2019,14 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
                     manifest_entries.append({"id": pid, "kind": kind, "shape": [int(series.shape[0])]})
                 elif kind == "ndarray":
                     arr = np.asarray(obj)
-                    if arr.dtype == object:
-                        arr = _to_unicode_ndarray(arr)
-                    _create_array_safe(grp, "data", arr)
+                    if arr.dtype.names is not None:
+                        encoded = _structured_array_json(arr).encode("utf-8")
+                        _create_array_safe(grp, "payload_json", np.frombuffer(encoded, dtype=np.uint8))
+                        grp.attrs["storage_layout"] = _STRUCTURED_ARRAY_TYPE
+                    else:
+                        if arr.dtype == object:
+                            arr = _to_unicode_ndarray(arr)
+                        _create_array_safe(grp, "data", arr)
                     grp.attrs["dtype"] = str(arr.dtype)
                     manifest_entries.append({"id": pid, "kind": kind, "shape": [int(x) for x in arr.shape]})
                 else:
@@ -1871,6 +2068,11 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
         }
 
     def _ndarray_to_payload(a: np.ndarray) -> dict:
+        if a.dtype.names is not None:
+            return {
+                "__type__": _STRUCTURED_ARRAY_TYPE,
+                "payload_json": _structured_array_json(a),
+            }
         return {
             "__type__": "numpy.ndarray",
             "dtype": str(a.dtype),
@@ -2020,6 +2222,8 @@ def save_dataset(adata: ad.AnnData, out_path: Path, fmt: str = "zarr", archive: 
                 "__type__": "scomnom.keymap.v1",
                 "safe_to_original": _keymap,
             }
+    except _StructuredArrayEncodingError:
+        raise
     except Exception as e:
         LOGGER.warning(
             "Failed to fully sanitize adata.uns; attempting best-effort write anyway. (%s)",
@@ -2253,6 +2457,12 @@ def load_dataset(path: Path) -> ad.AnnData:
                     pass
             return s
         if kind == "ndarray":
+            layout = str(node.attrs.get("storage_layout", ""))
+            if layout == _STRUCTURED_ARRAY_TYPE:
+                encoded = np.asarray(node["payload_json"], dtype=np.uint8).tobytes()
+                return _decode_structured_array(json.loads(encoded.decode("utf-8")))
+            if layout:
+                raise RuntimeError(f"Unsupported ndarray storage layout: {layout!r}")
             return np.asarray(node["data"])
         raise RuntimeError(f"Unsupported sidecar payload kind={kind!r} at path={rel_path!r}")
 
@@ -2323,6 +2533,9 @@ def load_dataset(path: Path) -> ad.AnnData:
                     return pd.Series(data=data, index=pd.Index(idx, dtype=str), name=name)
                 except Exception:
                     return obj
+
+            if t == _STRUCTURED_ARRAY_TYPE:
+                return _decode_structured_array(json.loads(str(obj["payload_json"])))
 
             if t == "numpy.ndarray":
                 try:
@@ -3165,6 +3378,8 @@ def export_rank_genes_groups_tables(
         for g in groups:
             n = len(names[g])
             for i in range(n):
+                if pd.isna(names[g][i]) or not str(names[g][i]).strip():
+                    continue
                 row = {"group": str(g), "gene": str(names[g][i])}
                 if available["scores"] is not None:
                     row["score"] = float(available["scores"][g][i])
@@ -3176,11 +3391,12 @@ def export_rank_genes_groups_tables(
                     row["pvals_adj"] = float(available["pvals_adj"][g][i])
                 rows.append(row)
 
-        df_all = pd.DataFrame(rows)
+        df_all = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["group", "gene"])
 
     # Normalize columns a bit
     if "names" in df_all.columns and "gene" not in df_all.columns:
         df_all = df_all.rename(columns={"names": "gene"})
+    df_all = df_all.loc[df_all["gene"].notna() & df_all["gene"].astype(str).str.strip().ne("")].copy()
 
     # helpful metadata columns (best-effort)
     if groupby is not None:
@@ -3448,6 +3664,8 @@ def export_rank_genes_groups_excel(
         for g in groups:
             n = len(names[g])
             for i in range(n):
+                if pd.isna(names[g][i]) or not str(names[g][i]).strip():
+                    continue
                 row = {"group": str(g), "gene": str(names[g][i])}
                 if available["scores"] is not None:
                     row["score"] = float(available["scores"][g][i])
@@ -3459,11 +3677,12 @@ def export_rank_genes_groups_excel(
                     row["pvals_adj"] = float(available["pvals_adj"][g][i])
                 rows.append(row)
 
-        df_all = pd.DataFrame(rows)
+        df_all = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["group", "gene"])
 
     # Normalize columns
     if "names" in df_all.columns and "gene" not in df_all.columns:
         df_all = df_all.rename(columns={"names": "gene"})
+    df_all = df_all.loc[df_all["gene"].notna() & df_all["gene"].astype(str).str.strip().ne("")].copy()
 
     # Add metadata cols (best-effort)
     if groupby is not None and "groupby" not in df_all.columns:

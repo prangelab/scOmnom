@@ -85,4 +85,34 @@ If no `--group-key` is provided, scOmnom resolves the active clustering round an
 * Reports and figures: `figures/<fmt>/markers_<round>_roundN/`
 * Updated AnnData: marker payloads are stored in `adata.uns` and written to the output dataset.
 
+CSV and Excel tables contain only retained marker genes. Empty padding slots
+in the fixed-length stored marker arrays are omitted from exports.
+
+Use `save_dataset()` and `load_dataset()` to retain the named, per-cluster
+marker arrays and their missing values in Zarr, archived Zarr, or H5AD outputs.
+If an older saved object contains stringified marker records with no cluster
+fields, rerun `scomnom markers` from the clustered object and write a new output.
+The loader does not guess gene names or group assignments from those strings.
+
+## Gene annotation availability
+
+Marker/DE table annotation and protein-coding plot selection use gene biotypes
+already present in `adata.var`, or retrieve them from Ensembl BioMart. The fixed
+annotation query uses HTTPS with a 30-second socket timeout and at most three
+attempts. HTML error pages, malformed tables and missing identifiers are rejected,
+including error pages returned with HTTP status 200.
+
+Validated responses are cached atomically under
+`~/.cache/scomnom/gene_annotations/*__gene_annotations.validated.json.gz`, together
+with the dataset, resolved Ensembl URL, retrieval time and query/response/table
+SHA256 checksums. These caches support offline reuse and should be archived with
+analysis provenance. Older unvalidated TSV caches and `.pybiomart.sqlite` are not
+used for this query. Existing input feature IDs are preserved.
+
+If no usable annotation is available, annotation-dependent exports and plots
+raise an explicit error. Unknown genes are not assumed to be protein-coding.
+Retry after the service recovers, retain a validated cache, or provide curated
+biotypes in `adata.var` before running. Marker statistics and biotype annotation
+are separate operations; a failed annotation step is not a completed marker run.
+
 ---

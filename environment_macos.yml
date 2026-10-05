@@ -1,64 +1,71 @@
+# Apple Silicon: CONDA_CHANNEL_PRIORITY=flexible conda env create -f environment_macos.yml
 name: scOmnom_env
 
 channels:
-  - pytorch
   - conda-forge
   - bioconda
+  - pytorch
   - defaults
 
 dependencies:
   # Python / tooling
   - python=3.11.14
-  - pip
-  - setuptools
-  - wheel
-  - cython
-  - pillow>=10.1
+  - pip=26.0.1
+  - setuptools=75.8.2
+  - wheel=0.46.3
+  - cython=3.2.4
+  - pillow=12.1.1
 
   # Numeric stack
   - numpy=2.3.5
-  - scipy=1.15.3
+  - defaults::scipy=1.15.3=py311h132fc3c_1
   - pandas=2.3.3
-  - matplotlib
+  - matplotlib=3.10.8
   - seaborn
-  - joblib
+  - joblib=1.5.3
   - h5py=3.15.1
-  - scikit-learn
+  - scikit-learn=1.8.0
   - psutil
-  - statsmodels
+  - statsmodels=0.14.6
   - xlsxwriter
 
   # Scanpy ecosystem
   - scanpy=1.11.5
+  - numba=0.64.0
+  - llvmlite=0.46.0
   - anndata=0.12.7
   - zarr=3.1.5
   - numcodecs=0.16.5
   - zstandard
-  - igraph
-  - python-igraph
-  - leidenalg
+  - igraph=1.0.1
+  - python-igraph=1.0.0
+  - leidenalg=0.11.0
   - scrublet
-  - kneed
-  - typer
-  - pydantic
+  - kneed=0.8.5
+  - typer=0.24.0
+  - pydantic=2.12.5
   - bbknn
-  - gseapy
+  - gseapy=1.1.12
 
   # PyTorch / Lightning
-  - pytorch=2.5.1
-  - torchvision=0.20.1
-  - torchaudio=2.5.1
+  # Match the validated Apple Silicon builds; cpu_generic also supports MPS.
+  - conda-forge::pytorch=2.5.1=cpu_generic_py311_hc7d8f6d_17
+  - conda-forge::libtorch=2.5.1=cpu_generic_h9a9d006_17
+  - pytorch::torchvision=0.20.1=py311_cpu
+  - pytorch::torchaudio=2.5.1=py311_cpu
   - pytorch-lightning=2.6.0
+  - torchmetrics=1.8.2
+  - llvm-openmp=22.1.0
 
   # Testing
-  - pytest
+  - pytest=9.0.2
 
   # R runtime for NicheNet backend
-  - r-base
+  - r-base=4.5.2
   - r-devtools
-  - r-rcpphnsw
-  - r-uwot
-  - r-seurat
+  - r-rcpphnsw=0.6.0
+  - r-uwot=0.2.4
+  - r-seurat=5.5.0
   - r-seuratobject
   - r-jsonlite
   - r-tidyverse
@@ -66,38 +73,39 @@ dependencies:
   - r-purrr
   - r-readr
   - r-tibble
-  - r-fdrtool
-  - r-hmisc
+  - r-hmisc=5.2_5
   - r-caret
   - r-randomforest
   - r-diagrammer
-  - r-mlrmbo
   - r-parallelmap
-  - r-emoa
   - r-e1071
-  - r-ggpubr
+  - r-ggpubr=0.6.3
   - r-circlize
   - bioconductor-complexheatmap
   - r-ggnewscale
   - r-ggforce
   - r-shadowtext
 
-  # Pin pip packages to the working Linux/HPC stack where needed.
+  # fdrtool, mlrMBO, emoa and nichenetr use the separate scOmnom R library.
+  # See docs/installation.md for the NicheNet backend setup.
+
+  # Preserve the validated macOS Python stack.
   - pip:
+      - -c constraints_macos.txt
       - scvi-tools==1.4.1
       - lightning==2.6.0
       - jax==0.8.2
       - jaxlib==0.8.2
-      - scanorama
-      - harmonypy
-      - scib-metrics
-      - celltypist
-      - decoupler
-      - umap-learn
-      - requests
-      - types-pytz
-      - pydeseq2
-      - pertpy
-      - pybiomart
-      - liana
-      - git+https://github.com/kaifuchenlab/MEBOCOST.git
+      - scanorama==1.7.4
+      - harmonypy==0.2.0
+      - scib-metrics==0.5.9
+      - celltypist==1.7.1
+      - decoupler==2.1.4
+      - umap-learn==0.5.11
+      - requests==2.32.5
+      - types-pytz==2026.1.1.20260304
+      - pydeseq2==0.5.4
+      - pertpy==1.0.3
+      - pybiomart==0.2.0
+      - liana==1.7.1
+      - git+https://github.com/kaifuchenlab/MEBOCOST.git@3e0be6f638b71c0f5bd08cef8b1448ae5230560e
