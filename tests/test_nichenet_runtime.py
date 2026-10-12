@@ -1,6 +1,10 @@
 """Exercise installer environment routing without running R or fetching code."""
 
 import importlib
+import json
+from pathlib import Path
+import shutil
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -85,3 +89,83 @@ def test_nichenet_later_install_failures_are_reported(runtime, codes, message):
     with pytest.raises(RuntimeError, match=message):
         md._ensure_nichenet_r_runtime(install_missing=True)
     assert len(calls) == len(codes)
+
+
+@pytest.mark.parametrize("returncode", [0, 1])
+def test_native_helper_keeps_resource_provenance_and_r_logs(monkeypatch, tmp_path, caplog, returncode):
+    monkeypatch.setattr(md, "_resolve_rscript", lambda: "/test/bin/Rscript")
+    models = [{"model": "lr_network", "path": str(tmp_path / "model.rds"),
+               "expected_md5": "pinned-md5", "sha256": "observed-sha256", "size_bytes": 12}]
+    monkeypatch.setattr(md, "_prepare_nichenet_models", lambda organism: models)
+
+    def run(args, **kwargs):
+        config = json.loads(Path(args[-1]).read_text())
+        assert config["model_resources"] == models
+        assert config["signal_scope"] == "all"
+        assert kwargs["env"] == {"EXAMPLE": "value"}
+        for name in ("ligand_activity", "ligand_target_links", "ligand_receptor_links", "potential_ligands"):
+            (Path(config["output_dir"]) / f"{name}.tsv").write_text("gene\tvalue\nSTAT1\t0.5\n")
+        return SimpleNamespace(returncode=returncode, stdout="R progress\n", stderr="R warning\n")
+
+    monkeypatch.setattr(md.subprocess, "run", run)
+    kwargs = dict(sender_expressed_genes=["STAT1"], receiver_expressed_genes=["STAT1"],
+                  geneset_oi=["STAT1"], background_genes=["STAT1"], top_n_ligands=30,
+                  top_n_targets=200, organism="human", signal_scope="all",
+                  r_env={"EXAMPLE": "value"}, evidence_dir=tmp_path / "evidence")
+    with caplog.at_level("INFO"):
+        if returncode:
+            with pytest.raises(RuntimeError, match="R helper failed"):
+                md._run_nichenet_sender_focused(**kwargs)
+        else:
+            result = md._run_nichenet_sender_focused(**kwargs)
+            assert result["model_resources"].to_dict(orient="records") == models
+            assert len(result["ligand_activity"]) == 1
+    evidence = kwargs["evidence_dir"]
+    assert (evidence / "nichenet_r.stdout.log").read_text() == "R progress\n"
+    assert (evidence / "nichenet_r.stderr.log").read_text() == "R warning\n"
+    assert "observed-sha256" in (evidence / "nichenet_model_resources.tsv").read_text()
+    assert "R warning" in caplog.text and "R progress" in caplog.text
+
+
+def test_successful_namespace_probe_warnings_are_visible(runtime, monkeypatch, caplog):
+    lib, _, _ = runtime
+    monkeypatch.setattr(md.subprocess, "run", lambda *a, **k:
+                        SimpleNamespace(returncode=0, stdout="loaded", stderr="namespace warning"))
+    with caplog.at_level("INFO"):
+        assert md._ensure_nichenet_r_runtime(install_missing=False) == lib
+    assert "namespace warning" in caplog.text and "loaded" in caplog.text
+
+
+def test_r_loader_verifies_before_reading(tmp_path):
+    rscript = shutil.which("Rscript")
+    if rscript is None:
+        pytest.skip("Rscript not installed")
+    # Parse the entire native helper, but execute only its base-R loader function.
+    code = r'''
+    args <- commandArgs(TRUE)
+    for (expr in parse(file=args[[1]])) {
+      if (is.call(expr) && identical(expr[[1]], as.name("<-")) &&
+          identical(expr[[2]], as.name("load_verified_model"))) eval(expr)
+    }
+    path <- args[[2]]
+    saveRDS(list(test=42), path)
+    cfg <- list(organism="human", model_resources=data.frame(
+      model="lr_network", path=path, size_bytes=file.info(path)$size,
+      expected_md5=unname(tools::md5sum(path))))
+    stopifnot(load_verified_model("lr_network")$test == 42)
+    cfg$model_resources$size_bytes <- cfg$model_resources$size_bytes + 1
+    err <- tryCatch(load_verified_model("lr_network"), error=identity)
+    stopifnot(inherits(err, "error"), grepl("checksum mismatch", conditionMessage(err)))
+    cfg$model_resources$size_bytes <- file.info(path)$size
+    cfg$model_resources$expected_md5 <- paste(rep("0", 32), collapse="")
+    err <- tryCatch(load_verified_model("lr_network"), error=identity)
+    stopifnot(inherits(err, "error"), grepl("checksum mismatch", conditionMessage(err)))
+    err <- tryCatch(load_verified_model("absent"), error=identity)
+    stopifnot(inherits(err, "error"), grepl("Missing verified", conditionMessage(err)))
+    cat("Local model accepted; altered and missing models rejected\n")
+    '''
+    result = subprocess.run([rscript, "--vanilla", "-e", code,
+                             str(md._NICHENET_R_HELPER), str(tmp_path / "tiny.rds")],
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert "altered and missing models rejected" in result.stdout

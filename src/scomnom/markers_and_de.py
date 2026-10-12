@@ -32,6 +32,7 @@ from scipy import stats as sstats
 from scomnom import __version__
 from . import io_utils, plot_utils, reporting
 from .logging_utils import init_logging
+from .nichenet_resources import prepare_models as _prepare_nichenet_models
 from .de_utils import (
     PseudobulkSpec,
     CellLevelMarkerSpec,
@@ -3166,12 +3167,18 @@ def _run_nichenet_sender_focused(
     organism: str,
     signal_scope: str,
     r_env: Optional[Mapping[str, str]] = None,
+    evidence_dir: Optional[Path] = None,
 ) -> dict[str, pd.DataFrame]:
     rscript = _resolve_rscript()
     if not rscript:
         raise RuntimeError("NicheNet requires `Rscript` on PATH.")
     if not _NICHENET_R_HELPER.exists():
         raise RuntimeError(f"NicheNet helper script not found at {_NICHENET_R_HELPER}.")
+
+    model_resources = pd.DataFrame(_prepare_nichenet_models(organism))
+    if evidence_dir is not None:
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        model_resources.to_csv(evidence_dir / "nichenet_model_resources.tsv", sep="\t", index=False)
 
     with tempfile.TemporaryDirectory(prefix="scomnom_nichenet_") as tmpdir:
         tmp = Path(tmpdir)
@@ -3198,6 +3205,7 @@ def _run_nichenet_sender_focused(
                     "top_n_targets": int(top_n_targets),
                     "organism": str(organism),
                     "signal_scope": str(signal_scope),
+                    "model_resources": model_resources.to_dict(orient="records"),
                 }
             )
         )
@@ -3208,6 +3216,13 @@ def _run_nichenet_sender_focused(
             text=True,
             env=dict(r_env) if r_env is not None else None,
         )
+        for stream, content in (("stdout", res.stdout), ("stderr", res.stderr)):
+            content = str(content or "")
+            if evidence_dir is not None:
+                (evidence_dir / f"nichenet_r.{stream}.log").write_text(content)
+            if content.strip():
+                log = LOGGER.warning if stream == "stderr" else LOGGER.info
+                log("NicheNet R %s:\n%s", stream, content.rstrip())
         if res.returncode != 0:
             stderr = str(res.stderr or "").strip()
             stdout = str(res.stdout or "").strip()
@@ -3222,7 +3237,7 @@ def _run_nichenet_sender_focused(
             "ligand_receptor_links": out_dir / "ligand_receptor_links.tsv",
             "potential_ligands": out_dir / "potential_ligands.tsv",
         }
-        result: dict[str, pd.DataFrame] = {}
+        result: dict[str, pd.DataFrame] = {"model_resources": model_resources}
         for key, path in outputs.items():
             result[key] = pd.read_csv(path, sep="\t") if path.exists() else pd.DataFrame()
         return result
@@ -4835,6 +4850,10 @@ def _ensure_nichenet_r_runtime(*, install_missing: bool) -> Path:
         text=True,
         env=runtime_env,
     )
+    if check_res.stdout:
+        LOGGER.info("NicheNet R runtime stdout:\n%s", check_res.stdout.rstrip())
+    if check_res.stderr:
+        LOGGER.warning("NicheNet R runtime stderr:\n%s", check_res.stderr.rstrip())
     if check_res.returncode == 0:
         return r_lib_dir
 
@@ -6087,6 +6106,7 @@ def run_nichenet_ccc(cfg) -> ad.AnnData:
                 organism=str(getattr(cfg, "nichenet_organism", "human")),
                 signal_scope=signal_scope,
                 r_env=nichenet_r_env,
+                evidence_dir=receiver_tables_dir,
             )
             ligand_activity = nichenet_res.get("ligand_activity", pd.DataFrame())
             ligand_target_links = nichenet_res.get("ligand_target_links", pd.DataFrame())
@@ -6163,6 +6183,7 @@ def run_nichenet_ccc(cfg) -> ad.AnnData:
                 "target_levels": list(target_levels),
                 "signal_scope": str(signal_scope),
                 "project_r_lib": str(nichenet_r_lib_dir),
+                "model_resources": nichenet_res.get("model_resources", pd.DataFrame()),
                 "ligand_activity": ligand_activity,
                 "ligand_target_links": ligand_target_links,
                 "ligand_receptor_links": ligand_receptor_links,

@@ -1807,6 +1807,7 @@ def test_run_nichenet_ccc_cross_tissue_sender_focused(
             ),
             "ligand_receptor_links": pd.DataFrame({"from": ["BMP2"], "to": ["BMPR1A_BMPR2"], "weight": [0.9]}),
             "potential_ligands": pd.DataFrame({"ligand": ["BMP2", "TGFB1"]}),
+            "model_resources": pd.DataFrame({"model": ["lr_network"], "sha256": ["verified-test-hash"]}),
         },
     )
 
@@ -1865,6 +1866,7 @@ def test_run_nichenet_ccc_cross_tissue_sender_focused(
     assert runs[run_key]["cross_tissue_mode"] is True
     assert runs[run_key]["receiver_cluster_mode"] == "all"
     assert str(runs[run_key]["project_r_lib"]) == str(project_r_lib)
+    assert runs[run_key]["model_resources"].iloc[0]["sha256"] == "verified-test-hash"
     assert list((tmp_path / "out" / "tables").glob("**/nichenet_ligand_activity.tsv"))
 
 

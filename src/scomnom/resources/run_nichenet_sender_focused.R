@@ -22,21 +22,25 @@ read_lines_clean <- function(path) {
   unique(vals)
 }
 
-load_model_urls <- function(organism) {
-  if (tolower(organism) != "human") {
+load_verified_model <- function(name) {
+  if (tolower(cfg$organism) != "human") {
     stop("scOmnom NicheNet v1 currently supports organism='human' only.", call. = FALSE)
   }
-  list(
-    ligand_target_matrix = "https://zenodo.org/record/7074291/files/ligand_target_matrix_nsga2r_final.rds",
-    lr_network = "https://zenodo.org/record/7074291/files/lr_network_human_21122021.rds",
-    weighted_networks = "https://zenodo.org/record/7074291/files/weighted_networks_nsga2r_final.rds"
-  )
+  models <- cfg$model_resources
+  model <- models[models$model == name, , drop = FALSE]
+  if (nrow(model) != 1L || !file.exists(model$path)) {
+    stop(paste("Missing verified local NicheNet model:", name), call. = FALSE)
+  }
+  if (file.info(model$path)$size != model$size_bytes ||
+      unname(tools::md5sum(model$path)) != model$expected_md5) {
+    stop(paste("NicheNet model checksum mismatch before readRDS:", name), call. = FALSE)
+  }
+  readRDS(model$path)
 }
 
-urls <- load_model_urls(cfg$organism)
-ligand_target_matrix <- readRDS(url(urls$ligand_target_matrix))
-lr_network <- readRDS(url(urls$lr_network))
-weighted_networks <- readRDS(url(urls$weighted_networks))
+ligand_target_matrix <- load_verified_model("ligand_target_matrix")
+lr_network <- load_verified_model("lr_network")
+weighted_networks <- load_verified_model("weighted_networks")
 
 sender_expressed_genes <- read_lines_clean(cfg$sender_expressed_genes_file)
 receiver_expressed_genes <- read_lines_clean(cfg$receiver_expressed_genes_file)

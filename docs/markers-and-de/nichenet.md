@@ -102,6 +102,35 @@ analyses, provision a reviewed, revision-pinned library separately. See
 [installation](../installation.md#nichenet-r-backend). The first NicheNet run may
 also need internet access to fetch official human model files.
 
+### Model Cache And Runtime Logs
+
+The three human models are fixed to Zenodo record `7074291`. Downloads and cache
+hits are checked against its published byte counts and MD5 checksums; an observed
+SHA256 is also recorded for reproducibility. The SHA256 is not an independently
+published reference checksum. R checks the local files again before reading them.
+The model selection and inference settings are unchanged.
+
+Set `SCOMNOM_NICHENET_CACHE_DIR` to a persistent, writable cache directory. Models
+are stored in its `7074291/` subdirectory. Without this override, scOmnom uses
+`$XDG_CACHE_HOME/scOmnom/nichenet/`, or `~/Library/Caches/scOmnom/nichenet/` on
+macOS and `~/.cache/scOmnom/nichenet/` on Linux when `XDG_CACHE_HOME` is unset.
+On HPC systems, use shared project scratch for this cache instead of temporary
+job-local storage; respect the site's scratch retention policy.
+
+Verified cached models work without network access. Downloads use temporary
+files and are published to the cache only after verification. Transient network
+failures receive at most three attempts, with each failed attempt logged. TLS
+verification is never disabled. A checksum mismatch stops the run and is not
+silently replaced; inspect the named file before removing it to allow a fresh
+download.
+
+Each receiver's table directory contains `nichenet_model_resources.tsv` with the
+resource URLs, paths, sizes, reference MD5, observed SHA256 and cache-hit status.
+On successful runs this information is also stored in the run payload under
+`model_resources`. R stdout and stderr are retained as `nichenet_r.stdout.log`
+and `nichenet_r.stderr.log`, including on R failure, and emitted to the pipeline
+log. Stderr is logged at warning level even when R exits successfully.
+
 ## Outputs
 
 NicheNet writes:
