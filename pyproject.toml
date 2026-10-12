@@ -27,7 +27,7 @@ dependencies = [
   "pydantic",
   "scrublet",
   "leidenalg",
-  "python-igraph",
+  "igraph",
   "joblib",
   "kneed",
   "h5py>=3.15.1",
