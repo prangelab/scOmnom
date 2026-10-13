@@ -1,4 +1,4 @@
-"""Exercise installer environment routing without running R or fetching code."""
+"""Exercise backend checks without installing packages or fetching code."""
 
 import importlib
 import json
@@ -35,60 +35,26 @@ def runtime(monkeypatch, tmp_path):
     return lib, calls, responses
 
 
-def test_existing_nichenet_runtime_does_not_install(runtime):
+@pytest.mark.parametrize("install_missing", [False, True])
+def test_existing_nichenet_runtime_does_not_install(runtime, install_missing):
     lib, calls, responses = runtime
     responses([0])
-    assert md._ensure_nichenet_r_runtime(install_missing=False) == lib
+    assert md._ensure_nichenet_r_runtime(install_missing=install_missing) == lib
     assert len(calls) == 1
     env = calls[0][1]["env"]
     assert env["R_LIBS_USER"] == str(lib)
     assert "R_LIBS" not in env
 
 
-def test_missing_nichenet_runtime_requires_opt_in(runtime):
+@pytest.mark.parametrize("install_missing", [False, True])
+def test_missing_nichenet_runtime_never_installs(runtime, install_missing):
     _, calls, responses = runtime
     responses([1])
-    with pytest.raises(RuntimeError, match="install-missing-r-deps"):
-        md._ensure_nichenet_r_runtime(install_missing=False)
+    with pytest.raises(RuntimeError, match="Automatic installation during analysis is disabled"):
+        md._ensure_nichenet_r_runtime(install_missing=install_missing)
     assert len(calls) == 1
 
 
-def test_nichenet_install_uses_isolated_library_for_every_install_step(runtime):
-    lib, calls, responses = runtime
-    responses([1, 0, 0, 0, 0])
-    assert md._ensure_nichenet_r_runtime(install_missing=True) == lib
-    assert len(calls) == 5
-    assert calls[2][0][1] == "clone"
-    assert calls[3][0][1:3] == ["CMD", "INSTALL"]
-    for _, kwargs in calls[1:4]:
-        env = kwargs["env"]
-        assert env["R_LIBS_USER"] == env["R_LIBS"] == str(lib)
-        assert "R_LIBS_SITE" not in env
-    assert "R_LIBS" not in calls[-1][1]["env"]
-
-
-def test_nichenet_bootstrap_failure_stops_before_clone(runtime):
-    _, calls, responses = runtime
-    responses([1, 1])
-    with pytest.raises(RuntimeError, match="bootstrapping required CRAN packages"):
-        md._ensure_nichenet_r_runtime(install_missing=True)
-    assert len(calls) == 2
-
-
-@pytest.mark.parametrize(
-    "codes, message",
-    [
-        ([1, 0, 1], "source download failed"),
-        ([1, 0, 0, 1], "dependency installation failed"),
-        ([1, 0, 0, 0, 1], "without a detectable"),
-    ],
-)
-def test_nichenet_later_install_failures_are_reported(runtime, codes, message):
-    _, calls, responses = runtime
-    responses(codes)
-    with pytest.raises(RuntimeError, match=message):
-        md._ensure_nichenet_r_runtime(install_missing=True)
-    assert len(calls) == len(codes)
 
 
 @pytest.mark.parametrize("returncode", [0, 1])

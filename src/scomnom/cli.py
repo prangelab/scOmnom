@@ -3252,7 +3252,7 @@ def ccc_mebocost(
     install_missing_python_deps: bool = typer.Option(
         False,
         "--install-missing-python-deps/--no-install-missing-python-deps",
-        help="Install missing MEBOCOST Python dependencies into the active environment before running.",
+        help="Deprecated compatibility flag. No packages or resources are installed during analysis; provision MEBOCOST separately.",
     ),
 ):
     if str(input_mode).strip().lower() not in {"counts", "lognorm"}:
@@ -3372,7 +3372,7 @@ def ccc_mebocost_paired(
     install_missing_python_deps: bool = typer.Option(
         False,
         "--install-missing-python-deps/--no-install-missing-python-deps",
-        help="Install missing MEBOCOST Python dependencies into the active environment before running.",
+        help="Deprecated compatibility flag. No packages or resources are installed during analysis; provision MEBOCOST separately.",
     ),
 ):
     if str(input_mode).strip().lower() not in {"counts", "lognorm"}:
@@ -3512,7 +3512,7 @@ def ccc_nichenet(
     install_missing_r_deps: bool = typer.Option(
         False,
         "--install-missing-r-deps/--no-install-missing-r-deps",
-        help="Install missing NicheNet R dependencies into scOmnom's project-local R library before running.",
+        help="Deprecated compatibility flag. No R packages are installed during analysis; provision NicheNet separately.",
     ),
 ):
     if str(input_mode).strip().lower() not in {"counts", "lognorm"}:

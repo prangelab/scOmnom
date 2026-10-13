@@ -79,9 +79,13 @@ MEBOCOST uses the Python package `MEBOCOST` from the Chen Lab GitHub repository 
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `--install-missing-python-deps` / `--no-install-missing-python-deps` | `--no-install-missing-python-deps` | Let scOmnom bootstrap missing MEBOCOST Python dependencies/resources into the active environment/cache. |
+| `--install-missing-python-deps` / `--no-install-missing-python-deps` | `--no-install-missing-python-deps` | Deprecated compatibility flag. Runtime installation and resource-repository downloads are disabled. |
 
-If the package or resource bundle is missing and installation is not enabled, scOmnom stops with an explicit install hint.
+If the package or resource bundle is missing, scOmnom stops with explicit
+installation instructions even when the legacy flag is supplied. Provision the
+backend and reviewed resource bundle separately. A complete local bundle can
+still be used to generate the configuration file without downloading anything.
+See [MEBOCOST installation](../installation.md#mebocost-backend).
 
 ## Pooled Outputs
 

@@ -26,7 +26,7 @@ Create the platform-specific environment:
 
 ```bash
 # Linux / HPC
-conda env create -f environment_linux.yml
+CONDA_CHANNEL_PRIORITY=flexible conda env create -f environment_linux.yml
 conda activate scOmnom_env
 
 # macOS
@@ -38,13 +38,18 @@ Install the package:
 
 ```bash
 # Linux / HPC
-pip install .
+pip install -c constraints_linux.txt .
 
 # macOS
 pip install -c constraints_macos.txt .
 ```
 
 This registers the `scomnom` command-line interface.
+
+The Linux manifest retains the HPC PyTorch 2.5.1 / CUDA 12.4 builds and channel
+order. Keep `constraints_linux.txt` beside its YAML and use it for the package
+installation too. These pins protect the scientific Python stack; they are not
+a complete cross-platform dependency lock.
 
 The macOS manifest targets Apple Silicon and selects specific builds from multiple
 channels. The command-local priority setting leaves your global Conda settings

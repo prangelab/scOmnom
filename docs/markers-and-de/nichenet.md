@@ -91,14 +91,14 @@ This backend shells out to `Rscript` and expects the R package `nichenetr` in a 
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `--install-missing-r-deps` / `--no-install-missing-r-deps` | `--no-install-missing-r-deps` | Let scOmnom bootstrap missing NicheNet R dependencies into the cache library. |
+| `--install-missing-r-deps` / `--no-install-missing-r-deps` | `--no-install-missing-r-deps` | Deprecated compatibility flag. Runtime installation is disabled. |
 
 The environment YAML files include the R runtime and available helper packages.
 On Apple Silicon, `fdrtool`, `mlrMBO`, and `emoa` are supplied through the separate
 R cache along with `nichenetr`, because they are unavailable from the declared
-Conda channels for that platform. The opt-in bootstrap follows upstream CRAN
-versions and the NicheNet repository; it is not version-locked. For reproducible
-analyses, provision a reviewed, revision-pinned library separately. See
+Conda channels for that platform. Provision the reviewed, revision-pinned library
+separately before analysis. Missing or unloadable packages stop the run without
+installing or updating dependencies, including when the legacy flag is supplied. See
 [installation](../installation.md#nichenet-r-backend). The first NicheNet run may
 also need internet access to fetch official human model files.
 

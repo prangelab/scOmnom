@@ -78,14 +78,13 @@ _CELLCHATDB_INTERACTION_ANNOTATIONS = (
 _NICHENET_R_HELPER = (
     Path(__file__).resolve().parent / "resources" / "run_nichenet_sender_focused.R"
 )
-_MEBOCOST_GIT_SPEC = "git+https://github.com/kaifuchenlab/MEBOCOST.git"
+_CCC_INSTALLATION_GUIDE = "https://prangelab.org/scOmnom/installation/"
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _NICHENET_R_LIB_DIR = (
     Path.home() / "Library" / "Caches" / "scOmnom" / "r-libs" / "nichenet"
     if sys.platform == "darwin"
     else Path.home() / ".cache" / "scOmnom" / "r-libs" / "nichenet"
 )
-_NICHENET_R_BOOTSTRAP_CRAN_PACKAGES = ("DiceKriging", "emoa", "fdrtool", "mlrMBO")
 _MEBOCOST_CACHE_ROOT = (
     Path.home() / "Library" / "Caches" / "scOmnom" / "mebocost"
     if sys.platform == "darwin"
@@ -3272,45 +3271,13 @@ def _import_mebocost_api(*, install_missing: bool) -> Any:
         return api_or_errors
     import_errors = api_or_errors
 
-    api = None
-    if api is not None:
-        return api
-
-    install_hint = f"{sys.executable} -m pip install '{_MEBOCOST_GIT_SPEC}'"
-    if not install_missing:
-        raise RuntimeError(
-            "scomnom ccc mebocost requires the Python package `MEBOCOST`.\n"
-            "Install it into the active environment, or rerun with `--install-missing-python-deps`.\n"
-            f"Suggested install command:\n{install_hint}"
-            + (f"\nImport attempts:\n" + "\n".join(import_errors) if import_errors else "")
-        )
-
-    res = subprocess.run(
-        [sys.executable, "-m", "pip", "install", _MEBOCOST_GIT_SPEC],
-        check=False,
-        capture_output=True,
-        text=True,
+    raise RuntimeError(
+        "MEBOCOST is unavailable or could not be imported.\n"
+        "Automatic installation during analysis is disabled, including "
+        "--install-missing-python-deps. Provision the backend separately.\n"
+        f"Installation instructions: {_CCC_INSTALLATION_GUIDE}#mebocost-backend"
+        + ("\nImport attempts:\n" + "\n".join(import_errors) if import_errors else "")
     )
-    if res.returncode != 0:
-        stderr = str(res.stderr or "").strip()
-        stdout = str(res.stdout or "").strip()
-        raise RuntimeError(
-            "Automatic MEBOCOST dependency installation failed.\n"
-            f"Suggested install command:\n{install_hint}"
-            + (f"\nSTDERR:\n{stderr}" if stderr else "")
-            + (f"\nSTDOUT:\n{stdout}" if stdout else "")
-        )
-
-    api_or_errors = _resolve_loaded_api()
-    if isinstance(api_or_errors, list):
-        raise RuntimeError(
-            "Automatic MEBOCOST dependency installation completed without a detectable MEBOCOST import.\n"
-            f"Suggested install command:\n{install_hint}"
-            + (f"\nImport attempts:\n" + "\n".join(api_or_errors) if api_or_errors else "")
-        )
-    api = api_or_errors
-    LOGGER.warning("Installed `MEBOCOST` into the active Python environment.")
-    return api
 
 
 def _mebocost_resource_file_map(repo_dir: Path) -> dict[str, Path]:
@@ -3405,51 +3372,17 @@ def _ensure_mebocost_resource_config(*, install_missing: bool) -> Path:
     if config_path.exists() and all(path.exists() for path in file_map.values()):
         return config_path
 
-    clone_hint = (
-        f"tmpdir=$(mktemp -d) && git clone --depth 1 https://github.com/kaifuchenlab/MEBOCOST.git "
-        f"\"$tmpdir/MEBOCOST\" && mkdir -p \"{_MEBOCOST_CACHE_ROOT}\" && "
-        f"rm -rf \"{repo_dir}\" && mv \"$tmpdir/MEBOCOST\" \"{repo_dir}\""
+    if all(path.exists() for path in file_map.values()):
+        return _write_mebocost_resource_config(repo_dir, config_path)
+    missing = [str(path) for path in file_map.values() if not path.exists()]
+    raise RuntimeError(
+        "MEBOCOST resource files are missing.\n"
+        "Automatic installation during analysis is disabled, including "
+        "--install-missing-python-deps. Provision the resource bundle separately.\n"
+        f"Expected resource directory: {repo_dir}\n"
+        f"Installation instructions: {_CCC_INSTALLATION_GUIDE}#mebocost-backend\n"
+        + "\n".join(missing)
     )
-    if not install_missing:
-        raise RuntimeError(
-            "scomnom ccc mebocost requires the upstream MEBOCOST resource database and config files.\n"
-            "Install them into the local cache by rerunning with `--install-missing-python-deps`, or bootstrap them manually.\n"
-            f"Suggested bootstrap command:\n{clone_hint}"
-        )
-
-    git_bin = shutil.which("git")
-    if not git_bin:
-        raise RuntimeError(
-            "Automatic MEBOCOST resource bootstrap failed because `git` is not available on PATH.\n"
-            f"Suggested bootstrap command:\n{clone_hint}"
-        )
-    _MEBOCOST_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-    if not repo_dir.exists():
-        tmp_root = Path(tempfile.mkdtemp(prefix="scomnom_mebocost_"))
-        clone_dir = tmp_root / "MEBOCOST"
-        try:
-            res = subprocess.run(
-                [git_bin, "clone", "--depth", "1", "https://github.com/kaifuchenlab/MEBOCOST.git", str(clone_dir)],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            if res.returncode != 0:
-                stderr = str(res.stderr or "").strip()
-                stdout = str(res.stdout or "").strip()
-                raise RuntimeError(
-                    "Automatic MEBOCOST resource bootstrap failed.\n"
-                    f"Suggested bootstrap command:\n{clone_hint}"
-                    + (f"\nSTDERR:\n{stderr}" if stderr else "")
-                    + (f"\nSTDOUT:\n{stdout}" if stdout else "")
-                )
-            shutil.move(str(clone_dir), str(repo_dir))
-        finally:
-            shutil.rmtree(tmp_root, ignore_errors=True)
-
-    config_path = _write_mebocost_resource_config(repo_dir, config_path)
-    LOGGER.warning("Bootstrapped MEBOCOST resources into local cache: %s", str(repo_dir))
-    return config_path
 
 
 def _call_with_supported_kwargs(func, **kwargs):
@@ -4795,35 +4728,6 @@ def _resolve_r_binary() -> Optional[str]:
     return shutil.which("R")
 
 
-def _nichenet_install_command_hint(r_lib_dir: Path) -> str:
-    r_lib = str(r_lib_dir)
-    r_bin = _resolve_r_binary() or "R"
-    cran_pkgs_expr = ", ".join(f'"{pkg}"' for pkg in _NICHENET_R_BOOTSTRAP_CRAN_PACKAGES)
-    return (
-        "tmpdir=$(mktemp -d) && "
-        + "R_LIBS_USER="
-        + r_lib
-        + " R_LIBS="
-        + r_lib
-        + " "
-        + (_resolve_rscript() or "Rscript")
-        + " -e 'dir.create(Sys.getenv(\"R_LIBS_USER\"), recursive=TRUE, showWarnings=FALSE); .libPaths(c(Sys.getenv(\"R_LIBS_USER\"), .Library, .Library.site)); pkgs <- c("
-        + cran_pkgs_expr
-        + "); missing_pkgs <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly=TRUE)]; if (length(missing_pkgs)) install.packages(missing_pkgs, repos=\"https://cloud.r-project.org\", lib=Sys.getenv(\"R_LIBS_USER\"))' && "
-        + "git clone --depth 1 https://github.com/saeyslab/nichenetr.git \"$tmpdir/nichenetr\" && "
-        + "mkdir -p "
-        + r_lib
-        + " && "
-        + "R_LIBS_USER="
-        + r_lib
-        + " R_LIBS="
-        + r_lib
-        + " "
-        + r_bin
-        + " CMD INSTALL --no-test-load -l "
-        + r_lib
-        + " \"$tmpdir/nichenetr\""
-    )
 
 
 def _ensure_nichenet_r_runtime(*, install_missing: bool) -> Path:
@@ -4837,7 +4741,6 @@ def _ensure_nichenet_r_runtime(*, install_missing: bool) -> Path:
     r_lib_dir = _NICHENET_R_LIB_DIR
     r_lib_dir.mkdir(parents=True, exist_ok=True)
     runtime_env = _nichenet_r_env(r_lib_dir, install_only=False)
-    install_env = _nichenet_r_env(r_lib_dir, install_only=True)
     check_expr = (
         'dir.create(Sys.getenv("R_LIBS_USER"), recursive=TRUE, showWarnings=FALSE); '
         '.libPaths(c(Sys.getenv("R_LIBS_USER"), .Library, .Library.site)); '
@@ -4857,113 +4760,15 @@ def _ensure_nichenet_r_runtime(*, install_missing: bool) -> Path:
     if check_res.returncode == 0:
         return r_lib_dir
 
-    manual_hint = _nichenet_install_command_hint(r_lib_dir)
-    if not install_missing:
-        raise RuntimeError(
-            "NicheNet requires the R package `nichenetr` in scOmnom's project-local R library.\n"
-            f"Expected library: {r_lib_dir}\n"
-            "Re-run with `--install-missing-r-deps` to bootstrap it automatically, or install it manually with:\n"
-            f"{manual_hint}"
-        )
-
-    git_bin = shutil.which("git")
-    if not git_bin:
-        raise RuntimeError(
-            "Automatic NicheNet dependency installation requires `git` on PATH.\n"
-            f"Project-local R library: {r_lib_dir}\n"
-            "You can retry manually with:\n"
-            f"{manual_hint}"
-        )
-    cran_pkgs_expr = ", ".join(f'"{pkg}"' for pkg in _NICHENET_R_BOOTSTRAP_CRAN_PACKAGES)
-    cran_bootstrap_expr = (
-        'dir.create(Sys.getenv("R_LIBS_USER"), recursive=TRUE, showWarnings=FALSE); '
-        '.libPaths(c(Sys.getenv("R_LIBS_USER"), .Library, .Library.site)); '
-        f'pkgs <- c({cran_pkgs_expr}); '
-        'missing_pkgs <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly=TRUE)]; '
-        'if (length(missing_pkgs)) install.packages(missing_pkgs, repos="https://cloud.r-project.org", lib=Sys.getenv("R_LIBS_USER")); '
-        'still_missing <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly=TRUE)]; '
-        'if (length(still_missing)) { write(paste(still_missing, collapse=", "), stderr()); quit(save="no", status=1) }'
+    raise RuntimeError(
+        "NicheNet requires an importable R package `nichenetr`.\n"
+        f"Expected cache library: {r_lib_dir}\n"
+        "Automatic installation during analysis is disabled, including "
+        "--install-missing-r-deps. Provision the backend separately.\n"
+        f"Installation instructions: {_CCC_INSTALLATION_GUIDE}#nichenet-r-backend"
+        + (f"\nSTDERR:\n{check_res.stderr.strip()}" if check_res.stderr else "")
+        + (f"\nSTDOUT:\n{check_res.stdout.strip()}" if check_res.stdout else "")
     )
-    cran_bootstrap_res = subprocess.run(
-        [str(rscript), "-e", cran_bootstrap_expr],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=install_env,
-    )
-    if cran_bootstrap_res.returncode != 0:
-        stderr = str(cran_bootstrap_res.stderr or "").strip()
-        stdout = str(cran_bootstrap_res.stdout or "").strip()
-        raise RuntimeError(
-            "Automatic NicheNet dependency installation failed while bootstrapping required CRAN packages.\n"
-            f"Project-local R library: {r_lib_dir}\n"
-            "You can retry manually with:\n"
-            f"{manual_hint}"
-            + (f"\nSTDERR:\n{stderr}" if stderr else "")
-            + (f"\nSTDOUT:\n{stdout}" if stdout else "")
-        )
-    with tempfile.TemporaryDirectory(prefix="scomnom_nichenetr_src_") as tmpdir:
-        src_dir = Path(tmpdir) / "nichenetr"
-        clone_res = subprocess.run(
-            [str(git_bin), "clone", "--depth", "1", "https://github.com/saeyslab/nichenetr.git", str(src_dir)],
-            check=False,
-            capture_output=True,
-            text=True,
-            env=install_env,
-        )
-        if clone_res.returncode != 0:
-            stderr = str(clone_res.stderr or "").strip()
-            stdout = str(clone_res.stdout or "").strip()
-            raise RuntimeError(
-                "Automatic NicheNet source download failed.\n"
-                f"Project-local R library: {r_lib_dir}\n"
-                "You can retry manually with:\n"
-                f"{manual_hint}"
-                + (f"\nSTDERR:\n{stderr}" if stderr else "")
-                + (f"\nSTDOUT:\n{stdout}" if stdout else "")
-            )
-        install_res = subprocess.run(
-            [str(r_bin), "CMD", "INSTALL", "--no-test-load", "-l", str(r_lib_dir), str(src_dir)],
-            check=False,
-            capture_output=True,
-            text=True,
-            env=install_env,
-        )
-    if install_res.returncode != 0:
-        stderr = str(install_res.stderr or "").strip()
-        stdout = str(install_res.stdout or "").strip()
-        raise RuntimeError(
-            "Automatic NicheNet dependency installation failed.\n"
-            f"Project-local R library: {r_lib_dir}\n"
-            "You can retry manually with:\n"
-            f"{manual_hint}"
-            + (f"\nSTDERR:\n{stderr}" if stderr else "")
-            + (f"\nSTDOUT:\n{stdout}" if stdout else "")
-        )
-
-    verify_res = subprocess.run(
-        [str(rscript), "-e", check_expr],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=runtime_env,
-    )
-    if verify_res.returncode != 0:
-        install_stderr = str(install_res.stderr or "").strip()
-        install_stdout = str(install_res.stdout or "").strip()
-        verify_stderr = str(verify_res.stderr or "").strip()
-        verify_stdout = str(verify_res.stdout or "").strip()
-        raise RuntimeError(
-            "Automatic NicheNet dependency installation completed without a detectable `nichenetr` import.\n"
-            f"Project-local R library: {r_lib_dir}\n"
-            "Please inspect the installation manually and retry."
-            + (f"\nINSTALL STDERR:\n{install_stderr}" if install_stderr else "")
-            + (f"\nINSTALL STDOUT:\n{install_stdout}" if install_stdout else "")
-            + (f"\nVERIFY STDERR:\n{verify_stderr}" if verify_stderr else "")
-            + (f"\nVERIFY STDOUT:\n{verify_stdout}" if verify_stdout else "")
-        )
-    LOGGER.warning("Installed `nichenetr` into project-local R library: %s", r_lib_dir)
-    return r_lib_dir
 
 
 def _liana_plot_color_map(

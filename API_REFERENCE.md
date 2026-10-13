@@ -1,5 +1,13 @@
 # scOmnom API Reference
 
+## Optional CCC Backends
+
+MEBOCOST and NicheNet must be provisioned before analysis. Missing packages or
+MEBOCOST resource files cause an explicit error, never a runtime installation.
+Legacy CLI installation flags are accepted for compatibility but cannot install
+code or download MEBOCOST resources. Existing backends remain usable. See
+[installation](https://prangelab.org/scOmnom/installation/) for the reviewed revisions and cache layout.
+
 ## Module `scomnom`
 
 ### `load_dataset`

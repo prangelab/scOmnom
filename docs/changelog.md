@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- remove automatic MEBOCOST/NicheNet package installation and MEBOCOST Git-resource downloads during analysis; retain the legacy flags as non-installing compatibility options, with explicit missing-backend errors and separate provisioning instructions
+
 ## 0.9.0rc2 [01-10-2026]
 
 Second release candidate; not the final 0.9.0 release.
