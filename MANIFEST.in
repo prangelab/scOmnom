@@ -1,0 +1,7 @@
+include environment.yml
+include environment_linux.yml
+include environment_macos.yml
+include constraints_linux.txt
+include constraints_macos.txt
+include changelog.md
+include docs/installation.md
