@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.9.0 [15-10-2026]
+
+Stable release consolidating the workflow changes in 0.9.0rc1 and 0.9.0rc2.
+
+- expose independent `markers`, `de`, `da`, `enrichment` and `ccc` commands, retaining the deprecated `markers-and-de` alias and the saved-object namespace for compatibility
+- add replicate-level activity scoring and covariate-adjusted contrasts through `enrichment sample`
+- retain the audited BISC selection, transcriptomic compaction veto, round persistence, refinement and merge-back workflow
+- harden sample-feature reconciliation and raw/CellBender count preservation, and support CellBender-only inputs
+- preserve the tested platform-specific scientific stacks and include environment definitions, Python constraints and installation instructions in source distributions
+- cache and verify NicheNet model downloads, retain R stdout/stderr for diagnosis, and harden BioMart annotation retrieval
 - add an explicit Linux x86-64 lock for the 688 tested Conda artifacts, a companion SHA256 manifest and a separate pip requirements file synchronized with the Linux YAML; include these installation inputs in source distributions
 - remove automatic MEBOCOST/NicheNet package installation and MEBOCOST Git-resource downloads during analysis; retain the legacy flags as non-installing compatibility options, with explicit missing-backend errors and separate provisioning instructions
 
