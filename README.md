@@ -22,7 +22,22 @@ git clone https://github.com/prangelab/scOmnom.git
 cd scOmnom
 ```
 
-Create the platform-specific environment:
+For the tested Linux x86-64 Conda builds, use the exact lock and then its
+separate constrained pip stage:
+
+```bash
+micromamba create -n scOmnom_env --file locks/linux-64-conda.explicit.txt
+micromamba activate scOmnom_env
+python -m pip install -r requirements_linux.txt
+```
+
+The lock fixes 688 Conda artifacts, not the subsequent pip or optional backend
+installation. The pip stage can build source packages, including the pinned
+MEBOCOST revision. See the [installation guide](docs/installation.md#linux-exact-tested-conda-builds)
+for checksum scope, source review and backend provisioning.
+
+Alternatively, create the platform-specific environment from YAML. The Linux
+YAML may resolve newer indirect Conda builds:
 
 ```bash
 # Linux / HPC

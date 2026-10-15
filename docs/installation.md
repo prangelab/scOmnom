@@ -11,7 +11,50 @@ cd scOmnom
 
 ## 1) Create The Environment
 
-Use the YAML that matches your platform:
+### Linux: Exact Tested Conda Builds
+
+For Linux x86-64 with an NVIDIA GPU, the explicit lock retains all 688 tested
+Conda artifacts, including the PyTorch 2.5.1 / CUDA 12.4 builds and R 4.5.3.
+It avoids resolving newer indirect Conda dependencies. From the repository root,
+create a **new** environment, then run the separate pip stage:
+
+```bash
+micromamba create -n scOmnom_env --file locks/linux-64-conda.explicit.txt
+micromamba activate scOmnom_env
+python -m pip install -r requirements_linux.txt
+```
+
+With Conda, use `conda create -n scOmnom_env --file locks/linux-64-conda.explicit.txt`
+and `conda activate scOmnom_env` instead. Do not apply this Linux lock on macOS
+or ARM Linux. Explicit installation does not solve host compatibility: the host
+must support the locked binaries and provide a compatible NVIDIA driver.
+
+The lock records public artifact URLs and MD5 checksums in the standard
+[explicit-file format](https://mamba.readthedocs.io/en/stable/user_guide/micromamba.html#explicit-spec-files).
+`locks/linux-64-conda.artifacts.json` additionally records SHA256 checksums and
+package identities for independent archive verification. The explicit-file
+command checks its MD5 entries, not the companion JSON's SHA256 entries.
+
+The lock covers the **Conda base**, not the complete environment. The subsequent
+pip stage uses the same requirements as the Linux YAML and the existing
+`constraints_linux.txt`. Some Conda-provided Python packages are deliberately
+replaced by those constrained pip versions. The constraints are version pins,
+not a complete pip artifact/hash lock. Keep all three files from the same
+checkout and do not update Conda packages afterward without revalidation.
+
+Installation can build source-only dependencies (`docrep`, `blitzgsea`, and
+`fbpca`) and the pinned `kaifuchenlab/MEBOCOST` revision. Review sources and build
+requirements before provisioning. Controlled/offline deployments should use
+reviewed wheels rather than allowing new source builds. Neither analysis jobs
+nor these instructions require changing an existing working environment.
+After the pip stage, continue with **Install scOmnom** below. NicheNet R packages
+and MEBOCOST resource files still require the separate provisioning steps below.
+
+### Platform YAMLs
+
+The flexible Linux YAML remains available for a fresh dependency resolution.
+It can select newer indirect Conda builds than the tested lock. Use the YAML
+that matches your platform:
 
 - Linux/HPC: `environment_linux.yml`
 - macOS (Apple Silicon): `environment_macos.yml`

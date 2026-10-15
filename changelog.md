@@ -4,6 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- add an explicit Linux x86-64 lock for the 688 tested Conda artifacts, a companion SHA256 manifest and a separate pip requirements file synchronized with the Linux YAML; include these installation inputs in source distributions
 - remove automatic MEBOCOST/NicheNet package installation and MEBOCOST Git-resource downloads during analysis; retain the legacy flags as non-installing compatibility options, with explicit missing-backend errors and separate provisioning instructions
 
 ## 0.9.0rc2 [01-10-2026]

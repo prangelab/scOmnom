@@ -3,5 +3,8 @@ include environment_linux.yml
 include environment_macos.yml
 include constraints_linux.txt
 include constraints_macos.txt
+include requirements_linux.txt
+include locks/linux-64-conda.explicit.txt
+include locks/linux-64-conda.artifacts.json
 include changelog.md
 include docs/installation.md

@@ -12,7 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 INSTALLATION_FILES = (
     "environment.yml", "environment_linux.yml", "environment_macos.yml",
     "constraints_linux.txt", "constraints_macos.txt", "docs/installation.md",
-    "changelog.md",
+    "changelog.md", "requirements_linux.txt", "locks/linux-64-conda.explicit.txt",
+    "locks/linux-64-conda.artifacts.json",
 )
 
 
