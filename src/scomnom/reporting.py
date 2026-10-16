@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+import numpy as np
 import pandas as pd
 import html
 import json
@@ -1302,7 +1303,7 @@ def generate_cluster_and_annotate_report(*, fig_root: Path, fmt: str, cfg, versi
     # Prefer explicit stored order, but keep only valid rounds
     ordered_rounds: List[str] = []
     ro = uns.get("cluster_round_order", None)
-    if isinstance(ro, (list, tuple)) and ro:
+    if isinstance(ro, (list, tuple, np.ndarray, pd.Index)) and len(ro) > 0:
         ordered_rounds = [str(x) for x in ro if str(x) in rounds_meta]
 
     # Fallback to sorted registered rounds

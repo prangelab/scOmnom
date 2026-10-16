@@ -37,11 +37,20 @@ def _ensure_cluster_rounds(adata: ad.AnnData) -> None:
       adata.uns["cluster_round_order"] : list[str]
       adata.uns["active_cluster_round"] : str | None
     """
+    order = adata.uns.get("cluster_round_order", [])
+    if not isinstance(order, (list, tuple, np.ndarray, pd.Index)):
+        raise ValueError("cluster_round_order must be a one-dimensional sequence of round IDs.")
+    if isinstance(order, np.ndarray) and order.ndim != 1:
+        raise ValueError("cluster_round_order must be one-dimensional.")
+    if any(not isinstance(rid, str) or not rid for rid in order):
+        raise ValueError("cluster_round_order must contain nonempty string round IDs.")
+    if len(set(order)) != len(order):
+        raise ValueError("cluster_round_order must contain unique round IDs.")
+
     adata.uns.setdefault("cluster_rounds", {})
-    adata.uns.setdefault("cluster_round_order", [])
+    # AnnData IO can restore a saved list as an array; retain its explicit order.
+    adata.uns["cluster_round_order"] = order if isinstance(order, list) else list(order)
     adata.uns.setdefault("active_cluster_round", None)
-    if not isinstance(adata.uns.get("cluster_round_order", None), list):
-        adata.uns["cluster_round_order"] = []
 
 
 def _next_round_index(adata: ad.AnnData) -> int:
@@ -164,8 +173,6 @@ def _register_round(
 
     adata.uns["cluster_rounds"][round_id] = payload
 
-    if not isinstance(adata.uns.get("cluster_round_order", None), list):
-        adata.uns["cluster_round_order"] = []
     if round_id not in adata.uns["cluster_round_order"]:
         adata.uns["cluster_round_order"].append(round_id)
 

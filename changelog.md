@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- preserve cluster-round order after Zarr/H5AD reload when appending or activating rounds; reject malformed order metadata without erasing history, and respect serialized round order in native clustering reports
+
 ## 0.9.0 [15-10-2026]
 
 Stable release consolidating the workflow changes in 0.9.0rc1 and 0.9.0rc2.
